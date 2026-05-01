@@ -1,0 +1,225 @@
+openapi: 3.0.3
+info:
+  title: Optimum Credit API
+  description: |
+    REST API for the Optimum Credit platform.
+
+    ## Authentication
+    - **Protected routes** require `Authorization: Bearer <session_token>`
+    - **Public routes** require no authentication
+
+    ## Base URL
+    All endpoints are prefixed with `/api`.
+  version: "1.0.0"
+  contact:
+    name: Optimum Credit Dev
+
+servers:
+  - url: /api
+    description: Same-origin (development & production)
+
+tags:
+  - name: Health
+    description: System health checks
+  - name: Auth
+    description: Authentication (client & admin)
+  - name: Portal
+    description: Client portal — documents, dashboard
+  - name: Admin
+    description: Admin-only operations
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Health check
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  timestamp:
+                    type: string
+                    format: date-time
+
+  /ping:
+    get:
+      tags: [Health]
+      summary: Ping
+      responses:
+        "200":
+          description: Pong
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: pong
+
+  /auth/onboarding/{token}:
+    get:
+      tags: [Auth]
+      summary: Redeem magic-link onboarding token
+      description: |
+        Validates a single-use onboarding token embedded in the welcome email.
+        On success, creates a client session and returns a bearer token.
+        Tokens expire after 72 hours and are single-use (`consumed_at` is set).
+      parameters:
+        - in: path
+          name: token
+          required: true
+          schema:
+            type: string
+          description: Raw 64-character hex onboarding token from the welcome email link
+      responses:
+        "200":
+          description: Token valid — session created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                    description: Bearer session token for subsequent requests
+                  user:
+                    type: object
+                    properties:
+                      id:
+                        type: integer
+                      email:
+                        type: string
+                      first_name:
+                        type: string
+                      last_name:
+                        type: string
+        "400":
+          description: Token expired or already used
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: Link expired or already used
+
+  /portal/documents:
+    post:
+      tags: [Portal]
+      summary: Upload a document (client)
+      security:
+        - BearerAuth: []
+      description: |
+        Accepts a multipart form upload. The file is encrypted with AES-256-GCM
+        before being stored on disk. `enc_iv` and `enc_tag` are persisted in the
+        database to enable decryption during admin review.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [doc_type, file]
+              properties:
+                doc_type:
+                  type: string
+                  enum: [id_front, id_back, ssn_card, proof_of_address, other]
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          description: Upload successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClientDocument"
+        "400":
+          description: Missing or invalid fields
+        "401":
+          description: Unauthorized
+
+  /admin/documents/{id}/file:
+    get:
+      tags: [Admin]
+      summary: Download decrypted document file (admin)
+      security:
+        - BearerAuth: []
+      description: |
+        Reads the encrypted file from disk, decrypts it with AES-256-GCM using
+        the stored `enc_iv` and `enc_tag`, and streams the raw file bytes back
+        with the original `Content-Type`.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+          description: Document ID
+      responses:
+        "200":
+          description: Decrypted file bytes
+          content:
+            image/*:
+              schema:
+                type: string
+                format: binary
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        "401":
+          description: Unauthorized (admin only)
+        "404":
+          description: Document not found
+        "500":
+          description: Decryption failed
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    ClientDocument:
+      type: object
+      properties:
+        id:
+          type: integer
+        client_id:
+          type: integer
+        doc_type:
+          type: string
+          enum: [id_front, id_back, ssn_card, proof_of_address, other]
+        file_name:
+          type: string
+        file_size:
+          type: integer
+        mime_type:
+          type: string
+        storage_provider:
+          type: string
+          enum: [local, s3, r2]
+        encrypted:
+          type: integer
+          enum: [0, 1]
+        review_status:
+          type: string
+          enum: [pending, approved, rejected]
+        rejection_reason:
+          type: string
+          nullable: true
+        uploaded_at:
+          type: string
+          format: date-time
