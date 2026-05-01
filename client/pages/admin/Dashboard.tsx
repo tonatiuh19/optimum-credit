@@ -41,7 +41,7 @@ export default function AdminDashboard() {
           icon={TrendingUp}
           label="New (30d)"
           value={s?.new_clients_30d ?? "—"}
-          tint="from-emerald-500/20"
+          tint="from-accent/20"
         />
         <Stat
           icon={FileCheck2}

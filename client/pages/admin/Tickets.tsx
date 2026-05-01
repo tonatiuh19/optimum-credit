@@ -55,8 +55,13 @@ export default function AdminTickets() {
         description="Review and respond to client support requests."
       />
 
-      <div className="grid md:grid-cols-3 gap-4 h-[calc(100vh-14rem)]">
-        <div className="bg-card rounded-2xl border border-border overflow-y-auto">
+      <div className="grid md:grid-cols-3 gap-4 md:h-[calc(100vh-14rem)]">
+        {/* List panel — hidden on mobile when a ticket is open */}
+        <div
+          className={`bg-card rounded-2xl border border-border overflow-y-auto max-h-[45vh] md:max-h-none ${
+            activeId ? "hidden md:block" : "block"
+          }`}
+        >
           {tickets.map((t) => (
             <button
               key={t.id}
@@ -78,7 +83,12 @@ export default function AdminTickets() {
           ))}
         </div>
 
-        <div className="md:col-span-2 bg-card rounded-2xl border border-border flex flex-col">
+        {/* Chat panel — hidden on mobile when no ticket selected */}
+        <div
+          className={`md:col-span-2 bg-card rounded-2xl border border-border flex flex-col ${
+            activeId ? "flex min-h-[65vh] md:min-h-0" : "hidden md:flex"
+          }`}
+        >
           {!selectedTicket || selectedTicket.id !== activeId ? (
             <div className="flex-1 flex items-center justify-center text-muted-foreground">
               Select a ticket
@@ -87,6 +97,12 @@ export default function AdminTickets() {
             <>
               <div className="p-4 border-b border-border flex justify-between gap-3">
                 <div>
+                  <button
+                    onClick={() => setActiveId(null)}
+                    className="md:hidden mb-2 flex items-center gap-1 text-sm text-primary hover:underline"
+                  >
+                    ← Back to list
+                  </button>
                   <h3 className="font-semibold">{selectedTicket.subject}</h3>
                   <p className="text-sm text-muted-foreground mt-0.5">
                     {selectedTicket.body}

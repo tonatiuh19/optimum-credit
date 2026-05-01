@@ -52,6 +52,13 @@ export default function ClientLayout({ children }: Props) {
 
   return (
     <div className="min-h-screen bg-secondary/40">
+      {/* Mobile overlay — closes sidebar on tap outside */}
+      {mobileOpen && (
+        <div
+          className="md:hidden fixed inset-0 z-20 bg-black/60 backdrop-blur-sm"
+          onClick={() => setMobileOpen(false)}
+        />
+      )}
       {/* Mobile top bar */}
       <div className="md:hidden sticky top-0 z-40 flex items-center justify-between bg-card border-b border-border px-4 h-14">
         <Link to="/portal" className="flex items-center gap-2 font-bold">
@@ -84,17 +91,13 @@ export default function ClientLayout({ children }: Props) {
           <div className="hidden md:flex items-center gap-2 px-6 h-20 border-b border-border">
             <Link
               to="/portal"
-              className="flex items-center gap-2 font-bold text-lg"
+              className="flex items-center transition-opacity hover:opacity-80"
             >
-              <div className="w-9 h-9 bg-gradient-to-br from-primary to-primary-600 rounded-lg flex items-center justify-center text-white text-sm font-bold">
-                OCR
-              </div>
-              <div>
-                <div className="leading-none">Optimum</div>
-                <div className="text-xs text-muted-foreground font-normal">
-                  Client Portal
-                </div>
-              </div>
+              <img
+                src="https://disruptinglabs.com/data/optimum/assets/images/logo_horizontal_gold_121829_text.png"
+                alt="Optimum Credit"
+                className="h-8 w-auto"
+              />
             </Link>
           </div>
 

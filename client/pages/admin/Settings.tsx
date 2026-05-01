@@ -42,9 +42,11 @@ export default function AdminSettings() {
               key={s.setting_key}
               className="bg-card rounded-2xl border border-border p-4"
             >
-              <div className="flex items-center justify-between mb-2">
-                <div>
-                  <div className="font-mono text-sm">{s.setting_key}</div>
+              <div className="flex flex-wrap items-start justify-between gap-2 mb-2">
+                <div className="min-w-0 flex-1">
+                  <div className="font-mono text-sm break-all">
+                    {s.setting_key}
+                  </div>
                   {s.description && (
                     <div className="text-xs text-muted-foreground">
                       {s.description}
@@ -54,7 +56,7 @@ export default function AdminSettings() {
                 <button
                   onClick={() => save(s.setting_key)}
                   disabled={edits[s.setting_key] === undefined}
-                  className="btn-primary text-sm inline-flex items-center gap-1.5 disabled:opacity-40"
+                  className="btn-primary text-sm inline-flex items-center gap-1.5 disabled:opacity-40 shrink-0"
                 >
                   <Save className="w-4 h-4" /> Save
                 </button>

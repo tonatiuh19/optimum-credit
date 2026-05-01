@@ -49,7 +49,7 @@ const STATUS_CONFIG: Record<
   },
   approved: {
     label: "Approved",
-    className: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
+    className: "bg-accent/10 text-accent border-accent/20",
     icon: <CheckCircle2 className="w-3 h-3" />,
   },
   rejected: {
@@ -173,7 +173,7 @@ export default function AdminDocuments() {
         title="Document Archive"
         description="Browse and preview all uploaded client documents. To review pending documents, go to Pipeline."
         badge={
-          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-600 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 rounded-full">
+          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-accent bg-accent/10 border border-accent/20 px-2.5 py-1 rounded-full">
             <ShieldCheck className="w-3.5 h-3.5" /> AES-256
           </span>
         }
@@ -415,8 +415,8 @@ export default function AdminDocuments() {
                 </span>
                 <span>{formatBytes(selected.file_size)}</span>
                 <span className="flex items-center gap-1.5 ml-auto">
-                  <ShieldCheck className="w-3 h-3 text-green-400" />
-                  <span className="text-green-400">AES-256 encrypted</span>
+                  <ShieldCheck className="w-3 h-3 text-accent" />
+                  <span className="text-accent">AES-256 encrypted</span>
                 </span>
               </div>
             </div>

@@ -19,12 +19,13 @@ export default function Layout({ children }: LayoutProps) {
             {/* Logo */}
             <Link
               to="/"
-              className="flex items-center gap-2 font-bold text-xl md:text-2xl text-foreground transition-opacity hover:opacity-80"
+              className="flex items-center transition-opacity hover:opacity-80"
             >
-              <div className="w-8 h-8 bg-gradient-to-br from-primary to-primary-600 rounded-lg flex items-center justify-center">
-                <span className="text-white text-sm font-bold">OCR</span>
-              </div>
-              <span className="hidden sm:inline">Optimum Credit</span>
+              <img
+                src="https://disruptinglabs.com/data/optimum/assets/images/logo_horizontal_gold_121829_text.png"
+                alt="Optimum Credit"
+                className="h-8 md:h-9 w-auto"
+              />
             </Link>
 
             {/* Desktop Navigation */}
@@ -141,11 +142,12 @@ export default function Layout({ children }: LayoutProps) {
           <div className="grid grid-cols-1 md:grid-cols-4 gap-8 mb-8">
             {/* Brand */}
             <div>
-              <div className="flex items-center gap-2 mb-4 font-bold text-lg">
-                <div className="w-8 h-8 bg-gradient-to-br from-primary to-primary-600 rounded-lg flex items-center justify-center">
-                  <span className="text-white text-sm font-bold">OCR</span>
-                </div>
-                <span>Optimum Credit</span>
+              <div className="mb-4">
+                <img
+                  src="https://disruptinglabs.com/data/optimum/assets/images/logo_horizontal_gold_121829_text.png"
+                  alt="Optimum Credit"
+                  className="h-8 w-auto"
+                />
               </div>
               <p className="text-sm text-muted-foreground">
                 Fixing credit profiles with transparency and expertise since

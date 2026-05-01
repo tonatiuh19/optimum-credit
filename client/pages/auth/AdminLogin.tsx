@@ -15,6 +15,7 @@ import {
   FileText,
   Activity,
 } from "lucide-react";
+import PageMeta from "@/components/PageMeta";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { requestAdminOtp, verifyAdminOtp } from "@/store/slices/adminAuthSlice";
 import OtpInput from "@/components/OtpInput";
@@ -67,31 +68,26 @@ export default function AdminLogin() {
 
   return (
     <div className="h-screen overflow-hidden flex">
+      <PageMeta
+        title="Staff Console"
+        description="Secure admin login for Optimum Credit staff."
+        canonical="/admin/login"
+        noIndex={true}
+      />
       {/* ── Left: Form column ── */}
       <div className="flex-1 lg:max-w-[480px] bg-gradient-to-br from-primary/5 via-background to-accent/5 flex flex-col overflow-y-auto">
         {/* Header */}
         <header className="sticky top-0 z-20 bg-background/80 backdrop-blur-md border-b border-border/60 shrink-0">
           <div className="px-6 h-16 flex items-center justify-between">
-            <Link to="/" className="flex items-center gap-2.5 group">
-              <div className="w-8 h-8 bg-gradient-to-br from-primary to-primary-600 rounded-xl flex items-center justify-center shadow-md shadow-primary/20 group-hover:shadow-primary/40 transition-shadow">
-                <ShieldCheck className="w-4 h-4 text-white" />
-              </div>
-              <div>
-                <div className="text-sm font-bold text-foreground leading-none tracking-tight">
-                  Optimum Credit
-                </div>
-                <div className="flex items-center gap-0.5 mt-0.5">
-                  {[...Array(5)].map((_, i) => (
-                    <Star
-                      key={i}
-                      className="w-2 h-2 fill-yellow-400 text-yellow-400"
-                    />
-                  ))}
-                  <span className="text-[9px] text-muted-foreground ml-1 tracking-wide">
-                    Staff Console
-                  </span>
-                </div>
-              </div>
+            <Link
+              to="/"
+              className="flex items-center transition-opacity hover:opacity-80"
+            >
+              <img
+                src="https://disruptinglabs.com/data/optimum/assets/images/logo_horizontal_gold_121829_text.png"
+                alt="Optimum Credit"
+                className="h-8 w-auto"
+              />
             </Link>
             <Link
               to="/"
@@ -104,7 +100,7 @@ export default function AdminLogin() {
         </header>
 
         {/* Form body */}
-        <div className="flex-1 flex flex-col justify-center px-8 py-10">
+        <div className="flex-1 flex flex-col justify-center px-5 sm:px-8 py-8 sm:py-10">
           <div className="w-full max-w-sm mx-auto animate-fade-up">
             {/* Icon + heading */}
             <div className="flex flex-col items-center text-center mb-8">
@@ -223,7 +219,7 @@ export default function AdminLogin() {
         </div>
 
         {/* Footer */}
-        <div className="px-8 pb-6 shrink-0">
+        <div className="px-5 sm:px-8 pb-6 shrink-0">
           <div className="flex flex-wrap items-center justify-center gap-4 text-xs text-muted-foreground mb-4">
             <div className="flex items-center gap-1.5">
               <CheckCircle className="w-3.5 h-3.5 text-accent" />
@@ -276,7 +272,7 @@ export default function AdminLogin() {
           {/* Top: badge */}
           <div>
             <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white/10 backdrop-blur-sm border border-white/20 text-xs font-medium text-white/90">
-              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+              <ShieldCheck className="w-3.5 h-3.5 text-accent" />
               Optimum Credit — Staff Console
             </span>
           </div>
@@ -286,7 +282,7 @@ export default function AdminLogin() {
             <div className="space-y-4 max-w-lg">
               <h2 className="text-4xl xl:text-5xl font-bold leading-tight text-white drop-shadow-md">
                 Every client depends{" "}
-                <span className="text-emerald-400">on what you do</span> next.
+                <span className="text-accent">on what you do</span> next.
               </h2>
               <p className="text-base text-white/70 leading-relaxed max-w-md">
                 Manage pipelines, review documents, communicate with clients,
@@ -301,7 +297,7 @@ export default function AdminLogin() {
                   key={label}
                   className="bg-white/10 backdrop-blur-sm border border-white/15 rounded-2xl px-4 py-4 text-center"
                 >
-                  <Icon className="w-5 h-5 text-emerald-400 mx-auto mb-2" />
+                  <Icon className="w-5 h-5 text-accent mx-auto mb-2" />
                   <div className="text-xl font-bold text-white">{value}</div>
                   <div className="text-[11px] text-white/60 mt-0.5 leading-tight">
                     {label}
@@ -312,14 +308,14 @@ export default function AdminLogin() {
 
             {/* Quote */}
             <div className="bg-white/8 backdrop-blur-sm border border-white/12 rounded-2xl p-6 max-w-lg">
-              <Quote className="w-6 h-6 text-emerald-400 mb-3 opacity-80" />
+              <Quote className="w-6 h-6 text-accent mb-3 opacity-80" />
               <p className="text-sm text-white/85 leading-relaxed italic">
                 "The console gives us everything we need in one view — client
                 status, documents, disputes, and messaging. It's transformed how
                 our team operates day-to-day."
               </p>
               <div className="flex items-center gap-3 mt-4">
-                <div className="w-9 h-9 rounded-full bg-gradient-to-br from-emerald-400 to-primary flex items-center justify-center text-sm font-bold text-white shadow-md">
+                <div className="w-9 h-9 rounded-full bg-gradient-to-br from-accent to-primary flex items-center justify-center text-sm font-bold text-white shadow-md">
                   J
                 </div>
                 <div>

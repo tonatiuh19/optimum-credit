@@ -114,7 +114,7 @@ export default function AdminClientDetail() {
                   <span
                     className={`text-xs uppercase px-2 py-0.5 rounded-full ${
                       d.review_status === "approved"
-                        ? "bg-emerald-500/20 text-emerald-300"
+                        ? "bg-accent/20 text-accent"
                         : d.review_status === "rejected"
                           ? "bg-red-500/20 text-red-300"
                           : "bg-yellow-500/20 text-yellow-300"

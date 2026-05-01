@@ -1,38 +1,121 @@
-import { ArrowRight, Star, CheckCircle, Shield, Zap, TrendingUp, MessageSquare, Lock } from "lucide-react";
+import {
+  ArrowRight,
+  Star,
+  CheckCircle,
+  Shield,
+  Zap,
+  TrendingUp,
+  MessageSquare,
+  Lock,
+} from "lucide-react";
 import { useState } from "react";
 import CreditImprovementCard from "@/components/CreditImprovementCard";
+import PageMeta, {
+  organizationSchema,
+  localBusinessSchema,
+} from "@/components/PageMeta";
 
 export default function Index() {
   const [selectedPackage, setSelectedPackage] = useState<string | null>(null);
 
   return (
     <div className="w-full">
+      <PageMeta
+        title="Professional Credit Repair"
+        description="Optimum Credit removes negative items, resolves disputes, and improves your credit score. Trusted by 15,000+ clients with a 98% success rate and average 140-point increase."
+        canonical="/"
+        ogType="website"
+        jsonLd={[organizationSchema, localBusinessSchema]}
+      />
       {/* Hero Section */}
-      <section className="section-container relative overflow-hidden pt-20 md:pt-32">
-        {/* Animated background elements */}
+      <section className="section-container relative overflow-hidden pt-14 md:pt-32">
+        {/* Background orbs — richer on mobile */}
         <div className="absolute inset-0 overflow-hidden pointer-events-none">
-          <div className="absolute top-10 right-20 w-72 h-72 bg-primary/5 rounded-full blur-3xl animate-float" />
-          <div className="absolute bottom-10 left-10 w-80 h-80 bg-accent/5 rounded-full blur-3xl animate-float" style={{ animationDelay: "1s" }} />
+          <div className="absolute -top-10 -right-10 w-64 h-64 bg-primary/10 rounded-full blur-2xl animate-float md:hidden" />
+          <div
+            className="absolute top-1/3 -left-16 w-52 h-52 bg-accent/10 rounded-full blur-2xl animate-float md:hidden"
+            style={{ animationDelay: "1.2s" }}
+          />
+          <div
+            className="absolute bottom-10 right-1/3 w-44 h-44 bg-primary/5 rounded-full blur-2xl animate-float md:hidden"
+            style={{ animationDelay: "0.6s" }}
+          />
+          <div className="absolute top-10 right-20 w-72 h-72 bg-primary/5 rounded-full blur-3xl animate-float hidden md:block" />
+          <div
+            className="absolute bottom-10 left-10 w-80 h-80 bg-accent/5 rounded-full blur-3xl animate-float hidden md:block"
+            style={{ animationDelay: "1s" }}
+          />
         </div>
 
         <div className="section-inner relative z-10">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-8 md:gap-12 items-center">
+          {/* Mobile-only live badge */}
+          <div
+            className="md:hidden mb-5 flex justify-center animate-fade-up"
+            style={{ animationDelay: "0s" }}
+          >
+            <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-primary/10 border border-primary/20 text-xs font-semibold text-primary">
+              <span className="relative flex h-2 w-2 shrink-0">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-accent" />
+              </span>
+              #1 Rated · 15,000+ clients · BBB Accredited
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 md:gap-12 items-center">
             {/* Left Content */}
-            <div className="space-y-6 md:space-y-8">
-              <div className="space-y-4 animate-fade-up" style={{ animationDelay: "0s" }}>
+            <div className="space-y-5 md:space-y-8">
+              <div
+                className="space-y-4 animate-fade-up"
+                style={{ animationDelay: "0s" }}
+              >
                 <h1 className="text-4xl md:text-5xl lg:text-6xl font-bold tracking-tight text-foreground leading-tight">
                   Fix Your Credit.{" "}
-                  <span className="gradient-text inline-block">Start Today.</span>
+                  <span className="gradient-text inline-block">
+                    Start Today.
+                  </span>
                 </h1>
-                <p className="text-lg md:text-xl text-muted-foreground leading-relaxed max-w-lg">
-                  Stop waiting for better credit. Our expert team removes negative items, improves your score, and opens doors to better rates and opportunities.
+                <p className="text-base md:text-xl text-muted-foreground leading-relaxed max-w-lg">
+                  Stop waiting for better credit. Our expert team removes
+                  negative items, improves your score, and opens doors to better
+                  rates and opportunities.
                 </p>
               </div>
 
+              {/* Mobile stat pills */}
+              <div
+                className="md:hidden grid grid-cols-3 gap-2 animate-fade-up"
+                style={{ animationDelay: "0.15s" }}
+              >
+                {[
+                  { value: "+140", label: "avg pts up", icon: TrendingUp },
+                  { value: "98%", label: "success rate", icon: CheckCircle },
+                  { value: "15K+", label: "clients helped", icon: Shield },
+                ].map(({ value, label, icon: Icon }, i) => (
+                  <div
+                    key={label}
+                    className="flex flex-col items-center gap-1.5 bg-card border border-border rounded-xl py-3 px-2 shadow-sm"
+                    style={{ animationDelay: `${0.15 + i * 0.08}s` }}
+                  >
+                    <Icon className="w-4 h-4 text-accent" />
+                    <span className="text-lg font-extrabold text-foreground tabular-nums leading-none">
+                      {value}
+                    </span>
+                    <span className="text-[10px] text-muted-foreground text-center leading-tight">
+                      {label}
+                    </span>
+                  </div>
+                ))}
+              </div>
+
               {/* CTAs */}
-              <div className="flex flex-col sm:flex-row gap-4 pt-4 animate-fade-up" style={{ animationDelay: "0.2s" }}>
+              <div
+                className="flex flex-col sm:flex-row gap-3 md:gap-4 animate-fade-up"
+                style={{ animationDelay: "0.2s" }}
+              >
                 <button className="btn-primary w-full sm:w-auto flex items-center justify-center gap-2 h-12 px-8 group hover:gap-3 transition-all duration-300 shadow-md hover:shadow-lg">
-                  Get Started <ArrowRight className="w-5 h-5 group-hover:translate-x-0.5 transition-transform" />
+                  Get Started{" "}
+                  <ArrowRight className="w-5 h-5 group-hover:translate-x-0.5 transition-transform" />
                 </button>
                 <button className="btn-secondary w-full sm:w-auto flex items-center justify-center gap-2 h-12 px-8 hover:bg-muted transition-colors duration-300">
                   See How It Works
@@ -40,7 +123,10 @@ export default function Index() {
               </div>
 
               {/* Trust Indicators */}
-              <div className="pt-4 space-y-3 animate-fade-up" style={{ animationDelay: "0.4s" }}>
+              <div
+                className="pt-2 md:pt-4 space-y-3 animate-fade-up"
+                style={{ animationDelay: "0.4s" }}
+              >
                 <div className="flex items-center gap-3 text-sm">
                   <div className="flex items-center gap-1 text-yellow-500">
                     {[...Array(5)].map((_, i) => (
@@ -54,18 +140,25 @@ export default function Index() {
                 <div className="flex flex-wrap gap-4 text-sm text-muted-foreground">
                   <div className="flex items-center gap-2 group cursor-pointer">
                     <CheckCircle className="w-4 h-4 text-accent group-hover:scale-110 transition-transform" />
-                    <span className="group-hover:text-foreground transition-colors font-medium">98% Success Rate</span>
+                    <span className="group-hover:text-foreground transition-colors font-medium">
+                      98% Success Rate
+                    </span>
                   </div>
                   <div className="flex items-center gap-2 group cursor-pointer">
                     <CheckCircle className="w-4 h-4 text-accent group-hover:scale-110 transition-transform" />
-                    <span className="group-hover:text-foreground transition-colors font-medium">Avg 140 Points Up</span>
+                    <span className="group-hover:text-foreground transition-colors font-medium">
+                      Avg 140 Points Up
+                    </span>
                   </div>
                 </div>
               </div>
             </div>
 
-            {/* Right Visual - Interactive Credit Improvement Card */}
-            <div className="animate-slide-in-right" style={{ animationDelay: "0.3s" }}>
+            {/* Right Visual — desktop only */}
+            <div
+              className="hidden md:block animate-slide-in-right"
+              style={{ animationDelay: "0.3s" }}
+            >
               <CreditImprovementCard
                 currentScore={580}
                 projectedScore={720}
@@ -85,7 +178,8 @@ export default function Index() {
               How It Works
             </h2>
             <p className="text-lg text-muted-foreground">
-              A simple, transparent process designed to fix your credit efficiently and effectively.
+              A simple, transparent process designed to fix your credit
+              efficiently and effectively.
             </p>
           </div>
 
@@ -95,25 +189,29 @@ export default function Index() {
               {
                 number: "01",
                 title: "Choose Your Plan",
-                description: "Select the package that matches your credit situation and goals.",
+                description:
+                  "Select the package that matches your credit situation and goals.",
                 icon: <Zap className="w-6 h-6" />,
               },
               {
                 number: "02",
                 title: "Upload Documents",
-                description: "Securely share your credit reports and financial documents.",
+                description:
+                  "Securely share your credit reports and financial documents.",
                 icon: <Lock className="w-6 h-6" />,
               },
               {
                 number: "03",
                 title: "We Fix Your Credit",
-                description: "Our experts challenge negative items and dispute inaccuracies.",
+                description:
+                  "Our experts challenge negative items and dispute inaccuracies.",
                 icon: <TrendingUp className="w-6 h-6" />,
               },
               {
                 number: "04",
                 title: "Track Progress",
-                description: "Monitor improvements in real-time via your personal dashboard.",
+                description:
+                  "Monitor improvements in real-time via your personal dashboard.",
                 icon: <MessageSquare className="w-6 h-6" />,
               },
             ].map((step, index) => (
@@ -152,7 +250,8 @@ export default function Index() {
               Simple, Transparent Pricing
             </h2>
             <p className="text-lg text-muted-foreground">
-              Choose the package that fits your needs. No hidden fees, no surprises.
+              Choose the package that fits your needs. No hidden fees, no
+              surprises.
             </p>
           </div>
 
@@ -165,7 +264,8 @@ export default function Index() {
                 subtitle: "For First-Time Filers",
                 price: "$599",
                 duration: "6 months",
-                description: "Perfect for those new to credit repair with a few negative items.",
+                description:
+                  "Perfect for those new to credit repair with a few negative items.",
                 benefits: [
                   "Credit report analysis",
                   "Up to 10 dispute letters",
@@ -182,7 +282,8 @@ export default function Index() {
                 subtitle: "Most Popular",
                 price: "$899",
                 duration: "12 months",
-                description: "Comprehensive repair for multiple negative items and complex situations.",
+                description:
+                  "Comprehensive repair for multiple negative items and complex situations.",
                 benefits: [
                   "Everything in Standard",
                   "Unlimited dispute letters",
@@ -200,7 +301,8 @@ export default function Index() {
                 subtitle: "Maximum Results",
                 price: "$1,299",
                 duration: "12 months",
-                description: "Premium service with authorized user accounts to boost your score.",
+                description:
+                  "Premium service with authorized user accounts to boost your score.",
                 benefits: [
                   "Everything in Complex",
                   "Authorized user tradelines",
@@ -247,9 +349,7 @@ export default function Index() {
 
                   <button
                     className={`w-full h-12 rounded-lg font-semibold transition-all duration-200 flex items-center justify-center gap-2 ${
-                      pkg.popular
-                        ? "btn-primary"
-                        : "btn-secondary"
+                      pkg.popular ? "btn-primary" : "btn-secondary"
                     }`}
                   >
                     {pkg.cta}
@@ -281,7 +381,8 @@ export default function Index() {
               Trusted by Thousands
             </h2>
             <p className="text-lg text-muted-foreground">
-              Real results from real people. See how we've transformed credit profiles.
+              Real results from real people. See how we've transformed credit
+              profiles.
             </p>
           </div>
 
@@ -350,8 +451,12 @@ export default function Index() {
               <p className="text-sm text-muted-foreground">Success Rate</p>
             </div>
             <div className="text-center">
-              <div className="text-4xl font-bold text-primary mb-2">140 pts</div>
-              <p className="text-sm text-muted-foreground">Avg Score Increase</p>
+              <div className="text-4xl font-bold text-primary mb-2">
+                140 pts
+              </div>
+              <p className="text-sm text-muted-foreground">
+                Avg Score Increase
+              </p>
             </div>
           </div>
         </div>
@@ -365,7 +470,8 @@ export default function Index() {
               Complete Transparency
             </h2>
             <p className="text-lg text-muted-foreground">
-              Understand exactly what happens at each stage of your repair journey.
+              Understand exactly what happens at each stage of your repair
+              journey.
             </p>
           </div>
 
@@ -377,20 +483,27 @@ export default function Index() {
                 <h3 className="text-xl font-bold">Monthly Rounds</h3>
               </div>
               <p className="text-muted-foreground mb-4">
-                Each month we file a new round of disputes with the three credit bureaus for inaccurate or outdated items on your report.
+                Each month we file a new round of disputes with the three credit
+                bureaus for inaccurate or outdated items on your report.
               </p>
               <ul className="space-y-2 text-sm">
                 <li className="flex items-center gap-2">
                   <span className="text-primary font-bold">→</span>
-                  <span className="text-muted-foreground">Initial assessment and strategy</span>
+                  <span className="text-muted-foreground">
+                    Initial assessment and strategy
+                  </span>
                 </li>
                 <li className="flex items-center gap-2">
                   <span className="text-primary font-bold">→</span>
-                  <span className="text-muted-foreground">File disputes with bureaus</span>
+                  <span className="text-muted-foreground">
+                    File disputes with bureaus
+                  </span>
                 </li>
                 <li className="flex items-center gap-2">
                   <span className="text-primary font-bold">→</span>
-                  <span className="text-muted-foreground">Monitor responses (30-45 days)</span>
+                  <span className="text-muted-foreground">
+                    Monitor responses (30-45 days)
+                  </span>
                 </li>
               </ul>
             </div>
@@ -402,20 +515,27 @@ export default function Index() {
                 <h3 className="text-xl font-bold">SMS Updates & Portal</h3>
               </div>
               <p className="text-muted-foreground mb-4">
-                Stay informed with regular updates. Access your personal client portal anytime to view your progress and upcoming actions.
+                Stay informed with regular updates. Access your personal client
+                portal anytime to view your progress and upcoming actions.
               </p>
               <ul className="space-y-2 text-sm">
                 <li className="flex items-center gap-2">
                   <span className="text-accent font-bold">→</span>
-                  <span className="text-muted-foreground">Real-time SMS notifications</span>
+                  <span className="text-muted-foreground">
+                    Real-time SMS notifications
+                  </span>
                 </li>
                 <li className="flex items-center gap-2">
                   <span className="text-accent font-bold">→</span>
-                  <span className="text-muted-foreground">24/7 portal access</span>
+                  <span className="text-muted-foreground">
+                    24/7 portal access
+                  </span>
                 </li>
                 <li className="flex items-center gap-2">
                   <span className="text-accent font-bold">→</span>
-                  <span className="text-muted-foreground">Detailed progress reports</span>
+                  <span className="text-muted-foreground">
+                    Detailed progress reports
+                  </span>
                 </li>
               </ul>
             </div>
@@ -428,7 +548,9 @@ export default function Index() {
               <h3 className="text-xl font-bold">Bank-Level Security</h3>
             </div>
             <p className="text-muted-foreground">
-              Your financial information is protected with 256-bit SSL encryption, FDIC-grade security protocols, and strict privacy compliance with CCPA and GDPR regulations.
+              Your financial information is protected with 256-bit SSL
+              encryption, FDIC-grade security protocols, and strict privacy
+              compliance with CCPA and GDPR regulations.
             </p>
           </div>
         </div>
@@ -442,7 +564,8 @@ export default function Index() {
               Ready to Fix Your Credit?
             </h2>
             <p className="text-lg text-muted-foreground mb-8">
-              Join thousands of people who've improved their financial lives. Start your free consultation today.
+              Join thousands of people who've improved their financial lives.
+              Start your free consultation today.
             </p>
             <div className="flex flex-col sm:flex-row gap-4 justify-center">
               <button className="btn-primary w-full sm:w-auto h-12 px-8 flex items-center justify-center gap-2">

@@ -53,8 +53,13 @@ export default function AdminConversations() {
         description="SMS, email, and call history with clients."
       />
 
-      <div className="grid md:grid-cols-3 gap-4 h-[calc(100vh-14rem)]">
-        <div className="bg-card rounded-2xl border border-border overflow-y-auto">
+      <div className="grid md:grid-cols-3 gap-4 md:h-[calc(100vh-14rem)]">
+        {/* List panel — hidden on mobile when a conversation is open */}
+        <div
+          className={`bg-card rounded-2xl border border-border overflow-y-auto max-h-[45vh] md:max-h-none ${
+            activeId ? "hidden md:block" : "block"
+          }`}
+        >
           {conversations.length === 0 ? (
             <div className="p-6 text-muted-foreground text-sm">
               No conversations.
@@ -82,7 +87,12 @@ export default function AdminConversations() {
           )}
         </div>
 
-        <div className="md:col-span-2 bg-card rounded-2xl border border-border flex flex-col">
+        {/* Chat panel — hidden on mobile when no conversation is selected */}
+        <div
+          className={`md:col-span-2 bg-card rounded-2xl border border-border flex flex-col ${
+            activeId ? "flex min-h-[65vh] md:min-h-0" : "hidden md:flex"
+          }`}
+        >
           {!active ? (
             <div className="flex-1 flex items-center justify-center text-muted-foreground">
               Select a conversation
@@ -90,6 +100,12 @@ export default function AdminConversations() {
           ) : (
             <>
               <div className="p-4 border-b border-border">
+                <button
+                  onClick={() => setActiveId(null)}
+                  className="md:hidden mb-2 flex items-center gap-1 text-sm text-primary hover:underline"
+                >
+                  ← Back to list
+                </button>
                 <div className="font-semibold">
                   {active.client_first_name} {active.client_last_name}
                 </div>

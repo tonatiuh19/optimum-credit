@@ -150,25 +150,22 @@ export default function AuthBrandPanel({ variant }: Props) {
       <div className="relative z-10 flex flex-col h-full w-full px-10 xl:px-14 py-10 xl:py-12">
         {/* Logo row — top right */}
         <Stagger delay={0} className="flex justify-end">
-          <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 bg-gradient-to-br from-primary to-primary-600 rounded-xl flex items-center justify-center shadow-lg shadow-primary/30 flex-shrink-0">
-              <ShieldCheck className="w-5 h-5 text-white" />
-            </div>
-            <div>
-              <div className="text-[14px] font-bold text-white leading-none tracking-tight">
-                Optimum Credit
-              </div>
-              <div className="flex items-center gap-0.5 mt-1">
-                {[...Array(5)].map((_, i) => (
-                  <Star
-                    key={i}
-                    className="w-2.5 h-2.5 fill-yellow-400 text-yellow-400"
-                  />
-                ))}
-                <span className="text-[10px] text-slate-500 ml-1.5 tracking-wide">
-                  5.0 · BBB Accredited
-                </span>
-              </div>
+          <div className="flex flex-col items-end gap-1">
+            <img
+              src="https://disruptinglabs.com/data/optimum/assets/images/logo_horizontal_gold_white_text.png"
+              alt="Optimum Credit"
+              className="h-8 w-auto"
+            />
+            <div className="flex items-center gap-0.5">
+              {[...Array(5)].map((_, i) => (
+                <Star
+                  key={i}
+                  className="w-2.5 h-2.5 fill-yellow-400 text-yellow-400"
+                />
+              ))}
+              <span className="text-[10px] text-slate-500 ml-1.5 tracking-wide">
+                5.0 · BBB Accredited
+              </span>
             </div>
           </div>
         </Stagger>

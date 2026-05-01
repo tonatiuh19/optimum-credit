@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { redeemOnboardingToken } from "@/store/slices/clientAuthSlice";
-import { Shield, Loader2, AlertCircle, CheckCircle2 } from "lucide-react";
+import { Loader2, AlertCircle, CheckCircle2 } from "lucide-react";
 
 export default function Onboarding() {
   const { token } = useParams<{ token: string }>();
@@ -34,17 +34,14 @@ export default function Onboarding() {
       <div className="w-full max-w-sm text-center space-y-6">
         {/* Logo + brand */}
         <div className="flex flex-col items-center gap-3">
-          <div className="w-14 h-14 rounded-2xl bg-primary/10 border border-primary/20 flex items-center justify-center">
-            <Shield className="w-7 h-7 text-primary" />
-          </div>
-          <div>
-            <h1 className="text-xl font-bold text-foreground">
-              Optimum Credit
-            </h1>
-            <p className="text-sm text-muted-foreground">
-              Secure onboarding link
-            </p>
-          </div>
+          <img
+            src="https://disruptinglabs.com/data/optimum/assets/images/logo_horizontal_gold_121829_text.png"
+            alt="Optimum Credit"
+            className="h-10 w-auto"
+          />
+          <p className="text-sm text-muted-foreground">
+            Secure onboarding link
+          </p>
         </div>
 
         {/* Status card */}
@@ -67,8 +64,8 @@ export default function Onboarding() {
 
           {!loading && user && !error && (
             <div className="flex flex-col items-center gap-3">
-              <div className="w-12 h-12 rounded-full bg-green-500/10 flex items-center justify-center">
-                <CheckCircle2 className="w-6 h-6 text-green-500" />
+              <div className="w-12 h-12 rounded-full bg-accent/10 flex items-center justify-center">
+                <CheckCircle2 className="w-6 h-6 text-accent" />
               </div>
               <p className="text-sm font-medium text-foreground">
                 Welcome, {user.first_name}!

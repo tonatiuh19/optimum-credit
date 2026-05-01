@@ -54,7 +54,7 @@ export default function Support() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-3xl font-bold flex items-center gap-2">
             <LifeBuoy className="w-7 h-7 text-primary" /> Support
@@ -63,7 +63,7 @@ export default function Support() {
         </div>
         <button
           onClick={() => setShowForm((v) => !v)}
-          className="btn-primary inline-flex items-center gap-1.5"
+          className="btn-primary inline-flex items-center gap-1.5 shrink-0"
         >
           <Plus className="w-4 h-4" /> New ticket
         </button>

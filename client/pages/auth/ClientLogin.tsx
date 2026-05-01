@@ -16,8 +16,9 @@ import {
   PartyPopper,
   Clock,
 } from "lucide-react";
-import OtpInput from "@/components/OtpInput";
+import PageMeta from "@/components/PageMeta";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
+import OtpInput from "@/components/OtpInput";
 import {
   requestClientOtp,
   verifyClientOtp,
@@ -77,31 +78,26 @@ export default function ClientLogin() {
 
   return (
     <div className="h-screen overflow-hidden flex">
+      <PageMeta
+        title="Client Portal Login"
+        description="Log in to your Optimum Credit client portal to track your credit repair progress, view documents, and message your team."
+        canonical="/portal/login"
+        noIndex={true}
+      />
       {/* ── Left: Form column ── */}
       <div className="flex-1 lg:max-w-[480px] bg-gradient-to-br from-primary/5 via-background to-accent/5 flex flex-col overflow-y-auto">
         {/* Header */}
         <header className="sticky top-0 z-20 bg-background/80 backdrop-blur-md border-b border-border/60 shrink-0">
           <div className="px-6 h-16 flex items-center justify-between">
-            <Link to="/" className="flex items-center gap-2.5 group">
-              <div className="w-8 h-8 bg-gradient-to-br from-primary to-primary-600 rounded-xl flex items-center justify-center shadow-md shadow-primary/20 group-hover:shadow-primary/40 transition-shadow">
-                <ShieldCheck className="w-4 h-4 text-white" />
-              </div>
-              <div>
-                <div className="text-sm font-bold text-foreground leading-none tracking-tight">
-                  Optimum Credit
-                </div>
-                <div className="flex items-center gap-0.5 mt-0.5">
-                  {[...Array(5)].map((_, i) => (
-                    <Star
-                      key={i}
-                      className="w-2 h-2 fill-yellow-400 text-yellow-400"
-                    />
-                  ))}
-                  <span className="text-[9px] text-muted-foreground ml-1 tracking-wide">
-                    BBB Accredited
-                  </span>
-                </div>
-              </div>
+            <Link
+              to="/"
+              className="flex items-center transition-opacity hover:opacity-80"
+            >
+              <img
+                src="https://disruptinglabs.com/data/optimum/assets/images/logo_horizontal_gold_121829_text.png"
+                alt="Optimum Credit"
+                className="h-8 w-auto"
+              />
             </Link>
             <Link
               to="/"
@@ -114,7 +110,7 @@ export default function ClientLogin() {
         </header>
 
         {/* Form body */}
-        <div className="flex-1 flex flex-col justify-center px-8 py-10">
+        <div className="flex-1 flex flex-col justify-center px-5 sm:px-8 py-8 sm:py-10">
           <div className="w-full max-w-sm mx-auto animate-fade-up">
             {/* Icon + heading */}
             <div className="flex flex-col items-center text-center mb-8">
@@ -271,7 +267,7 @@ export default function ClientLogin() {
         </div>
 
         {/* Footer */}
-        <div className="px-8 pb-6 shrink-0">
+        <div className="px-5 sm:px-8 pb-6 shrink-0">
           <div className="flex flex-wrap items-center justify-center gap-4 text-xs text-muted-foreground mb-4">
             <div className="flex items-center gap-1.5">
               <CheckCircle className="w-3.5 h-3.5 text-accent" />
@@ -323,7 +319,7 @@ export default function ClientLogin() {
           {/* Top: badge */}
           <div>
             <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white/10 backdrop-blur-sm border border-white/20 text-xs font-medium text-white/90">
-              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+              <ShieldCheck className="w-3.5 h-3.5 text-accent" />
               Your dedicated team is here for you
             </span>
           </div>
@@ -333,8 +329,8 @@ export default function ClientLogin() {
             <div className="space-y-4 max-w-lg">
               <h2 className="text-4xl xl:text-5xl font-bold leading-tight text-white drop-shadow-md">
                 Welcome back —{" "}
-                <span className="text-emerald-400">we've been working</span>{" "}
-                hard for you.
+                <span className="text-accent">we've been working</span> hard for
+                you.
               </h2>
               <p className="text-base text-white/70 leading-relaxed max-w-md">
                 Your progress is waiting. Log in to see everything we've been
@@ -350,7 +346,7 @@ export default function ClientLogin() {
                   key={label}
                   className="bg-white/10 backdrop-blur-sm border border-white/15 rounded-2xl px-4 py-4 text-center"
                 >
-                  <Icon className="w-5 h-5 text-emerald-400 mx-auto mb-2" />
+                  <Icon className="w-5 h-5 text-accent mx-auto mb-2" />
                   <div className="text-xl font-bold text-white">{value}</div>
                   <div className="text-[11px] text-white/60 mt-0.5 leading-tight">
                     {label}
@@ -361,14 +357,14 @@ export default function ClientLogin() {
 
             {/* Testimonial */}
             <div className="bg-white/8 backdrop-blur-sm border border-white/12 rounded-2xl p-6 max-w-lg">
-              <Quote className="w-6 h-6 text-emerald-400 mb-3 opacity-80" />
+              <Quote className="w-6 h-6 text-accent mb-3 opacity-80" />
               <p className="text-sm text-white/85 leading-relaxed italic">
                 "I finally felt like someone was truly in my corner. They
                 explained everything clearly, kept me updated, and never made me
                 feel lost. My score went from 511 to 724 in 8 months."
               </p>
               <div className="flex items-center gap-3 mt-4">
-                <div className="w-9 h-9 rounded-full bg-gradient-to-br from-emerald-400 to-primary flex items-center justify-center text-sm font-bold text-white shadow-md">
+                <div className="w-9 h-9 rounded-full bg-gradient-to-br from-accent to-primary flex items-center justify-center text-sm font-bold text-white shadow-md">
                   M
                 </div>
                 <div>

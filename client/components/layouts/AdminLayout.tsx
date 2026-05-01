@@ -123,15 +123,11 @@ export default function AdminLayout({ children }: Props) {
               <ShieldCheck className="w-4 h-4 text-white" />
             </div>
             {!collapsed && (
-              <div className="leading-tight min-w-0">
-                <div className="text-[13px] font-bold text-white tracking-tight">
-                  Optimum
-                </div>
-                <div className="text-[10px] text-slate-500 flex items-center gap-1">
-                  <Zap className="w-2.5 h-2.5 text-primary/60" />
-                  Admin Console
-                </div>
-              </div>
+              <img
+                src="https://disruptinglabs.com/data/optimum/assets/images/logo_horizontal_gold_white_text.png"
+                alt="Optimum Credit"
+                className="h-5 w-auto min-w-0"
+              />
             )}
           </Link>
           {/* Collapse toggle — top-right, desktop only */}

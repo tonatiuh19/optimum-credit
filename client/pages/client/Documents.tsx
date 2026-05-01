@@ -91,15 +91,13 @@ export default function Documents() {
 
       {/* All approved banner */}
       {allApproved && (
-        <div className="rounded-2xl border border-green-500/30 bg-green-500/5 p-5 flex items-center gap-4">
-          <div className="w-10 h-10 rounded-full bg-green-500/15 flex items-center justify-center shrink-0">
-            <PartyPopper className="w-5 h-5 text-green-400" />
+        <div className="rounded-2xl border border-accent/30 bg-accent/5 p-5 flex items-center gap-4">
+          <div className="w-10 h-10 rounded-full bg-accent/15 flex items-center justify-center shrink-0">
+            <PartyPopper className="w-5 h-5 text-accent" />
           </div>
           <div>
-            <p className="font-semibold text-green-300">
-              All documents approved!
-            </p>
-            <p className="text-sm text-green-400/80 mt-0.5">
+            <p className="font-semibold text-accent">All documents approved!</p>
+            <p className="text-sm text-accent/80 mt-0.5">
               Your file has been moved to the next stage. Our team will begin
               working on your case.
             </p>
@@ -207,7 +205,7 @@ function DocCard({
   const inputRef = useRef<HTMLInputElement>(null);
 
   const borderClass = {
-    approved: "border-green-500/30",
+    approved: "border-accent/30",
     pending: "border-amber-500/20",
     rejected: "border-destructive/30",
     missing: "border-border",
@@ -215,7 +213,7 @@ function DocCard({
 
   const statusBadge = {
     approved: (
-      <span className="inline-flex items-center gap-1 text-xs font-semibold bg-green-500/10 text-green-400 border border-green-500/20 px-2 py-0.5 rounded-full">
+      <span className="inline-flex items-center gap-1 text-xs font-semibold bg-accent/10 text-accent border border-accent/20 px-2 py-0.5 rounded-full">
         <CheckCircle2 className="w-3 h-3" /> Approved
       </span>
     ),
@@ -292,7 +290,7 @@ function DocCard({
       )}
 
       {status === "approved" && (
-        <div className="flex items-center justify-center gap-1.5 h-10 text-sm text-green-400 font-medium">
+        <div className="flex items-center justify-center gap-1.5 h-10 text-sm text-accent font-medium">
           <CheckCircle2 className="w-4 h-4" /> Document verified
         </div>
       )}

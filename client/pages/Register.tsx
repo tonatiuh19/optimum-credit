@@ -25,6 +25,7 @@ import {
   Mail,
   PartyPopper,
 } from "lucide-react";
+import PageMeta from "@/components/PageMeta";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
   fetchPackages,
@@ -121,30 +122,24 @@ export default function Register() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-primary/5 via-background to-accent/5 flex flex-col">
-      {/* ── Header ── */}
+      <PageMeta
+        title="Start Your Credit Repair"
+        description="Create your Optimum Credit account and begin your journey to a better credit score. Fast setup, expert support, and results in as little as 6 months."
+        canonical="/register"
+        noIndex={false}
+      />
       <header className="sticky top-0 z-20 bg-background/80 backdrop-blur-md border-b border-border/60">
         <div className="container max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           {/* Logo */}
-          <Link to="/" className="flex items-center gap-2.5 group">
-            <div className="w-8 h-8 bg-gradient-to-br from-primary to-primary-600 rounded-xl flex items-center justify-center shadow-md shadow-primary/20 group-hover:shadow-primary/40 transition-shadow">
-              <ShieldCheck className="w-4 h-4 text-white" />
-            </div>
-            <div>
-              <div className="text-sm font-bold text-foreground leading-none tracking-tight">
-                Optimum Credit
-              </div>
-              <div className="flex items-center gap-0.5 mt-0.5">
-                {[...Array(5)].map((_, i) => (
-                  <Star
-                    key={i}
-                    className="w-2 h-2 fill-yellow-400 text-yellow-400"
-                  />
-                ))}
-                <span className="text-[9px] text-muted-foreground ml-1 tracking-wide">
-                  BBB Accredited
-                </span>
-              </div>
-            </div>
+          <Link
+            to="/"
+            className="flex items-center transition-opacity hover:opacity-80"
+          >
+            <img
+              src="https://disruptinglabs.com/data/optimum/assets/images/logo_horizontal_gold_121829_text.png"
+              alt="Optimum Credit"
+              className="h-8 w-auto"
+            />
           </Link>
 
           {/* Back */}
