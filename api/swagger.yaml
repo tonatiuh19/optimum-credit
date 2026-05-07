@@ -23,6 +23,8 @@ tags:
     description: System health checks
   - name: Auth
     description: Authentication (client & admin)
+  - name: Registration
+    description: Public registration & Authorize.net payment flow
   - name: Portal
     description: Client portal — documents, dashboard
   - name: Admin
@@ -64,53 +66,177 @@ paths:
                     type: string
                     example: pong
 
-  /auth/onboarding/{token}:
-    get:
-      tags: [Auth]
-      summary: Redeem magic-link onboarding token
+  /registration:
+    post:
+      tags: [Registration]
+      summary: Register a new client
       description: |
-        Validates a single-use onboarding token embedded in the welcome email.
-        On success, creates a client session and returns a bearer token.
-        Tokens expire after 72 hours and are single-use (`consumed_at` is set).
-      parameters:
-        - in: path
-          name: token
-          required: true
-          schema:
-            type: string
-          description: Raw 64-character hex onboarding token from the welcome email link
+        Creates or updates a pending client record and returns the data needed
+        to render the payment step. When Authorize.net is not configured a mock
+        `transactionId` is returned (`isMock: true`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                [
+                  firstName,
+                  lastName,
+                  email,
+                  addressLine1,
+                  city,
+                  state,
+                  zip,
+                  ssnLast4,
+                  packageSlug,
+                ]
+              properties:
+                firstName: { type: string }
+                lastName: { type: string }
+                email: { type: string, format: email }
+                phone: { type: string }
+                addressLine1: { type: string }
+                addressLine2: { type: string }
+                city: { type: string }
+                state: { type: string, minLength: 2, maxLength: 2 }
+                zip: { type: string, pattern: '^\d{5}$' }
+                ssnLast4: { type: string, pattern: '^\d{4}$' }
+                packageSlug: { type: string }
+                affiliateCode: { type: string }
       responses:
         "200":
-          description: Token valid — session created
+          description: Client registered
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  token:
+                  clientId: { type: integer }
+                  packageId: { type: integer }
+                  packageName: { type: string }
+                  amountCents: { type: integer }
+                  isMock: { type: boolean }
+                  mockTransactionId:
                     type: string
-                    description: Bearer session token for subsequent requests
-                  user:
-                    type: object
-                    properties:
-                      id:
-                        type: integer
-                      email:
-                        type: string
-                      first_name:
-                        type: string
-                      last_name:
-                        type: string
+                    description: Only present when isMock is true
         "400":
-          description: Token expired or already used
+          description: Validation error
+        "409":
+          description: Email already has an active account
+
+  /registration/process-payment:
+    post:
+      tags: [Registration]
+      summary: Charge card via Authorize.net Accept.js nonce
+      description: |
+        Accepts an opaque payment nonce from the client-side Accept.js library,
+        charges the card through Authorize.net, and marks the client as onboarded.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [clientId, dataDescriptor, dataValue]
+              properties:
+                clientId: { type: integer }
+                dataDescriptor:
+                  type: string
+                  example: COMMON.ACCEPT.INAPP.PAYMENT
+                dataValue:
+                  type: string
+                  description: Opaque nonce from Accept.js
+      responses:
+        "200":
+          description: Payment succeeded
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  error:
-                    type: string
-                    example: Link expired or already used
+                  ok: { type: boolean }
+        "402":
+          description: Payment declined
+        "404":
+          description: Client not found
+        "503":
+          description: Payment provider not configured
+
+  /registration/confirm-mock:
+    post:
+      tags: [Registration]
+      summary: Confirm a sandbox mock payment (dev only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [clientId, transactionId]
+              properties:
+                clientId: { type: integer }
+                transactionId:
+                  type: string
+                  description: The mockTransactionId returned by /registration
+      responses:
+        "200":
+          description: Mock payment confirmed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+        "400":
+          description: Invalid or non-mock transaction ID
+
+  /auth/onboarding/{token}:
+    summary: Redeem magic-link onboarding token
+    description: |
+      Validates a single-use onboarding token embedded in the welcome email.
+      On success, creates a client session and returns a bearer token.
+      Tokens expire after 72 hours and are single-use (`consumed_at` is set).
+    parameters:
+      - in: path
+        name: token
+        required: true
+        schema:
+          type: string
+        description: Raw 64-character hex onboarding token from the welcome email link
+    responses:
+      "200":
+        description: Token valid — session created
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                token:
+                  type: string
+                  description: Bearer session token for subsequent requests
+                user:
+                  type: object
+                  properties:
+                    id:
+                      type: integer
+                    email:
+                      type: string
+                    first_name:
+                      type: string
+                    last_name:
+                      type: string
+      "400":
+        description: Token expired or already used
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                error:
+                  type: string
+                  example: Link expired or already used
 
   /portal/documents:
     post:
@@ -184,6 +310,144 @@ paths:
         "500":
           description: Decryption failed
 
+  /admin/clients:
+    get:
+      tags: [Admin]
+      summary: List clients
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: stage
+          schema:
+            type: string
+        - in: query
+          name: search
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of clients
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  clients:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AdminClientListItem"
+    post:
+      tags: [Admin]
+      summary: Create a new client
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [first_name, last_name, email]
+              properties:
+                first_name:
+                  type: string
+                last_name:
+                  type: string
+                email:
+                  type: string
+                  format: email
+                phone:
+                  type: string
+                package_id:
+                  type: integer
+                status:
+                  type: string
+                  enum: [pending_payment, onboarding, active, paused, cancelled]
+      responses:
+        "201":
+          description: Client created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  client:
+                    $ref: "#/components/schemas/AdminClientListItem"
+        "409":
+          description: Email already exists
+
+  /admin/clients/{id}:
+    put:
+      tags: [Admin]
+      summary: Update a client
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                first_name:
+                  type: string
+                last_name:
+                  type: string
+                email:
+                  type: string
+                  format: email
+                phone:
+                  type: string
+                package_id:
+                  type: integer
+                status:
+                  type: string
+                  enum: [pending_payment, onboarding, active, paused, cancelled]
+      responses:
+        "200":
+          description: Updated client
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  client:
+                    $ref: "#/components/schemas/AdminClientListItem"
+        "404":
+          description: Client not found
+        "409":
+          description: Email already exists
+    delete:
+      tags: [Admin]
+      summary: Delete a client
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+        "404":
+          description: Client not found
+
 components:
   securitySchemes:
     BearerAuth:
@@ -192,6 +456,44 @@ components:
       bearerFormat: JWT
 
   schemas:
+    AdminClientListItem:
+      type: object
+      properties:
+        id:
+          type: integer
+        first_name:
+          type: string
+        last_name:
+          type: string
+        email:
+          type: string
+        phone:
+          type: string
+          nullable: true
+        pipeline_stage:
+          type: string
+          enum:
+            [
+              new_client,
+              docs_ready,
+              round_1,
+              round_2,
+              round_3,
+              round_4,
+              round_5,
+              completed,
+              cancelled,
+            ]
+        status:
+          type: string
+          enum: [pending_payment, onboarding, active, paused, cancelled]
+        package_name:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
     ClientDocument:
       type: object
       properties:

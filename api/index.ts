@@ -17,20 +17,17 @@ import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import { Resend } from "resend";
 import twilio from "twilio";
-import Stripe from "stripe";
 
 // ============================================================================
 // ENV VALIDATION
 // ============================================================================
 
-if (
-  !process.env.DB_HOST ||
-  !process.env.DB_USER ||
-  !process.env.DB_PASSWORD ||
-  !process.env.DB_NAME
-) {
-  throw new Error(
-    "Database environment variables are required: DB_HOST, DB_USER, DB_PASSWORD, DB_NAME",
+const MISSING_DB_VARS = ["DB_HOST", "DB_USER", "DB_PASSWORD", "DB_NAME"].filter(
+  (k) => !process.env[k],
+);
+if (MISSING_DB_VARS.length > 0) {
+  console.error(
+    `❌ Missing required env vars: ${MISSING_DB_VARS.join(", ")}. All API routes will return 503.`,
   );
 }
 
@@ -47,8 +44,21 @@ const APP_URL = process.env.PUBLIC_APP_URL || "http://localhost:8080";
 const SESSION_TTL_DAYS = 30;
 const OTP_TTL_MIN = 10;
 const ONBOARDING_TOKEN_TTL_HOURS = 72;
+// /tmp is the only writable path in serverless (Vercel). Fall back to it when
+// the preferred directory cannot be created (read-only filesystem).
 const UPLOADS_DIR =
-  process.env.UPLOADS_DIR || path.join(process.cwd(), "uploads");
+  process.env.UPLOADS_DIR ||
+  (() => {
+    const preferred = path.join(process.cwd(), "uploads");
+    try {
+      fs.mkdirSync(preferred, { recursive: true });
+      return preferred;
+    } catch {
+      const tmp = "/tmp/uploads";
+      fs.mkdirSync(tmp, { recursive: true });
+      return tmp;
+    }
+  })();
 
 // ============================================================================
 // DATABASE POOL
@@ -65,10 +75,26 @@ const pool = mysql.createPool({
   connectionLimit: 10,
   queueLimit: 0,
   timezone: "+00:00", // Always use UTC — prevents expires_at mismatch with TiDB NOW()
+  // TiDB Cloud Serverless closes idle connections aggressively (~5 min).
+  // keepAlive prevents the OS from holding dead TCP sockets in the pool.
+  enableKeepAlive: true,
+  keepAliveInitialDelay: 10000, // send first keepalive after 10s
+  connectTimeout: 60000, // 60s connect timeout
+});
+
+// Silently swallow connection-level errors (ECONNRESET, PROTOCOL_CONNECTION_LOST)
+// so a dead pooled connection doesn't crash the process — the pool will discard it
+// and open a fresh one on the next query.
+pool.on("connection", (conn) => {
+  conn.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code !== "ECONNRESET" && err.code !== "PROTOCOL_CONNECTION_LOST") {
+      throw err;
+    }
+  });
 });
 
 // ============================================================================
-// EXTERNAL CLIENTS (Resend / Twilio / Stripe) — all with graceful fallback
+// EXTERNAL CLIENTS (Resend / Twilio / Authorize.net) — all with graceful fallback
 // ============================================================================
 
 const FROM_EMAIL =
@@ -97,14 +123,24 @@ if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN) {
 }
 const TWILIO_FROM = process.env.TWILIO_PHONE_NUMBER;
 
-let stripeClient: Stripe | null = null;
-if (process.env.STRIPE_SECRET_KEY) {
-  stripeClient = new Stripe(process.env.STRIPE_SECRET_KEY, {
-    apiVersion: "2024-11-20.acacia" as any,
-  });
-  console.log("✅ Stripe initialized");
+const AUTHORIZENET_URL =
+  process.env.AUTHORIZENET_SANDBOX !== "false"
+    ? "https://apitest.authorize.net/xml/v1/request.api"
+    : "https://api.authorize.net/xml/v1/request.api";
+const authorizeNetConfigured = !!(
+  process.env.AUTHORIZENET_API_LOGIN_ID &&
+  process.env.AUTHORIZENET_TRANSACTION_KEY
+);
+if (authorizeNetConfigured) {
+  console.log(
+    "✅ Authorize.net initialized (",
+    process.env.AUTHORIZENET_SANDBOX !== "false" ? "sandbox" : "production",
+    ")",
+  );
 } else {
-  console.warn("⚠️  STRIPE_SECRET_KEY not set — payments will use mock mode");
+  console.warn(
+    "⚠️  AUTHORIZENET_API_LOGIN_ID / AUTHORIZENET_TRANSACTION_KEY not set — payments will use mock mode",
+  );
 }
 
 // ============================================================================
@@ -168,12 +204,13 @@ function decryptFile(encrypted: Buffer, ivHex: string, tagHex: string): Buffer {
 // ONBOARDING TOKEN HELPERS (magic link after payment)
 // ============================================================================
 
-async function createOnboardingToken(clientId: number): Promise<string> {
+async function createOnboardingToken(
+  clientId: number,
+  ttlHours: number = ONBOARDING_TOKEN_TTL_HOURS,
+): Promise<string> {
   const rawToken = crypto.randomBytes(32).toString("hex");
   const tokenHash = sha256(rawToken);
-  const expiresAt = new Date(
-    Date.now() + ONBOARDING_TOKEN_TTL_HOURS * 60 * 60 * 1000,
-  );
+  const expiresAt = new Date(Date.now() + ttlHours * 60 * 60 * 1000);
   await pool.query<ResultSetHeader>(
     `INSERT INTO onboarding_tokens (client_id, token_hash, expires_at) VALUES (?, ?, ?)`,
     [clientId, tokenHash, expiresAt],
@@ -330,6 +367,30 @@ function requireAuth(actor: ActorType) {
 const requireClient = requireAuth("client");
 const requireAdmin = requireAuth("admin");
 
+async function requireSuperAdmin(
+  req: AuthedRequest,
+  res: Response,
+  next: NextFunction,
+) {
+  const token = extractToken(req);
+  if (!token) return res.status(401).json({ error: "Unauthorized" });
+  const payload = verifySessionToken(token);
+  if (!payload || payload.actor !== "admin") {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  const ok = await isSessionActive(payload);
+  if (!ok) return res.status(401).json({ error: "Session expired" });
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT role FROM admins WHERE id = ? LIMIT 1`,
+    [payload.id],
+  );
+  if (rows[0]?.role !== "super_admin") {
+    return res.status(403).json({ error: "Forbidden: super_admin required" });
+  }
+  req.auth = payload;
+  next();
+}
+
 // ============================================================================
 // EMAIL HELPERS
 // ============================================================================
@@ -379,10 +440,12 @@ ${opts.preheader ? `<div style="display:none;max-height:0;overflow:hidden;">${es
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4f5f9;padding:40px 16px;">
   <tr><td align="center">
     <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 8px 24px rgba(15,23,42,0.06);">
-      <tr><td style="background:linear-gradient(135deg,#1e40ff 0%,#0b2bd6 100%);padding:28px 32px;color:#fff;">
+      <tr><td style="background:#121829;padding:24px 32px;">
         <table width="100%"><tr>
-          <td style="font-size:20px;font-weight:800;letter-spacing:-0.01em;">Optimum Credit</td>
-          <td align="right" style="font-size:12px;opacity:.85;">Credit Repair, Done Right</td>
+          <td>
+            <img src="https://disruptinglabs.com/data/optimum/assets/images/logo_horizontal_gold_white_text.png" alt="Optimum Credit" height="40" style="display:block;height:40px;width:auto;border:0;" />
+          </td>
+          <td align="right" style="font-size:12px;color:#C0A06A;font-weight:600;letter-spacing:0.03em;">Credit Repair, Done Right</td>
         </tr></table>
       </td></tr>
       <tr><td style="padding:32px;">${opts.bodyHtml}</td></tr>
@@ -397,8 +460,8 @@ ${opts.preheader ? `<div style="display:none;max-height:0;overflow:hidden;">${es
 
 function emailButton(url: string, label: string) {
   return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0;">
-  <tr><td style="border-radius:10px;background:#1e40ff;">
-    <a href="${url}" style="display:inline-block;padding:14px 28px;color:#fff;text-decoration:none;font-weight:700;font-size:15px;border-radius:10px;">${escapeHtml(label)}</a>
+  <tr><td style="border-radius:10px;background:#C0A06A;">
+    <a href="${url}" style="display:inline-block;padding:14px 28px;color:#121829;text-decoration:none;font-weight:700;font-size:15px;border-radius:10px;">${escapeHtml(label)}</a>
   </td></tr></table>`;
 }
 
@@ -464,8 +527,8 @@ function tplWelcomePayment(opts: {
   const body = `
     <h1 style="margin:0 0 12px;font-size:26px;font-weight:800;color:#0f172a;">Welcome aboard, ${escapeHtml(opts.firstName)}!</h1>
     <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">Your payment was confirmed — you're officially on your way to a stronger credit score. One quick step remains: upload your documents.</p>
-    <div style="margin:20px 0;padding:20px;background:#eff6ff;border-radius:12px;border:1px solid #dbeafe;">
-      <div style="font-size:13px;color:#1e40af;text-transform:uppercase;letter-spacing:0.05em;font-weight:700;">Your Package</div>
+    <div style="margin:20px 0;padding:20px;background:#fdf8f0;border-radius:12px;border:1px solid #d4b896;">
+      <div style="font-size:13px;color:#8a6d3b;text-transform:uppercase;letter-spacing:0.05em;font-weight:700;">Your Package</div>
       <div style="margin-top:6px;font-size:18px;font-weight:700;color:#0f172a;">${escapeHtml(opts.packageName)} — ${escapeHtml(opts.packagePrice)}</div>
     </div>
     <p style="margin:16px 0 8px;font-size:15px;font-weight:700;color:#0f172a;">Documents you'll need to upload:</p>
@@ -561,6 +624,78 @@ function tplRoundComplete(opts: {
 }
 
 // ============================================================================
+// ADMIN WELCOME EMAIL TEMPLATE
+// ============================================================================
+
+const ROLE_LABELS: Record<string, string> = {
+  super_admin: "Super Admin",
+  admin: "Admin",
+  agent: "Agent",
+};
+
+function tplAdminWelcome(opts: {
+  firstName: string;
+  lastName: string;
+  email: string;
+  role: string;
+  loginUrl: string;
+  invitedByName: string;
+}) {
+  const roleLabel = ROLE_LABELS[opts.role] || opts.role;
+  const body = `
+    <div style="margin:0 0 28px;padding:24px 28px;background:linear-gradient(135deg,#1a2342 0%,#121829 100%);border-radius:14px;position:relative;overflow:hidden;">
+      <div style="font-size:10px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;color:#C0A06A;margin-bottom:10px;">You're on the team</div>
+      <div style="font-size:30px;font-weight:800;color:#ffffff;line-height:1.2;margin-bottom:8px;">Welcome, ${escapeHtml(opts.firstName)}!</div>
+      <div style="font-size:13px;color:rgba(255,255,255,0.55);">Optimum Credit Admin Panel</div>
+    </div>
+    <p style="margin:0 0 18px;font-size:15px;line-height:1.65;color:#334155;">
+      <strong>${escapeHtml(opts.invitedByName)}</strong> has added you to the <strong>Optimum Credit</strong> admin team.
+      Your account is ready and you've been granted access as a
+      <span style="display:inline-block;font-size:11px;font-weight:700;background:#C0A06A;color:#121829;padding:1px 10px;border-radius:20px;vertical-align:middle;margin-left:4px;">${escapeHtml(roleLabel)}</span>
+    </p>
+    <div style="margin:20px 0;padding:0;border-radius:12px;border:1px solid #e2e8f0;overflow:hidden;">
+      <div style="padding:10px 20px;background:#f8fafc;border-bottom:1px solid #e2e8f0;">
+        <div style="font-size:10px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#94a3b8;">Your account details</div>
+      </div>
+      <table width="100%" cellpadding="0" cellspacing="0" border="0">
+        <tr style="border-bottom:1px solid #f1f5f9;">
+          <td style="padding:12px 20px;width:110px;font-size:12px;font-weight:600;color:#94a3b8;vertical-align:top;">Full name</td>
+          <td style="padding:12px 20px;font-size:14px;font-weight:600;color:#0f172a;">${escapeHtml(opts.firstName)} ${escapeHtml(opts.lastName)}</td>
+        </tr>
+        <tr style="border-bottom:1px solid #f1f5f9;">
+          <td style="padding:12px 20px;font-size:12px;font-weight:600;color:#94a3b8;vertical-align:top;">Email</td>
+          <td style="padding:12px 20px;font-size:14px;color:#0f172a;">${escapeHtml(opts.email)}</td>
+        </tr>
+        <tr>
+          <td style="padding:12px 20px;font-size:12px;font-weight:600;color:#94a3b8;vertical-align:middle;">Access level</td>
+          <td style="padding:12px 20px;">
+            <span style="display:inline-block;font-size:11px;font-weight:700;background:#C0A06A;color:#121829;padding:3px 12px;border-radius:20px;">${escapeHtml(roleLabel)}</span>
+          </td>
+        </tr>
+      </table>
+    </div>
+    <p style="margin:20px 0 8px;font-size:14px;line-height:1.6;color:#334155;">
+      Click the button below to access your admin panel. You sign in with a one-time code sent to this email — no password needed.
+    </p>
+    ${emailButton(opts.loginUrl, "Go to Admin Panel")}
+    <div style="margin:24px 0 0;padding:14px 18px;background:#f1f5f9;border-radius:10px;border-left:4px solid #C0A06A;">
+      <div style="font-size:12px;font-weight:700;color:#0f172a;margin-bottom:4px;">🔒 Security reminder</div>
+      <div style="font-size:12px;color:#64748b;line-height:1.6;">
+        Optimum Credit staff will <em>never</em> ask for your sign-in code via phone or chat.
+        Only enter codes on the official admin login page. If you weren't expecting this invitation, please contact your administrator immediately.
+      </div>
+    </div>`;
+  return {
+    subject: `You've been added to Optimum Credit — welcome aboard, ${opts.firstName}!`,
+    html: emailLayout({
+      title: "Welcome to the Optimum Credit team",
+      preheader: `${opts.invitedByName} has added you to the Optimum Credit admin team as ${roleLabel}.`,
+      bodyHtml: body,
+    }),
+  };
+}
+
+// ============================================================================
 // SMS HELPERS
 // ============================================================================
 
@@ -578,48 +713,148 @@ async function sendSms(opts: { to: string; body: string }) {
 }
 
 // ============================================================================
-// STRIPE HELPERS
+// AUTHORIZE.NET HELPERS
 // ============================================================================
 
-async function createPaymentIntent(input: {
-  amountCents: number;
-  currency?: string;
-  customerEmail: string;
-  metadata?: Record<string, string>;
-}) {
-  if (!stripeClient) {
-    return {
-      id: `pi_mock_${Date.now()}`,
-      client_secret: `pi_mock_${Date.now()}_secret_mock`,
-      amount: input.amountCents,
-      currency: input.currency || "usd",
-      mock: true as const,
-    };
-  }
-  const intent = await stripeClient.paymentIntents.create({
-    amount: input.amountCents,
-    currency: input.currency || "usd",
-    receipt_email: input.customerEmail,
-    metadata: input.metadata,
-    automatic_payment_methods: { enabled: true },
-  });
-  return {
-    id: intent.id,
-    client_secret: intent.client_secret!,
-    amount: intent.amount,
-    currency: intent.currency,
-    mock: false as const,
+async function chargeCard(opts: {
+  amountDollars: string;
+  dataDescriptor: string;
+  dataValue: string;
+  clientId: number;
+  email: string;
+  firstName: string;
+  lastName: string;
+}): Promise<{
+  transactionId: string;
+  customerProfileId?: string;
+  customerPaymentProfileId?: string;
+}> {
+  // Step 1: Charge the card. No createCustomerProfile field — it doesn't exist
+  // in the createTransactionRequest XSD schema. Customer profile is created
+  // separately after a successful charge via createCustomerProfileFromTransactionRequest.
+  const chargePayload = {
+    createTransactionRequest: {
+      merchantAuthentication: {
+        name: process.env.AUTHORIZENET_API_LOGIN_ID,
+        transactionKey: process.env.AUTHORIZENET_TRANSACTION_KEY,
+      },
+      transactionRequest: {
+        transactionType: "authCaptureTransaction",
+        amount: opts.amountDollars,
+        payment: {
+          opaqueData: {
+            dataDescriptor: opts.dataDescriptor,
+            dataValue: opts.dataValue,
+          },
+        },
+        customer: {
+          type: "individual",
+          id: String(opts.clientId),
+          email: opts.email,
+        },
+        billTo: {
+          firstName: opts.firstName,
+          lastName: opts.lastName,
+          email: opts.email,
+        },
+        userFields: {
+          userField: [{ name: "client_id", value: String(opts.clientId) }],
+        },
+      },
+    },
   };
+
+  const resp = await fetch(AUTHORIZENET_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(chargePayload),
+  });
+  const data = (await resp.json()) as any;
+
+  console.log(
+    "[anet:charge]",
+    JSON.stringify(
+      {
+        resultCode: data?.messages?.resultCode,
+        responseCode: data?.transactionResponse?.responseCode,
+        transId: data?.transactionResponse?.transId,
+        authCode: data?.transactionResponse?.authCode,
+        errors: data?.transactionResponse?.errors,
+        messages: data?.messages?.message,
+      },
+      null,
+      2,
+    ),
+  );
+
+  if (
+    data?.messages?.resultCode !== "Ok" ||
+    data?.transactionResponse?.responseCode !== "1"
+  ) {
+    const errText =
+      data?.transactionResponse?.errors?.error?.[0]?.errorText ||
+      data?.messages?.message?.[0]?.text ||
+      "Payment processing failed";
+    throw new Error(errText);
+  }
+
+  const transactionId = data.transactionResponse.transId as string;
+
+  // Step 2: Create customer profile from the successful transaction.
+  // This is the documented approach — a separate call after charge.
+  // Errors here are non-fatal: the charge already succeeded.
+  let customerProfileId: string | undefined;
+  let customerPaymentProfileId: string | undefined;
+  try {
+    const profileResp = await fetch(AUTHORIZENET_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        createCustomerProfileFromTransactionRequest: {
+          merchantAuthentication: {
+            name: process.env.AUTHORIZENET_API_LOGIN_ID,
+            transactionKey: process.env.AUTHORIZENET_TRANSACTION_KEY,
+          },
+          transId: transactionId,
+        },
+      }),
+    });
+    const profileData = (await profileResp.json()) as any;
+    console.log(
+      "[anet:profile]",
+      JSON.stringify(
+        {
+          resultCode: profileData?.messages?.resultCode,
+          customerProfileId: profileData?.customerProfileId,
+          customerPaymentProfileIdList:
+            profileData?.customerPaymentProfileIdList,
+          messages: profileData?.messages?.message,
+        },
+        null,
+        2,
+      ),
+    );
+    if (profileData?.messages?.resultCode === "Ok") {
+      customerProfileId = profileData.customerProfileId as string;
+      customerPaymentProfileId = profileData
+        .customerPaymentProfileIdList?.[0] as string | undefined;
+    }
+  } catch (profileErr) {
+    // Profile creation failure doesn't block the payment flow
+    console.error("[anet:profile:error]", profileErr);
+  }
+
+  return { transactionId, customerProfileId, customerPaymentProfileId };
 }
 
 // ============================================================================
 // SHARED — payment success processing
 // ============================================================================
 
-async function markPaymentSucceeded(clientId: number, paymentIntentId: string) {
+async function markPaymentSucceeded(clientId: number, transactionId: string) {
   await pool.query<ResultSetHeader>(
-    `UPDATE payments SET status='succeeded', paid_at=NOW() WHERE stripe_payment_intent_id = ? AND status <> 'succeeded'`,
-    [paymentIntentId],
+    `UPDATE payments SET status='succeeded', paid_at=NOW() WHERE provider_transaction_id = ? AND status <> 'succeeded'`,
+    [transactionId],
   );
   await pool.query<ResultSetHeader>(
     `UPDATE clients SET status='onboarding' WHERE id = ? AND status='pending_payment'`,
@@ -635,58 +870,214 @@ async function markPaymentSucceeded(clientId: number, paymentIntentId: string) {
   if (rows.length === 0) return;
   const r = rows[0];
 
-  const rawToken = await createOnboardingToken(clientId).catch(() => null);
-  const onboardingUrl = rawToken
-    ? `${APP_URL}/portal/onboarding/${rawToken}`
-    : `${APP_URL}/portal/login`;
-  const tpl = tplWelcomePayment({
-    firstName: r.first_name,
-    packageName: r.package_name || "Credit Repair",
-    packagePrice: `$${(Number(r.price_cents) / 100).toFixed(2)}`,
-    onboardingUrl,
-  });
-  await sendEmail({ to: r.email, subject: tpl.subject, html: tpl.html }).catch(
-    (e) => console.error("welcome email failed", e),
-  );
-
-  if (r.phone) {
-    const messages = [
-      {
-        delayMs: 0,
-        body: `Hi ${r.first_name}, welcome to Optimum Credit! Please upload your documents to get started: ${APP_URL}/portal/login`,
-      },
-      {
-        delayMs: 24 * 60 * 60 * 1000,
-        body: `Reminder: We are waiting for your documents. Only takes a few minutes: ${APP_URL}/portal/login`,
-      },
-      {
-        delayMs: 2 * 24 * 60 * 60 * 1000,
-        body: `Final reminder: Please upload your documents today so we can begin: ${APP_URL}/portal/login`,
-      },
-    ];
-    for (const m of messages) {
-      const scheduledFor = new Date(Date.now() + m.delayMs);
-      await pool.query<ResultSetHeader>(
-        `INSERT INTO notification_queue (client_id, channel, to_address, body, scheduled_for) VALUES (?, 'sms', ?, ?, ?)`,
-        [clientId, r.phone, m.body, scheduledFor],
-      );
-    }
-    try {
-      await sendSms({ to: r.phone, body: messages[0].body });
-      await pool.query<ResultSetHeader>(
-        `UPDATE notification_queue SET sent_at = NOW(), status = 'sent'
-         WHERE client_id = ? AND channel = 'sms' AND scheduled_for <= NOW() AND status = 'pending'
-         ORDER BY id ASC LIMIT 1`,
-        [clientId],
-      );
-    } catch (e) {
-      console.error("SMS send failed:", e);
-    }
-  }
+  // All Day 0/1/2/3 communication (email) is handled by the
+  // "payment_confirmed" reminder flow. SMS can be added as a flow step type
+  // once Twilio is configured — do not hardcode sequences here.
 
   await pool.query<ResultSetHeader>(
     `INSERT INTO audit_logs (actor_type, actor_id, action, entity_type, entity_id) VALUES ('system', NULL, 'payment.succeeded', 'client', ?)`,
     [clientId],
+  );
+
+  // Trigger the "payment_confirmed" reminder flow (Day 1/2/3 email sequence)
+  triggerReminderFlow("payment_confirmed", clientId).catch((e) =>
+    console.error("[flow:payment_confirmed]", e?.message),
+  );
+}
+
+// ============================================================================
+// AUTHORIZE.NET — process card payment via Accept.js nonce
+// ============================================================================
+async function processAuthorizeNetPayment(
+  clientId: number,
+  email: string,
+  amountCents: number,
+  packageId: number | null,
+  dataDescriptor: string,
+  dataValue: string,
+  firstName: string,
+  lastName: string,
+): Promise<{ transactionId: string }> {
+  const result = await chargeCard({
+    amountDollars: (amountCents / 100).toFixed(2),
+    dataDescriptor,
+    dataValue,
+    clientId,
+    email,
+    firstName,
+    lastName,
+  });
+
+  await pool.query<ResultSetHeader>(
+    `INSERT INTO payments (client_id, package_id, amount_cents, status, provider, provider_transaction_id, metadata_json)
+     VALUES (?, ?, ?, 'pending', 'authorize_net', ?, ?)`,
+    [
+      clientId,
+      packageId,
+      amountCents,
+      result.transactionId,
+      JSON.stringify({}),
+    ],
+  );
+
+  // Store Authorize.net customer/payment profile IDs so future charges can
+  // reference the same customer and they appear in Authorize.net Manage Customers.
+  if (result.customerProfileId) {
+    await pool.query<ResultSetHeader>(
+      `UPDATE clients SET anet_customer_profile_id = ?, anet_payment_profile_id = ? WHERE id = ?`,
+      [
+        result.customerProfileId,
+        result.customerPaymentProfileId ?? null,
+        clientId,
+      ],
+    );
+  }
+
+  await markPaymentSucceeded(clientId, result.transactionId);
+  return result;
+}
+
+async function triggerReminderFlow(
+  triggerEvent: string,
+  clientId: number,
+  extraVars?: Record<string, string>,
+): Promise<void> {
+  const [flows] = await pool.query<RowDataPacket[]>(
+    `SELECT id FROM reminder_flows WHERE trigger_event = ? AND is_active = 1 LIMIT 1`,
+    [triggerEvent],
+  );
+  if (flows.length === 0) return;
+  const flowId = flows[0].id as number;
+
+  // Idempotency guard: skip if this flow already ran for this client within the last 10 minutes
+  // (prevents duplicates from double webhooks / retries).
+  const [recent] = await pool.query<RowDataPacket[]>(
+    `SELECT id FROM reminder_flow_executions
+     WHERE flow_id = ? AND client_id = ? AND triggered_at >= NOW() - INTERVAL 10 MINUTE
+     LIMIT 1`,
+    [flowId, clientId],
+  );
+  if (recent.length > 0) {
+    console.warn(
+      `[flow:${triggerEvent}] Skipping duplicate trigger for client ${clientId} (already ran within 10 min)`,
+    );
+    return;
+  }
+
+  const [steps] = await pool.query<RowDataPacket[]>(
+    `SELECT id, step_type, delay_days, label, subject, body, template_slug
+     FROM reminder_flow_steps WHERE flow_id = ? ORDER BY step_order ASC`,
+    [flowId],
+  );
+  if (steps.length === 0) return;
+
+  const [clientRows] = await pool.query<RowDataPacket[]>(
+    `SELECT first_name, last_name, email, phone FROM clients WHERE id = ? LIMIT 1`,
+    [clientId],
+  );
+  if (clientRows.length === 0) return;
+  const client = clientRows[0];
+
+  const vars: Record<string, string> = {
+    first_name: client.first_name as string,
+    last_name: client.last_name as string,
+    portal_url: `${APP_URL}/portal/login`, // fallback; overridden per email step below
+    ...extraVars,
+  };
+
+  let stepsExecuted = 0;
+  let stepsScheduled = 0;
+  let execError: string | null = null;
+
+  const replaceVars = (tmpl: string) =>
+    tmpl.replace(/\{\{(\w+)\}\}/g, (_, k) => vars[k] ?? `{{${k}}}`);
+
+  try {
+    for (const step of steps) {
+      const delayMs = (step.delay_days as number) * 24 * 60 * 60 * 1000;
+      const scheduledFor = new Date(Date.now() + delayMs);
+      const isImmediate = (step.delay_days as number) === 0;
+
+      if (step.step_type === "send_email") {
+        let subj = step.subject as string | null;
+        let bodyHtml = step.body as string | null;
+
+        if (step.template_slug) {
+          const [tmplRows] = await pool.query<RowDataPacket[]>(
+            `SELECT subject, body FROM communication_templates WHERE slug = ? AND is_active = 1 LIMIT 1`,
+            [step.template_slug],
+          );
+          if (tmplRows.length > 0) {
+            subj = tmplRows[0].subject as string | null;
+            bodyHtml = tmplRows[0].body as string | null;
+          }
+        }
+
+        if (!subj || !bodyHtml) continue;
+
+        // Generate a unique magic-link token for this step.
+        // TTL = delay_days * 24h (time until delivery) + 72h buffer for the client to click it.
+        const delayDays = step.delay_days as number;
+        const tokenTtlHours = delayDays * 24 + ONBOARDING_TOKEN_TTL_HOURS;
+        const rawToken = await createOnboardingToken(clientId, tokenTtlHours);
+        const magicLink = `${APP_URL}/portal/onboarding/${rawToken}`;
+
+        // Build step-specific vars with the magic link overriding the generic portal_url
+        const stepVars = { ...vars, portal_url: magicLink };
+        const stepReplaceVars = (tmpl: string) =>
+          tmpl.replace(/\{\{(\w+)\}\}/g, (_, k) => stepVars[k] ?? `{{${k}}}`);
+
+        const resolvedSubj = stepReplaceVars(subj);
+        const resolvedBody = stepReplaceVars(bodyHtml);
+        const fullHtml = emailLayout({
+          title: resolvedSubj,
+          bodyHtml: resolvedBody + emailButton(magicLink, "Go to My Portal"),
+        });
+
+        if (isImmediate) {
+          try {
+            await sendEmail({
+              to: client.email as string,
+              subject: resolvedSubj,
+              html: fullHtml,
+            });
+            stepsExecuted++;
+          } catch (e: any) {
+            console.error("[flow:send_email]", e?.message);
+          }
+        } else {
+          await pool.query<ResultSetHeader>(
+            `INSERT INTO notification_queue (client_id, channel, to_address, subject, body, scheduled_for) VALUES (?, 'email', ?, ?, ?, ?)`,
+            [clientId, client.email, resolvedSubj, fullHtml, scheduledFor],
+          );
+          stepsScheduled++;
+        }
+      } else if (step.step_type === "internal_alert") {
+        const alertBody = replaceVars(
+          (step.body as string | null) ||
+            `Client {{first_name}} {{last_name}} requires follow-up (flow: ${triggerEvent}).`,
+        );
+        await pool.query<ResultSetHeader>(
+          `INSERT INTO notification_queue (client_id, channel, to_address, subject, body, scheduled_for) VALUES (?, 'in_app', 'team', ?, ?, ?)`,
+          [clientId, step.label || "Team Alert", alertBody, scheduledFor],
+        );
+        stepsScheduled++;
+      }
+    }
+  } catch (e: any) {
+    execError = e?.message ?? String(e);
+  }
+
+  await pool.query<ResultSetHeader>(
+    `INSERT INTO reminder_flow_executions (flow_id, client_id, status, steps_executed, steps_scheduled, error_message) VALUES (?, ?, ?, ?, ?, ?)`,
+    [
+      flowId,
+      clientId,
+      execError ? "partial" : "completed",
+      stepsExecuted,
+      stepsScheduled,
+      execError,
+    ],
   );
 }
 
@@ -700,8 +1091,6 @@ const upload = multer({
 });
 
 function buildApp() {
-  // Ensure uploads directory exists on startup
-  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
   const app = express();
   app.use(cors());
   app.use(
@@ -953,27 +1342,34 @@ function buildApp() {
   });
 
   // ============================================================
-  // PUBLIC — packages + registration + Stripe
+  // PUBLIC — packages + registration + Authorize.net
   // ============================================================
   app.get("/api/packages", async (_req, res) => {
-    const [rows] = await pool.query<RowDataPacket[]>(
-      "SELECT id, slug, name, subtitle, description, price_cents, duration_months, features_json, sort_order FROM packages WHERE is_active = 1 ORDER BY sort_order ASC",
-    );
-    res.json({ packages: rows });
+    try {
+      const [rows] = await pool.query<RowDataPacket[]>(
+        "SELECT id, slug, name, subtitle, description, price_cents, duration_months, features_json, sort_order FROM packages WHERE is_active = 1 ORDER BY sort_order ASC",
+      );
+      res.json({ packages: rows });
+    } catch (err: any) {
+      console.error("[/api/packages] DB error:", err?.message ?? err);
+      res.status(503).json({
+        error: "Service temporarily unavailable. Please try again shortly.",
+      });
+    }
   });
 
+  // Single-step registration: charge card first, create client only on success.
+  // Accepts all form fields + Accept.js nonce (dataDescriptor + dataValue).
   app.post("/api/registration", async (req, res) => {
     const b = req.body || {};
     const required = [
       "firstName",
       "lastName",
       "email",
-      "addressLine1",
-      "city",
-      "state",
-      "zip",
-      "ssnLast4",
+      "phone",
       "packageSlug",
+      "dataDescriptor",
+      "dataValue",
     ];
     for (const f of required) {
       if (!b[f] || String(b[f]).trim().length === 0) {
@@ -981,9 +1377,15 @@ function buildApp() {
       }
     }
     const email = String(b.email).trim().toLowerCase();
-    const ssn = String(b.ssnLast4).replace(/\D/g, "").slice(-4);
-    if (ssn.length !== 4) {
-      return res.status(400).json({ error: "SSN last 4 must be 4 digits" });
+
+    const [existing] = await pool.query<RowDataPacket[]>(
+      "SELECT id, status FROM clients WHERE email = ? LIMIT 1",
+      [email],
+    );
+    if (existing.length > 0 && existing[0].status !== "pending_payment") {
+      return res.status(409).json({
+        error: "An account with this email already exists. Please sign in.",
+      });
     }
 
     const [pkgs] = await pool.query<RowDataPacket[]>(
@@ -1003,34 +1405,32 @@ function buildApp() {
       if (afs.length > 0) affiliateId = afs[0].id as number;
     }
 
-    const [existing] = await pool.query<RowDataPacket[]>(
-      "SELECT id, status FROM clients WHERE email = ? LIMIT 1",
-      [email],
-    );
+    // Use a temporary clientId placeholder for the charge (real ID assigned after insert).
+    // For re-attempts on pending_payment accounts, reuse the existing id.
+    const tempClientId = existing.length > 0 ? (existing[0].id as number) : 0;
 
+    // 1. Charge card FIRST — no DB record written on failure
+    let chargeResult: Awaited<
+      ReturnType<typeof processAuthorizeNetPayment>
+    > | null = null;
+    if (!authorizeNetConfigured) {
+      return res.status(503).json({ error: "Payment provider not configured" });
+    }
+
+    // We need a real clientId for Authorize.net metadata. For new clients we insert
+    // with status='pending_payment', charge, then update to 'onboarding' — or rollback.
     let clientId: number;
+    let isNewClient = false;
+
     if (existing.length > 0) {
-      if (existing[0].status !== "pending_payment") {
-        return res.status(409).json({
-          error: "An account with this email already exists. Please sign in.",
-        });
-      }
       clientId = existing[0].id as number;
       await pool.query<ResultSetHeader>(
-        `UPDATE clients
-         SET first_name=?, last_name=?, phone=?, address_line1=?, address_line2=?, city=?, state=?, zip=?, ssn_last4=?,
-             package_id=?, affiliate_id=COALESCE(affiliate_id, ?)
-         WHERE id=?`,
+        `UPDATE clients SET first_name=?, last_name=?, phone=?, package_id=?,
+          affiliate_id=COALESCE(affiliate_id, ?) WHERE id=?`,
         [
           b.firstName,
           b.lastName,
           b.phone || null,
-          b.addressLine1,
-          b.addressLine2 || null,
-          b.city,
-          b.state,
-          b.zip,
-          ssn,
           pkg.id,
           affiliateId,
           clientId,
@@ -1038,129 +1438,93 @@ function buildApp() {
       );
     } else {
       const [ins] = await pool.query<ResultSetHeader>(
-        `INSERT INTO clients
-          (email, first_name, last_name, phone, address_line1, address_line2, city, state, zip, ssn_last4,
-           package_id, affiliate_id, pipeline_stage, status)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'new_client', 'pending_payment')`,
-        [
-          email,
-          b.firstName,
-          b.lastName,
-          b.phone || null,
-          b.addressLine1,
-          b.addressLine2 || null,
-          b.city,
-          b.state,
-          b.zip,
-          ssn,
-          pkg.id,
-          affiliateId,
-        ],
+        `INSERT INTO clients (email, first_name, last_name, phone, package_id, affiliate_id,
+           pipeline_stage, status)
+         VALUES (?,?,?,?,?,?, 'new_client', 'pending_payment')`,
+        [email, b.firstName, b.lastName, b.phone || null, pkg.id, affiliateId],
       );
       clientId = ins.insertId;
+      isNewClient = true;
     }
 
-    const intent = await createPaymentIntent({
-      amountCents: pkg.price_cents as number,
-      customerEmail: email,
-      metadata: { client_id: String(clientId), package_id: String(pkg.id) },
-    });
-
-    await pool.query<ResultSetHeader>(
-      `INSERT INTO payments (client_id, package_id, amount_cents, status, provider, stripe_payment_intent_id, metadata_json)
-       VALUES (?,?,?, 'pending', 'stripe', ?, ?)
-       ON DUPLICATE KEY UPDATE status = VALUES(status)`,
-      [
+    try {
+      chargeResult = await processAuthorizeNetPayment(
         clientId,
-        pkg.id,
-        pkg.price_cents,
-        intent.id,
-        JSON.stringify({ mock: intent.mock }),
-      ],
-    );
+        email,
+        pkg.price_cents as number,
+        pkg.id as number,
+        String(b.dataDescriptor),
+        String(b.dataValue),
+        String(b.firstName),
+        String(b.lastName),
+      );
+    } catch (e: any) {
+      // Payment failed — delete the newly inserted client so no ghost records
+      if (isNewClient) {
+        await pool.query(
+          `DELETE FROM clients WHERE id = ? AND status = 'pending_payment'`,
+          [clientId],
+        );
+      }
+      return res.status(402).json({ error: e.message || "Payment failed" });
+    }
 
     res.json({
       clientId,
       packageId: pkg.id,
       packageName: pkg.name,
       amountCents: pkg.price_cents,
-      paymentIntentClientSecret: intent.client_secret,
-      isMock: intent.mock,
     });
   });
 
+  // Sandbox-only: confirm a mock payment (no real card charge).
   app.post("/api/registration/confirm-mock", async (req, res) => {
-    const { clientId, paymentIntentId } = req.body || {};
-    if (!clientId || !paymentIntentId) {
+    const { clientId, transactionId } = req.body || {};
+    if (!clientId || !transactionId) {
       return res.status(400).json({ error: "Missing fields" });
     }
-    if (!String(paymentIntentId).startsWith("pi_mock_")) {
-      return res.status(400).json({ error: "Not a mock intent" });
+    if (!String(transactionId).startsWith("txn_mock_")) {
+      return res.status(400).json({ error: "Not a mock transaction" });
     }
-    await markPaymentSucceeded(Number(clientId), String(paymentIntentId));
+    await markPaymentSucceeded(Number(clientId), String(transactionId));
     res.json({ ok: true });
   });
 
-  // Called by the frontend immediately after stripe.confirmCardPayment succeeds.
-  // Ensures the DB is updated and welcome email is sent even if the webhook
-  // is delayed or not configured (e.g. local dev without stripe listen).
-  // markPaymentSucceeded is idempotent — the webhook calling it again is safe.
-  app.post("/api/registration/confirm-payment", async (req, res) => {
-    const { clientId, paymentIntentId } = req.body || {};
-    if (!clientId || !paymentIntentId)
+  // Process a real Authorize.net payment via Accept.js nonce.
+  app.post("/api/registration/process-payment", async (req, res) => {
+    const { clientId, dataDescriptor, dataValue } = req.body || {};
+    if (!clientId || !dataDescriptor || !dataValue)
       return res.status(400).json({ error: "Missing fields" });
 
-    if (!stripeClient)
-      return res.status(503).json({ error: "Stripe not configured" });
+    if (!authorizeNetConfigured)
+      return res.status(503).json({ error: "Payment provider not configured" });
 
-    let intent: Stripe.PaymentIntent;
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT c.id, c.email, c.first_name, c.last_name, c.package_id, p.price_cents
+       FROM clients c LEFT JOIN packages p ON p.id = c.package_id
+       WHERE c.id = ? LIMIT 1`,
+      [Number(clientId)],
+    );
+    if (rows.length === 0)
+      return res.status(404).json({ error: "Client not found" });
+    const client = rows[0];
+
     try {
-      intent = await stripeClient.paymentIntents.retrieve(
-        String(paymentIntentId),
+      await processAuthorizeNetPayment(
+        Number(clientId),
+        client.email as string,
+        client.price_cents as number,
+        client.package_id as number | null,
+        String(dataDescriptor),
+        String(dataValue),
+        client.first_name as string,
+        client.last_name as string,
       );
     } catch (e: any) {
-      return res
-        .status(400)
-        .json({ error: "Could not retrieve payment intent" });
+      return res.status(402).json({ error: e.message || "Payment failed" });
     }
 
-    if (intent.status !== "succeeded")
-      return res
-        .status(400)
-        .json({ error: `Payment not succeeded: ${intent.status}` });
-
-    await markPaymentSucceeded(Number(clientId), String(paymentIntentId));
     res.json({ ok: true });
-  });
-
-  app.post("/api/stripe/webhook", async (req, res) => {
-    if (!stripeClient)
-      return res.status(503).json({ error: "Stripe not configured" });
-    const sig = req.headers["stripe-signature"] as string | undefined;
-    const rawBody = (req as any).rawBody || JSON.stringify(req.body);
-
-    let event: any = null;
-    if (process.env.STRIPE_WEBHOOK_SECRET && sig) {
-      try {
-        event = stripeClient.webhooks.constructEvent(
-          rawBody,
-          sig,
-          process.env.STRIPE_WEBHOOK_SECRET,
-        );
-      } catch (err) {
-        console.error("Stripe webhook signature failed:", err);
-        return res.status(400).json({ error: "Invalid signature" });
-      }
-    } else {
-      event = req.body;
-    }
-
-    if (event?.type === "payment_intent.succeeded") {
-      const pi = event.data.object;
-      const clientId = Number(pi.metadata?.client_id);
-      if (clientId) await markPaymentSucceeded(clientId, pi.id);
-    }
-    res.json({ received: true });
   });
 
   // ============================================================
@@ -1533,7 +1897,7 @@ function buildApp() {
       [id],
     );
     const [payments] = await pool.query<RowDataPacket[]>(
-      `SELECT id, amount_cents, status, paid_at, created_at, stripe_payment_intent_id
+      `SELECT id, amount_cents, status, paid_at, created_at, provider_transaction_id
        FROM payments WHERE client_id = ? ORDER BY created_at DESC`,
       [id],
     );
@@ -1574,6 +1938,142 @@ function buildApp() {
        ORDER BY c.pipeline_stage_changed_at DESC, c.created_at DESC`,
     );
     res.json({ clients: rows });
+  });
+
+  // ── Create client ────────────────────────────────────────────────────────
+  app.post("/api/admin/clients", requireAdmin, async (req, res) => {
+    const { first_name, last_name, email, phone, package_id, status } =
+      req.body || {};
+    if (!first_name || !last_name || !email)
+      return res
+        .status(400)
+        .json({ error: "first_name, last_name and email are required" });
+    const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRe.test(String(email)))
+      return res.status(400).json({ error: "Invalid email address" });
+    const allowedStatus = [
+      "pending_payment",
+      "onboarding",
+      "active",
+      "paused",
+      "cancelled",
+    ];
+    const clientStatus = allowedStatus.includes(status)
+      ? status
+      : "pending_payment";
+    try {
+      const [result] = await pool.query<ResultSetHeader>(
+        `INSERT INTO clients (first_name, last_name, email, phone, package_id, status)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          String(first_name).trim(),
+          String(last_name).trim(),
+          String(email).trim().toLowerCase(),
+          phone ? String(phone).trim() : null,
+          package_id ? Number(package_id) : null,
+          clientStatus,
+        ],
+      );
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT c.id, c.first_name, c.last_name, c.email, c.phone, c.pipeline_stage,
+                c.status, c.created_at, p.name AS package_name, p.slug AS package_slug
+         FROM clients c LEFT JOIN packages p ON p.id = c.package_id
+         WHERE c.id = ? LIMIT 1`,
+        [result.insertId],
+      );
+      res.status(201).json({ client: rows[0] });
+    } catch (err: any) {
+      if (err?.code === "ER_DUP_ENTRY")
+        return res
+          .status(409)
+          .json({ error: "A client with that email already exists" });
+      throw err;
+    }
+  });
+
+  // ── Update client ────────────────────────────────────────────────────────
+  app.put("/api/admin/clients/:id", requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    const { first_name, last_name, email, phone, package_id, status } =
+      req.body || {};
+    const [existing] = await pool.query<RowDataPacket[]>(
+      "SELECT id FROM clients WHERE id = ? LIMIT 1",
+      [id],
+    );
+    if (existing.length === 0)
+      return res.status(404).json({ error: "Client not found" });
+    const allowedStatus = [
+      "pending_payment",
+      "onboarding",
+      "active",
+      "paused",
+      "cancelled",
+    ];
+    const updates: string[] = [];
+    const args: any[] = [];
+    if (first_name != null) {
+      updates.push("first_name = ?");
+      args.push(String(first_name).trim());
+    }
+    if (last_name != null) {
+      updates.push("last_name = ?");
+      args.push(String(last_name).trim());
+    }
+    if (email != null) {
+      const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRe.test(String(email)))
+        return res.status(400).json({ error: "Invalid email address" });
+      updates.push("email = ?");
+      args.push(String(email).trim().toLowerCase());
+    }
+    if (phone !== undefined) {
+      updates.push("phone = ?");
+      args.push(phone ? String(phone).trim() : null);
+    }
+    if (package_id !== undefined) {
+      updates.push("package_id = ?");
+      args.push(package_id ? Number(package_id) : null);
+    }
+    if (status != null && allowedStatus.includes(status)) {
+      updates.push("status = ?");
+      args.push(status);
+    }
+    if (updates.length === 0)
+      return res.status(400).json({ error: "No valid fields to update" });
+    args.push(id);
+    try {
+      await pool.query<ResultSetHeader>(
+        `UPDATE clients SET ${updates.join(", ")} WHERE id = ?`,
+        args,
+      );
+    } catch (err: any) {
+      if (err?.code === "ER_DUP_ENTRY")
+        return res
+          .status(409)
+          .json({ error: "A client with that email already exists" });
+      throw err;
+    }
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT c.id, c.first_name, c.last_name, c.email, c.phone, c.pipeline_stage,
+              c.status, c.created_at, p.name AS package_name, p.slug AS package_slug
+       FROM clients c LEFT JOIN packages p ON p.id = c.package_id
+       WHERE c.id = ? LIMIT 1`,
+      [id],
+    );
+    res.json({ client: rows[0] });
+  });
+
+  // ── Delete client ────────────────────────────────────────────────────────
+  app.delete("/api/admin/clients/:id", requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    const [existing] = await pool.query<RowDataPacket[]>(
+      "SELECT id FROM clients WHERE id = ? LIMIT 1",
+      [id],
+    );
+    if (existing.length === 0)
+      return res.status(404).json({ error: "Client not found" });
+    await pool.query<ResultSetHeader>("DELETE FROM clients WHERE id = ?", [id]);
+    res.json({ ok: true });
   });
 
   app.post(
@@ -1637,6 +2137,12 @@ function buildApp() {
         `INSERT INTO client_pipeline_history (client_id, from_stage, to_stage, changed_by_admin_id, notes) VALUES (?,?,?,?,?)`,
         [id, fromStage, stage, req.auth!.id, notes || null],
       );
+      // Trigger reminder flow for completed stage
+      if (stage === "completed") {
+        triggerReminderFlow("completed", id).catch((e) =>
+          console.error("[flow:completed]", e?.message),
+        );
+      }
       res.json({ ok: true });
     },
   );
@@ -1717,7 +2223,7 @@ function buildApp() {
 
   app.post(
     "/api/admin/documents/:id/review",
-    requireAdmin,
+    requireSuperAdmin,
     async (req: AuthedRequest, res) => {
       const id = Number(req.params.id);
       const { decision, reason } = req.body || {};
@@ -1803,7 +2309,7 @@ function buildApp() {
 
   app.post(
     "/api/admin/clients/:id/round-reports",
-    requireAdmin,
+    requireSuperAdmin,
     async (req: AuthedRequest, res) => {
       const clientId = Number(req.params.id);
       const {
@@ -1874,6 +2380,16 @@ function buildApp() {
             body: `${c.first_name}, your Round ${round_number} report is ready! View progress: ${APP_URL}/portal/reports`,
           }).catch(() => null);
         }
+        // Trigger reminder flow for round completion
+        const roundTrigger = `round_${round_number}_complete`;
+        const scoreChange =
+          score_before != null && score_after != null
+            ? String(score_after - score_before)
+            : undefined;
+        await triggerReminderFlow(roundTrigger, clientId, {
+          items_removed: String(items_removed || 0),
+          ...(scoreChange !== undefined ? { score_change: scoreChange } : {}),
+        }).catch(() => null);
       }
       res.json({ ok: true });
     },
@@ -2070,6 +2586,61 @@ function buildApp() {
     res.json({ ok: true });
   });
 
+  app.post("/api/admin/templates", requireAdmin, async (req, res) => {
+    const { slug, name, channel, subject, body, variables } = req.body || {};
+    if (!slug || !name || !channel || !body) {
+      return res
+        .status(400)
+        .json({ error: "slug, name, channel and body are required" });
+    }
+    const [existing] = await pool.query<RowDataPacket[]>(
+      `SELECT id FROM communication_templates WHERE slug = ? LIMIT 1`,
+      [slug],
+    );
+    if ((existing as RowDataPacket[]).length > 0) {
+      return res
+        .status(409)
+        .json({ error: "A template with this slug already exists" });
+    }
+    const vars =
+      Array.isArray(variables) && variables.length > 0
+        ? JSON.stringify(variables)
+        : null;
+    const [result] = await pool.query<ResultSetHeader>(
+      `INSERT INTO communication_templates (slug, name, channel, subject, body, variables_json, is_active) VALUES (?,?,?,?,?,?,1)`,
+      [slug, name, channel, subject || null, body, vars],
+    );
+    res.json({ ok: true, id: result.insertId });
+  });
+
+  app.delete("/api/admin/templates/:id", requireAdmin, async (req, res) => {
+    // Guard: block delete if template is referenced by any reminder flow step
+    const [usages] = await pool.query<RowDataPacket[]>(
+      `SELECT rf.name AS flow_name
+       FROM reminder_flow_steps rfs
+       JOIN reminder_flows rf ON rf.id = rfs.flow_id
+       JOIN communication_templates ct ON ct.slug = rfs.template_slug
+       WHERE ct.id = ?`,
+      [req.params.id],
+    );
+    if ((usages as RowDataPacket[]).length > 0) {
+      const flows = [
+        ...new Set(
+          (usages as RowDataPacket[]).map((u) => u.flow_name as string),
+        ),
+      ];
+      return res.status(409).json({
+        error: "Template is used in active reminder flows",
+        flows,
+      });
+    }
+    await pool.query<ResultSetHeader>(
+      `DELETE FROM communication_templates WHERE id = ?`,
+      [req.params.id],
+    );
+    res.json({ ok: true });
+  });
+
   app.get("/api/admin/videos", requireAdmin, async (_req, res) => {
     const [rows] = await pool.query<RowDataPacket[]>(
       `SELECT * FROM educational_videos ORDER BY sort_order ASC, id DESC`,
@@ -2117,7 +2688,366 @@ function buildApp() {
     res.json({ ok: true });
   });
 
-  app.get("/api/admin/reports", requireAdmin, async (_req, res) => {
+  // ── ADMIN PAYMENTS ──────────────────────────────────────────────────────────
+  app.get("/api/admin/payments", requireAdmin, async (req, res) => {
+    const status = (req.query.status as string) || "all";
+    const search = ((req.query.search as string) || "").trim();
+    const provider = (req.query.provider as string) || "";
+    const page = Math.max(1, parseInt((req.query.page as string) || "1", 10));
+    const limit = Math.min(
+      100,
+      Math.max(10, parseInt((req.query.limit as string) || "50", 10)),
+    );
+    const offset = (page - 1) * limit;
+
+    const where: string[] = [];
+    const args: any[] = [];
+
+    if (status && status !== "all") {
+      where.push("pay.status = ?");
+      args.push(status);
+    }
+    if (provider && provider !== "all") {
+      where.push("pay.provider = ?");
+      args.push(provider);
+    }
+    if (search) {
+      where.push(
+        "(c.email LIKE ? OR c.first_name LIKE ? OR c.last_name LIKE ? OR pay.provider_transaction_id LIKE ?)",
+      );
+      const like = `%${search}%`;
+      args.push(like, like, like, like);
+    }
+
+    const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+    const [payments] = await pool.query<RowDataPacket[]>(
+      `SELECT pay.id, pay.client_id, pay.package_id, pay.amount_cents, pay.currency,
+              pay.status, pay.provider, pay.provider_transaction_id, pay.provider_charge_id,
+              pay.failure_reason, pay.paid_at, pay.created_at, pay.updated_at,
+              c.first_name AS client_first_name, c.last_name AS client_last_name,
+              c.email AS client_email, c.phone AS client_phone,
+              c.pipeline_stage AS client_pipeline_stage, c.status AS client_status,
+              p.name AS package_name, p.slug AS package_slug
+       FROM payments pay
+       LEFT JOIN clients c ON c.id = pay.client_id
+       LEFT JOIN packages p ON p.id = pay.package_id
+       ${whereClause}
+       ORDER BY pay.created_at DESC
+       LIMIT ? OFFSET ?`,
+      [...args, limit, offset],
+    );
+
+    const [countRow] = await pool.query<RowDataPacket[]>(
+      `SELECT COUNT(*) AS total FROM payments pay
+       LEFT JOIN clients c ON c.id = pay.client_id
+       ${whereClause}`,
+      args,
+    );
+    const total = Number(countRow[0]?.total ?? 0);
+
+    const [summary] = await pool.query<RowDataPacket[]>(
+      `SELECT
+        COUNT(*) AS total_count,
+        SUM(status = 'succeeded') AS succeeded_count,
+        SUM(status = 'pending') AS pending_count,
+        SUM(status = 'failed') AS failed_count,
+        SUM(status = 'refunded') AS refunded_count,
+        COALESCE(SUM(CASE WHEN status = 'succeeded' THEN amount_cents ELSE 0 END), 0) AS total_revenue_cents,
+        COALESCE(SUM(CASE WHEN status = 'succeeded' AND paid_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) THEN amount_cents ELSE 0 END), 0) AS revenue_30d_cents,
+        COALESCE(SUM(CASE WHEN status = 'succeeded' AND paid_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) THEN amount_cents ELSE 0 END), 0) AS revenue_7d_cents
+       FROM payments`,
+    );
+
+    res.json({
+      payments,
+      summary: summary[0] || {},
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    });
+  });
+
+  // ── COUPONS (admin CRUD) ────────────────────────────────────────────────────
+  app.get("/api/admin/coupons", requireAdmin, async (_req, res) => {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT c.*,
+              CONCAT(a.first_name,' ',a.last_name) AS created_by_name
+       FROM coupons c
+       LEFT JOIN admins a ON a.id = c.created_by_admin_id
+       ORDER BY c.created_at DESC`,
+    );
+    res.json({ coupons: rows });
+  });
+
+  app.post(
+    "/api/admin/coupons",
+    requireAdmin,
+    async (req: AuthedRequest, res) => {
+      const {
+        code,
+        description,
+        discount_type,
+        discount_value,
+        min_amount_cents,
+        max_uses,
+        applicable_packages,
+        valid_from,
+        expires_at,
+        is_active,
+      } = req.body || {};
+
+      if (!code || !discount_type || discount_value == null) {
+        return res.status(400).json({
+          error: "code, discount_type and discount_value are required",
+        });
+      }
+      const upperCode = String(code)
+        .toUpperCase()
+        .replace(/[^A-Z0-9_-]/g, "");
+      if (!upperCode)
+        return res.status(400).json({ error: "Invalid coupon code" });
+      if (!["percentage", "fixed"].includes(discount_type)) {
+        return res
+          .status(400)
+          .json({ error: "discount_type must be percentage or fixed" });
+      }
+      const val = Number(discount_value);
+      if (isNaN(val) || val <= 0)
+        return res.status(400).json({ error: "discount_value must be > 0" });
+      if (discount_type === "percentage" && val > 100) {
+        return res
+          .status(400)
+          .json({ error: "Percentage discount cannot exceed 100" });
+      }
+
+      const [existing] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM coupons WHERE code = ? LIMIT 1`,
+        [upperCode],
+      );
+      if (existing.length > 0)
+        return res.status(409).json({ error: "Coupon code already exists" });
+
+      const [r] = await pool.query<ResultSetHeader>(
+        `INSERT INTO coupons
+        (code, description, discount_type, discount_value, min_amount_cents, max_uses,
+         applicable_packages, valid_from, expires_at, is_active, created_by_admin_id)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+        [
+          upperCode,
+          description || null,
+          discount_type,
+          val,
+          Number(min_amount_cents) || 0,
+          max_uses != null ? Number(max_uses) : null,
+          applicable_packages ? JSON.stringify(applicable_packages) : null,
+          valid_from || null,
+          expires_at || null,
+          is_active != null ? Number(is_active) : 1,
+          req.auth!.id,
+        ],
+      );
+
+      const [created] = await pool.query<RowDataPacket[]>(
+        `SELECT c.*, CONCAT(a.first_name,' ',a.last_name) AS created_by_name
+       FROM coupons c LEFT JOIN admins a ON a.id = c.created_by_admin_id
+       WHERE c.id = ? LIMIT 1`,
+        [r.insertId],
+      );
+      res.status(201).json({ coupon: created[0] });
+    },
+  );
+
+  app.put("/api/admin/coupons/:id", requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    const {
+      code,
+      description,
+      discount_type,
+      discount_value,
+      min_amount_cents,
+      max_uses,
+      applicable_packages,
+      valid_from,
+      expires_at,
+      is_active,
+    } = req.body || {};
+
+    const [existing] = await pool.query<RowDataPacket[]>(
+      `SELECT id FROM coupons WHERE id = ? LIMIT 1`,
+      [id],
+    );
+    if (existing.length === 0)
+      return res.status(404).json({ error: "Coupon not found" });
+
+    const sets: string[] = [];
+    const vals: any[] = [];
+
+    if (code !== undefined) {
+      const upperCode = String(code)
+        .toUpperCase()
+        .replace(/[^A-Z0-9_-]/g, "");
+      if (!upperCode)
+        return res.status(400).json({ error: "Invalid coupon code" });
+      const [dup] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM coupons WHERE code = ? AND id <> ? LIMIT 1`,
+        [upperCode, id],
+      );
+      if (dup.length > 0)
+        return res.status(409).json({ error: "Coupon code already in use" });
+      sets.push("code = ?");
+      vals.push(upperCode);
+    }
+    if (description !== undefined) {
+      sets.push("description = ?");
+      vals.push(description || null);
+    }
+    if (discount_type !== undefined) {
+      sets.push("discount_type = ?");
+      vals.push(discount_type);
+    }
+    if (discount_value !== undefined) {
+      sets.push("discount_value = ?");
+      vals.push(Number(discount_value));
+    }
+    if (min_amount_cents !== undefined) {
+      sets.push("min_amount_cents = ?");
+      vals.push(Number(min_amount_cents) || 0);
+    }
+    if (max_uses !== undefined) {
+      sets.push("max_uses = ?");
+      vals.push(max_uses != null ? Number(max_uses) : null);
+    }
+    if (applicable_packages !== undefined) {
+      sets.push("applicable_packages = ?");
+      vals.push(
+        applicable_packages ? JSON.stringify(applicable_packages) : null,
+      );
+    }
+    if (valid_from !== undefined) {
+      sets.push("valid_from = ?");
+      vals.push(valid_from || null);
+    }
+    if (expires_at !== undefined) {
+      sets.push("expires_at = ?");
+      vals.push(expires_at || null);
+    }
+    if (is_active !== undefined) {
+      sets.push("is_active = ?");
+      vals.push(Number(is_active));
+    }
+
+    if (sets.length === 0)
+      return res.status(400).json({ error: "No fields to update" });
+
+    await pool.query<ResultSetHeader>(
+      `UPDATE coupons SET ${sets.join(", ")} WHERE id = ?`,
+      [...vals, id],
+    );
+    const [updated] = await pool.query<RowDataPacket[]>(
+      `SELECT c.*, CONCAT(a.first_name,' ',a.last_name) AS created_by_name
+       FROM coupons c LEFT JOIN admins a ON a.id = c.created_by_admin_id
+       WHERE c.id = ? LIMIT 1`,
+      [id],
+    );
+    res.json({ coupon: updated[0] });
+  });
+
+  app.delete("/api/admin/coupons/:id", requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT id FROM coupons WHERE id = ? LIMIT 1`,
+      [id],
+    );
+    if (rows.length === 0) return res.status(404).json({ error: "Not found" });
+    await pool.query<ResultSetHeader>(`DELETE FROM coupons WHERE id = ?`, [id]);
+    res.json({ ok: true });
+  });
+
+  // ── PUBLIC: validate + preview coupon discount ──────────────────────────────
+  app.post("/api/validate-coupon", async (req, res) => {
+    const { code, package_id, amount_cents } = req.body || {};
+    if (!code) return res.status(400).json({ error: "code required" });
+
+    const upperCode = String(code).toUpperCase().trim();
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT * FROM coupons WHERE code = ? AND is_active = 1 LIMIT 1`,
+      [upperCode],
+    );
+    if (rows.length === 0) {
+      return res.json({
+        valid: false,
+        discount_cents: 0,
+        final_amount_cents: Number(amount_cents) || 0,
+        error: "Invalid or inactive coupon code",
+      });
+    }
+    const c = rows[0];
+    const now = new Date();
+    if (c.valid_from && new Date(c.valid_from) > now) {
+      return res.json({
+        valid: false,
+        discount_cents: 0,
+        final_amount_cents: Number(amount_cents) || 0,
+        error: "Coupon is not yet valid",
+      });
+    }
+    if (c.expires_at && new Date(c.expires_at) < now) {
+      return res.json({
+        valid: false,
+        discount_cents: 0,
+        final_amount_cents: Number(amount_cents) || 0,
+        error: "Coupon has expired",
+      });
+    }
+    if (c.max_uses != null && Number(c.uses_count) >= Number(c.max_uses)) {
+      return res.json({
+        valid: false,
+        discount_cents: 0,
+        final_amount_cents: Number(amount_cents) || 0,
+        error: "Coupon usage limit reached",
+      });
+    }
+    const amt = Number(amount_cents) || 0;
+    if (amt < Number(c.min_amount_cents)) {
+      return res.json({
+        valid: false,
+        discount_cents: 0,
+        final_amount_cents: amt,
+        error: `Minimum order of $${(Number(c.min_amount_cents) / 100).toFixed(2)} required`,
+      });
+    }
+    if (c.applicable_packages && package_id) {
+      let pkgs: number[] = [];
+      try {
+        pkgs =
+          typeof c.applicable_packages === "string"
+            ? JSON.parse(c.applicable_packages)
+            : c.applicable_packages;
+      } catch {}
+      if (pkgs.length > 0 && !pkgs.includes(Number(package_id))) {
+        return res.json({
+          valid: false,
+          discount_cents: 0,
+          final_amount_cents: amt,
+          error: "Coupon not valid for selected package",
+        });
+      }
+    }
+    let discountCents = 0;
+    if (c.discount_type === "percentage") {
+      discountCents = Math.round((amt * Number(c.discount_value)) / 100);
+    } else {
+      discountCents = Number(c.discount_value);
+    }
+    discountCents = Math.min(discountCents, amt);
+    res.json({
+      valid: true,
+      coupon: c,
+      discount_cents: discountCents,
+      final_amount_cents: amt - discountCents,
+    });
+  });
+
+  app.get("/api/admin/reports", requireSuperAdmin, async (_req, res) => {
     const [revenueByMonth] = await pool.query<RowDataPacket[]>(
       `SELECT DATE_FORMAT(paid_at, '%Y-%m') AS month, SUM(amount_cents) AS revenue_cents, COUNT(*) AS count
        FROM payments WHERE status = 'succeeded' AND paid_at >= DATE_SUB(NOW(), INTERVAL 12 MONTH)
@@ -2136,14 +3066,14 @@ function buildApp() {
     res.json({ revenueByMonth, signupsByMonth, packageBreakdown });
   });
 
-  app.get("/api/admin/settings", requireAdmin, async (_req, res) => {
+  app.get("/api/admin/settings", requireSuperAdmin, async (_req, res) => {
     const [rows] = await pool.query<RowDataPacket[]>(
       `SELECT setting_key, setting_value, description, updated_at FROM system_settings`,
     );
     res.json({ settings: rows });
   });
 
-  app.post("/api/admin/settings", requireAdmin, async (req, res) => {
+  app.post("/api/admin/settings", requireSuperAdmin, async (req, res) => {
     const { setting_key, setting_value } = req.body || {};
     if (!setting_key)
       return res.status(400).json({ error: "setting_key required" });
@@ -2155,9 +3085,77 @@ function buildApp() {
     res.json({ ok: true });
   });
 
-  app.get("/api/admin/admins", requireAdmin, async (_req, res) => {
+  // ── Section locks ───────────────────────────────────────────────────────────
+
+  // GET /api/admin/section-locks — all sections with lock status (any admin)
+  app.get("/api/admin/section-locks", requireAdmin, async (_req, res) => {
     const [rows] = await pool.query<RowDataPacket[]>(
-      `SELECT id, email, first_name, last_name, phone, role, status, last_login_at, created_at FROM admins ORDER BY created_at DESC`,
+      `SELECT id, section_key, label, is_locked, lock_reason, updated_by_admin_id, updated_at
+       FROM section_locks ORDER BY id ASC`,
+    );
+    res.json({
+      section_locks: rows.map((r) => ({
+        ...r,
+        is_locked: Boolean(r.is_locked),
+      })),
+    });
+  });
+
+  // PUT /api/admin/section-locks/:key — toggle lock (super admin only)
+  app.put(
+    "/api/admin/section-locks/:key",
+    requireSuperAdmin,
+    async (req, res) => {
+      const { key } = req.params;
+      const { is_locked, lock_reason } = req.body || {};
+      const adminId = (req as any).adminId as number;
+      if (
+        typeof is_locked !== "boolean" &&
+        is_locked !== 0 &&
+        is_locked !== 1
+      ) {
+        return res.status(400).json({ error: "is_locked (boolean) required" });
+      }
+      const lockedVal = is_locked ? 1 : 0;
+      const [result] = await pool.query<ResultSetHeader>(
+        `UPDATE section_locks
+       SET is_locked = ?, lock_reason = ?, updated_by_admin_id = ?
+       WHERE section_key = ?`,
+        [lockedVal, lock_reason ?? null, adminId, key],
+      );
+      if (result.affectedRows === 0) {
+        return res.status(404).json({ error: "Section not found" });
+      }
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, section_key, label, is_locked, lock_reason, updated_by_admin_id, updated_at
+       FROM section_locks WHERE section_key = ?`,
+        [key],
+      );
+      const row = rows[0];
+      res.json({ section_lock: { ...row, is_locked: Boolean(row.is_locked) } });
+    },
+  );
+
+  app.get("/api/admin/admins", requireAdmin, async (req, res) => {
+    const search = ((req.query.search as string) || "").trim();
+    const role = (req.query.role as string) || "";
+    const conditions: string[] = [];
+    const params: any[] = [];
+    if (search) {
+      conditions.push(
+        "(email LIKE ? OR first_name LIKE ? OR last_name LIKE ?)",
+      );
+      const like = `%${search}%`;
+      params.push(like, like, like);
+    }
+    if (role) {
+      conditions.push("role = ?");
+      params.push(role);
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, email, first_name, last_name, phone, role, status, last_login_at, created_at FROM admins ${where} ORDER BY created_at DESC`,
+      params,
     );
     res.json({ admins: rows });
   });
@@ -2185,7 +3183,73 @@ function buildApp() {
           role || "admin",
         ],
       );
+      // Send welcome email (non-blocking)
+      const [inviter] = await pool.query<RowDataPacket[]>(
+        `SELECT first_name, last_name FROM admins WHERE id = ? LIMIT 1`,
+        [req.auth!.id],
+      );
+      const inviterName = inviter[0]
+        ? `${inviter[0].first_name} ${inviter[0].last_name}`
+        : "The Optimum Credit team";
+      const welcomeTpl = tplAdminWelcome({
+        firstName: first_name,
+        lastName: last_name,
+        email: String(email).toLowerCase(),
+        role: role || "admin",
+        loginUrl: `${APP_URL}/admin/login`,
+        invitedByName: inviterName,
+      });
+      sendEmail({
+        to: String(email).toLowerCase(),
+        subject: welcomeTpl.subject,
+        html: welcomeTpl.html,
+      }).catch((err) => console.error("[admin-welcome-email]:", err));
       res.json({ id: r.insertId });
+    },
+  );
+
+  app.put(
+    "/api/admin/admins/:id",
+    requireAdmin,
+    async (req: AuthedRequest, res) => {
+      const [me] = await pool.query<RowDataPacket[]>(
+        `SELECT role FROM admins WHERE id = ? LIMIT 1`,
+        [req.auth!.id],
+      );
+      if (me[0]?.role !== "super_admin")
+        return res.status(403).json({ error: "Forbidden" });
+      const targetId = Number(req.params.id);
+      const { first_name, last_name, phone, role, status } = req.body || {};
+      await pool.query(
+        `UPDATE admins SET first_name=COALESCE(?,first_name), last_name=COALESCE(?,last_name), phone=COALESCE(?,phone), role=COALESCE(?,role), status=COALESCE(?,status) WHERE id=?`,
+        [
+          first_name || null,
+          last_name || null,
+          phone || null,
+          role || null,
+          status || null,
+          targetId,
+        ],
+      );
+      res.json({ ok: true });
+    },
+  );
+
+  app.delete(
+    "/api/admin/admins/:id",
+    requireAdmin,
+    async (req: AuthedRequest, res) => {
+      const [me] = await pool.query<RowDataPacket[]>(
+        `SELECT role FROM admins WHERE id = ? LIMIT 1`,
+        [req.auth!.id],
+      );
+      if (me[0]?.role !== "super_admin")
+        return res.status(403).json({ error: "Forbidden" });
+      const targetId = Number(req.params.id);
+      if (targetId === req.auth!.id)
+        return res.status(400).json({ error: "Cannot delete yourself" });
+      await pool.query(`DELETE FROM admins WHERE id = ?`, [targetId]);
+      res.json({ ok: true });
     },
   );
 
@@ -2249,6 +3313,425 @@ function buildApp() {
     );
   });
 
+  // ============================================================
+  // REMINDER FLOWS
+  // ============================================================
+
+  // ── List all flows ────────────────────────────────────────────────────────
+  app.get("/api/admin/reminder-flows", requireAdmin, async (_req, res) => {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT rf.id, rf.name, rf.description, rf.trigger_event, rf.is_active, rf.created_at, rf.updated_at,
+              COUNT(rfs.id) AS step_count
+       FROM reminder_flows rf
+       LEFT JOIN reminder_flow_steps rfs ON rfs.flow_id = rf.id
+       GROUP BY rf.id
+       ORDER BY FIELD(rf.trigger_event,
+         'payment_confirmed','docs_ready',
+         'round_1_complete','round_2_complete','round_3_complete',
+         'round_4_complete','round_5_complete','completed')`,
+    );
+    res.json({ flows: rows });
+  });
+
+  // ── Get single flow with steps + recent executions ────────────────────────
+  app.get("/api/admin/reminder-flows/:id", requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    const [flowRows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, name, description, trigger_event, is_active, created_at, updated_at FROM reminder_flows WHERE id = ? LIMIT 1`,
+      [id],
+    );
+    if (flowRows.length === 0)
+      return res.status(404).json({ error: "Not found" });
+
+    const [steps] = await pool.query<RowDataPacket[]>(
+      `SELECT id, flow_id, step_order, step_type, delay_days, label, subject, body, template_slug, created_at, updated_at
+       FROM reminder_flow_steps WHERE flow_id = ? ORDER BY step_order ASC`,
+      [id],
+    );
+    const [executions] = await pool.query<RowDataPacket[]>(
+      `SELECT rfe.id, rfe.flow_id, rfe.client_id, rfe.triggered_at, rfe.status,
+              rfe.steps_executed, rfe.steps_scheduled, rfe.error_message,
+              CONCAT(c.first_name, ' ', c.last_name) AS client_name, c.email AS client_email,
+              (SELECT COUNT(*) FROM reminder_flow_steps rfs2 WHERE rfs2.flow_id = rfe.flow_id) AS total_steps,
+              (SELECT nq.subject FROM notification_queue nq
+               WHERE nq.client_id = rfe.client_id AND nq.status = 'pending'
+               AND nq.scheduled_for > rfe.triggered_at
+               ORDER BY nq.scheduled_for ASC LIMIT 1) AS next_step_label,
+              (SELECT nq.scheduled_for FROM notification_queue nq
+               WHERE nq.client_id = rfe.client_id AND nq.status = 'pending'
+               AND nq.scheduled_for > rfe.triggered_at
+               ORDER BY nq.scheduled_for ASC LIMIT 1) AS next_step_scheduled_for
+       FROM reminder_flow_executions rfe
+       JOIN clients c ON c.id = rfe.client_id
+       WHERE rfe.flow_id = ?
+       ORDER BY rfe.triggered_at DESC LIMIT 50`,
+      [id],
+    );
+
+    res.json({ flow: { ...flowRows[0], steps }, executions });
+  });
+
+  // ── Create flow ───────────────────────────────────────────────────────────
+  app.post("/api/admin/reminder-flows", requireAdmin, async (req, res) => {
+    const { name, description, trigger_event } = req.body || {};
+    if (!name || !trigger_event)
+      return res.status(400).json({ error: "name and trigger_event required" });
+    const allowed = [
+      "payment_confirmed",
+      "docs_ready",
+      "round_1_complete",
+      "round_2_complete",
+      "round_3_complete",
+      "round_4_complete",
+      "round_5_complete",
+      "completed",
+    ];
+    if (!allowed.includes(trigger_event))
+      return res.status(400).json({ error: "Invalid trigger_event" });
+    const [r] = await pool.query<ResultSetHeader>(
+      `INSERT INTO reminder_flows (name, description, trigger_event) VALUES (?, ?, ?)`,
+      [name, description || null, trigger_event],
+    );
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, name, description, trigger_event, is_active, created_at, updated_at FROM reminder_flows WHERE id = ? LIMIT 1`,
+      [r.insertId],
+    );
+    res.status(201).json({ flow: rows[0] });
+  });
+
+  // ── Update flow ───────────────────────────────────────────────────────────
+  app.put("/api/admin/reminder-flows/:id", requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    const { name, description, is_active } = req.body || {};
+    const updates: string[] = [];
+    const args: any[] = [];
+    if (name != null) {
+      updates.push("name = ?");
+      args.push(String(name).trim());
+    }
+    if (description !== undefined) {
+      updates.push("description = ?");
+      args.push(description || null);
+    }
+    if (is_active !== undefined) {
+      updates.push("is_active = ?");
+      args.push(is_active ? 1 : 0);
+    }
+    if (updates.length === 0)
+      return res.status(400).json({ error: "Nothing to update" });
+    args.push(id);
+    await pool.query<ResultSetHeader>(
+      `UPDATE reminder_flows SET ${updates.join(", ")} WHERE id = ?`,
+      args,
+    );
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, name, description, trigger_event, is_active, created_at, updated_at FROM reminder_flows WHERE id = ? LIMIT 1`,
+      [id],
+    );
+    res.json({ flow: rows[0] });
+  });
+
+  // ── Toggle active ─────────────────────────────────────────────────────────
+  app.post(
+    "/api/admin/reminder-flows/:id/toggle",
+    requireAdmin,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      await pool.query<ResultSetHeader>(
+        `UPDATE reminder_flows SET is_active = NOT is_active WHERE id = ?`,
+        [id],
+      );
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, is_active FROM reminder_flows WHERE id = ? LIMIT 1`,
+        [id],
+      );
+      res.json({ id, is_active: rows[0]?.is_active ?? 0 });
+    },
+  );
+
+  // ── Delete flow ───────────────────────────────────────────────────────────
+  app.delete(
+    "/api/admin/reminder-flows/:id",
+    requireAdmin,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      await pool.query<ResultSetHeader>(
+        `DELETE FROM reminder_flows WHERE id = ?`,
+        [id],
+      );
+      res.json({ ok: true });
+    },
+  );
+
+  // ── Add step ──────────────────────────────────────────────────────────────
+  app.post(
+    "/api/admin/reminder-flows/:id/steps",
+    requireAdmin,
+    async (req, res) => {
+      const flowId = Number(req.params.id);
+      const { step_type, delay_days, label, subject, body, template_slug } =
+        req.body || {};
+      if (!step_type)
+        return res.status(400).json({ error: "step_type required" });
+      const [maxOrder] = await pool.query<RowDataPacket[]>(
+        `SELECT COALESCE(MAX(step_order), 0) AS max_order FROM reminder_flow_steps WHERE flow_id = ?`,
+        [flowId],
+      );
+      const nextOrder = ((maxOrder[0]?.max_order as number) ?? 0) + 1;
+      const [r] = await pool.query<ResultSetHeader>(
+        `INSERT INTO reminder_flow_steps (flow_id, step_order, step_type, delay_days, label, subject, body, template_slug) VALUES (?,?,?,?,?,?,?,?)`,
+        [
+          flowId,
+          nextOrder,
+          step_type,
+          delay_days ?? 0,
+          label || null,
+          subject || null,
+          body || null,
+          template_slug || null,
+        ],
+      );
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM reminder_flow_steps WHERE id = ? LIMIT 1`,
+        [r.insertId],
+      );
+      res.status(201).json({ step: rows[0] });
+    },
+  );
+
+  // ── Update step ───────────────────────────────────────────────────────────
+  app.put(
+    "/api/admin/reminder-flows/:id/steps/:stepId",
+    requireAdmin,
+    async (req, res) => {
+      const flowId = Number(req.params.id);
+      const stepId = Number(req.params.stepId);
+      const {
+        step_type,
+        delay_days,
+        label,
+        subject,
+        body,
+        template_slug,
+        step_order,
+      } = req.body || {};
+      const updates: string[] = [];
+      const args: any[] = [];
+      if (step_type != null) {
+        updates.push("step_type = ?");
+        args.push(step_type);
+      }
+      if (delay_days !== undefined) {
+        updates.push("delay_days = ?");
+        args.push(Number(delay_days));
+      }
+      if (label !== undefined) {
+        updates.push("label = ?");
+        args.push(label || null);
+      }
+      if (subject !== undefined) {
+        updates.push("subject = ?");
+        args.push(subject || null);
+      }
+      if (body !== undefined) {
+        updates.push("body = ?");
+        args.push(body || null);
+      }
+      if (template_slug !== undefined) {
+        updates.push("template_slug = ?");
+        args.push(template_slug || null);
+      }
+      if (step_order !== undefined) {
+        updates.push("step_order = ?");
+        args.push(Number(step_order));
+      }
+      if (updates.length === 0)
+        return res.status(400).json({ error: "Nothing to update" });
+      args.push(stepId, flowId);
+      await pool.query<ResultSetHeader>(
+        `UPDATE reminder_flow_steps SET ${updates.join(", ")} WHERE id = ? AND flow_id = ?`,
+        args,
+      );
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM reminder_flow_steps WHERE id = ? LIMIT 1`,
+        [stepId],
+      );
+      res.json({ step: rows[0] });
+    },
+  );
+
+  // ── Delete step ───────────────────────────────────────────────────────────
+  app.delete(
+    "/api/admin/reminder-flows/:id/steps/:stepId",
+    requireAdmin,
+    async (req, res) => {
+      const flowId = Number(req.params.id);
+      const stepId = Number(req.params.stepId);
+      await pool.query<ResultSetHeader>(
+        `DELETE FROM reminder_flow_steps WHERE id = ? AND flow_id = ?`,
+        [stepId, flowId],
+      );
+      res.json({ ok: true });
+    },
+  );
+
+  // ── Manual trigger (fire flow for a specific client) ─────────────────────
+  app.post(
+    "/api/admin/reminder-flows/:id/trigger",
+    requireAdmin,
+    async (req, res) => {
+      const flowId = Number(req.params.id);
+      const { client_id } = req.body || {};
+      if (!client_id)
+        return res.status(400).json({ error: "client_id required" });
+
+      const [flowRows] = await pool.query<RowDataPacket[]>(
+        `SELECT trigger_event FROM reminder_flows WHERE id = ? LIMIT 1`,
+        [flowId],
+      );
+      if (flowRows.length === 0)
+        return res.status(404).json({ error: "Flow not found" });
+
+      await triggerReminderFlow(
+        flowRows[0].trigger_event as string,
+        Number(client_id),
+      );
+      res.json({ ok: true });
+    },
+  );
+
+  // ── List available email templates (for step editor) ─────────────────────
+  app.get(
+    "/api/admin/reminder-flows/meta/templates",
+    requireAdmin,
+    async (_req, res) => {
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT slug, name, subject FROM communication_templates WHERE channel = 'email' AND slug LIKE 'flow_%' ORDER BY name ASC`,
+      );
+      res.json({ templates: rows });
+    },
+  );
+
+  // ── List executions across all flows ─────────────────────────────────────
+  app.get(
+    "/api/admin/reminder-flows/meta/executions",
+    requireAdmin,
+    async (_req, res) => {
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT rfe.id, rfe.flow_id, rfe.client_id, rfe.triggered_at, rfe.status,
+              rfe.steps_executed, rfe.steps_scheduled, rfe.error_message,
+              rf.name AS flow_name, rf.trigger_event,
+              CONCAT(c.first_name, ' ', c.last_name) AS client_name, c.email AS client_email,
+              (SELECT COUNT(*) FROM reminder_flow_steps rfs2 WHERE rfs2.flow_id = rfe.flow_id) AS total_steps,
+              (SELECT nq.subject FROM notification_queue nq
+               WHERE nq.client_id = rfe.client_id AND nq.status = 'pending'
+               AND nq.scheduled_for > rfe.triggered_at
+               ORDER BY nq.scheduled_for ASC LIMIT 1) AS next_step_label,
+              (SELECT nq.scheduled_for FROM notification_queue nq
+               WHERE nq.client_id = rfe.client_id AND nq.status = 'pending'
+               AND nq.scheduled_for > rfe.triggered_at
+               ORDER BY nq.scheduled_for ASC LIMIT 1) AS next_step_scheduled_for
+       FROM reminder_flow_executions rfe
+       JOIN reminder_flows rf ON rf.id = rfe.flow_id
+       JOIN clients c ON c.id = rfe.client_id
+       ORDER BY rfe.triggered_at DESC LIMIT 100`,
+      );
+      res.json({ executions: rows });
+    },
+  );
+
+  // ── Cron: process notification queue ────────────────────────────────────
+  // Called by a cPanel cron job:
+  //   curl -s -X POST https://yourdomain.com/api/cron/process-queue \
+  //        -H "x-cron-secret: YOUR_CRON_SECRET"
+  app.post("/api/cron/process-queue", async (req, res) => {
+    const secret = process.env.CRON_SECRET;
+    if (!secret) {
+      return res
+        .status(503)
+        .json({ error: "CRON_SECRET not configured on server" });
+    }
+    const provided = req.headers["x-cron-secret"] as string | undefined;
+    if (!provided || provided !== secret) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const batchSize = 50; // max emails per run
+    const maxAttempts = 3;
+
+    // Atomically claim a batch by flipping status to 'processing'.
+    // This prevents duplicate sends if two cron runs overlap.
+    await pool.query<ResultSetHeader>(
+      `UPDATE notification_queue
+       SET status = 'processing'
+       WHERE status = 'pending'
+         AND scheduled_for <= NOW()
+         AND attempts < ?
+       ORDER BY scheduled_for ASC
+       LIMIT ?`,
+      [maxAttempts, batchSize],
+    );
+
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, client_id, channel, to_address, subject, body, attempts
+       FROM notification_queue
+       WHERE status = 'processing'
+       ORDER BY scheduled_for ASC
+       LIMIT ?`,
+      [batchSize],
+    );
+
+    let sent = 0;
+    let failed = 0;
+
+    for (const row of rows as RowDataPacket[]) {
+      const qid = row.id as number;
+      try {
+        if (row.channel === "email") {
+          await sendEmail({
+            to: row.to_address as string,
+            subject: row.subject as string,
+            html: row.body as string,
+          });
+          await pool.query<ResultSetHeader>(
+            `UPDATE notification_queue SET status='sent', sent_at=NOW(), attempts=attempts+1 WHERE id=?`,
+            [qid],
+          );
+          sent++;
+        } else {
+          // in_app / sms — mark sent (SMS not yet wired)
+          await pool.query<ResultSetHeader>(
+            `UPDATE notification_queue SET status='sent', sent_at=NOW(), attempts=attempts+1 WHERE id=?`,
+            [qid],
+          );
+          sent++;
+        }
+      } catch (e: any) {
+        const newAttempts = (row.attempts as number) + 1;
+        const newStatus = newAttempts >= maxAttempts ? "failed" : "pending";
+        await pool.query<ResultSetHeader>(
+          `UPDATE notification_queue SET status=?, attempts=?, error_message=? WHERE id=?`,
+          [newStatus, newAttempts, e?.message ?? String(e), qid],
+        );
+        failed++;
+      }
+    }
+
+    res.json({ ok: true, processed: rows.length, sent, failed });
+  });
+
+  // ── Global JSON error handler (must be last use()) ───────────────────────
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+    const status = typeof err?.status === "number" ? err.status : 500;
+    const message =
+      process.env.NODE_ENV === "production"
+        ? "An unexpected error occurred."
+        : (err?.message ?? String(err));
+    console.error(`[Express error handler] ${status}:`, err?.message ?? err);
+    res.status(status).json({ error: message });
+  });
+
   return app;
 }
 
@@ -2256,7 +3739,23 @@ function buildApp() {
 // EXPORTS — Vercel serverless + dev server
 // ============================================================================
 
-const app = buildApp();
+let app: ReturnType<typeof buildApp>;
+try {
+  app = buildApp();
+} catch (initErr: any) {
+  console.error(
+    "[API init] Fatal error during startup:",
+    initErr?.message ?? initErr,
+  );
+  // Serve a JSON 503 for every request when the app fails to initialise
+  app = express() as any;
+  (app as any).use((_req: Request, res: Response) => {
+    res.status(503).json({
+      error:
+        "Service unavailable — server failed to initialise. Check environment variables.",
+    });
+  });
+}
 
 export default function handler(req: VercelRequest, res: VercelResponse) {
   return app(req as any, res as any);

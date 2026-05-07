@@ -4,6 +4,7 @@ import adminAuth from "./slices/adminAuthSlice";
 import packages from "./slices/packagesSlice";
 import portal from "./slices/portalSlice";
 import admin from "./slices/adminSlice";
+import reminderFlows from "./slices/reminderFlowsSlice";
 
 export const store = configureStore({
   reducer: {
@@ -12,6 +13,7 @@ export const store = configureStore({
     packages,
     portal,
     admin,
+    reminderFlows,
   },
   middleware: (getDefault) => getDefault({ serializableCheck: false }),
 });

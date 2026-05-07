@@ -68,14 +68,12 @@ export interface RegistrationPayload {
   firstName: string;
   lastName: string;
   email: string;
-  phone?: string;
-  addressLine1: string;
-  addressLine2?: string;
-  city: string;
-  state: string;
-  zip: string;
-  ssnLast4: string;
+  phone: string;
   packageSlug: string;
+  // Accept.js nonce — card is tokenized in the browser before this POST is sent
+  dataDescriptor: string;
+  dataValue: string;
+  // Collected later during portal onboarding:
   affiliateCode?: string;
 }
 
@@ -84,8 +82,6 @@ export interface RegistrationResponse {
   packageId: number;
   packageName: string;
   amountCents: number;
-  paymentIntentClientSecret: string;
-  isMock: boolean;
 }
 
 // ============================================================
@@ -221,6 +217,15 @@ export interface AdminClientListItem {
   docs_rejected?: number;
 }
 
+export interface AdminClientFormPayload {
+  first_name: string;
+  last_name: string;
+  email: string;
+  phone?: string;
+  package_id?: number | null;
+  status?: ClientStatus;
+}
+
 export interface AdminDashboardStats {
   active_clients: number;
   pending_payments: number;
@@ -248,3 +253,198 @@ export interface SystemSetting {
   description?: string | null;
   updated_at: string;
 }
+
+export interface SectionLock {
+  id: number;
+  section_key: string;
+  label: string;
+  is_locked: boolean;
+  lock_reason: string | null;
+  updated_by_admin_id: number | null;
+  updated_at: string;
+}
+
+// ============================================================
+// PAGINATION
+// ============================================================
+export interface PaginationInfo {
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+}
+
+// ============================================================
+// ADMIN TEAM
+// ============================================================
+export interface AdminUserListItem {
+  id: number;
+  email: string;
+  first_name: string;
+  last_name: string;
+  phone?: string | null;
+  role: "super_admin" | "admin" | "agent";
+  status: "active" | "inactive" | "suspended";
+  last_login_at?: string | null;
+  created_at: string;
+}
+
+// ============================================================
+// REMINDER FLOWS
+// ============================================================
+export type ReminderFlowTriggerEvent =
+  | "payment_confirmed"
+  | "docs_ready"
+  | "round_1_complete"
+  | "round_2_complete"
+  | "round_3_complete"
+  | "round_4_complete"
+  | "round_5_complete"
+  | "completed";
+
+export type ReminderFlowStepType = "send_email" | "internal_alert";
+
+export interface ReminderFlowStep {
+  id: number;
+  flow_id: number;
+  step_order: number;
+  step_type: ReminderFlowStepType;
+  delay_days: number;
+  label?: string | null;
+  subject?: string | null;
+  body?: string | null;
+  template_slug?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReminderFlow {
+  id: number;
+  name: string;
+  description?: string | null;
+  trigger_event: ReminderFlowTriggerEvent;
+  is_active: number;
+  step_count?: number;
+  created_at: string;
+  updated_at: string;
+  steps?: ReminderFlowStep[];
+}
+
+export interface ReminderFlowExecution {
+  id: number;
+  flow_id: number;
+  client_id: number;
+  client_name?: string;
+  client_email?: string;
+  triggered_at: string;
+  status: "completed" | "partial" | "failed";
+  steps_executed: number;
+  steps_scheduled: number;
+  total_steps?: number;
+  next_step_label?: string | null;
+  next_step_scheduled_for?: string | null;
+  error_message?: string | null;
+  // present on the global executions list endpoint
+  flow_name?: string;
+  trigger_event?: string;
+}
+
+// ============================================================
+// PAYMENTS
+// ============================================================
+export type PaymentStatus =
+  | "pending"
+  | "succeeded"
+  | "failed"
+  | "refunded"
+  | "cancelled";
+
+export type PaymentProvider = "stripe" | "authorize_net" | "manual";
+
+export interface Payment {
+  id: number;
+  client_id: number;
+  client_first_name?: string | null;
+  client_last_name?: string | null;
+  client_email?: string | null;
+  client_phone?: string | null;
+  client_pipeline_stage?: PipelineStage | null;
+  client_status?: ClientStatus | null;
+  package_id?: number | null;
+  package_name?: string | null;
+  package_slug?: string | null;
+  amount_cents: number;
+  currency: string;
+  status: PaymentStatus;
+  provider: PaymentProvider;
+  provider_transaction_id?: string | null;
+  provider_charge_id?: string | null;
+  failure_reason?: string | null;
+  paid_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AdminPaymentsSummary {
+  total_count: number;
+  succeeded_count: number;
+  pending_count: number;
+  failed_count: number;
+  refunded_count: number;
+  total_revenue_cents: number;
+  revenue_30d_cents: number;
+  revenue_7d_cents: number;
+}
+
+export interface AdminPaymentsResponse {
+  payments: Payment[];
+  summary: AdminPaymentsSummary;
+  pagination: PaginationInfo;
+}
+
+// ============================================================
+// COUPONS
+// ============================================================
+export type CouponDiscountType = "percentage" | "fixed";
+
+export interface Coupon {
+  id: number;
+  code: string;
+  description?: string | null;
+  discount_type: CouponDiscountType;
+  discount_value: number;
+  min_amount_cents: number;
+  max_uses?: number | null;
+  uses_count: number;
+  applicable_packages?: number[] | null;
+  valid_from?: string | null;
+  expires_at?: string | null;
+  is_active: number;
+  created_by_admin_id?: number | null;
+  created_by_name?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CouponValidateResponse {
+  valid: boolean;
+  coupon?: Coupon;
+  discount_cents: number;
+  final_amount_cents: number;
+  error?: string;
+}
+
+export interface CreateCouponPayload {
+  code: string;
+  description?: string;
+  discount_type: CouponDiscountType;
+  discount_value: number;
+  min_amount_cents?: number;
+  max_uses?: number | null;
+  applicable_packages?: number[] | null;
+  valid_from?: string | null;
+  expires_at?: string | null;
+  is_active?: number;
+}
+
+export type UpdateCouponPayload = Partial<CreateCouponPayload>;

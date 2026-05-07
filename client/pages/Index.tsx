@@ -7,16 +7,28 @@ import {
   TrendingUp,
   MessageSquare,
   Lock,
+  Loader2,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import CreditImprovementCard from "@/components/CreditImprovementCard";
 import PageMeta, {
   organizationSchema,
   localBusinessSchema,
 } from "@/components/PageMeta";
+import { useAppDispatch, useAppSelector } from "@/store/hooks";
+import { fetchPackages } from "@/store/slices/packagesSlice";
 
 export default function Index() {
-  const [selectedPackage, setSelectedPackage] = useState<string | null>(null);
+  const dispatch = useAppDispatch();
+  const navigate = useNavigate();
+  const { packages, loading: packagesLoading } = useAppSelector(
+    (s) => s.packages,
+  );
+
+  useEffect(() => {
+    dispatch(fetchPackages());
+  }, [dispatch]);
 
   return (
     <div className="w-full">
@@ -28,103 +40,216 @@ export default function Index() {
         jsonLd={[organizationSchema, localBusinessSchema]}
       />
       {/* Hero Section */}
-      <section className="section-container relative overflow-hidden pt-14 md:pt-32">
-        {/* Background orbs — richer on mobile */}
+      {/* ── MOBILE hero (hidden on md+) ──────────────────────────────── */}
+      <section className="md:hidden relative overflow-hidden bg-background">
+        {/* Full-bleed gradient top band */}
+        <div className="absolute inset-x-0 top-0 h-64 bg-gradient-to-b from-primary/[0.08] to-transparent pointer-events-none" />
+        <div className="absolute -top-16 -right-16 w-56 h-56 bg-accent/10 rounded-full blur-3xl pointer-events-none animate-float" />
+        <div
+          className="absolute top-32 -left-12 w-48 h-48 bg-primary/10 rounded-full blur-3xl pointer-events-none animate-float"
+          style={{ animationDelay: "1.1s" }}
+        />
+
+        <div className="relative z-10 px-5 pt-10 pb-8 flex flex-col gap-7">
+          {/* Headline */}
+          <div
+            className="text-center animate-fade-up"
+            style={{ animationDelay: "0.05s" }}
+          >
+            <h1 className="text-[2.6rem] font-extrabold tracking-tight text-foreground leading-[1.1] mb-3">
+              Fix Your Credit.
+              <br />
+              <span className="gradient-text">Start Today.</span>
+            </h1>
+            <p className="text-[0.95rem] text-muted-foreground leading-relaxed max-w-xs mx-auto">
+              Our experts remove negative items, dispute errors, and boost your
+              score — fast.
+            </p>
+          </div>
+
+          {/* Score card */}
+          <div
+            className="mx-auto w-full max-w-sm animate-fade-up"
+            style={{ animationDelay: "0.12s" }}
+          >
+            <div className="rounded-2xl border border-border bg-card shadow-lg overflow-hidden">
+              {/* Card header */}
+              <div className="bg-gradient-to-r from-primary to-primary/80 px-5 py-3 flex items-center justify-between">
+                <span className="text-xs font-semibold text-primary-foreground/80 uppercase tracking-widest">
+                  Credit Score Journey
+                </span>
+                <span className="text-[10px] bg-accent text-accent-foreground font-bold px-2 py-0.5 rounded-full">
+                  Avg result
+                </span>
+              </div>
+              {/* Score comparison row */}
+              <div className="px-5 py-4 flex items-center justify-between gap-3">
+                <div className="flex flex-col items-center">
+                  <span className="text-[11px] text-muted-foreground font-medium mb-1">
+                    Before
+                  </span>
+                  <div className="w-16 h-16 rounded-full border-4 border-destructive/30 flex items-center justify-center bg-destructive/5">
+                    <span className="text-xl font-extrabold text-destructive">
+                      580
+                    </span>
+                  </div>
+                  <span className="text-[10px] text-muted-foreground mt-1">
+                    Poor
+                  </span>
+                </div>
+                {/* Arrow / improvement */}
+                <div className="flex-1 flex flex-col items-center gap-1">
+                  <div className="flex items-center gap-1">
+                    <div
+                      className="h-0.5 flex-1 bg-gradient-to-r from-destructive/40 to-accent/60 rounded-full"
+                      style={{ width: 48 }}
+                    />
+                    <TrendingUp className="w-5 h-5 text-accent" />
+                    <div
+                      className="h-0.5 flex-1 bg-gradient-to-r from-accent/60 to-accent rounded-full"
+                      style={{ width: 48 }}
+                    />
+                  </div>
+                  <span className="text-accent font-extrabold text-sm">
+                    +140 pts
+                  </span>
+                  <span className="text-[9px] text-muted-foreground">
+                    in ~6 months
+                  </span>
+                </div>
+                <div className="flex flex-col items-center">
+                  <span className="text-[11px] text-muted-foreground font-medium mb-1">
+                    After
+                  </span>
+                  <div className="w-16 h-16 rounded-full border-4 border-accent/50 flex items-center justify-center bg-accent/10 shadow-md shadow-accent/20">
+                    <span className="text-xl font-extrabold text-accent">
+                      720
+                    </span>
+                  </div>
+                  <span className="text-[10px] text-muted-foreground mt-1">
+                    Good
+                  </span>
+                </div>
+              </div>
+              {/* Stat strip */}
+              <div className="border-t border-border grid grid-cols-3 divide-x divide-border">
+                {[
+                  { value: "98%", label: "Success" },
+                  { value: "15K+", label: "Clients" },
+                  { value: "~6mo", label: "Avg Time" },
+                ].map(({ value, label }) => (
+                  <div
+                    key={label}
+                    className="flex flex-col items-center py-2.5"
+                  >
+                    <span className="text-sm font-extrabold text-foreground">
+                      {value}
+                    </span>
+                    <span className="text-[9px] text-muted-foreground">
+                      {label}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* CTAs */}
+          <div
+            className="flex flex-col gap-3 animate-fade-up"
+            style={{ animationDelay: "0.2s" }}
+          >
+            <Link
+              to="/register"
+              className="btn-primary w-full flex items-center justify-center gap-2 h-13 text-base shadow-lg shadow-primary/20 hover:shadow-primary/30 group"
+            >
+              Get Started Free
+              <ArrowRight className="w-5 h-5 group-hover:translate-x-0.5 transition-transform" />
+            </Link>
+            <a
+              href="#how-it-works"
+              className="btn-secondary w-full flex items-center justify-center h-12 text-sm"
+            >
+              See How It Works
+            </a>
+          </div>
+
+          {/* Social proof strip */}
+          <div
+            className="flex items-center justify-center gap-3 animate-fade-up"
+            style={{ animationDelay: "0.28s" }}
+          >
+            <div className="flex items-center gap-0.5">
+              {[...Array(5)].map((_, i) => (
+                <Star
+                  key={i}
+                  className="w-3.5 h-3.5 fill-yellow-400 text-yellow-400"
+                />
+              ))}
+            </div>
+            <span className="text-xs text-muted-foreground font-medium">
+              Trusted by <strong className="text-foreground">15,000+</strong>{" "}
+              clients
+            </span>
+          </div>
+        </div>
+      </section>
+
+      {/* ── DESKTOP hero (hidden on mobile) ─────────────────────────── */}
+      <section className="hidden md:block section-container relative overflow-hidden pt-32">
+        {/* Background orbs */}
         <div className="absolute inset-0 overflow-hidden pointer-events-none">
-          <div className="absolute -top-10 -right-10 w-64 h-64 bg-primary/10 rounded-full blur-2xl animate-float md:hidden" />
+          <div className="absolute top-10 right-20 w-72 h-72 bg-primary/5 rounded-full blur-3xl animate-float" />
           <div
-            className="absolute top-1/3 -left-16 w-52 h-52 bg-accent/10 rounded-full blur-2xl animate-float md:hidden"
-            style={{ animationDelay: "1.2s" }}
-          />
-          <div
-            className="absolute bottom-10 right-1/3 w-44 h-44 bg-primary/5 rounded-full blur-2xl animate-float md:hidden"
-            style={{ animationDelay: "0.6s" }}
-          />
-          <div className="absolute top-10 right-20 w-72 h-72 bg-primary/5 rounded-full blur-3xl animate-float hidden md:block" />
-          <div
-            className="absolute bottom-10 left-10 w-80 h-80 bg-accent/5 rounded-full blur-3xl animate-float hidden md:block"
+            className="absolute bottom-10 left-10 w-80 h-80 bg-accent/5 rounded-full blur-3xl animate-float"
             style={{ animationDelay: "1s" }}
           />
         </div>
 
         <div className="section-inner relative z-10">
-          {/* Mobile-only live badge */}
-          <div
-            className="md:hidden mb-5 flex justify-center animate-fade-up"
-            style={{ animationDelay: "0s" }}
-          >
-            <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-primary/10 border border-primary/20 text-xs font-semibold text-primary">
-              <span className="relative flex h-2 w-2 shrink-0">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent opacity-75" />
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-accent" />
-              </span>
-              #1 Rated · 15,000+ clients · BBB Accredited
-            </span>
-          </div>
-
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 md:gap-12 items-center">
             {/* Left Content */}
-            <div className="space-y-5 md:space-y-8">
+            <div className="space-y-8">
               <div
                 className="space-y-4 animate-fade-up"
                 style={{ animationDelay: "0s" }}
               >
-                <h1 className="text-4xl md:text-5xl lg:text-6xl font-bold tracking-tight text-foreground leading-tight">
+                <h1 className="text-5xl lg:text-6xl font-bold tracking-tight text-foreground leading-tight">
                   Fix Your Credit.{" "}
                   <span className="gradient-text inline-block">
                     Start Today.
                   </span>
                 </h1>
-                <p className="text-base md:text-xl text-muted-foreground leading-relaxed max-w-lg">
+                <p className="text-xl text-muted-foreground leading-relaxed max-w-lg">
                   Stop waiting for better credit. Our expert team removes
                   negative items, improves your score, and opens doors to better
                   rates and opportunities.
                 </p>
               </div>
 
-              {/* Mobile stat pills */}
-              <div
-                className="md:hidden grid grid-cols-3 gap-2 animate-fade-up"
-                style={{ animationDelay: "0.15s" }}
-              >
-                {[
-                  { value: "+140", label: "avg pts up", icon: TrendingUp },
-                  { value: "98%", label: "success rate", icon: CheckCircle },
-                  { value: "15K+", label: "clients helped", icon: Shield },
-                ].map(({ value, label, icon: Icon }, i) => (
-                  <div
-                    key={label}
-                    className="flex flex-col items-center gap-1.5 bg-card border border-border rounded-xl py-3 px-2 shadow-sm"
-                    style={{ animationDelay: `${0.15 + i * 0.08}s` }}
-                  >
-                    <Icon className="w-4 h-4 text-accent" />
-                    <span className="text-lg font-extrabold text-foreground tabular-nums leading-none">
-                      {value}
-                    </span>
-                    <span className="text-[10px] text-muted-foreground text-center leading-tight">
-                      {label}
-                    </span>
-                  </div>
-                ))}
-              </div>
-
               {/* CTAs */}
               <div
-                className="flex flex-col sm:flex-row gap-3 md:gap-4 animate-fade-up"
+                className="flex flex-row gap-4 animate-fade-up"
                 style={{ animationDelay: "0.2s" }}
               >
-                <button className="btn-primary w-full sm:w-auto flex items-center justify-center gap-2 h-12 px-8 group hover:gap-3 transition-all duration-300 shadow-md hover:shadow-lg">
+                <Link
+                  to="/register"
+                  className="btn-primary flex items-center justify-center gap-2 h-12 px-8 group hover:gap-3 transition-all duration-300 shadow-md hover:shadow-lg"
+                >
                   Get Started{" "}
                   <ArrowRight className="w-5 h-5 group-hover:translate-x-0.5 transition-transform" />
-                </button>
-                <button className="btn-secondary w-full sm:w-auto flex items-center justify-center gap-2 h-12 px-8 hover:bg-muted transition-colors duration-300">
+                </Link>
+                <a
+                  href="#how-it-works"
+                  className="btn-secondary flex items-center justify-center gap-2 h-12 px-8 hover:bg-muted transition-colors duration-300"
+                >
                   See How It Works
-                </button>
+                </a>
               </div>
 
               {/* Trust Indicators */}
               <div
-                className="pt-2 md:pt-4 space-y-3 animate-fade-up"
+                className="pt-4 space-y-3 animate-fade-up"
                 style={{ animationDelay: "0.4s" }}
               >
                 <div className="flex items-center gap-3 text-sm">
@@ -138,25 +263,21 @@ export default function Index() {
                   </span>
                 </div>
                 <div className="flex flex-wrap gap-4 text-sm text-muted-foreground">
-                  <div className="flex items-center gap-2 group cursor-pointer">
-                    <CheckCircle className="w-4 h-4 text-accent group-hover:scale-110 transition-transform" />
-                    <span className="group-hover:text-foreground transition-colors font-medium">
-                      98% Success Rate
-                    </span>
+                  <div className="flex items-center gap-2">
+                    <CheckCircle className="w-4 h-4 text-accent" />
+                    <span className="font-medium">98% Success Rate</span>
                   </div>
-                  <div className="flex items-center gap-2 group cursor-pointer">
-                    <CheckCircle className="w-4 h-4 text-accent group-hover:scale-110 transition-transform" />
-                    <span className="group-hover:text-foreground transition-colors font-medium">
-                      Avg 140 Points Up
-                    </span>
+                  <div className="flex items-center gap-2">
+                    <CheckCircle className="w-4 h-4 text-accent" />
+                    <span className="font-medium">Avg 140 Points Up</span>
                   </div>
                 </div>
               </div>
             </div>
 
-            {/* Right Visual — desktop only */}
+            {/* Right Visual */}
             <div
-              className="hidden md:block animate-slide-in-right"
+              className="animate-slide-in-right"
               style={{ animationDelay: "0.3s" }}
             >
               <CreditImprovementCard
@@ -257,118 +378,84 @@ export default function Index() {
 
           {/* Packages Grid */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-5xl mx-auto">
-            {[
-              {
-                id: "standard",
-                name: "Standard",
-                subtitle: "For First-Time Filers",
-                price: "$599",
-                duration: "6 months",
-                description:
-                  "Perfect for those new to credit repair with a few negative items.",
-                benefits: [
-                  "Credit report analysis",
-                  "Up to 10 dispute letters",
-                  "Monthly progress reports",
-                  "Email support",
-                  "Client portal access",
-                ],
-                cta: "Select Plan",
-                popular: false,
-              },
-              {
-                id: "complex",
-                name: "Complex",
-                subtitle: "Most Popular",
-                price: "$899",
-                duration: "12 months",
-                description:
-                  "Comprehensive repair for multiple negative items and complex situations.",
-                benefits: [
-                  "Everything in Standard",
-                  "Unlimited dispute letters",
-                  "Bi-weekly progress updates",
-                  "Phone & email support",
-                  "Specialized negotiation",
-                  "Collections handling",
-                ],
-                cta: "Select Plan",
-                popular: true,
-              },
-              {
-                id: "tradeline",
-                name: "Tradeline",
-                subtitle: "Maximum Results",
-                price: "$1,299",
-                duration: "12 months",
-                description:
-                  "Premium service with authorized user accounts to boost your score.",
-                benefits: [
-                  "Everything in Complex",
-                  "Authorized user tradelines",
-                  "Weekly priority calls",
-                  "Personal credit coach",
-                  "Hardship negotiations",
-                  "Bankruptcy assistance",
-                ],
-                cta: "Select Plan",
-                popular: false,
-              },
-            ].map((pkg) => (
-              <div
-                key={pkg.id}
-                className={`card-base overflow-hidden transition-all duration-300 ${
-                  pkg.popular ? "md:scale-105 border-primary shadow-lg" : ""
-                } ${selectedPackage === pkg.id ? "ring-2 ring-primary" : ""}`}
-                onClick={() => setSelectedPackage(pkg.id)}
-              >
-                {pkg.popular && (
-                  <div className="bg-gradient-to-r from-primary to-primary-600 text-primary-foreground py-2 px-4 text-center text-sm font-semibold">
-                    Most Popular
-                  </div>
-                )}
-
-                <div className="p-6 md:p-8">
-                  <h3 className="text-2xl font-bold mb-1">{pkg.name}</h3>
-                  <p className="text-sm text-muted-foreground mb-4">
-                    {pkg.subtitle}
-                  </p>
-
-                  <div className="mb-6">
-                    <div className="text-4xl font-bold text-foreground mb-1">
-                      {pkg.price}
-                    </div>
-                    <p className="text-sm text-muted-foreground">
-                      per service • {pkg.duration}
-                    </p>
-                  </div>
-
-                  <p className="text-sm text-muted-foreground mb-6">
-                    {pkg.description}
-                  </p>
-
-                  <button
-                    className={`w-full h-12 rounded-lg font-semibold transition-all duration-200 flex items-center justify-center gap-2 ${
-                      pkg.popular ? "btn-primary" : "btn-secondary"
-                    }`}
-                  >
-                    {pkg.cta}
-                    <ArrowRight className="w-4 h-4" />
-                  </button>
-
-                  <div className="mt-8 space-y-3">
-                    {pkg.benefits.map((benefit, idx) => (
-                      <div key={idx} className="flex items-start gap-3">
-                        <CheckCircle className="w-5 h-5 text-accent flex-shrink-0 mt-0.5" />
-                        <span className="text-sm text-muted-foreground">
-                          {benefit}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+            {packagesLoading ? (
+              <div className="col-span-3 flex justify-center py-16">
+                <Loader2 className="w-8 h-8 animate-spin text-primary" />
               </div>
-            ))}
+            ) : packages.length === 0 ? (
+              <div className="col-span-3 text-center py-16 text-muted-foreground">
+                Packages unavailable. Please try again later.
+              </div>
+            ) : (
+              packages.map((pkg, idx) => {
+                const isPopular = idx === 1;
+                const price = `$${(pkg.price_cents / 100).toLocaleString()}`;
+                const features: string[] = Array.isArray(pkg.features_json)
+                  ? pkg.features_json
+                  : typeof pkg.features_json === "string"
+                    ? JSON.parse(pkg.features_json)
+                    : [];
+                return (
+                  <div
+                    key={pkg.slug}
+                    className={`card-base overflow-hidden transition-all duration-300 cursor-pointer ${
+                      isPopular ? "md:scale-105 border-primary shadow-lg" : ""
+                    }`}
+                    onClick={() => navigate(`/register?plan=${pkg.slug}`)}
+                  >
+                    {isPopular && (
+                      <div className="bg-gradient-to-r from-primary to-primary-600 text-primary-foreground py-2 px-4 text-center text-sm font-semibold">
+                        Most Popular
+                      </div>
+                    )}
+
+                    <div className="p-6 md:p-8">
+                      <h3 className="text-2xl font-bold mb-1">{pkg.name}</h3>
+                      <p className="text-sm text-muted-foreground mb-4">
+                        {pkg.subtitle}
+                      </p>
+
+                      <div className="mb-6">
+                        <div className="text-4xl font-bold text-foreground mb-1">
+                          {price}
+                        </div>
+                        <p className="text-sm text-muted-foreground">
+                          per service • {pkg.duration_months} months
+                        </p>
+                      </div>
+
+                      <p className="text-sm text-muted-foreground mb-6">
+                        {pkg.description}
+                      </p>
+
+                      <button
+                        className={`w-full h-12 rounded-lg font-semibold transition-all duration-200 flex items-center justify-center gap-2 ${
+                          isPopular ? "btn-primary" : "btn-secondary"
+                        }`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          navigate(`/register?plan=${pkg.slug}`);
+                        }}
+                      >
+                        Select Plan
+                        <ArrowRight className="w-4 h-4" />
+                      </button>
+
+                      <div className="mt-8 space-y-3">
+                        {features.map((benefit, i) => (
+                          <div key={i} className="flex items-start gap-3">
+                            <CheckCircle className="w-5 h-5 text-accent flex-shrink-0 mt-0.5" />
+                            <span className="text-sm text-muted-foreground">
+                              {benefit}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            )}
           </div>
         </div>
       </section>
@@ -568,12 +655,18 @@ export default function Index() {
               Start your free consultation today.
             </p>
             <div className="flex flex-col sm:flex-row gap-4 justify-center">
-              <button className="btn-primary w-full sm:w-auto h-12 px-8 flex items-center justify-center gap-2">
+              <Link
+                to="/register"
+                className="btn-primary w-full sm:w-auto h-12 px-8 flex items-center justify-center gap-2"
+              >
                 Start Your Journey <ArrowRight className="w-5 h-5" />
-              </button>
-              <button className="btn-secondary w-full sm:w-auto h-12 px-8">
+              </Link>
+              <a
+                href="#packages"
+                className="btn-secondary w-full sm:w-auto h-12 px-8 flex items-center justify-center"
+              >
                 Schedule a Call
-              </button>
+              </a>
             </div>
             <p className="text-sm text-muted-foreground mt-6">
               No credit card required. Free 15-minute consultation.

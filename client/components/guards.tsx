@@ -15,6 +15,21 @@ export function RequireAdmin({ children }: { children: ReactNode }) {
 }
 
 /**
+ * Protect super_admin-only routes — redirect non-super-admins to /admin dashboard.
+ */
+export function RequireSuperAdmin({ children }: { children: ReactNode }) {
+  const { token, user } = useAppSelector((s) => s.adminAuth);
+  const location = useLocation();
+  if (!token) {
+    return <Navigate to="/admin/login" state={{ from: location }} replace />;
+  }
+  if (user && user.role !== "super_admin") {
+    return <Navigate to="/admin" replace />;
+  }
+  return <>{children}</>;
+}
+
+/**
  * Protect client portal routes — redirect unauthenticated visitors to /portal/login.
  */
 export function RequireClient({ children }: { children: ReactNode }) {

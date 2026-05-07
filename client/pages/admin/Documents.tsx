@@ -3,7 +3,6 @@ import {
   Archive,
   X,
   Eye,
-  User,
   Calendar,
   FileText,
   ShieldCheck,
@@ -13,14 +12,18 @@ import {
   Search,
   CheckCircle2,
   Clock,
+  ChevronDown,
 } from "lucide-react";
 import AdminPageHeader from "@/components/AdminPageHeader";
+import { DataGrid } from "@/components/ui/data-grid";
+import type { DataGridColumn } from "@/components/ui/data-grid";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { fetchAllDocuments } from "@/store/slices/adminSlice";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import api from "@/lib/api";
+import { useDebounce } from "@/hooks/use-debounce";
 
 const DOC_TYPE_LABELS: Record<string, string> = {
   id_front: "Gov ID — Front",
@@ -91,36 +94,29 @@ function formatDate(s: string) {
 
 export default function AdminDocuments() {
   const dispatch = useAppDispatch();
-  const { allDocuments } = useAppSelector((s) => s.admin);
+  const { allDocuments, loading } = useAppSelector((s) => s.admin);
 
   const [search, setSearch] = useState("");
+  const debouncedSearch = useDebounce(search, 350);
   const [statusFilter, setStatusFilter] = useState<
     "all" | "pending" | "approved" | "rejected"
   >("all");
   const [typeFilter, setTypeFilter] = useState<string>("all");
+  const [sortBy, setSortBy] = useState("uploaded_at");
+  const [sortDir, setSortDir] = useState<"ASC" | "DESC">("DESC");
 
   const [selected, setSelected] = useState<DocRecord | null>(null);
   const [fileUrl, setFileUrl] = useState<string | null>(null);
   const [fileLoading, setFileLoading] = useState(false);
 
   useEffect(() => {
-    dispatch(fetchAllDocuments({}));
-  }, [dispatch]);
+    dispatch(fetchAllDocuments({ search: debouncedSearch || undefined }));
+  }, [dispatch, debouncedSearch]);
 
-  // Client-side filter (all docs already fetched)
   const docs = (allDocuments as DocRecord[]).filter((d) => {
     if (statusFilter !== "all" && d.review_status !== statusFilter)
       return false;
     if (typeFilter !== "all" && d.doc_type !== typeFilter) return false;
-    if (search) {
-      const q = search.toLowerCase();
-      return (
-        d.first_name.toLowerCase().includes(q) ||
-        d.last_name.toLowerCase().includes(q) ||
-        d.email.toLowerCase().includes(q) ||
-        d.file_name.toLowerCase().includes(q)
-      );
-    }
     return true;
   });
 
@@ -132,6 +128,22 @@ export default function AdminDocuments() {
     },
     { all: 0, pending: 0, approved: 0, rejected: 0 } as Record<string, number>,
   );
+
+  const handleSort = (key: string) => {
+    if (sortBy === key) {
+      setSortDir((d) => (d === "ASC" ? "DESC" : "ASC"));
+    } else {
+      setSortBy(key);
+      setSortDir("ASC");
+    }
+  };
+
+  const sorted = [...docs].sort((a, b) => {
+    const av = (a as any)[sortBy] ?? "";
+    const bv = (b as any)[sortBy] ?? "";
+    const cmp = String(av).localeCompare(String(bv));
+    return sortDir === "ASC" ? cmp : -cmp;
+  });
 
   const loadFile = useCallback(async (doc: DocRecord) => {
     setFileUrl(null);
@@ -165,6 +177,112 @@ export default function AdminDocuments() {
   const isImage = selected?.mime_type.startsWith("image/");
   const isPdf = selected?.mime_type === "application/pdf";
 
+  const columns: DataGridColumn<DocRecord>[] = [
+    {
+      key: "first_name",
+      label: "Client",
+      sortable: true,
+      sticky: true,
+      render: (d) => (
+        <div>
+          <div className="font-medium">
+            {d.first_name} {d.last_name}
+          </div>
+          <div className="text-xs text-muted-foreground">{d.email}</div>
+        </div>
+      ),
+    },
+    {
+      key: "file_name",
+      label: "Document",
+      sortable: true,
+      wrap: true,
+      render: (d) => (
+        <div>
+          <div className="flex items-center gap-2">
+            <FileText className="w-3.5 h-3.5 text-muted-foreground/60 shrink-0" />
+            <span className="text-foreground/80 truncate max-w-[160px]">
+              {d.file_name}
+            </span>
+          </div>
+          <div className="text-xs text-muted-foreground mt-0.5">
+            {formatBytes(d.file_size)}
+          </div>
+        </div>
+      ),
+    },
+    {
+      key: "doc_type",
+      label: "Type",
+      sortable: true,
+      shrink: true,
+      render: (d) => (
+        <span
+          className={`inline-flex text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${
+            DOC_TYPE_COLORS[d.doc_type] || DOC_TYPE_COLORS.other
+          }`}
+        >
+          {DOC_TYPE_LABELS[d.doc_type] || d.doc_type}
+        </span>
+      ),
+    },
+    {
+      key: "uploaded_at",
+      label: "Uploaded",
+      sortable: true,
+      shrink: true,
+      render: (d) => (
+        <span className="text-xs text-muted-foreground">
+          {formatDate(d.uploaded_at)}
+        </span>
+      ),
+    },
+    {
+      key: "review_status",
+      label: "Status",
+      sortable: true,
+      shrink: true,
+      render: (d) => {
+        const sc = STATUS_CONFIG[d.review_status] || STATUS_CONFIG.pending;
+        return (
+          <div>
+            <Badge
+              variant="outline"
+              className={`text-[10px] gap-1 ${sc.className}`}
+            >
+              {sc.icon}
+              {sc.label}
+            </Badge>
+            {d.review_status === "rejected" && d.rejection_reason && (
+              <div
+                className="text-[10px] text-red-500 mt-1 max-w-[140px] truncate"
+                title={d.rejection_reason}
+              >
+                {d.rejection_reason}
+              </div>
+            )}
+          </div>
+        );
+      },
+    },
+    {
+      key: "_actions",
+      label: "",
+      shrink: true,
+      render: (d) => (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            openDoc(d);
+          }}
+          className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline"
+        >
+          <Eye className="w-3.5 h-3.5" /> View
+        </button>
+      ),
+    },
+  ];
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -179,28 +297,41 @@ export default function AdminDocuments() {
         }
       />
 
-      {/* Stats filter chips */}
-      <div className="flex flex-wrap gap-2">
-        {(["all", "pending", "approved", "rejected"] as const).map((s) => (
-          <button
-            key={s}
-            onClick={() => setStatusFilter(s)}
-            className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition-all ${
-              statusFilter === s
-                ? "bg-primary/15 border-primary/50 text-primary"
-                : "bg-muted border-border text-muted-foreground hover:border-primary/30"
-            }`}
+      {/* Filter bar */}
+      <div className="flex flex-wrap gap-3 items-center">
+        <div className="relative flex-1 min-w-[220px]">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+          <Input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search by client name, email or filename…"
+            className="pl-9 h-10"
+          />
+        </div>
+        <div className="relative">
+          <select
+            value={statusFilter}
+            onChange={(e) =>
+              setStatusFilter(e.target.value as typeof statusFilter)
+            }
+            className="h-10 pl-3 pr-8 rounded-lg border border-input bg-background text-sm text-foreground appearance-none focus:outline-none focus:ring-2 focus:ring-primary/50 cursor-pointer"
           >
-            {s.charAt(0).toUpperCase() + s.slice(1)}{" "}
-            <span className="opacity-60">({counts[s] ?? 0})</span>
-          </button>
-        ))}
-
-        <div className="ml-auto flex items-center gap-2">
+            {(["all", "pending", "approved", "rejected"] as const).map((s) => (
+              <option key={s} value={s}>
+                {s === "all"
+                  ? "All statuses"
+                  : s.charAt(0).toUpperCase() + s.slice(1)}
+                {counts[s] != null ? ` (${counts[s]})` : ""}
+              </option>
+            ))}
+          </select>
+          <ChevronDown className="w-3.5 h-3.5 absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+        </div>
+        <div className="relative">
           <select
             value={typeFilter}
             onChange={(e) => setTypeFilter(e.target.value)}
-            className="bg-background border border-input text-xs rounded-lg px-2 py-1.5 text-foreground focus:outline-none focus:border-primary/50"
+            className="h-10 pl-3 pr-8 rounded-lg border border-input bg-background text-sm text-foreground appearance-none focus:outline-none focus:ring-2 focus:ring-primary/50 cursor-pointer"
           >
             <option value="all">All types</option>
             {Object.entries(DOC_TYPE_LABELS).map(([k, v]) => (
@@ -209,124 +340,28 @@ export default function AdminDocuments() {
               </option>
             ))}
           </select>
+          <ChevronDown className="w-3.5 h-3.5 absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
         </div>
       </div>
 
-      {/* Search */}
-      <div className="relative">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-        <Input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search by client name, email or filename…"
-          className="pl-9"
+      {/* Document grid */}
+      <div className="bg-card rounded-2xl border border-border px-6 py-4">
+        <DataGrid
+          data={sorted}
+          columns={columns}
+          rowKey={(d) => d.id}
+          isLoading={loading}
+          sortBy={sortBy}
+          sortDir={sortDir}
+          onSort={handleSort}
+          onRowClick={openDoc}
+          emptyMessage={
+            search || statusFilter !== "all" || typeFilter !== "all"
+              ? "Try adjusting your filters."
+              : "No documents have been uploaded yet."
+          }
         />
       </div>
-
-      {/* Document table */}
-      {docs.length === 0 ? (
-        <div className="bg-card rounded-2xl border border-border p-12 text-center">
-          <FileText className="w-10 h-10 text-muted-foreground/40 mx-auto mb-3" />
-          <p className="font-semibold text-foreground">No documents found</p>
-          <p className="text-sm text-muted-foreground mt-1">
-            {search || statusFilter !== "all" || typeFilter !== "all"
-              ? "Try adjusting your filters."
-              : "No documents have been uploaded yet."}
-          </p>
-        </div>
-      ) : (
-        <div className="rounded-2xl border border-border overflow-hidden bg-card">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border bg-muted/50">
-                <th className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-                  Client
-                </th>
-                <th className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-                  Document
-                </th>
-                <th className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide hidden md:table-cell">
-                  Type
-                </th>
-                <th className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide hidden lg:table-cell">
-                  Uploaded
-                </th>
-                <th className="text-left px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-                  Status
-                </th>
-                <th className="px-4 py-3" />
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border/50">
-              {docs.map((d) => {
-                const sc =
-                  STATUS_CONFIG[d.review_status] || STATUS_CONFIG.pending;
-                return (
-                  <tr
-                    key={d.id}
-                    className="hover:bg-muted/30 transition-colors group"
-                  >
-                    <td className="px-4 py-3">
-                      <div className="font-medium truncate max-w-[140px]">
-                        {d.first_name} {d.last_name}
-                      </div>
-                      <div className="text-xs text-muted-foreground truncate max-w-[140px]">
-                        {d.email}
-                      </div>
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-2">
-                        <FileText className="w-3.5 h-3.5 text-muted-foreground/60 shrink-0" />
-                        <span className="truncate max-w-[160px] text-foreground/80">
-                          {d.file_name}
-                        </span>
-                      </div>
-                      <div className="text-xs text-muted-foreground mt-0.5">
-                        {formatBytes(d.file_size)}
-                      </div>
-                    </td>
-                    <td className="px-4 py-3 hidden md:table-cell">
-                      <span
-                        className={`inline-flex text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${DOC_TYPE_COLORS[d.doc_type] || DOC_TYPE_COLORS.other}`}
-                      >
-                        {DOC_TYPE_LABELS[d.doc_type] || d.doc_type}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 hidden lg:table-cell text-xs text-muted-foreground">
-                      {formatDate(d.uploaded_at)}
-                    </td>
-                    <td className="px-4 py-3">
-                      <Badge
-                        variant="outline"
-                        className={`text-[10px] gap-1 ${sc.className}`}
-                      >
-                        {sc.icon}
-                        {sc.label}
-                      </Badge>
-                      {d.review_status === "rejected" && d.rejection_reason && (
-                        <div
-                          className="text-[10px] text-red-500 mt-1 max-w-[140px] truncate"
-                          title={d.rejection_reason}
-                        >
-                          {d.rejection_reason}
-                        </div>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <button
-                        onClick={() => openDoc(d)}
-                        className="opacity-0 group-hover:opacity-100 transition-opacity inline-flex items-center gap-1.5 text-xs text-primary hover:underline"
-                      >
-                        <Eye className="w-3.5 h-3.5" /> View
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
 
       {/* View-only preview overlay */}
       <Dialog open={!!selected} onOpenChange={(open) => !open && closeDoc()}>

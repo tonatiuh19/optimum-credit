@@ -50,18 +50,18 @@ export default function AdminClientDetail() {
     <div className="space-y-6">
       <Link
         to="/admin/clients"
-        className="inline-flex items-center gap-1.5 text-sm text-slate-400 hover:text-white"
+        className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
       >
         <ArrowLeft className="w-4 h-4" /> Back to clients
       </Link>
 
-      <div className="bg-[#0f1530] rounded-2xl border border-white/10 p-6">
+      <div className="bg-card rounded-2xl border border-border p-6">
         <div className="flex flex-wrap justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-bold">
+            <h1 className="text-2xl font-bold text-foreground">
               {c.first_name} {c.last_name}
             </h1>
-            <div className="flex flex-wrap gap-4 mt-2 text-sm text-slate-400">
+            <div className="flex flex-wrap gap-4 mt-2 text-sm text-muted-foreground">
               <span className="inline-flex items-center gap-1">
                 <Mail className="w-4 h-4" /> {c.email}
               </span>
@@ -78,16 +78,16 @@ export default function AdminClientDetail() {
             </div>
           </div>
           <div>
-            <label className="text-xs uppercase text-slate-400 block mb-1">
+            <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground block mb-1">
               Pipeline stage
             </label>
             <select
               value={c.pipeline_stage}
               onChange={(e) => onStage(e.target.value as PipelineStage)}
-              className="h-10 px-3 rounded-lg border border-white/10 bg-white/5 text-sm text-white"
+              className="h-10 px-3 rounded-lg border border-input bg-background text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
             >
               {STAGES.map((s) => (
-                <option key={s} value={s} className="bg-[#0f1530]">
+                <option key={s} value={s}>
                   {s.replace(/_/g, " ")}
                 </option>
               ))}
@@ -99,16 +99,18 @@ export default function AdminClientDetail() {
       <div className="grid lg:grid-cols-2 gap-4">
         <Card title="Documents">
           {docs.length === 0 ? (
-            <div className="text-slate-400 text-sm">No documents yet.</div>
+            <div className="text-muted-foreground text-sm">
+              No documents yet.
+            </div>
           ) : (
             <ul className="space-y-2">
               {docs.map((d: any) => (
                 <li
                   key={d.id}
-                  className="flex items-center justify-between p-2 rounded-lg bg-white/5 text-sm"
+                  className="flex items-center justify-between p-2 rounded-lg bg-muted/50 text-sm"
                 >
-                  <span className="inline-flex items-center gap-2">
-                    <FileText className="w-4 h-4 text-slate-400" />
+                  <span className="inline-flex items-center gap-2 text-foreground">
+                    <FileText className="w-4 h-4 text-muted-foreground" />
                     {d.doc_type} · {d.file_name}
                   </span>
                   <span
@@ -130,16 +132,20 @@ export default function AdminClientDetail() {
 
         <Card title="Payments">
           {payments.length === 0 ? (
-            <div className="text-slate-400 text-sm">No payments.</div>
+            <div className="text-muted-foreground text-sm">No payments.</div>
           ) : (
             <ul className="space-y-2 text-sm">
               {payments.map((p: any) => (
                 <li
                   key={p.id}
-                  className="flex items-center justify-between p-2 rounded-lg bg-white/5"
+                  className="flex items-center justify-between p-2 rounded-lg bg-muted/50"
                 >
-                  <span>${(p.amount_cents / 100).toFixed(2)}</span>
-                  <span className="text-xs uppercase">{p.status}</span>
+                  <span className="font-medium text-foreground">
+                    ${(p.amount_cents / 100).toFixed(2)}
+                  </span>
+                  <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                    {p.status}
+                  </span>
                 </li>
               ))}
             </ul>
@@ -162,14 +168,19 @@ export default function AdminClientDetail() {
           <RoundReportForm clientId={c.id} onDone={() => setShowRound(false)} />
         )}
         {reports.length === 0 ? (
-          <div className="text-slate-400 text-sm">No reports yet.</div>
+          <div className="text-muted-foreground text-sm">No reports yet.</div>
         ) : (
           <div className="space-y-3 mt-3">
             {reports.map((r: any) => (
-              <div key={r.id} className="p-4 rounded-lg bg-white/5">
+              <div
+                key={r.id}
+                className="p-4 rounded-lg bg-muted/50 border border-border"
+              >
                 <div className="flex items-center justify-between mb-2">
-                  <span className="font-semibold">Round {r.round_number}</span>
-                  <span className="text-xs text-slate-400">
+                  <span className="font-semibold text-foreground">
+                    Round {r.round_number}
+                  </span>
+                  <span className="text-xs text-muted-foreground">
                     {new Date(r.created_at).toLocaleDateString()}
                   </span>
                 </div>
@@ -198,9 +209,9 @@ function Card({
   right?: any;
 }) {
   return (
-    <div className="bg-[#0f1530] rounded-2xl border border-white/10 p-6">
+    <div className="bg-card rounded-2xl border border-border p-6">
       <div className="flex items-center justify-between mb-4">
-        <h2 className="font-semibold">{title}</h2>
+        <h2 className="font-semibold text-foreground">{title}</h2>
         {right}
       </div>
       {children}
@@ -211,8 +222,8 @@ function Card({
 function Mini({ label, v }: { label: string; v: any }) {
   return (
     <div>
-      <div className="text-xs text-slate-400">{label}</div>
-      <div className="font-bold">{v ?? "—"}</div>
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="font-bold text-foreground">{v ?? "—"}</div>
     </div>
   );
 }
@@ -256,7 +267,7 @@ function RoundReportForm({
   return (
     <form
       onSubmit={form.handleSubmit}
-      className="grid sm:grid-cols-2 gap-3 p-4 mb-4 bg-white/5 rounded-lg"
+      className="grid sm:grid-cols-2 gap-3 p-4 mb-4 bg-muted/50 rounded-lg border border-border"
     >
       <Field f={form} name="round_number" label="Round #" type="number" />
       <Field f={form} name="score_before" label="Score Before" type="number" />
@@ -274,25 +285,28 @@ function RoundReportForm({
         type="number"
       />
       <div className="sm:col-span-2">
-        <label className="text-xs uppercase text-slate-400 block mb-1">
+        <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground block mb-1">
           Summary
         </label>
         <textarea
           rows={3}
           {...form.getFieldProps("summary_md")}
-          className="w-full p-2 rounded-lg border border-white/10 bg-white/5 text-sm text-white"
+          className="w-full p-2 rounded-lg border border-input bg-background text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
         />
       </div>
       <div className="sm:col-span-2 flex gap-2 justify-end">
         <button
           type="button"
           onClick={onDone}
-          className="btn-secondary text-sm"
+          className="h-9 px-4 rounded-lg border border-input bg-background text-sm font-medium text-foreground hover:bg-muted transition-colors"
         >
           Cancel
         </button>
-        <button type="submit" className="btn-primary text-sm">
-          Save & notify
+        <button
+          type="submit"
+          className="h-9 px-4 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors"
+        >
+          Save &amp; notify
         </button>
       </div>
     </form>
@@ -312,13 +326,13 @@ function Field({
 }) {
   return (
     <div>
-      <label className="text-xs uppercase text-slate-400 block mb-1">
+      <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground block mb-1">
         {label}
       </label>
       <input
         type={type}
         {...f.getFieldProps(name)}
-        className="w-full h-10 px-3 rounded-lg border border-white/10 bg-white/5 text-sm text-white"
+        className="w-full h-10 px-3 rounded-lg border border-input bg-background text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
       />
     </div>
   );

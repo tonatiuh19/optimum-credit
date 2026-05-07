@@ -48,7 +48,7 @@ export const submitRegistration = createAsyncThunk<
 
 export const confirmMockPayment = createAsyncThunk<
   void,
-  { clientId: number; paymentIntentId: string }
+  { clientId: number; transactionId: string }
 >("packages/confirmMock", async (args) => {
   await api.post("/registration/confirm-mock", args);
 });

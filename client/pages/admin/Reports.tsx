@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { BarChart3 } from "lucide-react";
 import AdminPageHeader from "@/components/AdminPageHeader";
+import { DataGrid } from "@/components/ui/data-grid";
+import type { DataGridColumn } from "@/components/ui/data-grid";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { fetchAdminReports } from "@/store/slices/adminSlice";
 
@@ -56,26 +58,7 @@ export default function AdminReports() {
       </div>
 
       <Card title="Package breakdown">
-        <table className="w-full text-sm">
-          <thead className="text-xs uppercase text-muted-foreground">
-            <tr>
-              <th className="text-left p-2">Package</th>
-              <th className="text-right p-2">Sold</th>
-              <th className="text-right p-2">Revenue</th>
-            </tr>
-          </thead>
-          <tbody>
-            {reports.packageBreakdown.map((p: any) => (
-              <tr key={p.package_id} className="border-t border-border/50">
-                <td className="p-2">{p.package_name}</td>
-                <td className="text-right p-2">{p.sold}</td>
-                <td className="text-right p-2">
-                  ${(Number(p.revenue || 0) / 100).toLocaleString()}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <PackageBreakdownGrid data={reports.packageBreakdown} />
       </Card>
     </div>
   );
@@ -116,5 +99,67 @@ function BarChart({
         </div>
       ))}
     </div>
+  );
+}
+
+function PackageBreakdownGrid({ data }: { data: any[] }) {
+  const [sortBy, setSortBy] = useState("sold");
+  const [sortDir, setSortDir] = useState<"ASC" | "DESC">("DESC");
+
+  const handleSort = (key: string) => {
+    if (sortBy === key) {
+      setSortDir((d) => (d === "ASC" ? "DESC" : "ASC"));
+    } else {
+      setSortBy(key);
+      setSortDir("ASC");
+    }
+  };
+
+  const sorted = [...data].sort((a, b) => {
+    const av = Number(a[sortBy] ?? 0);
+    const bv = Number(b[sortBy] ?? 0);
+    return sortDir === "ASC" ? av - bv : bv - av;
+  });
+
+  const columns: DataGridColumn<any>[] = [
+    {
+      key: "package_name",
+      label: "Package",
+      sortable: true,
+      render: (p) => <span className="font-medium">{p.package_name}</span>,
+    },
+    {
+      key: "sold",
+      label: "Sold",
+      sortable: true,
+      shrink: true,
+      render: (p) => (
+        <span className="font-semibold text-primary">{p.sold}</span>
+      ),
+    },
+    {
+      key: "revenue",
+      label: "Revenue",
+      sortable: true,
+      shrink: true,
+      render: (p) => (
+        <span className="font-semibold text-accent">
+          ${(Number(p.revenue || 0) / 100).toLocaleString()}
+        </span>
+      ),
+    },
+  ];
+
+  return (
+    <DataGrid
+      data={sorted}
+      columns={columns}
+      rowKey={(p) => p.package_id ?? p.package_name}
+      sortBy={sortBy}
+      sortDir={sortDir}
+      onSort={handleSort}
+      emptyMessage="No package data yet."
+      noBleeding
+    />
   );
 }

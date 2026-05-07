@@ -3,13 +3,20 @@ import api from "@/lib/api";
 import type {
   AdminClientListItem,
   AdminDashboardStats,
+  AdminPaymentsResponse,
+  AdminUserListItem,
   CommunicationTemplate,
   Conversation,
   ConversationMessage,
+  Coupon,
+  CreateCouponPayload,
   EducationalVideo,
+  Payment,
   PipelineStage,
   SupportTicket,
+  SectionLock,
   SystemSetting,
+  UpdateCouponPayload,
 } from "@shared/api";
 
 interface AdminState {
@@ -43,6 +50,15 @@ interface AdminState {
     signupsByMonth: any[];
     packageBreakdown: any[];
   };
+  team: AdminUserListItem[];
+  payments: Payment[];
+  paymentsSummary: AdminPaymentsResponse["summary"] | null;
+  paymentsPagination: AdminPaymentsResponse["pagination"] | null;
+  coupons: Coupon[];
+  couponsSaving: boolean;
+  sectionLocks: SectionLock[];
+  sectionLocksLoading: boolean;
+  sectionLocksSaving: boolean;
   loading: boolean;
   saving: boolean;
 }
@@ -65,6 +81,15 @@ const initialState: AdminState = {
   videos: [],
   settings: [],
   reports: { revenueByMonth: [], signupsByMonth: [], packageBreakdown: [] },
+  team: [],
+  payments: [],
+  paymentsSummary: null,
+  paymentsPagination: null,
+  coupons: [],
+  couponsSaving: false,
+  sectionLocks: [],
+  sectionLocksLoading: true,
+  sectionLocksSaving: false,
   loading: false,
   saving: false,
 };
@@ -237,6 +262,38 @@ export const updateTemplate = createAsyncThunk<
   await api.post(`/admin/templates/${id}`, rest);
 });
 
+export const createTemplate = createAsyncThunk<
+  { id: number },
+  {
+    slug: string;
+    name: string;
+    channel: string;
+    subject?: string;
+    body: string;
+    variables?: string[];
+  }
+>("admin/createTemplate", async (args) => {
+  const { data } = await api.post("/admin/templates", args);
+  return data as { id: number };
+});
+
+export const deleteTemplate = createAsyncThunk<
+  void,
+  { id: number },
+  { rejectValue: { error: string; flows: string[] } }
+>("admin/deleteTemplate", async ({ id }, { rejectWithValue }) => {
+  try {
+    await api.delete(`/admin/templates/${id}`);
+  } catch (e: any) {
+    if (e?.response?.status === 409) {
+      return rejectWithValue(
+        e.response.data as { error: string; flows: string[] },
+      );
+    }
+    throw e;
+  }
+});
+
 export const fetchAdminVideos = createAsyncThunk("admin/videos", async () => {
   const { data } = await api.get("/admin/videos");
   return data.videos as EducationalVideo[];
@@ -273,6 +330,138 @@ export const fetchAdminReports = createAsyncThunk("admin/reports", async () => {
   return data;
 });
 
+export const fetchAdminTeam = createAsyncThunk(
+  "admin/team",
+  async (params?: { search?: string; role?: string }) => {
+    const { data } = await api.get("/admin/admins", { params });
+    return data.admins as AdminUserListItem[];
+  },
+);
+
+export const createAdminTeamMember = createAsyncThunk<
+  void,
+  {
+    email: string;
+    first_name: string;
+    last_name: string;
+    phone?: string;
+    role: string;
+  }
+>("admin/team/create", async (args) => {
+  await api.post("/admin/admins", args);
+});
+
+export const updateAdminTeamMember = createAsyncThunk<
+  void,
+  {
+    id: number;
+    first_name?: string;
+    last_name?: string;
+    phone?: string;
+    role?: string;
+    status?: string;
+  }
+>("admin/team/update", async ({ id, ...rest }) => {
+  await api.put(`/admin/admins/${id}`, rest);
+});
+
+export const deleteAdminTeamMember = createAsyncThunk<void, { id: number }>(
+  "admin/team/delete",
+  async ({ id }) => {
+    await api.delete(`/admin/admins/${id}`);
+  },
+);
+
+export const createAdminClient = createAsyncThunk<
+  AdminClientListItem,
+  {
+    first_name: string;
+    last_name: string;
+    email: string;
+    phone?: string;
+    package_id?: number | null;
+    status?: string;
+  }
+>("admin/clients/create", async (args) => {
+  const { data } = await api.post("/admin/clients", args);
+  return data.client as AdminClientListItem;
+});
+
+export const updateAdminClient = createAsyncThunk<
+  AdminClientListItem,
+  {
+    id: number;
+    first_name?: string;
+    last_name?: string;
+    email?: string;
+    phone?: string;
+    package_id?: number | null;
+    status?: string;
+  }
+>("admin/clients/update", async ({ id, ...rest }) => {
+  const { data } = await api.put(`/admin/clients/${id}`, rest);
+  return data.client as AdminClientListItem;
+});
+
+export const deleteAdminClient = createAsyncThunk<void, { id: number }>(
+  "admin/clients/delete",
+  async ({ id }) => {
+    await api.delete(`/admin/clients/${id}`);
+  },
+);
+
+export const fetchAdminCoupons = createAsyncThunk<Coupon[], void>(
+  "admin/coupons/fetch",
+  async () => {
+    const { data } = await api.get("/admin/coupons");
+    return data.coupons as Coupon[];
+  },
+);
+
+export const createAdminCoupon = createAsyncThunk<Coupon, CreateCouponPayload>(
+  "admin/coupons/create",
+  async (payload) => {
+    const { data } = await api.post("/admin/coupons", payload);
+    return data.coupon as Coupon;
+  },
+);
+
+export const updateAdminCoupon = createAsyncThunk<
+  Coupon,
+  { id: number } & UpdateCouponPayload
+>("admin/coupons/update", async ({ id, ...rest }) => {
+  const { data } = await api.put(`/admin/coupons/${id}`, rest);
+  return data.coupon as Coupon;
+});
+
+export const deleteAdminCoupon = createAsyncThunk<void, { id: number }>(
+  "admin/coupons/delete",
+  async ({ id }) => {
+    await api.delete(`/admin/coupons/${id}`);
+  },
+);
+
+export const fetchAdminPayments = createAsyncThunk<
+  AdminPaymentsResponse,
+  | {
+      status?: string;
+      search?: string;
+      provider?: string;
+      page?: number;
+      limit?: number;
+    }
+  | undefined
+>("admin/payments", async (args) => {
+  const params: any = {};
+  if (args?.status) params.status = args.status;
+  if (args?.search) params.search = args.search;
+  if (args?.provider) params.provider = args.provider;
+  if (args?.page) params.page = args.page;
+  if (args?.limit) params.limit = args.limit;
+  const { data } = await api.get("/admin/payments", { params });
+  return data as AdminPaymentsResponse;
+});
+
 const slice = createSlice({
   name: "admin",
   initialState,
@@ -282,10 +471,35 @@ const slice = createSlice({
     },
   },
   extraReducers: (b) => {
+    // ── loading flag (pending + rejected only — fulfilled handled per-case) ──
+    const setLoading = (s: AdminState) => {
+      s.loading = true;
+    };
+    const clearLoading = (s: AdminState) => {
+      s.loading = false;
+    };
+    [
+      fetchAdminClients,
+      fetchAllDocuments,
+      fetchAdminTeam,
+      fetchPipeline,
+      fetchAdminDashboard,
+      fetchAdminReports,
+      fetchSettings,
+      fetchTemplates,
+      fetchAdminVideos,
+      fetchAdminTickets,
+    ].forEach((thunk) => {
+      b.addCase(thunk.pending, setLoading);
+      b.addCase(thunk.rejected, clearLoading);
+    });
+
     b.addCase(fetchAdminDashboard.fulfilled, (s, a) => {
+      s.loading = false;
       s.dashboard = a.payload;
     });
     b.addCase(fetchAdminClients.fulfilled, (s, a) => {
+      s.loading = false;
       s.clients = a.payload;
     });
     b.addCase(fetchAdminClient.fulfilled, (s, a) => {
@@ -302,12 +516,14 @@ const slice = createSlice({
       s.panelLoading = false;
     });
     b.addCase(fetchPipeline.fulfilled, (s, a) => {
+      s.loading = false;
       s.pipelineClients = a.payload;
     });
     b.addCase(fetchPendingDocuments.fulfilled, (s, a) => {
       s.pendingDocuments = a.payload;
     });
     b.addCase(fetchAllDocuments.fulfilled, (s, a) => {
+      s.loading = false;
       s.allDocuments = a.payload;
     });
     b.addCase(fetchConversations.fulfilled, (s, a) => {
@@ -317,6 +533,7 @@ const slice = createSlice({
       s.conversationMessages[a.payload.id] = a.payload.messages;
     });
     b.addCase(fetchAdminTickets.fulfilled, (s, a) => {
+      s.loading = false;
       s.tickets = a.payload;
     });
     b.addCase(fetchAdminTicket.fulfilled, (s, a) => {
@@ -324,18 +541,126 @@ const slice = createSlice({
       s.ticketReplies = a.payload.replies;
     });
     b.addCase(fetchTemplates.fulfilled, (s, a) => {
+      s.loading = false;
       s.templates = a.payload;
     });
+    b.addCase(deleteTemplate.fulfilled, (s, a) => {
+      const id = (a.meta.arg as { id: number }).id;
+      s.templates = s.templates.filter((t) => t.id !== id);
+    });
     b.addCase(fetchAdminVideos.fulfilled, (s, a) => {
+      s.loading = false;
       s.videos = a.payload;
     });
     b.addCase(fetchSettings.fulfilled, (s, a) => {
+      s.loading = false;
       s.settings = a.payload;
     });
     b.addCase(fetchAdminReports.fulfilled, (s, a) => {
+      s.loading = false;
       s.reports = a.payload;
     });
+    b.addCase(fetchAdminTeam.fulfilled, (s, a) => {
+      s.loading = false;
+      s.team = a.payload;
+    });
+    b.addCase(createAdminClient.fulfilled, (s, a) => {
+      s.clients.unshift(a.payload);
+    });
+    b.addCase(updateAdminClient.fulfilled, (s, a) => {
+      const idx = s.clients.findIndex((c) => c.id === a.payload.id);
+      if (idx !== -1) s.clients[idx] = a.payload;
+      if (s.selectedClient?.client?.id === a.payload.id) {
+        s.selectedClient.client = { ...s.selectedClient.client, ...a.payload };
+      }
+    });
+    b.addCase(deleteAdminClient.fulfilled, (s, a) => {
+      const id = a.meta.arg.id;
+      s.clients = s.clients.filter((c) => c.id !== id);
+    });
+    b.addCase(fetchAdminPayments.pending, (s) => {
+      s.loading = true;
+    });
+    b.addCase(fetchAdminPayments.rejected, (s) => {
+      s.loading = false;
+    });
+    b.addCase(fetchAdminPayments.fulfilled, (s, a) => {
+      s.loading = false;
+      s.payments = a.payload.payments;
+      s.paymentsSummary = a.payload.summary;
+      s.paymentsPagination = a.payload.pagination;
+    });
+    b.addCase(fetchAdminCoupons.fulfilled, (s, a) => {
+      s.coupons = a.payload;
+    });
+    b.addCase(createAdminCoupon.pending, (s) => {
+      s.couponsSaving = true;
+    });
+    b.addCase(createAdminCoupon.rejected, (s) => {
+      s.couponsSaving = false;
+    });
+    b.addCase(createAdminCoupon.fulfilled, (s, a) => {
+      s.couponsSaving = false;
+      s.coupons.unshift(a.payload);
+    });
+    b.addCase(updateAdminCoupon.pending, (s) => {
+      s.couponsSaving = true;
+    });
+    b.addCase(updateAdminCoupon.rejected, (s) => {
+      s.couponsSaving = false;
+    });
+    b.addCase(updateAdminCoupon.fulfilled, (s, a) => {
+      s.couponsSaving = false;
+      const idx = s.coupons.findIndex((c) => c.id === a.payload.id);
+      if (idx !== -1) s.coupons[idx] = a.payload;
+    });
+    b.addCase(deleteAdminCoupon.fulfilled, (s, a) => {
+      s.coupons = s.coupons.filter((c) => c.id !== a.meta.arg.id);
+    });
+    b.addCase(fetchSectionLocks.pending, (s) => {
+      s.sectionLocksLoading = true;
+    });
+    b.addCase(fetchSectionLocks.rejected, (s) => {
+      s.sectionLocksLoading = false;
+    });
+    b.addCase(fetchSectionLocks.fulfilled, (s, a) => {
+      s.sectionLocks = a.payload;
+      s.sectionLocksLoading = false;
+    });
+    b.addCase(updateSectionLock.pending, (s) => {
+      s.sectionLocksSaving = true;
+    });
+    b.addCase(updateSectionLock.rejected, (s) => {
+      s.sectionLocksSaving = false;
+    });
+    b.addCase(updateSectionLock.fulfilled, (s, a) => {
+      s.sectionLocksSaving = false;
+      const idx = s.sectionLocks.findIndex(
+        (l) => l.section_key === a.payload.section_key,
+      );
+      if (idx !== -1) s.sectionLocks[idx] = a.payload;
+      else s.sectionLocks.push(a.payload);
+    });
   },
+});
+
+export const fetchSectionLocks = createAsyncThunk<SectionLock[], void>(
+  "admin/fetchSectionLocks",
+  async () => {
+    const { data } = await api.get("/admin/section-locks");
+    return data.section_locks as SectionLock[];
+  },
+);
+
+export const updateSectionLock = createAsyncThunk<
+  SectionLock,
+  { key: string; is_locked: boolean; lock_reason?: string | null }
+>("admin/updateSectionLock", async ({ key, is_locked, lock_reason }) => {
+  const { data } = await api.put(`/admin/section-locks/${key}`, {
+    is_locked,
+    lock_reason: lock_reason ?? null,
+  });
+  return data.section_lock as SectionLock;
 });
 
 export const { clearPanelClient } = slice.actions;

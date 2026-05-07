@@ -7,10 +7,8 @@ import {
   ShieldCheck,
   Mail,
   Loader2,
-  Star,
   CheckCircle,
   TrendingUp,
-  Quote,
   Users,
   FileText,
   Activity,
@@ -273,7 +271,6 @@ export default function AdminLogin() {
           <div>
             <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white/10 backdrop-blur-sm border border-white/20 text-xs font-medium text-white/90">
               <ShieldCheck className="w-3.5 h-3.5 text-accent" />
-              Optimum Credit — Staff Console
             </span>
           </div>
 
@@ -304,37 +301,6 @@ export default function AdminLogin() {
                   </div>
                 </div>
               ))}
-            </div>
-
-            {/* Quote */}
-            <div className="bg-white/8 backdrop-blur-sm border border-white/12 rounded-2xl p-6 max-w-lg">
-              <Quote className="w-6 h-6 text-accent mb-3 opacity-80" />
-              <p className="text-sm text-white/85 leading-relaxed italic">
-                "The console gives us everything we need in one view — client
-                status, documents, disputes, and messaging. It's transformed how
-                our team operates day-to-day."
-              </p>
-              <div className="flex items-center gap-3 mt-4">
-                <div className="w-9 h-9 rounded-full bg-gradient-to-br from-accent to-primary flex items-center justify-center text-sm font-bold text-white shadow-md">
-                  J
-                </div>
-                <div>
-                  <div className="text-sm font-semibold text-white">
-                    Jessica R.
-                  </div>
-                  <div className="flex items-center gap-0.5 mt-0.5">
-                    {[...Array(5)].map((_, i) => (
-                      <Star
-                        key={i}
-                        className="w-3 h-3 fill-yellow-400 text-yellow-400"
-                      />
-                    ))}
-                    <span className="text-[10px] text-white/50 ml-1">
-                      Senior Credit Advisor
-                    </span>
-                  </div>
-                </div>
-              </div>
             </div>
           </div>
 

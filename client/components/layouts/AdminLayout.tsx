@@ -1,5 +1,11 @@
 import { ReactNode, useEffect, useState } from "react";
-import { Link, NavLink, useNavigate } from "react-router-dom";
+import {
+  Link,
+  NavLink,
+  Navigate,
+  useNavigate,
+  useLocation,
+} from "react-router-dom";
 import {
   LayoutDashboard,
   Users,
@@ -18,9 +24,13 @@ import {
   ChevronLeft,
   ChevronRight,
   Zap,
+  UserCog,
+  CreditCard,
+  Lock,
 } from "lucide-react";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { adminLogout, fetchAdminMe } from "@/store/slices/adminAuthSlice";
+import { fetchSectionLocks } from "@/store/slices/adminSlice";
 
 interface Props {
   children: ReactNode;
@@ -30,35 +40,103 @@ const NAV_GROUPS = [
   {
     label: "Overview",
     items: [
-      { to: "/admin", end: true, label: "Dashboard", icon: LayoutDashboard },
-      { to: "/admin/clients", label: "Clients", icon: Users },
-      { to: "/admin/pipeline", label: "Pipeline", icon: Workflow },
+      {
+        to: "/admin",
+        end: true,
+        label: "Dashboard",
+        icon: LayoutDashboard,
+        sectionKey: "dashboard",
+      },
+      {
+        to: "/admin/clients",
+        label: "Clients",
+        icon: Users,
+        sectionKey: "clients",
+      },
+      {
+        to: "/admin/pipeline",
+        label: "Pipeline",
+        icon: Workflow,
+        sectionKey: "pipeline",
+      },
     ],
   },
   {
     label: "Work",
     items: [
-      { to: "/admin/documents", label: "Doc Review", icon: FileCheck2 },
+      {
+        to: "/admin/documents",
+        label: "Doc Review",
+        icon: FileCheck2,
+        sectionKey: "documents",
+      },
+      {
+        to: "/admin/payments",
+        label: "Payments",
+        icon: CreditCard,
+        sectionKey: "payments",
+      },
       {
         to: "/admin/conversations",
         label: "Conversations",
         icon: MessageSquare,
+        sectionKey: "conversations",
       },
-      { to: "/admin/tickets", label: "Support", icon: LifeBuoy },
+      {
+        to: "/admin/tickets",
+        label: "Support",
+        icon: LifeBuoy,
+        sectionKey: "tickets",
+      },
     ],
   },
   {
     label: "Content",
     items: [
-      { to: "/admin/templates", label: "Templates", icon: Mailbox },
-      { to: "/admin/videos", label: "Videos", icon: PlayCircle },
+      {
+        to: "/admin/templates",
+        label: "Templates",
+        icon: Mailbox,
+        sectionKey: "templates",
+      },
+      {
+        to: "/admin/videos",
+        label: "Videos",
+        icon: PlayCircle,
+        sectionKey: "videos",
+      },
+      {
+        to: "/admin/reminder-flows",
+        label: "Reminder Flows",
+        icon: Zap,
+        sectionKey: "reminder-flows",
+      },
     ],
   },
   {
     label: "Insights",
     items: [
-      { to: "/admin/reports", label: "Reports", icon: BarChart3 },
-      { to: "/admin/settings", label: "Settings", icon: Settings },
+      {
+        to: "/admin/reports",
+        label: "Reports",
+        icon: BarChart3,
+        superAdminOnly: true,
+        sectionKey: "reports",
+      },
+      {
+        to: "/admin/settings",
+        label: "Settings",
+        icon: Settings,
+        superAdminOnly: true,
+        sectionKey: "settings",
+      },
+      {
+        to: "/admin/people",
+        label: "People",
+        icon: UserCog,
+        superAdminOnly: true,
+        sectionKey: "people",
+      },
     ],
   },
 ];
@@ -66,7 +144,10 @@ const NAV_GROUPS = [
 export default function AdminLayout({ children }: Props) {
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
+  const location = useLocation();
   const { user, token } = useAppSelector((s) => s.adminAuth);
+  const { sectionLocks, sectionLocksLoading } = useAppSelector((s) => s.admin);
+  const isSuperAdmin = user?.role === "super_admin";
   const [mobileOpen, setMobileOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
 
@@ -75,8 +156,29 @@ export default function AdminLayout({ children }: Props) {
   }, [token, user, dispatch]);
 
   useEffect(() => {
+    if (token) dispatch(fetchSectionLocks());
+  }, [token, dispatch]);
+
+  useEffect(() => {
     if (!token) navigate("/admin/login", { replace: true });
   }, [token, navigate]);
+
+  // Build a quick lookup: sectionKey → is_locked
+  const lockedKeys = new Set(
+    sectionLocks.filter((l) => l.is_locked).map((l) => l.section_key),
+  );
+
+  // Synchronously check if the current route is locked (no flash)
+  const isCurrentLocked =
+    !sectionLocksLoading &&
+    NAV_GROUPS.flatMap((g) => g.items).some(
+      (item) =>
+        item.sectionKey &&
+        lockedKeys.has(item.sectionKey) &&
+        location.pathname.startsWith(item.to),
+    );
+
+  if (isCurrentLocked) return <Navigate to="/admin" replace />;
 
   const handleLogout = async () => {
     await dispatch(adminLogout());
@@ -119,9 +221,6 @@ export default function AdminLayout({ children }: Props) {
             to="/admin"
             className="flex items-center gap-2.5 min-w-0 group flex-1"
           >
-            <div className="w-8 h-8 bg-gradient-to-br from-primary to-primary-600 rounded-xl flex items-center justify-center shrink-0 shadow-lg shadow-primary/40 group-hover:shadow-primary/60 transition-shadow">
-              <ShieldCheck className="w-4 h-4 text-white" />
-            </div>
             {!collapsed && (
               <img
                 src="https://disruptinglabs.com/data/optimum/assets/images/logo_horizontal_gold_white_text.png"
@@ -146,55 +245,133 @@ export default function AdminLayout({ children }: Props) {
 
         {/* Nav groups */}
         <nav className="flex-1 px-2 overflow-y-auto overflow-x-hidden py-2 space-y-4">
-          {NAV_GROUPS.map((group) => (
-            <div key={group.label}>
-              {!collapsed && (
-                <div className="px-2 mb-1 text-[9px] font-bold uppercase tracking-[0.15em] text-slate-600">
-                  {group.label}
-                </div>
-              )}
-              <div className="space-y-0.5">
-                {group.items.map((item) => (
-                  <NavLink
-                    key={item.to}
-                    to={item.to}
-                    end={"end" in item ? item.end : undefined}
-                    title={collapsed ? item.label : undefined}
-                    onClick={() => setMobileOpen(false)}
-                    className={({ isActive }) =>
-                      [
-                        "flex items-center rounded-lg text-[13px] font-medium transition-all duration-150 group relative",
-                        collapsed
-                          ? "justify-center px-0 py-2.5 w-full"
-                          : "gap-2.5 px-2.5 py-2",
-                        isActive
-                          ? "bg-primary/[0.18] text-white border border-primary/[0.3] shadow-sm shadow-primary/10"
-                          : "text-slate-400 hover:text-slate-100 hover:bg-white/[0.06] border border-transparent",
-                      ].join(" ")
-                    }
-                  >
-                    {({ isActive }) => (
-                      <>
-                        <item.icon
-                          className={`w-4 h-4 shrink-0 transition-colors ${
-                            isActive
-                              ? "text-white"
-                              : "text-slate-500 group-hover:text-slate-300"
-                          }`}
-                        />
+          {sectionLocksLoading ? (
+            // Skeleton nav while locks load — prevents flash of unlocked sections
+            <div className="space-y-4">
+              {[4, 4, 3, 3].map((count, gi) => (
+                <div key={gi}>
+                  {!collapsed && (
+                    <div className="px-2 mb-1 h-2 w-12 rounded bg-white/[0.05] animate-pulse" />
+                  )}
+                  <div className="space-y-0.5">
+                    {Array.from({ length: count }).map((_, i) => (
+                      <div
+                        key={i}
+                        className={[
+                          "flex items-center rounded-lg animate-pulse bg-white/[0.04]",
+                          collapsed
+                            ? "justify-center px-0 py-2.5 w-full h-9"
+                            : "gap-2.5 px-2.5 py-2 h-9",
+                        ].join(" ")}
+                      >
+                        <div className="w-4 h-4 rounded bg-white/[0.06] shrink-0" />
                         {!collapsed && (
-                          <span className="truncate">{item.label}</span>
+                          <div className="h-2.5 rounded bg-white/[0.06] flex-1" />
                         )}
-                        {isActive && collapsed && (
-                          <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 bg-primary rounded-r-full" />
-                        )}
-                      </>
-                    )}
-                  </NavLink>
-                ))}
-              </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
             </div>
-          ))}
+          ) : (
+            NAV_GROUPS.map((group) => {
+              const visibleItems = group.items.filter(
+                (item) => !(item as any).superAdminOnly || isSuperAdmin,
+              );
+              if (visibleItems.length === 0) return null;
+              return (
+                <div key={group.label}>
+                  {!collapsed && (
+                    <div className="px-2 mb-1 text-[9px] font-bold uppercase tracking-[0.15em] text-slate-600">
+                      {group.label}
+                    </div>
+                  )}
+                  <div className="space-y-0.5">
+                    {visibleItems.map((item) => {
+                      const locked = (item as any).sectionKey
+                        ? lockedKeys.has((item as any).sectionKey)
+                        : false;
+
+                      if (locked) {
+                        const lockData = sectionLocks.find(
+                          (l) => l.section_key === item.sectionKey,
+                        );
+                        const tooltip = lockData?.lock_reason
+                          ? `${item.label}: ${lockData.lock_reason}`
+                          : `${item.label} — Section locked`;
+                        return (
+                          <div
+                            key={item.to}
+                            title={tooltip}
+                            className={[
+                              "flex items-center rounded-lg text-[13px] font-medium cursor-not-allowed select-none",
+                              "text-slate-600 border border-transparent",
+                              collapsed
+                                ? "justify-center px-0 py-2.5 w-full"
+                                : "gap-2.5 px-2.5 py-2",
+                            ].join(" ")}
+                          >
+                            <item.icon className="w-4 h-4 shrink-0 text-slate-700" />
+                            {!collapsed && (
+                              <>
+                                <span className="truncate flex-1">
+                                  {item.label}
+                                </span>
+                                <Lock className="w-3 h-3 text-slate-700 shrink-0" />
+                              </>
+                            )}
+                            {collapsed && (
+                              <Lock className="absolute top-0.5 right-0.5 w-2.5 h-2.5 text-slate-700" />
+                            )}
+                          </div>
+                        );
+                      }
+
+                      return (
+                        <NavLink
+                          key={item.to}
+                          to={item.to}
+                          end={"end" in item ? item.end : undefined}
+                          title={collapsed ? item.label : undefined}
+                          onClick={() => setMobileOpen(false)}
+                          className={({ isActive }) =>
+                            [
+                              "flex items-center rounded-lg text-[13px] font-medium transition-all duration-150 group relative",
+                              collapsed
+                                ? "justify-center px-0 py-2.5 w-full"
+                                : "gap-2.5 px-2.5 py-2",
+                              isActive
+                                ? "bg-primary/[0.18] text-white border border-primary/[0.3] shadow-sm shadow-primary/10"
+                                : "text-slate-400 hover:text-slate-100 hover:bg-white/[0.06] border border-transparent",
+                            ].join(" ")
+                          }
+                        >
+                          {({ isActive }) => (
+                            <>
+                              <item.icon
+                                className={`w-4 h-4 shrink-0 transition-colors ${
+                                  isActive
+                                    ? "text-white"
+                                    : "text-slate-500 group-hover:text-slate-300"
+                                }`}
+                              />
+                              {!collapsed && (
+                                <span className="truncate">{item.label}</span>
+                              )}
+                              {isActive && collapsed && (
+                                <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 bg-primary rounded-r-full" />
+                              )}
+                            </>
+                          )}
+                        </NavLink>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })
+          )}
         </nav>
 
         {/* Footer: user + logout merged */}
@@ -273,7 +450,13 @@ export default function AdminLayout({ children }: Props) {
         </header>
 
         <main className="flex-1 overflow-y-auto">
-          <div className="px-5 sm:px-7 lg:px-10 py-6 md:py-8">{children}</div>
+          {sectionLocksLoading ? (
+            <div className="flex items-center justify-center h-full">
+              <div className="w-6 h-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
+            </div>
+          ) : (
+            <div className="px-5 sm:px-7 lg:px-10 py-6 md:py-8">{children}</div>
+          )}
         </main>
       </div>
     </div>

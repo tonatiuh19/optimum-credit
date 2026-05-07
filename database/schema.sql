@@ -156,6 +156,9 @@ CREATE TABLE IF NOT EXISTS `clients` (
   `contract_signature_ip` VARCHAR(45) DEFAULT NULL,
   -- Stripe
   `stripe_customer_id` VARCHAR(255) DEFAULT NULL,
+  -- Authorize.net — populated after first successful charge
+  `anet_customer_profile_id` VARCHAR(64) DEFAULT NULL,
+  `anet_payment_profile_id` VARCHAR(64) DEFAULT NULL,
   -- Status
   `status` ENUM('pending_payment','onboarding','active','paused','cancelled') NOT NULL DEFAULT 'pending_payment',
   `email_verified_at` DATETIME DEFAULT NULL,
@@ -203,7 +206,7 @@ CREATE TABLE IF NOT EXISTS `client_sessions` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================================
--- PAYMENTS / STRIPE
+-- PAYMENTS (Authorize.net)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS `payments` (
   `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -212,9 +215,9 @@ CREATE TABLE IF NOT EXISTS `payments` (
   `amount_cents` INT UNSIGNED NOT NULL,
   `currency` CHAR(3) NOT NULL DEFAULT 'USD',
   `status` ENUM('pending','succeeded','failed','refunded','cancelled') NOT NULL DEFAULT 'pending',
-  `provider` ENUM('stripe','manual') NOT NULL DEFAULT 'stripe',
-  `stripe_payment_intent_id` VARCHAR(255) DEFAULT NULL UNIQUE,
-  `stripe_charge_id` VARCHAR(255) DEFAULT NULL,
+  `provider` ENUM('stripe','authorize_net','manual') NOT NULL DEFAULT 'authorize_net',
+  `provider_transaction_id` VARCHAR(255) DEFAULT NULL UNIQUE,
+  `provider_charge_id` VARCHAR(255) DEFAULT NULL,
   `failure_reason` TEXT DEFAULT NULL,
   `metadata_json` JSON DEFAULT NULL,
   `paid_at` DATETIME DEFAULT NULL,
@@ -509,7 +512,7 @@ CREATE TABLE IF NOT EXISTS `notification_queue` (
   `payload_json` JSON DEFAULT NULL,
   `scheduled_for` DATETIME NOT NULL,
   `sent_at` DATETIME DEFAULT NULL,
-  `status` ENUM('pending','sent','failed','cancelled') NOT NULL DEFAULT 'pending',
+  `status` ENUM('pending','processing','sent','failed','cancelled') NOT NULL DEFAULT 'pending',
   `attempts` TINYINT UNSIGNED NOT NULL DEFAULT 0,
   `error_message` TEXT DEFAULT NULL,
   `provider_message_id` VARCHAR(255) DEFAULT NULL,
@@ -561,3 +564,110 @@ INSERT INTO `system_settings` (`setting_key`,`setting_value`,`description`) VALU
   ('company_name','Optimum Credit Repair','Company display name'),
   ('support_email','support@optimumcreditrepair.com','Public-facing support email')
 ON DUPLICATE KEY UPDATE `setting_value`=VALUES(`setting_value`);
+
+-- ============================================================================
+-- SECTION LOCKS (toggle admin panel sections on/off from the database)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `section_locks` (
+  `id`                   INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `section_key`          VARCHAR(50)  NOT NULL UNIQUE
+                           COMMENT 'Matches the nav route key, e.g. conversations',
+  `label`                VARCHAR(100) NOT NULL
+                           COMMENT 'Human-readable section name shown in settings UI',
+  `is_locked`            TINYINT(1)   NOT NULL DEFAULT 0,
+  `lock_reason`          VARCHAR(255) DEFAULT NULL
+                           COMMENT 'Optional message shown to admins when section is locked',
+  `updated_by_admin_id`  INT UNSIGNED DEFAULT NULL,
+  `updated_at`           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_section_locks_key` (`section_key`),
+  CONSTRAINT `fk_section_locks_admin`
+    FOREIGN KEY (`updated_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT INTO `section_locks` (`section_key`, `label`, `is_locked`, `lock_reason`) VALUES
+  ('documents',       'Doc Review',      0, NULL),
+  ('conversations',   'Conversations',   1, 'Coming soon — messaging system is under construction.'),
+  ('tickets',         'Support',         0, NULL),
+  ('templates',       'Templates',       0, NULL),
+  ('videos',          'Videos',          0, NULL),
+  ('reminder-flows',  'Reminder Flows',  0, NULL),
+  ('reports',         'Reports',         0, NULL),
+  ('people',          'People',          0, NULL)
+ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
+
+-- ============================================================================
+-- REMINDER FLOWS (automated email sequences per pipeline trigger)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `reminder_flows` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `name` VARCHAR(200) NOT NULL,
+  `description` TEXT DEFAULT NULL,
+  `trigger_event` ENUM('payment_confirmed','docs_ready','round_1_complete','round_2_complete','round_3_complete','round_4_complete','round_5_complete','completed') NOT NULL,
+  `is_active` TINYINT(1) NOT NULL DEFAULT 1,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  INDEX `idx_trigger_event` (`trigger_event`),
+  INDEX `idx_is_active` (`is_active`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `reminder_flow_steps` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `flow_id` INT UNSIGNED NOT NULL,
+  `step_order` INT NOT NULL DEFAULT 0,
+  `step_type` ENUM('send_email','internal_alert') NOT NULL DEFAULT 'send_email',
+  `delay_days` INT NOT NULL DEFAULT 0,
+  `label` VARCHAR(200) DEFAULT NULL,
+  `subject` VARCHAR(500) DEFAULT NULL,
+  `body` MEDIUMTEXT DEFAULT NULL,
+  `template_slug` VARCHAR(100) DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  CONSTRAINT `fk_rfs_flow` FOREIGN KEY (`flow_id`) REFERENCES `reminder_flows` (`id`) ON DELETE CASCADE,
+  INDEX `idx_flow_order` (`flow_id`,`step_order`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================================
+-- COUPONS (promotional discount codes applied at registration)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `coupons` (
+  `id`                     INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `code`                   VARCHAR(50)  NOT NULL UNIQUE COMMENT 'Uppercase promo code, e.g. SAVE20',
+  `description`            VARCHAR(255) DEFAULT NULL,
+  `discount_type`          ENUM('percentage','fixed') NOT NULL DEFAULT 'percentage',
+  `discount_value`         INT UNSIGNED NOT NULL COMMENT 'Percent (0-100) or cents amount',
+  `min_amount_cents`       INT UNSIGNED NOT NULL DEFAULT 0,
+  `max_uses`               INT UNSIGNED DEFAULT NULL COMMENT 'NULL = unlimited',
+  `uses_count`             INT UNSIGNED NOT NULL DEFAULT 0,
+  `applicable_packages`    JSON DEFAULT NULL COMMENT 'Array of package IDs; NULL means all',
+  `valid_from`             DATETIME DEFAULT NULL,
+  `expires_at`             DATETIME DEFAULT NULL,
+  `is_active`              TINYINT(1) NOT NULL DEFAULT 1,
+  `created_by_admin_id`    INT UNSIGNED DEFAULT NULL,
+  `created_at`             DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at`             DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_coupons_code`   (`code`),
+  KEY `idx_coupons_active` (`is_active`),
+  KEY `idx_coupons_expires`(`expires_at`),
+  CONSTRAINT `fk_coupons_admin`
+    FOREIGN KEY (`created_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `reminder_flow_executions` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `flow_id` INT UNSIGNED NOT NULL,
+  `client_id` INT UNSIGNED NOT NULL,
+  `triggered_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `status` ENUM('completed','partial','failed') NOT NULL DEFAULT 'completed',
+  `steps_executed` INT NOT NULL DEFAULT 0,
+  `steps_scheduled` INT NOT NULL DEFAULT 0,
+  `error_message` TEXT DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  INDEX `idx_rfe_flow` (`flow_id`),
+  INDEX `idx_rfe_client` (`client_id`),
+  INDEX `idx_rfe_triggered_at` (`triggered_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

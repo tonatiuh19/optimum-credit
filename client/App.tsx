@@ -40,11 +40,15 @@ import AdminTemplates from "./pages/admin/Templates";
 import AdminVideos from "./pages/admin/Videos";
 import AdminReports from "./pages/admin/Reports";
 import AdminSettings from "./pages/admin/Settings";
+import AdminPeople from "./pages/admin/People";
+import AdminReminderFlows from "./pages/admin/ReminderFlows";
+import AdminPayments from "./pages/admin/Payments";
 import {
   RequireAdmin,
   RequireClient,
   NoAuthAdmin,
   NoAuthClient,
+  RequireSuperAdmin,
 } from "./components/guards";
 
 const queryClient = new QueryClient();
@@ -212,14 +216,40 @@ const App = () => (
               <Route
                 path="/admin/reports"
                 element={
-                  <RequireAdmin>{wrap(AdminLayout, AdminReports)}</RequireAdmin>
+                  <RequireSuperAdmin>
+                    {wrap(AdminLayout, AdminReports)}
+                  </RequireSuperAdmin>
                 }
               />
               <Route
                 path="/admin/settings"
                 element={
-                  <RequireAdmin>
+                  <RequireSuperAdmin>
                     {wrap(AdminLayout, AdminSettings)}
+                  </RequireSuperAdmin>
+                }
+              />
+              <Route
+                path="/admin/people"
+                element={
+                  <RequireSuperAdmin>
+                    {wrap(AdminLayout, AdminPeople)}
+                  </RequireSuperAdmin>
+                }
+              />
+              <Route
+                path="/admin/reminder-flows"
+                element={
+                  <RequireAdmin>
+                    {wrap(AdminLayout, AdminReminderFlows)}
+                  </RequireAdmin>
+                }
+              />
+              <Route
+                path="/admin/payments"
+                element={
+                  <RequireAdmin>
+                    {wrap(AdminLayout, AdminPayments)}
                   </RequireAdmin>
                 }
               />
