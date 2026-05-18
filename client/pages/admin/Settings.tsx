@@ -5,7 +5,6 @@ import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
   fetchSettings,
   saveSetting,
-  fetchSectionLocks,
   updateSectionLock,
 } from "@/store/slices/adminSlice";
 import { useToast } from "@/hooks/use-toast";
@@ -31,7 +30,6 @@ export default function AdminSettings() {
 
   useEffect(() => {
     dispatch(fetchSettings());
-    dispatch(fetchSectionLocks());
   }, [dispatch]);
 
   const save = async (k: string) => {

@@ -26,7 +26,7 @@ export default function AdminVideos() {
       video_url: "",
       thumbnail_url: "",
       category: "general",
-      is_published: true,
+      is_published: 1,
     },
     validationSchema: Yup.object({
       title: Yup.string().required("Required"),

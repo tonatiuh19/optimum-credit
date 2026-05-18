@@ -19,7 +19,7 @@ export default function AdminTickets() {
   const [internal, setInternal] = useState(false);
 
   useEffect(() => {
-    dispatch(fetchAdminTickets());
+    dispatch(fetchAdminTickets(undefined));
   }, [dispatch]);
 
   const open = (id: number) => {
@@ -43,7 +43,7 @@ export default function AdminTickets() {
   const setStatus = async (status: string) => {
     if (!activeId) return;
     await dispatch(updateTicketStatus({ ticketId: activeId, status }));
-    dispatch(fetchAdminTickets());
+    dispatch(fetchAdminTickets(undefined));
     dispatch(fetchAdminTicket({ id: activeId }));
   };
 

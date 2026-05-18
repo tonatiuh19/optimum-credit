@@ -60,6 +60,14 @@ const UPLOADS_DIR =
     }
   })();
 
+// CDN (disruptinglabs.com) file storage
+// Files are proxied through Express — the CDN URL is never exposed to the browser.
+const CDN_UPLOAD_SECRET = process.env.CDN_UPLOAD_SECRET || "";
+const CDN_UPLOAD_URL =
+  process.env.CDN_UPLOAD_URL ||
+  "https://disruptinglabs.com/data/api/uploadFiles.php";
+const CDN_MAIN_FOLDER = process.env.CDN_MAIN_FOLDER || "optimum-credit";
+
 // ============================================================================
 // DATABASE POOL
 // ============================================================================
@@ -198,6 +206,42 @@ function decryptFile(encrypted: Buffer, ivHex: string, tagHex: string): Buffer {
   );
   decipher.setAuthTag(Buffer.from(tagHex, "hex"));
   return Buffer.concat([decipher.update(encrypted), decipher.final()]);
+}
+
+/**
+ * Upload a file buffer to the Disrupting Labs CDN and return the full public URL.
+ * The URL is stored as storage_key in the DB and is never sent directly to the browser —
+ * all access is proxied through the authenticated Express file-serve endpoints.
+ */
+async function uploadToCDN(
+  buffer: Buffer,
+  originalname: string,
+  mimetype: string,
+  clientId: number,
+): Promise<string> {
+  if (!CDN_UPLOAD_SECRET)
+    throw new Error("CDN_UPLOAD_SECRET is not configured");
+  const formData = new FormData();
+  formData.append("main_folder", CDN_MAIN_FOLDER);
+  formData.append("id", `client-${clientId}`);
+  formData.append(
+    "files[]",
+    new Blob([new Uint8Array(buffer)], { type: mimetype }),
+    originalname,
+  );
+  const res = await fetch(CDN_UPLOAD_URL, {
+    method: "POST",
+    headers: { "X-Api-Key": CDN_UPLOAD_SECRET },
+    body: formData,
+  });
+  if (!res.ok) throw new Error(`CDN upload failed: ${res.status}`);
+  const data = (await res.json()) as any;
+  const uploaded = data?.uploaded?.[0];
+  if (!uploaded?.url)
+    throw new Error(
+      "CDN upload returned no URL: " + (data?.error ?? "unknown"),
+    );
+  return uploaded.url as string;
 }
 
 // ============================================================================
@@ -588,6 +632,27 @@ function tplDocumentRejected(opts: {
   };
 }
 
+function tplAllDocsApproved(opts: { firstName: string; portalUrl: string }) {
+  const body = `
+    <h1 style="margin:0 0 12px;font-size:24px;font-weight:800;color:#0f172a;">Great news &#127881; — your documents are all verified!</h1>
+    <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">Hi ${escapeHtml(opts.firstName)}, our team has reviewed and approved all four of your identity documents. Your file has been moved to the next stage and our specialists will begin working on your case right away.</p>
+    <div style="margin:20px 0;padding:16px 20px;background:#f0fdf4;border-left:4px solid #22c55e;border-radius:8px;">
+      <div style="font-size:13px;font-weight:700;color:#15803d;">What happens next?</div>
+      <div style="margin-top:6px;font-size:14px;color:#166534;line-height:1.6;">Our specialists will start reviewing your credit reports and preparing dispute letters with the major credit bureaus. You'll receive a progress update after each round is completed — usually within 30&ndash;45 days.</div>
+    </div>
+    <p style="margin:16px 0;font-size:14px;line-height:1.6;color:#334155;">You can track your progress and view round reports directly from your client portal.</p>
+    ${emailButton(opts.portalUrl, "View My Portal")}
+    <p style="margin:24px 0 0;font-size:13px;color:#64748b;">Questions? Reply to this email and our team will be happy to assist.</p>`;
+  return {
+    subject: `Optimum Credit: all documents verified — we're getting started!`,
+    html: emailLayout({
+      title: "Documents Verified",
+      preheader: "All your documents have been approved. We're on it!",
+      bodyHtml: body,
+    }),
+  };
+}
+
 function tplRoundComplete(opts: {
   firstName: string;
   roundNumber: number;
@@ -883,6 +948,11 @@ async function markPaymentSucceeded(clientId: number, transactionId: string) {
   triggerReminderFlow("payment_confirmed", clientId).catch((e) =>
     console.error("[flow:payment_confirmed]", e?.message),
   );
+
+  // Push new client to Credit Repair Cloud (async — don't block payment confirmation)
+  crcSyncClient(clientId).catch((e) =>
+    console.error("[crc:new-client-sync]", e?.message),
+  );
 }
 
 // ============================================================================
@@ -1082,6 +1152,200 @@ async function triggerReminderFlow(
 }
 
 // ============================================================================
+// CREDIT REPAIR CLOUD (CRC) SERVICE
+// ============================================================================
+
+const CRC_BASE_URL = "https://app.creditrepaircloud.com/api";
+const crcConfigured = !!(
+  process.env.CRC_API_AUTH_KEY && process.env.CRC_SECRET_KEY
+);
+const crcDryRun =
+  process.env.CRC_DRY_RUN === "true" || process.env.NODE_ENV === "test";
+
+if (crcConfigured && !crcDryRun) {
+  console.log("✅ Credit Repair Cloud API configured (live mode)");
+} else if (crcConfigured && crcDryRun) {
+  console.log(
+    "✅ Credit Repair Cloud API configured (DRY-RUN — no real calls)",
+  );
+} else {
+  console.warn(
+    "⚠️  CRC_API_AUTH_KEY / CRC_SECRET_KEY not set — CRC sync will be skipped",
+  );
+}
+
+/** Build the XML payload for a CRC lead/client record. */
+function buildCrcClientXml(opts: {
+  type: string;
+  firstname: string;
+  lastname: string;
+  email: string;
+  phone_home?: string | null;
+  street_address?: string | null;
+  city?: string | null;
+  state?: string | null;
+  zip?: string | null;
+  ssno?: string | null;
+  birth_date?: string | null;
+  memo?: string | null;
+  id?: string | null; // required for updateRecord
+}): string {
+  const tag = (name: string, value: string | null | undefined) =>
+    value != null && value !== "" ? `    <${name}>${value}</${name}>` : "";
+
+  const fields = [
+    opts.id != null ? `    <id>${opts.id}</id>` : "",
+    `    <type>${opts.type}</type>`,
+    `    <firstname>${opts.firstname}</firstname>`,
+    `    <lastname>${opts.lastname}</lastname>`,
+    `    <email>${opts.email}</email>`,
+    tag("phone_home", opts.phone_home),
+    tag("street_address", opts.street_address),
+    tag("city", opts.city),
+    tag("state", opts.state),
+    tag("zip", opts.zip),
+    tag("ssno", opts.ssno),
+    tag("birth_date", opts.birth_date),
+    tag("memo", opts.memo),
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  return `<crcloud>\n  <lead>\n${fields}\n  </lead>\n</crcloud>`;
+}
+
+/** Map our pipeline_stage to a CRC client status. */
+function mapStageToCrcType(stage: string): string {
+  if (stage === "new_client") return "Client";
+  if (stage === "completed") return "Client";
+  if (stage === "cancelled") return "Inactive";
+  return "Client"; // active rounds remain Client status
+}
+
+/** POST to CRC API with XML data. Returns parsed JSON response body. */
+async function crcPost(
+  path: string,
+  xmlData: string,
+): Promise<{ success: boolean; crcId?: string; raw?: any; dryRun?: boolean }> {
+  if (!crcConfigured || crcDryRun) {
+    const mode = !crcConfigured ? "no-keys" : "dry-run";
+    console.log(`[crc:${mode}]`, path, "\n" + xmlData);
+    // Return a fake CRC ID so local testing exercises the full code path
+    return { success: true, crcId: undefined, dryRun: true };
+  }
+
+  const url = `${CRC_BASE_URL}${path}?apiauthkey=${encodeURIComponent(process.env.CRC_API_AUTH_KEY!)}&secretkey=${encodeURIComponent(process.env.CRC_SECRET_KEY!)}`;
+
+  const body = new URLSearchParams();
+  body.set("xmlData", xmlData);
+
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+
+  const text = await resp.text();
+  let raw: any;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    raw = { raw: text };
+  }
+
+  // CRC returns {"status":"success","id":"<base64-id>"} on success
+  if (resp.ok && (raw?.status === "success" || raw?.status === "1")) {
+    return { success: true, crcId: raw?.id as string | undefined, raw };
+  }
+  console.error("[crc:error]", path, raw);
+  return { success: false, raw };
+}
+
+/**
+ * Push a local client record to CRC (create or update).
+ * Logs the result in crc_sync_log and updates clients.crc_client_id.
+ */
+async function crcSyncClient(clientId: number): Promise<void> {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT c.id, c.first_name, c.last_name, c.email, c.phone,
+            c.address_line1, c.city, c.state, c.zip,
+            c.ssn_last4, c.date_of_birth, c.pipeline_stage,
+            c.crc_client_id
+     FROM clients c WHERE c.id = ? LIMIT 1`,
+    [clientId],
+  );
+  if (rows.length === 0) return;
+  const c = rows[0];
+
+  const isUpdate = !!c.crc_client_id;
+  const crcType = mapStageToCrcType(c.pipeline_stage as string);
+
+  const xmlData = buildCrcClientXml({
+    id: isUpdate ? (c.crc_client_id as string) : null,
+    type: crcType,
+    firstname: c.first_name as string,
+    lastname: c.last_name as string,
+    email: c.email as string,
+    phone_home: c.phone as string | null,
+    street_address: c.address_line1 as string | null,
+    city: c.city as string | null,
+    state: c.state as string | null,
+    zip: c.zip as string | null,
+    ssno: c.ssn_last4 as string | null,
+    birth_date: c.date_of_birth
+      ? new Date(c.date_of_birth as string).toLocaleDateString("en-US")
+      : null,
+  });
+
+  const action = isUpdate ? "push_update" : "push_create";
+  const endpoint = isUpdate ? "/lead/updateRecord" : "/lead/insertRecord";
+  const result = await crcPost(endpoint, xmlData);
+
+  if (result.success && !isUpdate && result.crcId) {
+    await pool.query<ResultSetHeader>(
+      `UPDATE clients SET crc_client_id = ?, crc_synced_at = NOW() WHERE id = ?`,
+      [result.crcId, clientId],
+    );
+  } else if (result.success && isUpdate) {
+    await pool.query<ResultSetHeader>(
+      `UPDATE clients SET crc_synced_at = NOW() WHERE id = ?`,
+      [clientId],
+    );
+  }
+
+  await pool.query<ResultSetHeader>(
+    `INSERT INTO crc_sync_log (client_id, action, crc_client_id, pipeline_stage, status, error_message, payload)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [
+      clientId,
+      action,
+      result.crcId || (c.crc_client_id as string) || null,
+      c.pipeline_stage,
+      result.success ? "success" : "error",
+      result.success ? null : JSON.stringify(result.raw),
+      JSON.stringify({ xmlData, response: result.raw }),
+    ],
+  );
+}
+
+/** Map Zapier/CRC webhook stage name → our pipeline_stage enum value. */
+const CRC_STAGE_MAP: Record<string, string> = {
+  "new client": "new_client",
+  "docs ready": "docs_ready",
+  "round 1": "round_1",
+  "round 1 (month 1)": "round_1",
+  "round 2": "round_2",
+  "round 2 (month 2)": "round_2",
+  "round 3": "round_3",
+  "round 3 (month 3)": "round_3",
+  "round 4": "round_4",
+  "round 4 (month 4)": "round_4",
+  "round 5": "round_5",
+  "round 5 (month 5)": "round_5",
+  completed: "completed",
+};
+
+// ============================================================================
 // EXPRESS APP
 // ============================================================================
 
@@ -1203,7 +1467,10 @@ function buildApp() {
       [email],
     );
     if (rows.length === 0)
-      return res.status(404).json({ error: "Admin not found" });
+      return res.status(404).json({
+        error:
+          "No staff account found for that email. Double-check for typos or contact your super admin.",
+      });
     const code = await createOtp(
       "admin",
       rows[0].id as number,
@@ -1571,6 +1838,60 @@ function buildApp() {
     },
   );
 
+  // Serve a client's own document file (decrypted, inline)
+  app.get(
+    "/api/portal/documents/:id/file",
+    requireClient,
+    async (req: AuthedRequest, res) => {
+      const clientId = req.auth!.id;
+      const docId = Number(req.params.id);
+      if (!docId || isNaN(docId))
+        return res.status(400).json({ error: "Invalid id" });
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT file_name, mime_type, storage_provider, storage_key, encrypted, enc_iv, enc_tag
+         FROM client_documents WHERE id = ? AND client_id = ? LIMIT 1`,
+        [docId, clientId],
+      );
+      if (rows.length === 0)
+        return res.status(404).json({ error: "Not found" });
+      const doc = rows[0];
+      try {
+        let buf: Buffer;
+        if (doc.storage_provider === "cdn") {
+          const cdnRes = await fetch(doc.storage_key as string);
+          if (!cdnRes.ok)
+            return res.status(404).json({ error: "File not available" });
+          const cdnRaw = Buffer.from(await cdnRes.arrayBuffer());
+          buf =
+            doc.encrypted && doc.enc_iv && doc.enc_tag
+              ? decryptFile(cdnRaw, doc.enc_iv as string, doc.enc_tag as string)
+              : cdnRaw;
+        } else {
+          const raw = await fs.promises.readFile(
+            path.join(UPLOADS_DIR, doc.storage_key as string),
+          );
+          buf =
+            doc.encrypted && doc.enc_iv && doc.enc_tag
+              ? decryptFile(raw, doc.enc_iv as string, doc.enc_tag as string)
+              : raw;
+        }
+        res.set(
+          "Content-Type",
+          (doc.mime_type as string) || "application/octet-stream",
+        );
+        res.set(
+          "Content-Disposition",
+          `inline; filename="${encodeURIComponent(doc.file_name as string)}"`,
+        );
+        res.set("Content-Length", String(buf.length));
+        res.set("Cache-Control", "no-store, no-cache");
+        res.send(buf);
+      } catch {
+        res.status(404).json({ error: "File not found" });
+      }
+    },
+  );
+
   app.post(
     "/api/portal/documents",
     requireClient,
@@ -1594,23 +1915,24 @@ function buildApp() {
 
       const inserted: any[] = [];
       for (const f of files) {
-        const safeFilename = f.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
-        const relKey = `clients/${clientId}/${Date.now()}_${safeFilename}.enc`;
-        const absPath = path.join(UPLOADS_DIR, relKey);
-        await fs.promises.mkdir(path.dirname(absPath), { recursive: true });
         const { encrypted, iv, tag } = encryptFile(f.buffer);
-        await fs.promises.writeFile(absPath, encrypted);
+        const cdnUrl = await uploadToCDN(
+          encrypted,
+          f.originalname + ".enc",
+          "application/octet-stream",
+          clientId,
+        );
         const [r] = await pool.query<ResultSetHeader>(
           `INSERT INTO client_documents
             (client_id, doc_type, file_name, file_size, mime_type, storage_provider, storage_key, encrypted, enc_iv, enc_tag, review_status)
-           VALUES (?,?,?,?,?, 'local', ?, 1, ?, ?, 'pending')`,
+           VALUES (?,?,?,?,?, 'cdn', ?, 1, ?, ?, 'pending')`,
           [
             clientId,
             docType,
             f.originalname,
             f.size,
             f.mimetype,
-            relKey,
+            cdnUrl,
             iv,
             tag,
           ],
@@ -1931,7 +2253,12 @@ function buildApp() {
            SUM(CASE WHEN review_status = 'approved' THEN 1 ELSE 0 END) AS docs_approved,
            SUM(CASE WHEN review_status = 'pending'  THEN 1 ELSE 0 END) AS docs_pending,
            SUM(CASE WHEN review_status = 'rejected' THEN 1 ELSE 0 END) AS docs_rejected
-         FROM client_documents
+         FROM (
+           SELECT client_id, doc_type, review_status,
+             ROW_NUMBER() OVER (PARTITION BY client_id, doc_type ORDER BY uploaded_at DESC) AS rn
+           FROM client_documents
+         ) latest
+         WHERE rn = 1
          GROUP BY client_id
        ) ds ON ds.client_id = c.id
        WHERE c.status NOT IN ('cancelled')
@@ -2143,9 +2470,268 @@ function buildApp() {
           console.error("[flow:completed]", e?.message),
         );
       }
+      // Async CRC sync when stage changes — do not block response
+      crcSyncClient(id).catch((e) =>
+        console.error("[crc:stage-sync]", e?.message),
+      );
       res.json({ ok: true });
     },
   );
+
+  // ============================================================
+  // CREDIT REPAIR CLOUD — ADMIN ENDPOINTS
+  // ============================================================
+
+  /** GET /api/admin/crc/status — check CRC configuration */
+  app.get("/api/admin/crc/status", requireAdmin, (_req, res) => {
+    res.json({
+      configured: crcConfigured,
+      dry_run: crcDryRun,
+      mode: !crcConfigured ? "disabled" : crcDryRun ? "dry_run" : "live",
+    });
+  });
+
+  /**
+   * GET /api/admin/crc/preview/:id — preview the XML payload for a client
+   * without sending anything to CRC. Safe to use anytime.
+   */
+  app.get("/api/admin/crc/preview/:id", requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: "Invalid id" });
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT c.id, c.first_name, c.last_name, c.email, c.phone,
+                c.address_line1, c.city, c.state, c.zip,
+                c.ssn_last4, c.date_of_birth, c.pipeline_stage,
+                c.crc_client_id, c.crc_synced_at
+         FROM clients c WHERE c.id = ? LIMIT 1`,
+      [id],
+    );
+    if (rows.length === 0)
+      return res.status(404).json({ error: "Client not found" });
+    const c = rows[0];
+    const isUpdate = !!c.crc_client_id;
+    const xmlData = buildCrcClientXml({
+      id: isUpdate ? (c.crc_client_id as string) : null,
+      type: mapStageToCrcType(c.pipeline_stage as string),
+      firstname: c.first_name as string,
+      lastname: c.last_name as string,
+      email: c.email as string,
+      phone_home: c.phone as string | null,
+      street_address: c.address_line1 as string | null,
+      city: c.city as string | null,
+      state: c.state as string | null,
+      zip: c.zip as string | null,
+      ssno: c.ssn_last4 as string | null,
+      birth_date: c.date_of_birth
+        ? new Date(c.date_of_birth as string).toLocaleDateString("en-US")
+        : null,
+    });
+    res.json({
+      action: isUpdate ? "updateRecord" : "insertRecord",
+      endpoint: isUpdate
+        ? `${CRC_BASE_URL}/lead/updateRecord`
+        : `${CRC_BASE_URL}/lead/insertRecord`,
+      crc_client_id: c.crc_client_id ?? null,
+      crc_synced_at: c.crc_synced_at ?? null,
+      xmlData,
+      note: "This is a preview only — nothing was sent to CRC.",
+    });
+  });
+
+  /**
+   * POST /api/admin/crc/simulate-webhook — fire a fake Zapier stage-change
+   * event against our own webhook handler. Useful for local testing without Zapier.
+   *
+   * Body: { clientId?: number, email?: string, stage: string }
+   */
+  app.post(
+    "/api/admin/crc/simulate-webhook",
+    requireAdmin,
+    async (req, res) => {
+      const { clientId, email, stage } = req.body || {};
+      if (!stage) return res.status(400).json({ error: "Missing stage" });
+
+      // Resolve the client's email if clientId provided
+      let resolvedEmail = email;
+      if (!resolvedEmail && clientId) {
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT email FROM clients WHERE id = ? LIMIT 1`,
+          [Number(clientId)],
+        );
+        resolvedEmail = rows[0]?.email;
+      }
+      if (!resolvedEmail)
+        return res.status(400).json({ error: "Provide clientId or email" });
+
+      // Forward internally to webhook handler (simulate Zapier POST)
+      const webhookSecret = process.env.CRC_WEBHOOK_SECRET || "";
+      const internalRes = await fetch(
+        `http://localhost:${process.env.PORT || 8080}/api/webhooks/crc`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            secret: webhookSecret,
+            email: resolvedEmail,
+            stage,
+          }),
+        },
+      );
+      const result = await internalRes.json();
+      res.json({ simulated: true, webhook_response: result });
+    },
+  );
+
+  /** POST /api/admin/clients/:id/crc-sync — manually push a client to CRC */
+  app.post(
+    "/api/admin/clients/:id/crc-sync",
+    requireAdmin,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (isNaN(id)) return res.status(400).json({ error: "Invalid id" });
+      try {
+        await crcSyncClient(id);
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT crc_client_id, crc_synced_at FROM clients WHERE id = ? LIMIT 1`,
+          [id],
+        );
+        res.json({
+          ok: true,
+          crc_client_id: rows[0]?.crc_client_id ?? null,
+          crc_synced_at: rows[0]?.crc_synced_at ?? null,
+        });
+      } catch (e: any) {
+        res.status(500).json({ error: e?.message ?? "CRC sync failed" });
+      }
+    },
+  );
+
+  /** GET /api/admin/crc/sync-log — latest CRC sync log entries */
+  app.get("/api/admin/crc/sync-log", requireAdmin, async (req, res) => {
+    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT l.id, l.client_id, c.first_name, c.last_name, c.email,
+              l.action, l.crc_client_id, l.pipeline_stage,
+              l.status, l.error_message, l.created_at
+       FROM crc_sync_log l
+       JOIN clients c ON c.id = l.client_id
+       ORDER BY l.created_at DESC
+       LIMIT ?`,
+      [limit],
+    );
+    res.json(rows);
+  });
+
+  // ============================================================
+  // CREDIT REPAIR CLOUD — WEBHOOK (called by Zapier)
+  // ============================================================
+  /**
+   * POST /api/webhooks/crc
+   * Receives a stage-change event from Zapier (or CRC directly).
+   *
+   * Expected JSON body (sent by Zapier):
+   * {
+   *   "secret": "<CRC_WEBHOOK_SECRET>",  // optional shared secret
+   *   "email": "client@example.com",     // used to look up local client
+   *   "crc_client_id": "ODY4",           // CRC base64 ID (optional fallback)
+   *   "stage": "Round 2 (Month 2)"       // stage name from CRC/GoHighLevel
+   * }
+   */
+  app.post("/api/webhooks/crc", async (req, res) => {
+    // Verify shared secret if configured (timing-safe comparison)
+    const webhookSecret = process.env.CRC_WEBHOOK_SECRET;
+    if (webhookSecret) {
+      const provided = String(req.body?.secret ?? "");
+      const secretBuf = Buffer.from(webhookSecret);
+      const providedBuf = Buffer.alloc(secretBuf.length);
+      providedBuf.write(provided.slice(0, secretBuf.length));
+      if (!crypto.timingSafeEqual(secretBuf, providedBuf)) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+    }
+
+    const { email, crc_client_id, stage } = req.body || {};
+
+    if (!stage) return res.status(400).json({ error: "Missing stage" });
+    if (!email && !crc_client_id)
+      return res.status(400).json({ error: "Missing email or crc_client_id" });
+
+    // Map CRC stage name → our enum
+    const mapped = CRC_STAGE_MAP[String(stage).toLowerCase().trim()];
+    if (!mapped) {
+      console.warn("[crc:webhook] Unknown stage:", stage);
+      return res.status(422).json({ error: `Unknown stage: ${stage}` });
+    }
+
+    // Find the client
+    const params: (string | number)[] = [];
+    let lookup = "";
+    if (email) {
+      lookup = "email = ?";
+      params.push(String(email).toLowerCase().trim());
+    } else {
+      lookup = "crc_client_id = ?";
+      params.push(String(crc_client_id));
+    }
+
+    const [clients] = await pool.query<RowDataPacket[]>(
+      `SELECT id, pipeline_stage, crc_client_id FROM clients WHERE ${lookup} LIMIT 1`,
+      params,
+    );
+
+    if (clients.length === 0) {
+      console.warn("[crc:webhook] Client not found:", email || crc_client_id);
+      // Return 200 so Zapier doesn't retry — we just can't find this client
+      return res.json({ ok: false, reason: "client_not_found" });
+    }
+
+    const client = clients[0];
+    const clientId = client.id as number;
+    const fromStage = client.pipeline_stage as string;
+
+    // Store crc_client_id if we didn't have it yet
+    if (crc_client_id && !client.crc_client_id) {
+      await pool.query<ResultSetHeader>(
+        `UPDATE clients SET crc_client_id = ? WHERE id = ?`,
+        [String(crc_client_id), clientId],
+      );
+    }
+
+    if (fromStage === mapped) {
+      return res.json({ ok: true, unchanged: true });
+    }
+
+    await pool.query<ResultSetHeader>(
+      `UPDATE clients SET pipeline_stage = ?, pipeline_stage_changed_at = NOW() WHERE id = ?`,
+      [mapped, clientId],
+    );
+    await pool.query<ResultSetHeader>(
+      `INSERT INTO client_pipeline_history (client_id, from_stage, to_stage, notes)
+       VALUES (?, ?, ?, 'Automated: CRC webhook')`,
+      [clientId, fromStage, mapped],
+    );
+
+    // Log the webhook sync
+    await pool.query<ResultSetHeader>(
+      `INSERT INTO crc_sync_log (client_id, action, crc_client_id, pipeline_stage, status, payload)
+       VALUES (?, 'webhook_stage_update', ?, ?, 'success', ?)`,
+      [
+        clientId,
+        crc_client_id || client.crc_client_id || null,
+        mapped,
+        JSON.stringify({ from: fromStage, to: mapped, raw_stage: stage }),
+      ],
+    );
+
+    // Trigger reminder flow for completed stage
+    if (mapped === "completed") {
+      triggerReminderFlow("completed", clientId).catch((e) =>
+        console.error("[flow:completed]", e?.message),
+      );
+    }
+
+    res.json({ ok: true, stage: mapped, clientId });
+  });
 
   app.get("/api/admin/documents", requireAdmin, async (req, res) => {
     const status = (req.query.status as string) || "pending";
@@ -2160,10 +2746,10 @@ function buildApp() {
     }
     if (search) {
       conditions.push(
-        "(c.first_name LIKE ? OR c.last_name LIKE ? OR c.email LIKE ?)",
+        "(c.first_name LIKE ? OR c.last_name LIKE ? OR c.email LIKE ? OR d.file_name LIKE ?)",
       );
       const like = `%${search}%`;
-      params.push(like, like, like);
+      params.push(like, like, like, like);
     }
 
     const where =
@@ -2195,14 +2781,25 @@ function buildApp() {
       if (rows.length === 0)
         return res.status(404).json({ error: "Not found" });
       const doc = rows[0];
-      const absPath = path.join(UPLOADS_DIR, doc.storage_key as string);
       try {
-        const raw = await fs.promises.readFile(absPath);
         let buf: Buffer;
-        if (doc.encrypted && doc.enc_iv && doc.enc_tag) {
-          buf = decryptFile(raw, doc.enc_iv as string, doc.enc_tag as string);
+        if (doc.storage_provider === "cdn") {
+          const cdnRes = await fetch(doc.storage_key as string);
+          if (!cdnRes.ok)
+            return res.status(404).json({ error: "File not available" });
+          const cdnRaw = Buffer.from(await cdnRes.arrayBuffer());
+          buf =
+            doc.encrypted && doc.enc_iv && doc.enc_tag
+              ? decryptFile(cdnRaw, doc.enc_iv as string, doc.enc_tag as string)
+              : cdnRaw;
         } else {
-          buf = raw;
+          const raw = await fs.promises.readFile(
+            path.join(UPLOADS_DIR, doc.storage_key as string),
+          );
+          buf =
+            doc.encrypted && doc.enc_iv && doc.enc_tag
+              ? decryptFile(raw, doc.enc_iv as string, doc.enc_tag as string)
+              : raw;
         }
         res.set(
           "Content-Type",
@@ -2216,7 +2813,7 @@ function buildApp() {
         res.set("Cache-Control", "no-store, no-cache");
         res.send(buf);
       } catch {
-        res.status(404).json({ error: "File not found on disk" });
+        res.status(404).json({ error: "File not found" });
       }
     },
   );
@@ -2300,6 +2897,23 @@ function buildApp() {
             `INSERT INTO client_pipeline_history (client_id, from_stage, to_stage, changed_by_admin_id, notes) VALUES (?, 'new_client', 'docs_ready', ?, 'Auto-advanced: all documents approved')`,
             [d.client_id, req.auth!.id],
           );
+          // Notify client that all their documents have been approved
+          const portalUrl = `${APP_URL}/portal/documents`;
+          const approvedTpl = tplAllDocsApproved({
+            firstName: d.first_name,
+            portalUrl,
+          });
+          await sendEmail({
+            to: d.email,
+            subject: approvedTpl.subject,
+            html: approvedTpl.html,
+          }).catch(() => null);
+          if (d.phone) {
+            await sendSms({
+              to: d.phone,
+              body: `Optimum Credit: great news! All your documents have been verified and your case is now being processed. Log in to track your progress: ${APP_URL}/portal`,
+            }).catch(() => null);
+          }
         }
       }
 
@@ -3086,6 +3700,20 @@ function buildApp() {
   });
 
   // ── Section locks ───────────────────────────────────────────────────────────
+
+  // GET /api/portal/section-locks — client portal sections (requires client auth)
+  app.get("/api/portal/section-locks", requireClient, async (_req, res) => {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT section_key, label, is_locked, lock_reason
+       FROM section_locks WHERE section_key LIKE 'portal_%' ORDER BY id ASC`,
+    );
+    res.json({
+      section_locks: rows.map((r) => ({
+        ...r,
+        is_locked: Boolean(r.is_locked),
+      })),
+    });
+  });
 
   // GET /api/admin/section-locks — all sections with lock status (any admin)
   app.get("/api/admin/section-locks", requireAdmin, async (_req, res) => {

@@ -1,6 +1,13 @@
 import { ReactNode, useEffect, useState } from "react";
-import { Link, NavLink, useNavigate } from "react-router-dom";
 import {
+  Link,
+  NavLink,
+  Navigate,
+  useNavigate,
+  useLocation,
+} from "react-router-dom";
+import {
+  Construction,
   LayoutDashboard,
   FileText,
   ScrollText,
@@ -12,29 +19,77 @@ import {
   LogOut,
   Menu,
   X,
+  Lock,
 } from "lucide-react";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { clientLogout, fetchClientMe } from "@/store/slices/clientAuthSlice";
+import { fetchPortalSectionLocks } from "@/store/slices/portalSlice";
 
 interface Props {
   children: ReactNode;
 }
 
-const NAV = [
-  { to: "/portal", end: true, label: "Dashboard", icon: LayoutDashboard },
+const NAV: {
+  to: string;
+  end?: boolean;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+  sectionKey?: string;
+}[] = [
+  {
+    to: "/portal",
+    end: true,
+    label: "Dashboard",
+    icon: LayoutDashboard,
+    sectionKey: "portal_dashboard",
+  },
   { to: "/portal/documents", label: "My Documents", icon: FileText },
-  { to: "/portal/contract", label: "Service Agreement", icon: ScrollText },
-  { to: "/portal/reports", label: "Progress Reports", icon: TrendingUp },
-  { to: "/portal/optibot", label: "Optibot AI", icon: Bot },
-  { to: "/portal/videos", label: "Education", icon: PlayCircle },
-  { to: "/portal/support", label: "Support", icon: LifeBuoy },
-  { to: "/portal/profile", label: "My Profile", icon: User },
+  {
+    to: "/portal/contract",
+    label: "Service Agreement",
+    icon: ScrollText,
+    sectionKey: "portal_contract",
+  },
+  {
+    to: "/portal/reports",
+    label: "Progress Reports",
+    icon: TrendingUp,
+    sectionKey: "portal_reports",
+  },
+  {
+    to: "/portal/optibot",
+    label: "Optibot AI",
+    icon: Bot,
+    sectionKey: "portal_optibot",
+  },
+  {
+    to: "/portal/videos",
+    label: "Education",
+    icon: PlayCircle,
+    sectionKey: "portal_videos",
+  },
+  {
+    to: "/portal/support",
+    label: "Support",
+    icon: LifeBuoy,
+    sectionKey: "portal_support",
+  },
+  {
+    to: "/portal/profile",
+    label: "My Profile",
+    icon: User,
+    sectionKey: "portal_profile",
+  },
 ];
 
 export default function ClientLayout({ children }: Props) {
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
+  const location = useLocation();
   const { user, token } = useAppSelector((s) => s.clientAuth);
+  const { sectionLocks, sectionLocksInitialized } = useAppSelector(
+    (s) => s.portal,
+  );
   const [mobileOpen, setMobileOpen] = useState(false);
 
   useEffect(() => {
@@ -44,6 +99,26 @@ export default function ClientLayout({ children }: Props) {
   useEffect(() => {
     if (!token) navigate("/portal/login", { replace: true });
   }, [token, navigate]);
+
+  useEffect(() => {
+    if (token) dispatch(fetchPortalSectionLocks());
+  }, [token, dispatch]);
+
+  // Build locked key set from DB
+  const lockedKeys = new Set(
+    sectionLocks.filter((l) => l.is_locked).map((l) => l.section_key),
+  );
+
+  // Redirect direct URL access to locked sections (only after locks are loaded)
+  const isLockedRoute =
+    sectionLocksInitialized &&
+    NAV.some(
+      (item) =>
+        item.sectionKey &&
+        lockedKeys.has(item.sectionKey) &&
+        location.pathname === item.to,
+    );
+  if (isLockedRoute) return <Navigate to="/portal/documents" replace />;
 
   const handleLogout = async () => {
     await dispatch(clientLogout());
@@ -118,24 +193,58 @@ export default function ClientLayout({ children }: Props) {
 
           {/* Nav */}
           <nav className="flex-1 px-3 space-y-1 overflow-y-auto">
-            {NAV.map((item) => (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.end}
-                onClick={() => setMobileOpen(false)}
-                className={({ isActive }) =>
-                  `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
-                    isActive
-                      ? "bg-primary text-primary-foreground shadow-sm"
-                      : "text-muted-foreground hover:text-foreground hover:bg-secondary"
-                  }`
-                }
-              >
-                <item.icon className="w-4.5 h-4.5 w-5 h-5" />
-                {item.label}
-              </NavLink>
-            ))}
+            {!sectionLocksInitialized ? (
+              // Skeleton nav while locks load — prevents flash of unlocked items
+              <div className="space-y-0.5">
+                {Array.from({ length: 8 }).map((_, i) => (
+                  <div
+                    key={i}
+                    className="flex items-center gap-3 px-3 py-2.5 rounded-lg animate-pulse"
+                  >
+                    <div className="w-5 h-5 rounded bg-muted shrink-0" />
+                    <div className="h-3 rounded bg-muted flex-1" />
+                  </div>
+                ))}
+              </div>
+            ) : (
+              NAV.map((item) => {
+                const locked = item.sectionKey
+                  ? lockedKeys.has(item.sectionKey)
+                  : false;
+                const lockData = locked
+                  ? sectionLocks.find((l) => l.section_key === item.sectionKey)
+                  : null;
+                const tooltip = lockData?.lock_reason ?? "Coming soon";
+                return locked ? (
+                  <div
+                    key={item.to}
+                    title={tooltip}
+                    className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium cursor-not-allowed select-none text-muted-foreground/40"
+                  >
+                    <item.icon className="w-5 h-5 shrink-0" />
+                    <span className="flex-1">{item.label}</span>
+                    <Lock className="w-3 h-3 shrink-0" />
+                  </div>
+                ) : (
+                  <NavLink
+                    key={item.to}
+                    to={item.to}
+                    end={item.end}
+                    onClick={() => setMobileOpen(false)}
+                    className={({ isActive }) =>
+                      `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                        isActive
+                          ? "bg-primary text-primary-foreground shadow-sm"
+                          : "text-muted-foreground hover:text-foreground hover:bg-secondary"
+                      }`
+                    }
+                  >
+                    <item.icon className="w-5 h-5" />
+                    {item.label}
+                  </NavLink>
+                );
+              })
+            )}
           </nav>
 
           <div className="p-3 mt-2 border-t border-border">
@@ -151,9 +260,23 @@ export default function ClientLayout({ children }: Props) {
 
         {/* Main content */}
         <main className="flex-1 min-w-0">
-          <div className="container max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-6 md:py-10">
-            {children}
+          {/* Work in progress banner */}
+          <div className="flex items-center gap-3 px-4 sm:px-6 lg:px-8 py-2.5 bg-amber-500/10 border-b border-amber-500/20">
+            <Construction className="w-4 h-4 text-amber-500 shrink-0" />
+            <p className="text-xs text-amber-600 font-medium">
+              Client portal is currently under active development — some
+              features may be incomplete or change.
+            </p>
           </div>
+          {!sectionLocksInitialized ? (
+            <div className="flex items-center justify-center h-64">
+              <div className="w-6 h-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
+            </div>
+          ) : (
+            <div className="container max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-6 md:py-10">
+              {children}
+            </div>
+          )}
         </main>
       </div>
     </div>

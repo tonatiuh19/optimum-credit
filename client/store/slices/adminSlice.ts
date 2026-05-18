@@ -58,6 +58,7 @@ interface AdminState {
   couponsSaving: boolean;
   sectionLocks: SectionLock[];
   sectionLocksLoading: boolean;
+  sectionLocksInitialized: boolean;
   sectionLocksSaving: boolean;
   loading: boolean;
   saving: boolean;
@@ -89,6 +90,7 @@ const initialState: AdminState = {
   couponsSaving: false,
   sectionLocks: [],
   sectionLocksLoading: true,
+  sectionLocksInitialized: false,
   sectionLocksSaving: false,
   loading: false,
   saving: false,
@@ -626,6 +628,7 @@ const slice = createSlice({
     b.addCase(fetchSectionLocks.fulfilled, (s, a) => {
       s.sectionLocks = a.payload;
       s.sectionLocksLoading = false;
+      s.sectionLocksInitialized = true;
     });
     b.addCase(updateSectionLock.pending, (s) => {
       s.sectionLocksSaving = true;

@@ -3,6 +3,7 @@ import {
   Archive,
   X,
   Eye,
+  ExternalLink,
   Calendar,
   FileText,
   ShieldCheck,
@@ -393,20 +394,24 @@ export default function AdminDocuments() {
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
                   {fileUrl && (
-                    <a
-                      href={fileUrl}
-                      download={selected.file_name}
-                      className="inline-flex items-center gap-1.5 text-xs text-foreground/80 hover:text-foreground bg-muted hover:bg-muted/80 px-2.5 py-1.5 rounded-lg transition-colors"
-                    >
-                      <Download className="w-3.5 h-3.5" /> Download
-                    </a>
+                    <>
+                      <a
+                        href={fileUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 text-xs text-foreground/80 hover:text-foreground bg-muted hover:bg-muted/80 px-2.5 py-1.5 rounded-lg transition-colors"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" /> Open in tab
+                      </a>
+                      <a
+                        href={fileUrl}
+                        download={selected.file_name}
+                        className="inline-flex items-center gap-1.5 text-xs text-foreground/80 hover:text-foreground bg-muted hover:bg-muted/80 px-2.5 py-1.5 rounded-lg transition-colors"
+                      >
+                        <Download className="w-3.5 h-3.5" /> Download
+                      </a>
+                    </>
                   )}
-                  <button
-                    onClick={closeDoc}
-                    className="w-7 h-7 rounded-lg bg-muted hover:bg-muted/80 flex items-center justify-center"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
                 </div>
               </div>
 

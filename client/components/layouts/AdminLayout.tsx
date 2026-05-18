@@ -146,7 +146,8 @@ export default function AdminLayout({ children }: Props) {
   const navigate = useNavigate();
   const location = useLocation();
   const { user, token } = useAppSelector((s) => s.adminAuth);
-  const { sectionLocks, sectionLocksLoading } = useAppSelector((s) => s.admin);
+  const { sectionLocks, sectionLocksLoading, sectionLocksInitialized } =
+    useAppSelector((s) => s.admin);
   const isSuperAdmin = user?.role === "super_admin";
   const [mobileOpen, setMobileOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
@@ -168,14 +169,18 @@ export default function AdminLayout({ children }: Props) {
     sectionLocks.filter((l) => l.is_locked).map((l) => l.section_key),
   );
 
-  // Synchronously check if the current route is locked (no flash)
+  // Synchronously check if the current route is locked (no flash).
+  // Use exact match for items with `end: true` (e.g. /admin dashboard) so the
+  // "/admin" prefix doesn't incorrectly match every admin sub-route.
   const isCurrentLocked =
     !sectionLocksLoading &&
     NAV_GROUPS.flatMap((g) => g.items).some(
       (item) =>
         item.sectionKey &&
         lockedKeys.has(item.sectionKey) &&
-        location.pathname.startsWith(item.to),
+        (item.end
+          ? location.pathname === item.to
+          : location.pathname.startsWith(item.to)),
     );
 
   if (isCurrentLocked) return <Navigate to="/admin" replace />;
@@ -450,7 +455,7 @@ export default function AdminLayout({ children }: Props) {
         </header>
 
         <main className="flex-1 overflow-y-auto">
-          {sectionLocksLoading ? (
+          {!sectionLocksInitialized ? (
             <div className="flex items-center justify-center h-full">
               <div className="w-6 h-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
             </div>

@@ -3,6 +3,7 @@ import api from "@/lib/api";
 import type {
   ClientDocument,
   RoundReport,
+  SectionLock,
   SupportTicket,
   AiChatSession,
   AiChatMessage,
@@ -17,6 +18,8 @@ interface PortalState {
   videos: EducationalVideo[];
   chatSessions: AiChatSession[];
   chatMessages: AiChatMessage[];
+  sectionLocks: SectionLock[];
+  sectionLocksInitialized: boolean;
   loading: boolean;
   error: string | null;
 }
@@ -29,6 +32,8 @@ const initialState: PortalState = {
   videos: [],
   chatSessions: [],
   chatMessages: [],
+  sectionLocks: [],
+  sectionLocksInitialized: false,
   loading: false,
   error: null,
 };
@@ -37,6 +42,14 @@ export const fetchDashboard = createAsyncThunk("portal/dashboard", async () => {
   const { data } = await api.get("/portal/dashboard");
   return data;
 });
+
+export const fetchPortalSectionLocks = createAsyncThunk(
+  "portal/sectionLocks",
+  async () => {
+    const { data } = await api.get("/portal/section-locks");
+    return data.section_locks as SectionLock[];
+  },
+);
 
 export const uploadDocuments = createAsyncThunk<
   { documents: any[] },
@@ -151,6 +164,10 @@ const slice = createSlice({
     });
     b.addCase(fetchChatMessages.fulfilled, (s, a) => {
       s.chatMessages = a.payload;
+    });
+    b.addCase(fetchPortalSectionLocks.fulfilled, (s, a) => {
+      s.sectionLocks = a.payload;
+      s.sectionLocksInitialized = true;
     });
   },
 });

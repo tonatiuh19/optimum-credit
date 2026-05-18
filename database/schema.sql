@@ -161,6 +161,9 @@ CREATE TABLE IF NOT EXISTS `clients` (
   `anet_payment_profile_id` VARCHAR(64) DEFAULT NULL,
   -- Status
   `status` ENUM('pending_payment','onboarding','active','paused','cancelled') NOT NULL DEFAULT 'pending_payment',
+  -- Credit Repair Cloud integration
+  `crc_client_id` VARCHAR(64) DEFAULT NULL COMMENT 'Base64-encoded CRC lead/client ID from CRC API',
+  `crc_synced_at` DATETIME DEFAULT NULL COMMENT 'Last successful sync with CRC API',
   `email_verified_at` DATETIME DEFAULT NULL,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -169,6 +172,7 @@ CREATE TABLE IF NOT EXISTS `clients` (
   KEY `idx_clients_pipeline_stage` (`pipeline_stage`),
   KEY `idx_clients_package` (`package_id`),
   KEY `idx_clients_affiliate` (`affiliate_id`),
+  KEY `idx_clients_crc_id` (`crc_client_id`),
   CONSTRAINT `fk_clients_package` FOREIGN KEY (`package_id`) REFERENCES `packages`(`id`) ON DELETE SET NULL,
   CONSTRAINT `fk_clients_affiliate` FOREIGN KEY (`affiliate_id`) REFERENCES `affiliates`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -241,7 +245,7 @@ CREATE TABLE IF NOT EXISTS `client_documents` (
   `file_name` VARCHAR(255) NOT NULL,
   `file_size` INT UNSIGNED NOT NULL,
   `mime_type` VARCHAR(100) NOT NULL,
-  `storage_provider` ENUM('local','s3','r2') NOT NULL DEFAULT 'local',
+  `storage_provider` ENUM('local','s3','r2','cdn') NOT NULL DEFAULT 'local',
   `storage_key` VARCHAR(500) NOT NULL,
   `encrypted` TINYINT(1) NOT NULL DEFAULT 1,
   `enc_iv` CHAR(32) DEFAULT NULL COMMENT 'AES-256-GCM IV (16 bytes hex)',
@@ -336,6 +340,26 @@ CREATE TABLE IF NOT EXISTS `client_pipeline_history` (
   KEY `idx_pipeline_history_created` (`created_at`),
   CONSTRAINT `fk_pipeline_history_client` FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_pipeline_history_admin` FOREIGN KEY (`changed_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================================
+-- CRC SYNC LOG (Credit Repair Cloud integration audit trail)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `crc_sync_log` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `client_id` INT UNSIGNED NOT NULL,
+  `action` ENUM('push_create','push_update','pull','webhook_stage_update') NOT NULL,
+  `crc_client_id` VARCHAR(64) DEFAULT NULL,
+  `pipeline_stage` VARCHAR(50) DEFAULT NULL,
+  `status` ENUM('success','error') NOT NULL DEFAULT 'success',
+  `error_message` TEXT DEFAULT NULL,
+  `payload` JSON DEFAULT NULL COMMENT 'Request/response payload for debugging',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_crc_sync_client` (`client_id`),
+  KEY `idx_crc_sync_action` (`action`),
+  KEY `idx_crc_sync_created` (`created_at`),
+  CONSTRAINT `fk_crc_sync_client` FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================================
@@ -593,7 +617,14 @@ INSERT INTO `section_locks` (`section_key`, `label`, `is_locked`, `lock_reason`)
   ('videos',          'Videos',          0, NULL),
   ('reminder-flows',  'Reminder Flows',  0, NULL),
   ('reports',         'Reports',         0, NULL),
-  ('people',          'People',          0, NULL)
+  ('people',          'People',          0, NULL),
+  ('portal_dashboard', 'Portal — Dashboard',         1, 'Coming soon — client dashboard is under construction.'),
+  ('portal_contract',  'Portal — Service Agreement', 1, 'Coming soon — contracts module is under construction.'),
+  ('portal_reports',   'Portal — Progress Reports',  1, 'Coming soon — reports are under construction.'),
+  ('portal_optibot',   'Portal — Optibot AI',        1, 'Coming soon — AI assistant is under construction.'),
+  ('portal_videos',    'Portal — Education',         1, 'Coming soon — education centre is under construction.'),
+  ('portal_support',   'Portal — Support',           1, 'Coming soon — support tickets are under construction.'),
+  ('portal_profile',   'Portal — My Profile',        1, 'Coming soon — profile page is under construction.')
 ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 
 -- ============================================================================

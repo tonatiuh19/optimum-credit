@@ -35,7 +35,10 @@ export const requestClientOtp = createAsyncThunk<
     await api.post("/auth/client/request-otp", { email });
     return { email };
   } catch (e: any) {
-    return rejectWithValue(e?.response?.data?.error || "Could not send code");
+    return rejectWithValue(
+      e?.response?.data?.error ||
+        "Something went wrong sending your code. Check your connection and try again.",
+    );
   }
 });
 

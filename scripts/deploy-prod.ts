@@ -106,7 +106,8 @@ async function main() {
         LIMIT 1`,
     );
 
-    const currentVersion = (rows as mysql.RowDataPacket[])[0]?.setting_value ?? null;
+    const currentVersion =
+      (rows as mysql.RowDataPacket[])[0]?.setting_value ?? null;
     const deployVersion = explicitVersion
       ? normalizeVersion(explicitVersion)
       : await promptForVersion(currentVersion);

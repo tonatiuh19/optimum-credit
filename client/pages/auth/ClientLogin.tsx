@@ -177,8 +177,20 @@ export default function ClientLogin() {
                 </div>
 
                 {error && (
-                  <div className="text-sm text-destructive bg-destructive/10 border border-destructive/20 px-4 py-3 rounded-xl">
-                    {error}
+                  <div className="rounded-xl border border-destructive/20 bg-destructive/5 px-4 py-3 space-y-3">
+                    <p className="text-sm text-destructive">{error}</p>
+                    <div className="border-t border-destructive/10 pt-3 space-y-1.5">
+                      <p className="text-xs text-muted-foreground">
+                        Haven't started your credit journey yet?
+                      </p>
+                      <Link
+                        to={`/register?email=${encodeURIComponent(emailForm.values.email)}`}
+                        className="w-full btn-primary rounded-xl gap-2 flex items-center justify-center text-sm"
+                      >
+                        <Sparkles className="w-4 h-4" />
+                        Get started — create your account
+                      </Link>
+                    </div>
                   </div>
                 )}
 
@@ -196,24 +208,28 @@ export default function ClientLogin() {
                   )}
                 </button>
 
-                <div className="relative my-2">
-                  <div className="absolute inset-0 flex items-center">
-                    <div className="w-full border-t border-border" />
-                  </div>
-                  <div className="relative flex justify-center text-xs">
-                    <span className="px-3 bg-background text-muted-foreground">
-                      New here?
-                    </span>
-                  </div>
-                </div>
+                {!error && (
+                  <>
+                    <div className="relative my-2">
+                      <div className="absolute inset-0 flex items-center">
+                        <div className="w-full border-t border-border" />
+                      </div>
+                      <div className="relative flex justify-center text-xs">
+                        <span className="px-3 bg-background text-muted-foreground">
+                          New here?
+                        </span>
+                      </div>
+                    </div>
 
-                <Link
-                  to="/register"
-                  className="w-full btn-secondary rounded-xl gap-2 flex items-center justify-center"
-                >
-                  <Sparkles className="w-4 h-4 text-primary" />
-                  Start your credit journey
-                </Link>
+                    <Link
+                      to="/register"
+                      className="w-full btn-secondary rounded-xl gap-2 flex items-center justify-center"
+                    >
+                      <Sparkles className="w-4 h-4 text-primary" />
+                      Start your credit journey
+                    </Link>
+                  </>
+                )}
               </form>
             ) : (
               <form onSubmit={codeForm.handleSubmit} className="space-y-4">

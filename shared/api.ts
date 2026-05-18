@@ -210,11 +210,41 @@ export interface AdminClientListItem {
   created_at: string;
   package_name?: string | null;
   package_slug?: string | null;
+  // CRC integration
+  crc_client_id?: string | null;
+  crc_synced_at?: string | null;
   // doc task counts (from pipeline endpoint)
   docs_total?: number;
   docs_approved?: number;
   docs_pending?: number;
   docs_rejected?: number;
+}
+
+// ============================================================
+// CREDIT REPAIR CLOUD (CRC)
+// ============================================================
+export interface CrcSyncLogEntry {
+  id: number;
+  client_id: number;
+  first_name: string;
+  last_name: string;
+  email: string;
+  action: "push_create" | "push_update" | "pull" | "webhook_stage_update";
+  crc_client_id?: string | null;
+  pipeline_stage?: string | null;
+  status: "success" | "error";
+  error_message?: string | null;
+  created_at: string;
+}
+
+export interface CrcStatusResponse {
+  configured: boolean;
+}
+
+export interface CrcSyncResponse {
+  ok: boolean;
+  crc_client_id: string | null;
+  crc_synced_at: string | null;
 }
 
 export interface AdminClientFormPayload {

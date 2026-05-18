@@ -138,7 +138,7 @@ export default function Register() {
     initialValues: {
       firstName: "",
       lastName: "",
-      email: "",
+      email: new URLSearchParams(location.search).get("email") || "",
       phone: "",
     },
     validationSchema: REG_SCHEMA,

@@ -107,7 +107,7 @@ export default function AdminConversations() {
                   ← Back to list
                 </button>
                 <div className="font-semibold">
-                  {active.client_first_name} {active.client_last_name}
+                  {active.first_name} {active.last_name}
                 </div>
               </div>
               <div className="flex-1 overflow-y-auto p-4 space-y-2">

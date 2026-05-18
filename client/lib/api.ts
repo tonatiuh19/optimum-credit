@@ -28,7 +28,7 @@ api.interceptors.request.use((config) => {
   const isAdmin = url.startsWith("/admin") || url.startsWith("/auth/admin");
   const token = isAdmin ? getAdminToken() : getClientToken();
   if (token) {
-    config.headers = config.headers ?? {};
+    config.headers = (config.headers ?? {}) as any;
     (config.headers as any).Authorization = `Bearer ${token}`;
   }
   return config;
