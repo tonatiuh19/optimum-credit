@@ -5,9 +5,11 @@ import {
   CheckCircle2,
   Circle,
   FileText,
-  ScrollText,
+  LifeBuoy,
+  PlayCircle,
   Sparkles,
   TrendingUp,
+  User,
 } from "lucide-react";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { fetchDashboard } from "@/store/slices/portalSlice";
@@ -52,24 +54,19 @@ export default function Dashboard() {
   const docsApproved = (dashboard?.documents || []).filter(
     (d: any) => d.review_status === "approved",
   ).length;
+  const smartCreditConnected =
+    !!user?.smart_credit_connected_at ||
+    !!dashboard?.client?.smart_credit_connected_at;
 
   const onboardingTodos = [
-    {
-      label: "Sign service agreement",
-      done:
-        !!user?.contract_signed_at || !!dashboard?.client?.contract_signed_at,
-      to: "/portal/contract",
-    },
     {
       label: "Upload your documents",
       done: docsApproved >= 4,
       to: "/portal/documents",
     },
     {
-      label: "Connect Smart Credit",
-      done:
-        !!user?.smart_credit_connected_at ||
-        !!dashboard?.client?.smart_credit_connected_at,
+      label: "Connect Smart Credit monitoring",
+      done: smartCreditConnected,
       to: "/portal/profile",
     },
   ];
@@ -86,27 +83,45 @@ export default function Dashboard() {
       </div>
 
       {loading && !dashboard ? (
-        <div className="text-muted-foreground">Loading…</div>
+        <div className="grid sm:grid-cols-3 gap-4">
+          {[0, 1, 2].map((i) => (
+            <div
+              key={i}
+              className="bg-card rounded-2xl border border-border p-5 h-24 animate-pulse"
+            />
+          ))}
+        </div>
       ) : (
         <>
           {/* Pipeline progress */}
           <div className="bg-card rounded-2xl border border-border p-6 shadow-sm">
-            <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center justify-between mb-5">
               <h2 className="text-lg font-semibold">Your Progress</h2>
-              <span className="text-xs font-semibold uppercase tracking-wide bg-primary/10 text-primary px-2 py-1 rounded-full">
-                {STAGE_LABELS[stage] || stage}
-              </span>
+              <div className="flex items-center gap-2">
+                {dashboard?.active_case?.case_number && (
+                  <span className="font-mono text-[11px] font-bold text-muted-foreground bg-muted border border-border px-2 py-0.5 rounded">
+                    {dashboard.active_case.case_number}
+                  </span>
+                )}
+                <span className="text-xs font-semibold uppercase tracking-wide bg-primary/10 text-primary px-2.5 py-1 rounded-full">
+                  {STAGE_LABELS[stage] || stage}
+                </span>
+              </div>
             </div>
-            <div className="grid grid-cols-4 sm:grid-cols-8 gap-1.5">
+            <div className="grid grid-cols-4 sm:grid-cols-8 gap-2">
               {STAGE_ORDER.map((s, i) => (
-                <div key={s} className="flex flex-col items-center gap-1">
+                <div key={s} className="flex flex-col items-center gap-1.5">
                   <div
-                    className={`w-full h-2 rounded-full ${
-                      i <= stageIdx ? "bg-primary" : "bg-secondary"
+                    className={`w-full h-2 rounded-full transition-all duration-500 ${
+                      i < stageIdx
+                        ? "bg-accent"
+                        : i === stageIdx
+                          ? "bg-primary"
+                          : "bg-secondary"
                     }`}
                   />
                   <span
-                    className={`text-[10px] sm:text-xs text-center ${
+                    className={`text-[10px] text-center leading-tight ${
                       i <= stageIdx
                         ? "text-foreground font-medium"
                         : "text-muted-foreground"
@@ -130,21 +145,21 @@ export default function Dashboard() {
                   0,
                 ),
               )}
-              tint="from-accent/10 to-accent/0"
+              tint="from-accent/10 to-transparent"
               color="text-accent"
             />
             <StatCard
               icon={FileText}
               label="Documents Approved"
               value={`${docsApproved}/4`}
-              tint="from-primary/10 to-primary/0"
+              tint="from-primary/10 to-transparent"
               color="text-primary"
             />
             <StatCard
               icon={Sparkles}
-              label="Latest Score"
+              label="Latest Credit Score"
               value={latest?.score_after ? String(latest.score_after) : "—"}
-              tint="from-yellow-100 to-yellow-50"
+              tint="from-yellow-500/10 to-transparent"
               color="text-yellow-600"
             />
           </div>
@@ -152,12 +167,12 @@ export default function Dashboard() {
           {/* Onboarding checklist */}
           <div className="bg-card rounded-2xl border border-border p-6 shadow-sm">
             <h2 className="text-lg font-semibold mb-4">Get started</h2>
-            <ul className="space-y-3">
+            <ul className="space-y-2">
               {onboardingTodos.map((t) => (
                 <li key={t.label}>
                   <Link
                     to={t.to}
-                    className="flex items-center gap-3 p-3 -mx-3 rounded-lg hover:bg-secondary/60 transition-colors"
+                    className="flex items-center gap-3 p-3 -mx-3 rounded-xl hover:bg-secondary/60 transition-colors"
                   >
                     {t.done ? (
                       <CheckCircle2 className="w-5 h-5 text-accent shrink-0" />
@@ -165,7 +180,7 @@ export default function Dashboard() {
                       <Circle className="w-5 h-5 text-muted-foreground shrink-0" />
                     )}
                     <span
-                      className={`flex-1 ${
+                      className={`flex-1 text-sm ${
                         t.done
                           ? "line-through text-muted-foreground"
                           : "font-medium"
@@ -173,7 +188,9 @@ export default function Dashboard() {
                     >
                       {t.label}
                     </span>
-                    <ArrowRight className="w-4 h-4 text-muted-foreground" />
+                    {!t.done && (
+                      <ArrowRight className="w-4 h-4 text-muted-foreground" />
+                    )}
                   </Link>
                 </li>
               ))}
@@ -189,61 +206,59 @@ export default function Dashboard() {
                 </h2>
                 <Link
                   to="/portal/reports"
-                  className="text-sm text-primary font-medium inline-flex items-center"
+                  className="text-sm text-primary font-medium inline-flex items-center gap-1 hover:underline"
                 >
-                  All reports <ArrowRight className="w-4 h-4 ml-1" />
+                  All reports <ArrowRight className="w-3.5 h-3.5" />
                 </Link>
               </div>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
-                <div>
-                  <div className="text-muted-foreground text-xs uppercase">
-                    Items Removed
-                  </div>
-                  <div className="text-2xl font-bold mt-1">
-                    {latest.items_removed || 0}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-muted-foreground text-xs uppercase">
-                    Items Disputed
-                  </div>
-                  <div className="text-2xl font-bold mt-1">
-                    {latest.items_disputed || 0}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-muted-foreground text-xs uppercase">
-                    Score Before
-                  </div>
-                  <div className="text-2xl font-bold mt-1">
-                    {latest.score_before || "—"}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-muted-foreground text-xs uppercase">
-                    Score After
-                  </div>
-                  <div className="text-2xl font-bold mt-1 text-accent">
-                    {latest.score_after || "—"}
-                  </div>
-                </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                <ReportStat
+                  label="Items Removed"
+                  value={latest.items_removed || 0}
+                  accent
+                />
+                <ReportStat
+                  label="Items Disputed"
+                  value={latest.items_disputed || 0}
+                />
+                <ReportStat
+                  label="Score Before"
+                  value={latest.score_before || "—"}
+                />
+                <ReportStat
+                  label="Score After"
+                  value={latest.score_after || "—"}
+                  accent
+                />
               </div>
             </div>
           )}
 
           {/* Quick links */}
-          <div className="grid sm:grid-cols-2 gap-4">
+          <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <QuickLink
               to="/portal/documents"
               icon={FileText}
-              title="Upload documents"
-              desc="ID, SSN, and proof of address"
+              title="My Documents"
+              desc="Upload & track docs"
             />
             <QuickLink
-              to="/portal/contract"
-              icon={ScrollText}
-              title="Service agreement"
-              desc="Review and e-sign"
+              to="/portal/reports"
+              icon={TrendingUp}
+              title="Progress Reports"
+              desc="Round-by-round results"
+            />
+            <QuickLink
+              to="/portal/videos"
+              icon={PlayCircle}
+              title="Education"
+              desc="Learn credit strategies"
+            />
+            <QuickLink
+              to="/portal/support"
+              icon={LifeBuoy}
+              title="Support"
+              desc="Get help from our team"
             />
           </div>
         </>
@@ -259,7 +274,7 @@ function StatCard({
   tint,
   color,
 }: {
-  icon: any;
+  icon: React.ComponentType<{ className?: string }>;
   label: string;
   value: string;
   tint: string;
@@ -269,11 +284,32 @@ function StatCard({
     <div
       className={`bg-gradient-to-br ${tint} bg-card rounded-2xl border border-border p-5 shadow-sm`}
     >
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between mb-2">
         <span className="text-sm text-muted-foreground">{label}</span>
         <Icon className={`w-5 h-5 ${color}`} />
       </div>
-      <div className="text-3xl font-bold mt-2">{value}</div>
+      <div className="text-3xl font-bold">{value}</div>
+    </div>
+  );
+}
+
+function ReportStat({
+  label,
+  value,
+  accent,
+}: {
+  label: string;
+  value: string | number;
+  accent?: boolean;
+}) {
+  return (
+    <div>
+      <div className="text-xs uppercase text-muted-foreground tracking-wide">
+        {label}
+      </div>
+      <div className={`text-2xl font-bold mt-1 ${accent ? "text-accent" : ""}`}>
+        {value}
+      </div>
     </div>
   );
 }
@@ -285,7 +321,7 @@ function QuickLink({
   desc,
 }: {
   to: string;
-  icon: any;
+  icon: React.ComponentType<{ className?: string }>;
   title: string;
   desc: string;
 }) {
@@ -294,14 +330,13 @@ function QuickLink({
       to={to}
       className="group bg-card rounded-2xl border border-border p-5 shadow-sm hover:border-primary/30 hover:shadow-md transition-all flex items-start gap-4"
     >
-      <div className="w-11 h-11 rounded-xl bg-primary/10 text-primary flex items-center justify-center shrink-0 group-hover:bg-primary group-hover:text-primary-foreground transition-colors">
+      <div className="w-10 h-10 rounded-xl bg-primary/10 text-primary flex items-center justify-center shrink-0 group-hover:bg-primary group-hover:text-primary-foreground transition-colors">
         <Icon className="w-5 h-5" />
       </div>
-      <div className="flex-1">
-        <h3 className="font-semibold">{title}</h3>
-        <p className="text-sm text-muted-foreground">{desc}</p>
+      <div className="flex-1 min-w-0">
+        <h3 className="font-semibold text-sm">{title}</h3>
+        <p className="text-xs text-muted-foreground mt-0.5">{desc}</p>
       </div>
-      <ArrowRight className="w-4 h-4 text-muted-foreground group-hover:text-primary transition-colors" />
     </Link>
   );
 }

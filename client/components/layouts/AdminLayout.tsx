@@ -101,7 +101,7 @@ const NAV_GROUPS = [
       },
       {
         to: "/admin/videos",
-        label: "Videos",
+        label: "Education",
         icon: PlayCircle,
         sectionKey: "videos",
       },

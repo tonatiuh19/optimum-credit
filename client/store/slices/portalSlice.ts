@@ -79,6 +79,13 @@ export const submitSmartCredit = createAsyncThunk<
   await api.post("/portal/smart-credit", args);
 });
 
+export const updateProfile = createAsyncThunk<
+  void,
+  { first_name: string; last_name: string; phone?: string }
+>("portal/updateProfile", async (args) => {
+  await api.put("/portal/profile", args);
+});
+
 export const fetchTickets = createAsyncThunk("portal/tickets", async () => {
   const { data } = await api.get("/portal/tickets");
   return data.tickets as SupportTicket[];

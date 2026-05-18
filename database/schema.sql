@@ -236,12 +236,38 @@ CREATE TABLE IF NOT EXISTS `payments` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================================
+-- CREDIT REPAIR CASES (one per engagement / package purchase)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `credit_repair_cases` (
+  `id`                        INT UNSIGNED  NOT NULL AUTO_INCREMENT,
+  `case_number`               VARCHAR(20)   DEFAULT NULL UNIQUE COMMENT 'e.g. CR-00001; set after INSERT via UPDATE',
+  `client_id`                 INT UNSIGNED  NOT NULL,
+  `package_id`                INT UNSIGNED  DEFAULT NULL,
+  `pipeline_stage`            ENUM('new_client','docs_ready','round_1','round_2','round_3','round_4','round_5','completed','cancelled')
+                                            NOT NULL DEFAULT 'new_client',
+  `pipeline_stage_changed_at` DATETIME      DEFAULT NULL,
+  `status`                    ENUM('active','completed','cancelled','on_hold')
+                                            NOT NULL DEFAULT 'active',
+  `notes`                     TEXT          DEFAULT NULL,
+  `created_at`                DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at`                DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_cases_client`  (`client_id`),
+  KEY `idx_cases_stage`   (`pipeline_stage`),
+  KEY `idx_cases_status`  (`status`),
+  CONSTRAINT `fk_cases_client`  FOREIGN KEY (`client_id`)  REFERENCES `clients`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_cases_package` FOREIGN KEY (`package_id`) REFERENCES `packages`(`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================================
 -- DOCUMENTS (ID, SSN card, proof of address)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS `client_documents` (
   `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
   `client_id` INT UNSIGNED NOT NULL,
+  `case_id` INT UNSIGNED DEFAULT NULL,
   `doc_type` ENUM('id_front','id_back','ssn_card','proof_of_address','other') NOT NULL,
+  `pipeline_round` VARCHAR(30) DEFAULT NULL COMMENT 'Pipeline stage this document is linked to (e.g. round_1)',
   `file_name` VARCHAR(255) NOT NULL,
   `file_size` INT UNSIGNED NOT NULL,
   `mime_type` VARCHAR(100) NOT NULL,
@@ -258,10 +284,12 @@ CREATE TABLE IF NOT EXISTS `client_documents` (
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_client_docs_client` (`client_id`),
+  KEY `idx_client_docs_case` (`case_id`),
   KEY `idx_client_docs_status` (`review_status`),
   KEY `idx_client_docs_type` (`doc_type`),
   CONSTRAINT `fk_client_docs_client` FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE CASCADE,
-  CONSTRAINT `fk_client_docs_admin` FOREIGN KEY (`reviewed_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL
+  CONSTRAINT `fk_client_docs_admin` FOREIGN KEY (`reviewed_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_docs_case` FOREIGN KEY (`case_id`) REFERENCES `credit_repair_cases`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================================
@@ -306,6 +334,7 @@ CREATE TABLE IF NOT EXISTS `client_contracts` (
 CREATE TABLE IF NOT EXISTS `client_round_reports` (
   `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
   `client_id` INT UNSIGNED NOT NULL,
+  `case_id` INT UNSIGNED DEFAULT NULL,
   `round_number` TINYINT UNSIGNED NOT NULL,
   `score_before` SMALLINT UNSIGNED DEFAULT NULL,
   `score_after` SMALLINT UNSIGNED DEFAULT NULL,
@@ -321,7 +350,8 @@ CREATE TABLE IF NOT EXISTS `client_round_reports` (
   UNIQUE KEY `uq_client_round` (`client_id`,`round_number`),
   KEY `idx_round_reports_client` (`client_id`),
   CONSTRAINT `fk_round_reports_client` FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE CASCADE,
-  CONSTRAINT `fk_round_reports_admin` FOREIGN KEY (`created_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL
+  CONSTRAINT `fk_round_reports_admin` FOREIGN KEY (`created_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_reports_case` FOREIGN KEY (`case_id`) REFERENCES `credit_repair_cases`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================================
@@ -478,8 +508,10 @@ CREATE TABLE IF NOT EXISTS `ai_chat_messages` (
 CREATE TABLE IF NOT EXISTS `educational_videos` (
   `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
   `title` VARCHAR(255) NOT NULL,
+  `content_type` ENUM('video','pdf','image','article') NOT NULL DEFAULT 'video',
   `description` TEXT DEFAULT NULL,
-  `video_url` VARCHAR(500) NOT NULL,
+  `video_url` VARCHAR(500) DEFAULT NULL,
+  `file_url` VARCHAR(500) DEFAULT NULL COMMENT 'CDN URL for uploaded file (pdf, image, video)',
   `thumbnail_url` VARCHAR(500) DEFAULT NULL,
   `duration_seconds` INT UNSIGNED DEFAULT NULL,
   `category` VARCHAR(100) DEFAULT NULL,
@@ -490,7 +522,8 @@ CREATE TABLE IF NOT EXISTS `educational_videos` (
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_videos_published` (`is_published`),
-  KEY `idx_videos_category` (`category`)
+  KEY `idx_videos_category` (`category`),
+  KEY `idx_videos_content_type` (`content_type`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================================

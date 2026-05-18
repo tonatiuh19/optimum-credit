@@ -185,14 +185,17 @@ export interface AiChatMessage {
 export interface EducationalVideo {
   id: number;
   title: string;
+  content_type: "video" | "pdf" | "image" | "article";
   description?: string | null;
-  video_url: string;
+  video_url?: string | null;
+  file_url?: string | null;
   thumbnail_url?: string | null;
   duration_seconds?: number | null;
   category?: string | null;
   language: string;
   is_published?: number;
   sort_order?: number;
+  created_at?: string;
 }
 
 // ============================================================
@@ -214,6 +217,36 @@ export interface AdminClientListItem {
   crc_client_id?: string | null;
   crc_synced_at?: string | null;
   // doc task counts (from pipeline endpoint)
+  docs_total?: number;
+  docs_approved?: number;
+  docs_pending?: number;
+  docs_rejected?: number;
+}
+
+// ============================================================
+// CREDIT REPAIR CASES
+// ============================================================
+export interface CreditRepairCase {
+  /** credit_repair_cases.id (case primary key) */
+  id: number;
+  /** e.g. "CR-00001" */
+  case_number: string;
+  client_id: number;
+  first_name: string;
+  last_name: string;
+  email: string;
+  phone?: string | null;
+  package_id?: number | null;
+  package_name?: string | null;
+  package_slug?: string | null;
+  crc_client_id?: string | null;
+  crc_synced_at?: string | null;
+  pipeline_stage: PipelineStage;
+  pipeline_stage_changed_at?: string | null;
+  /** active | completed | cancelled | on_hold */
+  status: "active" | "completed" | "cancelled" | "on_hold";
+  client_status: string;
+  created_at: string;
   docs_total?: number;
   docs_approved?: number;
   docs_pending?: number;

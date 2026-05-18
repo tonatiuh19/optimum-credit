@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Archive,
   X,
@@ -14,6 +15,7 @@ import {
   CheckCircle2,
   Clock,
   ChevronDown,
+  Link2,
 } from "lucide-react";
 import AdminPageHeader from "@/components/AdminPageHeader";
 import { DataGrid } from "@/components/ui/data-grid";
@@ -33,6 +35,22 @@ const DOC_TYPE_LABELS: Record<string, string> = {
   proof_of_address: "Proof of Address",
   other: "Other",
 };
+
+const PIPELINE_ROUNDS: { value: string; label: string }[] = [
+  { value: "new_client", label: "New Client" },
+  { value: "docs_ready", label: "Docs Verified" },
+  { value: "round_1", label: "Round 1" },
+  { value: "round_2", label: "Round 2" },
+  { value: "round_3", label: "Round 3" },
+  { value: "round_4", label: "Round 4" },
+  { value: "round_5", label: "Round 5" },
+  { value: "completed", label: "Completed" },
+  { value: "cancelled", label: "Cancelled" },
+];
+
+const ROUND_LABEL: Record<string, string> = Object.fromEntries(
+  PIPELINE_ROUNDS.map((r) => [r.value, r.label]),
+);
 
 const DOC_TYPE_COLORS: Record<string, string> = {
   id_front: "bg-blue-500/10 text-blue-400 border-blue-500/20",
@@ -67,6 +85,7 @@ interface DocRecord {
   id: number;
   client_id: number;
   doc_type: string;
+  pipeline_round: string | null;
   file_name: string;
   file_size: number;
   mime_type: string;
@@ -95,6 +114,7 @@ function formatDate(s: string) {
 
 export default function AdminDocuments() {
   const dispatch = useAppDispatch();
+  const navigate = useNavigate();
   const { allDocuments, loading } = useAppSelector((s) => s.admin);
 
   const [search, setSearch] = useState("");
@@ -109,7 +129,6 @@ export default function AdminDocuments() {
   const [selected, setSelected] = useState<DocRecord | null>(null);
   const [fileUrl, setFileUrl] = useState<string | null>(null);
   const [fileLoading, setFileLoading] = useState(false);
-
   useEffect(() => {
     dispatch(fetchAllDocuments({ search: debouncedSearch || undefined }));
   }, [dispatch, debouncedSearch]);
@@ -228,6 +247,21 @@ export default function AdminDocuments() {
       ),
     },
     {
+      key: "pipeline_round",
+      label: "Pipeline",
+      sortable: true,
+      shrink: true,
+      render: (d) =>
+        d.pipeline_round ? (
+          <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full border bg-primary/10 text-primary border-primary/20">
+            <Link2 className="w-2.5 h-2.5" />
+            {ROUND_LABEL[d.pipeline_round] ?? d.pipeline_round}
+          </span>
+        ) : (
+          <span className="text-[10px] text-muted-foreground/50">—</span>
+        ),
+    },
+    {
       key: "uploaded_at",
       label: "Uploaded",
       sortable: true,
@@ -271,15 +305,27 @@ export default function AdminDocuments() {
       label: "",
       shrink: true,
       render: (d) => (
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            openDoc(d);
-          }}
-          className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline"
-        >
-          <Eye className="w-3.5 h-3.5" /> View
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              openDoc(d);
+            }}
+            className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline"
+          >
+            <Eye className="w-3.5 h-3.5" /> View
+          </button>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              navigate(`/admin/pipeline?client=${d.client_id}`);
+            }}
+            className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-primary transition-colors"
+            title="View in Pipeline"
+          >
+            <ExternalLink className="w-3.5 h-3.5" />
+          </button>
+        </div>
       ),
     },
   ];
@@ -448,16 +494,18 @@ export default function AdminDocuments() {
               </div>
 
               {/* Footer: metadata */}
-              <div className="px-5 py-3 border-t border-border flex items-center gap-4 text-xs text-muted-foreground shrink-0">
-                <span className="flex items-center gap-1.5">
-                  <Calendar className="w-3 h-3" />
-                  Uploaded {formatDate(selected.uploaded_at)}
-                </span>
-                <span>{formatBytes(selected.file_size)}</span>
-                <span className="flex items-center gap-1.5 ml-auto">
-                  <ShieldCheck className="w-3 h-3 text-accent" />
-                  <span className="text-accent">AES-256 encrypted</span>
-                </span>
+              <div className="px-5 py-3 border-t border-border shrink-0">
+                <div className="flex items-center gap-4 text-xs text-muted-foreground">
+                  <span className="flex items-center gap-1.5">
+                    <Calendar className="w-3 h-3" />
+                    Uploaded {formatDate(selected.uploaded_at)}
+                  </span>
+                  <span>{formatBytes(selected.file_size)}</span>
+                  <span className="flex items-center gap-1.5 ml-auto">
+                    <ShieldCheck className="w-3 h-3 text-accent" />
+                    <span className="text-accent">AES-256 encrypted</span>
+                  </span>
+                </div>
               </div>
             </div>
           )}

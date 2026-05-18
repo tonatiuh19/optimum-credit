@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
+import { useSearchParams } from "react-router-dom";
 import type { LucideIcon } from "lucide-react";
 import {
   Workflow,
@@ -22,17 +23,18 @@ import {
   ScanLine,
   Hash,
   Home,
+  Link2,
 } from "lucide-react";
 import AdminPageHeader from "@/components/AdminPageHeader";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
   fetchPipeline,
-  updateClientStage,
-  fetchPanelClient,
+  updateCaseStage,
+  fetchPanelCase,
   clearPanelClient,
   reviewDocument,
 } from "@/store/slices/adminSlice";
-import type { AdminClientListItem, PipelineStage } from "@shared/api";
+import type { CreditRepairCase, PipelineStage } from "@shared/api";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -137,13 +139,13 @@ function fmtDate(s: string) {
     year: "numeric",
   });
 }
-function canMoveToDocsReady(c: AdminClientListItem) {
+function formatCaseId(id: number) {
+  return `#CR-${String(id).padStart(5, "0")}`;
+}
+function canMoveToDocsReady(c: CreditRepairCase) {
   return (c.docs_approved ?? 0) >= 4 && (c.docs_pending ?? 0) === 0;
 }
-function isDragAllowed(
-  targetStage: string,
-  client: AdminClientListItem | null,
-) {
+function isDragAllowed(targetStage: string, client: CreditRepairCase | null) {
   if (!client) return false;
   if (targetStage === "docs_ready") return canMoveToDocsReady(client);
   return true;
@@ -157,12 +159,13 @@ function KanbanCard({
   onDragEnd,
   onClick,
 }: {
-  client: AdminClientListItem;
+  client: CreditRepairCase;
   onDragStart: () => void;
   onDragEnd: () => void;
   onClick: () => void;
 }) {
-  const isPaid = client.status === "onboarding" || client.status === "active";
+  const isPaid =
+    client.client_status === "onboarding" || client.client_status === "active";
   const docsApproved = client.docs_approved ?? 0;
   const docsPending = client.docs_pending ?? 0;
   const docsRejected = client.docs_rejected ?? 0;
@@ -267,8 +270,8 @@ function KanbanCard({
 
         {/* Footer row */}
         <div className="flex items-center justify-between text-[10px] text-muted-foreground">
-          <span className="font-medium">
-            {days === 0 ? "Today" : `${days}d ago`}
+          <span className="font-mono font-semibold text-primary/70">
+            {client.case_number}
           </span>
           <span className="opacity-0 group-hover:opacity-100 transition-opacity text-primary font-semibold flex items-center gap-0.5">
             Open <ArrowRight className="w-2.5 h-2.5" />
@@ -338,6 +341,17 @@ function DocTaskCard({
   };
 
   const DocIcon = docType.icon;
+  const ROUND_LABEL: Record<string, string> = {
+    new_client: "New Client",
+    docs_ready: "Docs Verified",
+    round_1: "Round 1",
+    round_2: "Round 2",
+    round_3: "Round 3",
+    round_4: "Round 4",
+    round_5: "Round 5",
+    completed: "Completed",
+    cancelled: "Cancelled",
+  };
   return (
     <div
       className={`rounded-xl border ${borderBg[status]} p-3.5 transition-colors`}
@@ -356,7 +370,15 @@ function DocTaskCard({
             )}
           </div>
         </div>
-        {statusBadge[status]}
+        <div className="flex items-center gap-1.5">
+          {doc?.pipeline_round && (
+            <span className="inline-flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/20">
+              <Link2 className="w-2 h-2" />
+              {ROUND_LABEL[doc.pipeline_round] ?? doc.pipeline_round}
+            </span>
+          )}
+          {statusBadge[status]}
+        </div>
       </div>
       {status === "rejected" && doc?.rejection_reason && (
         <div className="text-[11px] text-destructive bg-destructive/10 border border-destructive/20 px-2.5 py-2 rounded-lg mb-2 leading-relaxed">
@@ -566,12 +588,13 @@ function HistoryTab({ history }: { history: any[] }) {
 
 export default function AdminPipeline() {
   const dispatch = useAppDispatch();
-  const { pipelineClients, panelClient, panelLoading } = useAppSelector(
+  const { pipelineCases, panelClient, panelLoading } = useAppSelector(
     (s) => s.admin,
   );
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const [panelOpen, setPanelOpen] = useState(false);
-  const [panelClientId, setPanelClientId] = useState<number | null>(null);
+  const [panelCaseId, setPanelCaseId] = useState<number | null>(null);
   const [panelTab, setPanelTab] = useState<
     "overview" | "documents" | "history"
   >("documents");
@@ -592,24 +615,41 @@ export default function AdminPipeline() {
     dispatch(fetchPipeline());
   }, [dispatch]);
 
+  // Auto-open panel when navigated from another page with ?client=ID
+  useEffect(() => {
+    const clientParam = searchParams.get("client");
+    if (clientParam && pipelineCases.length > 0) {
+      const clientId = Number(clientParam);
+      if (!isNaN(clientId) && clientId > 0) {
+        const matchedCase = pipelineCases.find((c) => c.client_id === clientId);
+        if (matchedCase) {
+          setPanelCaseId(matchedCase.id);
+          setPanelTab("documents");
+          setPanelOpen(true);
+          dispatch(fetchPanelCase(matchedCase.id));
+          setSearchParams({}, { replace: true });
+        }
+      }
+    }
+  }, [searchParams, pipelineCases, dispatch, setSearchParams]);
+
   // Panel
-  const openPanel = (clientId: number) => {
-    setPanelClientId(clientId);
+  const openPanel = (caseId: number) => {
+    setPanelCaseId(caseId);
     setPanelTab("documents");
     setPanelOpen(true);
-    dispatch(fetchPanelClient(clientId));
+    dispatch(fetchPanelCase(caseId));
   };
   const closePanel = () => {
     setPanelOpen(false);
-    setPanelClientId(null);
+    setPanelCaseId(null);
     dispatch(clearPanelClient());
     closePreview();
   };
 
   // Drag
-  const draggingClient =
-    pipelineClients.find((c) => c.id === draggingId) ?? null;
-  const onDragStart = (clientId: number) => setDraggingId(clientId);
+  const draggingCase = pipelineCases.find((c) => c.id === draggingId) ?? null;
+  const onDragStart = (caseId: number) => setDraggingId(caseId);
   const onDragEnd = () => {
     setDraggingId(null);
     setDragOverStage(null);
@@ -617,17 +657,17 @@ export default function AdminPipeline() {
   const onDragOver = (e: React.DragEvent, stage: string) => {
     e.preventDefault();
     setDragOverStage(stage);
-    e.dataTransfer.dropEffect = isDragAllowed(stage, draggingClient)
+    e.dataTransfer.dropEffect = isDragAllowed(stage, draggingCase)
       ? "move"
       : "none";
   };
   const onDrop = async (e: React.DragEvent, stage: PipelineStage) => {
     e.preventDefault();
     const id = Number(e.dataTransfer.getData("text/plain"));
-    const client = pipelineClients.find((c) => c.id === id);
+    const kase = pipelineCases.find((c) => c.id === id);
     setDraggingId(null);
     setDragOverStage(null);
-    if (!client || !isDragAllowed(stage, client)) {
+    if (!kase || !isDragAllowed(stage, kase)) {
       if (stage === "docs_ready")
         setStageError(
           "Cannot move to Docs Verified — all 4 documents must be approved first.",
@@ -635,7 +675,7 @@ export default function AdminPipeline() {
       return;
     }
     setStageError(null);
-    await dispatch(updateClientStage({ clientId: id, stage }));
+    await dispatch(updateCaseStage({ caseId: id, stage }));
     dispatch(fetchPipeline());
   };
 
@@ -645,8 +685,8 @@ export default function AdminPipeline() {
     await dispatch(reviewDocument({ id: docId, decision: "approved" }));
     setActionLoadingId(null);
     setRejectingDocId(null);
-    if (panelClientId) {
-      dispatch(fetchPanelClient(panelClientId));
+    if (panelCaseId) {
+      dispatch(fetchPanelCase(panelCaseId));
       dispatch(fetchPipeline());
     }
   };
@@ -659,8 +699,8 @@ export default function AdminPipeline() {
     setActionLoadingId(null);
     setRejectingDocId(null);
     setRejectReason("");
-    if (panelClientId) {
-      dispatch(fetchPanelClient(panelClientId));
+    if (panelCaseId) {
+      dispatch(fetchPanelCase(panelCaseId));
       dispatch(fetchPipeline());
     }
   };
@@ -688,9 +728,9 @@ export default function AdminPipeline() {
   };
 
   // Grouped
-  const grouped = COLUMNS.reduce<Record<string, AdminClientListItem[]>>(
+  const grouped = COLUMNS.reduce<Record<string, CreditRepairCase[]>>(
     (acc, c) => {
-      acc[c.stage] = pipelineClients.filter(
+      acc[c.stage] = pipelineCases.filter(
         (cl) => cl.pipeline_stage === c.stage,
       );
       return acc;
@@ -755,9 +795,9 @@ export default function AdminPipeline() {
       <div className="overflow-x-auto pb-4 -mx-1 px-1">
         <div className="flex gap-3 min-w-max">
           {COLUMNS.map((col) => {
-            const colClients = grouped[col.stage] ?? [];
+            const colCases = grouped[col.stage] ?? [];
             const isDragTarget = dragOverStage === col.stage;
-            const canDrop = isDragAllowed(col.stage, draggingClient);
+            const canDrop = isDragAllowed(col.stage, draggingCase);
             return (
               <div
                 key={col.stage}
@@ -785,26 +825,26 @@ export default function AdminPipeline() {
                         {col.label}
                       </h3>
                       {col.stage === "docs_ready" &&
-                        draggingClient &&
+                        draggingCase &&
                         !canDrop && (
                           <Lock className="w-3 h-3 text-destructive" />
                         )}
                     </div>
                     <span
                       className={`min-w-[20px] h-5 flex items-center justify-center text-[10px] font-bold px-1.5 rounded-md ${
-                        colClients.length > 0
+                        colCases.length > 0
                           ? col.countBg
                           : "text-muted-foreground/40 bg-muted"
                       }`}
                     >
-                      {colClients.length}
+                      {colCases.length}
                     </span>
                   </div>
                 </div>
 
                 {/* Cards */}
                 <div className="flex-1 p-2 space-y-2 overflow-y-auto max-h-[calc(100vh-230px)] min-h-[120px] bg-muted/30">
-                  {colClients.map((c) => (
+                  {colCases.map((c) => (
                     <KanbanCard
                       key={c.id}
                       client={c}
@@ -813,7 +853,7 @@ export default function AdminPipeline() {
                       onClick={() => openPanel(c.id)}
                     />
                   ))}
-                  {colClients.length === 0 && (
+                  {colCases.length === 0 && (
                     <div className="h-20 flex flex-col items-center justify-center gap-1.5 rounded-xl border-2 border-dashed border-border/40">
                       {isDragTarget && canDrop ? (
                         <>
@@ -853,10 +893,16 @@ export default function AdminPipeline() {
               <div className="px-6 pt-5 pb-4 bg-card border-b border-border shrink-0">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <h2 className="text-xl font-bold truncate">
-                      {pd.client.first_name} {pd.client.last_name}
-                    </h2>
-                    <p className="text-sm text-muted-foreground truncate mt-0.5">
+                    <div className="flex items-center gap-2 mb-0.5">
+                      <h2 className="text-xl font-bold truncate">
+                        {pd.client.first_name} {pd.client.last_name}
+                      </h2>
+                      <span className="inline-flex items-center gap-1 font-mono text-[11px] font-bold bg-primary/10 text-primary border border-primary/25 px-2 py-0.5 rounded-md shrink-0">
+                        <Hash className="w-3 h-3" />
+                        {pd.case_info?.case_number ?? ""}
+                      </span>
+                    </div>
+                    <p className="text-sm text-muted-foreground truncate">
                       {pd.client.email}
                     </p>
                   </div>
@@ -910,6 +956,14 @@ export default function AdminPipeline() {
 
                 {panelTab === "documents" && (
                   <div className="space-y-3">
+                    <div className="flex items-center justify-between pb-1">
+                      <span className="text-[11px] text-muted-foreground font-medium">
+                        Case documents
+                      </span>
+                      <span className="font-mono text-[10px] font-bold text-primary/70 bg-primary/8 border border-primary/15 px-1.5 py-0.5 rounded">
+                        {pd.case_info?.case_number ?? ""}
+                      </span>
+                    </div>
                     {REQUIRED_DOCS.map((rd) => {
                       const doc = latestDocByType(rd.type);
                       return (

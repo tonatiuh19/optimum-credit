@@ -217,13 +217,15 @@ async function uploadToCDN(
   buffer: Buffer,
   originalname: string,
   mimetype: string,
-  clientId: number,
+  clientId: number | string,
 ): Promise<string> {
   if (!CDN_UPLOAD_SECRET)
     throw new Error("CDN_UPLOAD_SECRET is not configured");
+  const folderId =
+    typeof clientId === "string" ? clientId : `client-${clientId}`;
   const formData = new FormData();
   formData.append("main_folder", CDN_MAIN_FOLDER);
-  formData.append("id", `client-${clientId}`);
+  formData.append("id", folderId);
   formData.append(
     "files[]",
     new Blob([new Uint8Array(buffer)], { type: mimetype }),
@@ -943,6 +945,32 @@ async function markPaymentSucceeded(clientId: number, transactionId: string) {
     `INSERT INTO audit_logs (actor_type, actor_id, action, entity_type, entity_id) VALUES ('system', NULL, 'payment.succeeded', 'client', ?)`,
     [clientId],
   );
+
+  // Create a credit_repair_cases row if no active case exists for this client
+  const [existingCases] = await pool.query<RowDataPacket[]>(
+    `SELECT id FROM credit_repair_cases WHERE client_id = ? AND status = 'active' LIMIT 1`,
+    [clientId],
+  );
+  if (existingCases.length === 0) {
+    const [pkgRow] = await pool.query<RowDataPacket[]>(
+      `SELECT package_id, pipeline_stage FROM clients WHERE id = ? LIMIT 1`,
+      [clientId],
+    );
+    const [caseInsert] = await pool.query<ResultSetHeader>(
+      `INSERT INTO credit_repair_cases (case_number, client_id, package_id, pipeline_stage, status)
+       VALUES (NULL, ?, ?, COALESCE(?, 'new_client'), 'active')`,
+      [
+        clientId,
+        pkgRow[0]?.package_id ?? null,
+        pkgRow[0]?.pipeline_stage ?? "new_client",
+      ],
+    );
+    const newCaseId = caseInsert.insertId;
+    await pool.query<ResultSetHeader>(
+      `UPDATE credit_repair_cases SET case_number = ? WHERE id = ?`,
+      [`CR-${String(newCaseId).padStart(5, "0")}`, newCaseId],
+    );
+  }
 
   // Trigger the "payment_confirmed" reminder flow (Day 1/2/3 email sequence)
   triggerReminderFlow("payment_confirmed", clientId).catch((e) =>
@@ -1829,11 +1857,20 @@ function buildApp() {
         [clientId],
       );
 
+      const [activeCase] = await pool.query<RowDataPacket[]>(
+        `SELECT id, case_number, pipeline_stage, status, created_at
+         FROM credit_repair_cases
+         WHERE client_id = ? AND status = 'active'
+         ORDER BY created_at DESC LIMIT 1`,
+        [clientId],
+      );
+
       res.json({
         client: clientRows[0],
         documents: docRows,
         reports: reportRows,
         tickets: ticketRows,
+        active_case: activeCase[0] ?? null,
       });
     },
   );
@@ -1922,12 +1959,19 @@ function buildApp() {
           "application/octet-stream",
           clientId,
         );
+        // Resolve active case for this client to link the document
+        const [caseRows] = await pool.query<RowDataPacket[]>(
+          `SELECT id FROM credit_repair_cases WHERE client_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1`,
+          [clientId],
+        );
+        const activeCaseId: number | null = caseRows[0]?.id ?? null;
         const [r] = await pool.query<ResultSetHeader>(
           `INSERT INTO client_documents
-            (client_id, doc_type, file_name, file_size, mime_type, storage_provider, storage_key, encrypted, enc_iv, enc_tag, review_status)
+            (client_id, case_id, doc_type, file_name, file_size, mime_type, storage_provider, storage_key, encrypted, enc_iv, enc_tag, review_status)
            VALUES (?,?,?,?,?, 'cdn', ?, 1, ?, ?, 'pending')`,
           [
             clientId,
+            activeCaseId,
             docType,
             f.originalname,
             f.size,
@@ -1989,6 +2033,25 @@ function buildApp() {
         [signature_name, req.ip || null, clientId],
       );
       res.json({ ok: true, signed_at: new Date().toISOString() });
+    },
+  );
+
+  app.put(
+    "/api/portal/profile",
+    requireClient,
+    async (req: AuthedRequest, res) => {
+      const clientId = req.auth!.id;
+      const { first_name, last_name, phone } = req.body || {};
+      if (!first_name?.trim() || !last_name?.trim()) {
+        return res
+          .status(400)
+          .json({ error: "First and last name are required" });
+      }
+      await pool.query<ResultSetHeader>(
+        `UPDATE clients SET first_name = ?, last_name = ?, phone = ? WHERE id = ?`,
+        [first_name.trim(), last_name.trim(), phone?.trim() || null, clientId],
+      );
+      res.json({ ok: true });
     },
   );
 
@@ -2142,7 +2205,8 @@ function buildApp() {
 
   app.get("/api/portal/videos", requireClient, async (_req, res) => {
     const [rows] = await pool.query<RowDataPacket[]>(
-      `SELECT id, title, description, video_url, thumbnail_url, duration_seconds, category, language
+      `SELECT id, title, content_type, description, video_url, file_url,
+              thumbnail_url, duration_seconds, category, language
        FROM educational_videos WHERE is_published = 1 ORDER BY sort_order ASC, id DESC`,
     );
     res.json({ videos: rows });
@@ -2209,7 +2273,7 @@ function buildApp() {
     );
     if (c.length === 0) return res.status(404).json({ error: "Not found" });
     const [docs] = await pool.query<RowDataPacket[]>(
-      `SELECT id, doc_type, file_name, file_size, mime_type, review_status, rejection_reason, uploaded_at, reviewed_at
+      `SELECT id, doc_type, pipeline_round, file_name, file_size, mime_type, review_status, rejection_reason, uploaded_at, reviewed_at
        FROM client_documents WHERE client_id = ? ORDER BY uploaded_at DESC`,
       [id],
     );
@@ -2238,34 +2302,211 @@ function buildApp() {
 
   app.get("/api/admin/pipeline", requireAdmin, async (_req, res) => {
     const [rows] = await pool.query<RowDataPacket[]>(
-      `SELECT c.id, c.first_name, c.last_name, c.email, c.phone, c.pipeline_stage,
-              c.status, c.created_at, c.pipeline_stage_changed_at,
+      `SELECT cr.id, cr.case_number, cr.client_id, cr.pipeline_stage,
+              cr.pipeline_stage_changed_at, cr.status, cr.created_at,
+              c.first_name, c.last_name, c.email, c.phone,
+              c.status AS client_status,
+              c.crc_client_id, c.crc_synced_at,
               p.name AS package_name, p.slug AS package_slug,
               COALESCE(ds.docs_total,    0) AS docs_total,
               COALESCE(ds.docs_approved, 0) AS docs_approved,
               COALESCE(ds.docs_pending,  0) AS docs_pending,
               COALESCE(ds.docs_rejected, 0) AS docs_rejected
-       FROM clients c
-       LEFT JOIN packages p ON p.id = c.package_id
+       FROM credit_repair_cases cr
+       JOIN clients c ON c.id = cr.client_id
+       LEFT JOIN packages p ON p.id = cr.package_id
        LEFT JOIN (
-         SELECT client_id,
+         SELECT case_id,
            COUNT(*) AS docs_total,
            SUM(CASE WHEN review_status = 'approved' THEN 1 ELSE 0 END) AS docs_approved,
            SUM(CASE WHEN review_status = 'pending'  THEN 1 ELSE 0 END) AS docs_pending,
            SUM(CASE WHEN review_status = 'rejected' THEN 1 ELSE 0 END) AS docs_rejected
          FROM (
-           SELECT client_id, doc_type, review_status,
-             ROW_NUMBER() OVER (PARTITION BY client_id, doc_type ORDER BY uploaded_at DESC) AS rn
+           SELECT case_id, doc_type, review_status,
+             ROW_NUMBER() OVER (PARTITION BY case_id, doc_type ORDER BY uploaded_at DESC) AS rn
            FROM client_documents
+           WHERE case_id IS NOT NULL
          ) latest
          WHERE rn = 1
-         GROUP BY client_id
-       ) ds ON ds.client_id = c.id
-       WHERE c.status NOT IN ('cancelled')
-       ORDER BY c.pipeline_stage_changed_at DESC, c.created_at DESC`,
+         GROUP BY case_id
+       ) ds ON ds.case_id = cr.id
+       WHERE cr.status NOT IN ('cancelled')
+       ORDER BY cr.pipeline_stage_changed_at DESC, cr.created_at DESC`,
     );
-    res.json({ clients: rows });
+    res.json({ cases: rows });
   });
+
+  // ── Get single case detail (pipeline panel) ──────────────────────────────
+  app.get("/api/admin/cases/:id", requireAdmin, async (req, res) => {
+    const caseId = Number(req.params.id);
+    if (!caseId || isNaN(caseId))
+      return res.status(400).json({ error: "Invalid case id" });
+
+    const [caseRows] = await pool.query<RowDataPacket[]>(
+      `SELECT cr.id AS case_id, cr.case_number, cr.pipeline_stage AS case_stage,
+              cr.status AS case_status, cr.created_at AS case_created_at,
+              c.id, c.first_name, c.last_name, c.email, c.phone,
+              cr.pipeline_stage,
+              c.status, c.contract_signed_at, c.smart_credit_connected_at,
+              c.crc_client_id, c.crc_synced_at,
+              p.name AS package_name, p.price_cents AS package_price_cents
+       FROM credit_repair_cases cr
+       JOIN clients c ON c.id = cr.client_id
+       LEFT JOIN packages p ON p.id = cr.package_id
+       WHERE cr.id = ? LIMIT 1`,
+      [caseId],
+    );
+    if (caseRows.length === 0)
+      return res.status(404).json({ error: "Case not found" });
+
+    const row = caseRows[0];
+    const clientId = row.id as number;
+
+    const [docs] = await pool.query<RowDataPacket[]>(
+      `SELECT id, doc_type, pipeline_round, file_name, file_size, mime_type,
+              review_status, rejection_reason, uploaded_at, reviewed_at
+       FROM client_documents
+       WHERE case_id = ?
+       ORDER BY uploaded_at DESC`,
+      [caseId],
+    );
+    const [reports] = await pool.query<RowDataPacket[]>(
+      `SELECT id, round_number, score_before, score_after, items_removed,
+              items_disputed, summary_md, created_at
+       FROM client_round_reports WHERE client_id = ? ORDER BY round_number DESC`,
+      [clientId],
+    );
+    const [payments] = await pool.query<RowDataPacket[]>(
+      `SELECT p.id, p.amount_cents, p.status, p.paid_at, p.created_at,
+              pk.name AS package_name
+       FROM payments p LEFT JOIN packages pk ON pk.id = p.package_id
+       WHERE p.client_id = ? ORDER BY p.created_at DESC`,
+      [clientId],
+    );
+    const [pipeline] = await pool.query<RowDataPacket[]>(
+      `SELECT id, from_stage, to_stage, notes, created_at
+       FROM client_pipeline_history WHERE client_id = ? ORDER BY created_at DESC`,
+      [clientId],
+    );
+
+    res.json({
+      case_info: {
+        id: row.case_id,
+        case_number: row.case_number,
+        status: row.case_status,
+        pipeline_stage: row.case_stage,
+        created_at: row.case_created_at,
+      },
+      client: {
+        id: row.id,
+        first_name: row.first_name,
+        last_name: row.last_name,
+        email: row.email,
+        phone: row.phone,
+        pipeline_stage: row.pipeline_stage, // sourced from case stage
+        status: row.status,
+        contract_signed_at: row.contract_signed_at,
+        smart_credit_connected_at: row.smart_credit_connected_at,
+        crc_client_id: row.crc_client_id,
+        crc_synced_at: row.crc_synced_at,
+        package_name: row.package_name,
+        package_price_cents: row.package_price_cents,
+      },
+      documents: docs,
+      reports,
+      payments,
+      pipeline_history: pipeline,
+    });
+  });
+
+  // ── Update case pipeline stage ────────────────────────────────────────────
+  app.post(
+    "/api/admin/cases/:id/stage",
+    requireAdmin,
+    async (req: AuthedRequest, res) => {
+      const caseId = Number(req.params.id);
+      if (!caseId || isNaN(caseId))
+        return res.status(400).json({ error: "Invalid case id" });
+
+      const { stage, notes } = req.body || {};
+      const allowed = [
+        "new_client",
+        "docs_ready",
+        "round_1",
+        "round_2",
+        "round_3",
+        "round_4",
+        "round_5",
+        "completed",
+        "cancelled",
+      ];
+      if (!allowed.includes(stage))
+        return res.status(400).json({ error: "Invalid stage" });
+
+      const [cur] = await pool.query<RowDataPacket[]>(
+        `SELECT cr.pipeline_stage, cr.client_id FROM credit_repair_cases cr WHERE cr.id = ? LIMIT 1`,
+        [caseId],
+      );
+      if (cur.length === 0)
+        return res.status(404).json({ error: "Case not found" });
+
+      const fromStage = cur[0].pipeline_stage as string;
+      const clientId = cur[0].client_id as number;
+      if (fromStage === stage) return res.json({ ok: true, unchanged: true });
+
+      // Enforce docs_ready rule: all 4 required docs must be approved for this case
+      if (stage === "docs_ready") {
+        const REQUIRED = [
+          "id_front",
+          "id_back",
+          "ssn_card",
+          "proof_of_address",
+        ];
+        const [docRows] = await pool.query<RowDataPacket[]>(
+          `SELECT doc_type, review_status FROM client_documents
+           WHERE case_id = ? AND doc_type IN (?) ORDER BY uploaded_at DESC`,
+          [caseId, REQUIRED],
+        );
+        const latestByType: Record<string, string> = {};
+        for (const d of docRows) {
+          if (!latestByType[d.doc_type as string])
+            latestByType[d.doc_type as string] = d.review_status as string;
+        }
+        const approved = REQUIRED.filter((t) => latestByType[t] === "approved");
+        if (approved.length < 4) {
+          return res.status(422).json({
+            error: `Cannot advance to Docs Verified — ${4 - approved.length} required document(s) still need approval.`,
+          });
+        }
+      }
+
+      // Update the case stage
+      await pool.query<ResultSetHeader>(
+        `UPDATE credit_repair_cases SET pipeline_stage = ?, pipeline_stage_changed_at = NOW() WHERE id = ?`,
+        [stage, caseId],
+      );
+      // Keep clients.pipeline_stage in sync for client portal backward compat
+      await pool.query<ResultSetHeader>(
+        `UPDATE clients SET pipeline_stage = ?, pipeline_stage_changed_at = NOW() WHERE id = ?`,
+        [stage, clientId],
+      );
+      await pool.query<ResultSetHeader>(
+        `INSERT INTO client_pipeline_history (client_id, from_stage, to_stage, changed_by_admin_id, notes)
+         VALUES (?,?,?,?,?)`,
+        [clientId, fromStage, stage, req.auth!.id, notes || null],
+      );
+
+      if (stage === "completed") {
+        triggerReminderFlow("completed", clientId).catch((e) =>
+          console.error("[flow:completed]", e?.message),
+        );
+      }
+      crcSyncClient(clientId).catch((e) =>
+        console.error("[crc:stage-sync]", e?.message),
+      );
+      res.json({ ok: true });
+    },
+  );
 
   // ── Create client ────────────────────────────────────────────────────────
   app.post("/api/admin/clients", requireAdmin, async (req, res) => {
@@ -2756,7 +2997,7 @@ function buildApp() {
       conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
     const [rows] = await pool.query<RowDataPacket[]>(
-      `SELECT d.id, d.client_id, d.doc_type, d.file_name, d.file_size, d.mime_type,
+      `SELECT d.id, d.client_id, d.doc_type, d.pipeline_round, d.file_name, d.file_size, d.mime_type,
               d.review_status, d.rejection_reason, d.uploaded_at, d.reviewed_at,
               c.first_name, c.last_name, c.email
        FROM client_documents d JOIN clients c ON c.id = d.client_id
@@ -2766,6 +3007,38 @@ function buildApp() {
     );
     res.json({ documents: rows });
   });
+
+  app.patch(
+    "/api/admin/documents/:id/pipeline-round",
+    requireAdmin,
+    async (req: AuthedRequest, res) => {
+      const id = Number(req.params.id);
+      const { pipeline_round } = req.body || {};
+      const VALID_ROUNDS = [
+        "new_client",
+        "docs_ready",
+        "round_1",
+        "round_2",
+        "round_3",
+        "round_4",
+        "round_5",
+        "completed",
+        "cancelled",
+      ];
+      if (
+        pipeline_round !== null &&
+        pipeline_round !== undefined &&
+        !VALID_ROUNDS.includes(pipeline_round)
+      ) {
+        return res.status(400).json({ error: "Invalid pipeline_round value" });
+      }
+      await pool.query<ResultSetHeader>(
+        `UPDATE client_documents SET pipeline_round = ? WHERE id = ?`,
+        [pipeline_round || null, id],
+      );
+      res.json({ ok: true });
+    },
+  );
 
   // Serve decrypted document file to admin (streamed, authenticated)
   app.get(
@@ -3262,11 +3535,35 @@ function buildApp() {
     res.json({ videos: rows });
   });
 
+  // Upload a file to CDN and return the URL (no DB write)
+  app.post(
+    "/api/admin/educational-content/upload",
+    requireAdmin,
+    upload.single("file"),
+    async (req, res) => {
+      const f = (req as any).file as Express.Multer.File | undefined;
+      if (!f) return res.status(400).json({ error: "No file provided" });
+      try {
+        const cdnUrl = await uploadToCDN(
+          f.buffer,
+          f.originalname,
+          f.mimetype,
+          "education",
+        );
+        res.json({ url: cdnUrl, mime_type: f.mimetype, size: f.size });
+      } catch (err: any) {
+        res.status(500).json({ error: err.message || "Upload failed" });
+      }
+    },
+  );
+
   app.post("/api/admin/videos", requireAdmin, async (req, res) => {
     const {
       title,
+      content_type,
       description,
       video_url,
+      file_url,
       thumbnail_url,
       duration_seconds,
       category,
@@ -3274,24 +3571,76 @@ function buildApp() {
       is_published,
       sort_order,
     } = req.body || {};
-    if (!title || !video_url)
-      return res.status(400).json({ error: "title and video_url required" });
+    if (!title) return res.status(400).json({ error: "title is required" });
+    const ctype = content_type || "video";
+    if (ctype === "video" && !video_url && !file_url)
+      return res
+        .status(400)
+        .json({ error: "video_url or file_url required for video content" });
+    if (["pdf", "image", "article"].includes(ctype) && !file_url && !video_url)
+      return res
+        .status(400)
+        .json({ error: "file_url required for this content type" });
     const [r] = await pool.query<ResultSetHeader>(
-      `INSERT INTO educational_videos (title, description, video_url, thumbnail_url, duration_seconds, category, language, is_published, sort_order)
-       VALUES (?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO educational_videos
+         (title, content_type, description, video_url, file_url, thumbnail_url,
+          duration_seconds, category, language, is_published, sort_order)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
       [
         title,
+        ctype,
         description || null,
-        video_url,
+        video_url || null,
+        file_url || null,
         thumbnail_url || null,
         duration_seconds || null,
         category || null,
         language || "en",
-        is_published === false ? 0 : 1,
+        is_published === false || is_published === 0 ? 0 : 1,
         sort_order || 0,
       ],
     );
     res.json({ id: r.insertId });
+  });
+
+  app.put("/api/admin/videos/:id", requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    const {
+      title,
+      content_type,
+      description,
+      video_url,
+      file_url,
+      thumbnail_url,
+      duration_seconds,
+      category,
+      language,
+      is_published,
+      sort_order,
+    } = req.body || {};
+    if (!title) return res.status(400).json({ error: "title is required" });
+    await pool.query<ResultSetHeader>(
+      `UPDATE educational_videos
+       SET title=?, content_type=?, description=?, video_url=?, file_url=?,
+           thumbnail_url=?, duration_seconds=?, category=?, language=?,
+           is_published=?, sort_order=?
+       WHERE id=?`,
+      [
+        title,
+        content_type || "video",
+        description || null,
+        video_url || null,
+        file_url || null,
+        thumbnail_url || null,
+        duration_seconds || null,
+        category || null,
+        language || "en",
+        is_published === false || is_published === 0 ? 0 : 1,
+        sort_order ?? 0,
+        id,
+      ],
+    );
+    res.json({ ok: true });
   });
 
   app.delete("/api/admin/videos/:id", requireAdmin, async (req, res) => {

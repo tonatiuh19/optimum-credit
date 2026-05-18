@@ -394,6 +394,148 @@ paths:
         "404":
           description: Document not found
 
+  /admin/pipeline:
+    get:
+      tags: [Admin]
+      summary: Get all active credit repair cases for the pipeline Kanban board
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Pipeline cases
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cases:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/CreditRepairCase"
+        "401":
+          description: Unauthorized
+
+  /admin/cases/{id}:
+    get:
+      tags: [Admin]
+      summary: Get full detail for a single credit repair case
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+          description: Credit repair case ID
+      responses:
+        "200":
+          description: Case detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  case_info:
+                    type: object
+                    properties:
+                      id:
+                        type: integer
+                      case_number:
+                        type: string
+                        example: CR-00001
+                      status:
+                        type: string
+                        enum: [active, completed, cancelled, on_hold]
+                      pipeline_stage:
+                        type: string
+                      created_at:
+                        type: string
+                        format: date-time
+                  client:
+                    $ref: "#/components/schemas/AdminClientDetail"
+                  documents:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ClientDocument"
+                  reports:
+                    type: array
+                    items:
+                      type: object
+                  payments:
+                    type: array
+                    items:
+                      type: object
+                  pipeline_history:
+                    type: array
+                    items:
+                      type: object
+        "400":
+          description: Invalid case ID
+        "401":
+          description: Unauthorized
+        "404":
+          description: Case not found
+
+  /admin/cases/{id}/stage:
+    post:
+      tags: [Admin]
+      summary: Move a credit repair case to a new pipeline stage
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+          description: Credit repair case ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [stage]
+              properties:
+                stage:
+                  type: string
+                  enum:
+                    [
+                      new_client,
+                      docs_ready,
+                      round_1,
+                      round_2,
+                      round_3,
+                      round_4,
+                      round_5,
+                      completed,
+                      cancelled,
+                    ]
+                notes:
+                  type: string
+      responses:
+        "200":
+          description: Stage updated (or unchanged if same stage)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  unchanged:
+                    type: boolean
+                    description: True when the requested stage equals the current stage
+        "400":
+          description: Invalid stage value or case ID
+        "401":
+          description: Unauthorized
+        "404":
+          description: Case not found
+        "422":
+          description: Stage transition blocked (e.g. docs_ready requires all docs approved)
+
   /admin/clients:
     get:
       tags: [Admin]
@@ -738,6 +880,79 @@ components:
       bearerFormat: JWT
 
   schemas:
+    CreditRepairCase:
+      type: object
+      properties:
+        id:
+          type: integer
+          description: credit_repair_cases.id
+        case_number:
+          type: string
+          example: CR-00001
+        client_id:
+          type: integer
+        first_name:
+          type: string
+        last_name:
+          type: string
+        email:
+          type: string
+        phone:
+          type: string
+          nullable: true
+        package_id:
+          type: integer
+          nullable: true
+        package_name:
+          type: string
+          nullable: true
+        package_slug:
+          type: string
+          nullable: true
+        crc_client_id:
+          type: string
+          nullable: true
+        crc_synced_at:
+          type: string
+          format: date-time
+          nullable: true
+        pipeline_stage:
+          type: string
+          enum:
+            [
+              new_client,
+              docs_ready,
+              round_1,
+              round_2,
+              round_3,
+              round_4,
+              round_5,
+              completed,
+              cancelled,
+            ]
+        pipeline_stage_changed_at:
+          type: string
+          format: date-time
+          nullable: true
+        status:
+          type: string
+          enum: [active, completed, cancelled, on_hold]
+          description: Case status (distinct from client status)
+        client_status:
+          type: string
+          description: Client account status
+        created_at:
+          type: string
+          format: date-time
+        docs_total:
+          type: integer
+        docs_approved:
+          type: integer
+        docs_pending:
+          type: integer
+        docs_rejected:
+          type: integer
+
     AdminClientListItem:
       type: object
       properties:

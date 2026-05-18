@@ -10,6 +10,7 @@ import type {
   ConversationMessage,
   Coupon,
   CreateCouponPayload,
+  CreditRepairCase,
   EducationalVideo,
   Payment,
   PipelineStage,
@@ -27,8 +28,15 @@ interface AdminState {
   };
   clients: AdminClientListItem[];
   pipelineClients: AdminClientListItem[];
+  pipelineCases: CreditRepairCase[];
   selectedClient: any | null;
   panelClient: {
+    case_info?: {
+      id: number;
+      case_number: string;
+      status: string;
+      pipeline_stage: string;
+    };
     client: any;
     documents: any[];
     payments: any[];
@@ -68,6 +76,7 @@ const initialState: AdminState = {
   dashboard: { stats: null, stages: [], recent_clients: [] },
   clients: [],
   pipelineClients: [],
+  pipelineCases: [],
   selectedClient: null,
   panelClient: null,
   panelLoading: false,
@@ -125,7 +134,7 @@ export const fetchAdminClient = createAsyncThunk<any, { id: number }>(
 
 export const fetchPipeline = createAsyncThunk("admin/pipeline", async () => {
   const { data } = await api.get("/admin/pipeline");
-  return data.clients as AdminClientListItem[];
+  return data.cases as CreditRepairCase[];
 });
 
 export const updateClientStage = createAsyncThunk<
@@ -134,6 +143,21 @@ export const updateClientStage = createAsyncThunk<
 >("admin/updateStage", async ({ clientId, stage, notes }) => {
   await api.post(`/admin/clients/${clientId}/stage`, { stage, notes });
 });
+
+export const updateCaseStage = createAsyncThunk<
+  void,
+  { caseId: number; stage: PipelineStage; notes?: string }
+>("admin/updateCaseStage", async ({ caseId, stage, notes }) => {
+  await api.post(`/admin/cases/${caseId}/stage`, { stage, notes });
+});
+
+export const fetchPanelCase = createAsyncThunk(
+  "admin/panelCase",
+  async (id: number) => {
+    const { data } = await api.get(`/admin/cases/${id}`);
+    return data;
+  },
+);
 
 export const fetchPendingDocuments = createAsyncThunk(
   "admin/pendingDocs",
@@ -301,12 +325,31 @@ export const fetchAdminVideos = createAsyncThunk("admin/videos", async () => {
   return data.videos as EducationalVideo[];
 });
 
+export const uploadEducationalFile = createAsyncThunk<
+  { url: string; mime_type: string; size: number },
+  File
+>("admin/uploadEducationalFile", async (file) => {
+  const fd = new FormData();
+  fd.append("file", file);
+  const { data } = await api.post("/admin/educational-content/upload", fd, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return data;
+});
+
 export const createVideo = createAsyncThunk<void, Partial<EducationalVideo>>(
   "admin/createVideo",
   async (args) => {
     await api.post("/admin/videos", args);
   },
 );
+
+export const updateVideo = createAsyncThunk<
+  void,
+  { id: number } & Partial<EducationalVideo>
+>("admin/updateVideo", async ({ id, ...args }) => {
+  await api.put(`/admin/videos/${id}`, args);
+});
 
 export const deleteVideo = createAsyncThunk<void, { id: number }>(
   "admin/deleteVideo",
@@ -517,9 +560,19 @@ const slice = createSlice({
     b.addCase(fetchPanelClient.rejected, (s) => {
       s.panelLoading = false;
     });
+    b.addCase(fetchPanelCase.pending, (s) => {
+      s.panelLoading = true;
+    });
+    b.addCase(fetchPanelCase.fulfilled, (s, a) => {
+      s.panelClient = a.payload;
+      s.panelLoading = false;
+    });
+    b.addCase(fetchPanelCase.rejected, (s) => {
+      s.panelLoading = false;
+    });
     b.addCase(fetchPipeline.fulfilled, (s, a) => {
       s.loading = false;
-      s.pipelineClients = a.payload;
+      s.pipelineCases = a.payload;
     });
     b.addCase(fetchPendingDocuments.fulfilled, (s, a) => {
       s.pendingDocuments = a.payload;
