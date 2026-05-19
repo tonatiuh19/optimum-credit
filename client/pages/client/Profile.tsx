@@ -72,7 +72,7 @@ export default function Profile() {
       {/* Account info */}
       <div className="bg-card rounded-2xl border border-border p-6 shadow-sm">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="font-semibold">Account Information</h2>
+          <h2 className="text-base font-semibold">Account Information</h2>
           {!editingInfo ? (
             <button
               onClick={() => setEditingInfo(true)}
@@ -174,7 +174,7 @@ export default function Profile() {
             <ShieldCheck className="w-5 h-5 text-primary" />
           </div>
           <div>
-            <h2 className="font-semibold">Smart Credit Monitoring</h2>
+            <h2 className="text-base font-semibold">Smart Credit Monitoring</h2>
             <p className="text-sm text-muted-foreground mt-0.5">
               We use Smart Credit to pull your three-bureau report and track
               score changes after every dispute round.

@@ -24,7 +24,6 @@ import Documents from "./pages/client/Documents";
 import Onboarding from "./pages/client/Onboarding";
 import Contract from "./pages/client/Contract";
 import Reports from "./pages/client/Reports";
-import Optibot from "./pages/client/Optibot";
 import Support from "./pages/client/Support";
 import Profile from "./pages/client/Profile";
 import Videos from "./pages/client/Videos";
@@ -119,12 +118,6 @@ const App = () => (
                 path="/portal/reports"
                 element={
                   <RequireClient>{wrap(ClientLayout, Reports)}</RequireClient>
-                }
-              />
-              <Route
-                path="/portal/optibot"
-                element={
-                  <RequireClient>{wrap(ClientLayout, Optibot)}</RequireClient>
                 }
               />
               <Route

@@ -142,6 +142,17 @@ export interface TicketReply {
   created_at: string;
 }
 
+export interface SupportFaq {
+  id: number;
+  question: string;
+  answer: string;
+  category: "billing" | "documents" | "process" | "technical" | "general";
+  sort_order: number;
+  is_active: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Conversation {
   id: number;
   client_id: number;
@@ -296,6 +307,31 @@ export interface AdminDashboardStats {
   open_tickets: number;
   revenue_cents_30d: number;
   new_clients_30d: number;
+  completed_clients: number;
+  avg_score_improvement: number;
+}
+
+export interface AdminDashboardTicket {
+  id: number;
+  subject: string;
+  status: "open" | "in_progress" | "waiting_client";
+  priority: "low" | "normal" | "high" | "urgent";
+  category: string;
+  created_at: string;
+  first_name: string;
+  last_name: string;
+  client_id: number;
+}
+
+export interface AdminDashboardPayment {
+  id: number;
+  amount_cents: number;
+  status: string;
+  paid_at: string | null;
+  created_at: string;
+  first_name: string;
+  last_name: string;
+  client_id: number;
 }
 
 export interface CommunicationTemplate {

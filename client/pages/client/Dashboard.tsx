@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { Link } from "react-router-dom";
+import ClientPageHeader from "@/components/ClientPageHeader";
 import {
   ArrowRight,
   CheckCircle2,
@@ -73,14 +74,10 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-8">
-      <div>
-        <h1 className="text-3xl md:text-4xl font-bold">
-          Welcome back, {user?.first_name || "there"}!
-        </h1>
-        <p className="text-muted-foreground mt-2">
-          Here's a snapshot of your credit repair journey.
-        </p>
-      </div>
+      <ClientPageHeader
+        title={`Welcome back, ${user?.first_name || "there"}!`}
+        description="Here's a snapshot of your credit repair journey."
+      />
 
       {loading && !dashboard ? (
         <div className="grid sm:grid-cols-3 gap-4">

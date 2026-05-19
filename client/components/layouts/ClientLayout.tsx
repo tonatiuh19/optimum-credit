@@ -12,7 +12,6 @@ import {
   FileText,
   ScrollText,
   TrendingUp,
-  Bot,
   LifeBuoy,
   PlayCircle,
   User,
@@ -55,12 +54,6 @@ const NAV: {
     label: "Progress Reports",
     icon: TrendingUp,
     sectionKey: "portal_reports",
-  },
-  {
-    to: "/portal/optibot",
-    label: "Optibot AI",
-    icon: Bot,
-    sectionKey: "portal_optibot",
   },
   {
     to: "/portal/videos",

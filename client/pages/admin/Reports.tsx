@@ -67,7 +67,7 @@ export default function AdminReports() {
 function Card({ title, children }: { title: string; children: any }) {
   return (
     <div className="bg-card rounded-2xl border border-border p-6">
-      <h2 className="font-semibold mb-4">{title}</h2>
+      <h2 className="text-base font-semibold mb-4">{title}</h2>
       {children}
     </div>
   );

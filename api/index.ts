@@ -90,15 +90,24 @@ const pool = mysql.createPool({
   connectTimeout: 60000, // 60s connect timeout
 });
 
-// Silently swallow connection-level errors (ECONNRESET, PROTOCOL_CONNECTION_LOST)
-// so a dead pooled connection doesn't crash the process — the pool will discard it
-// and open a fresh one on the next query.
+// Silently swallow connection-level errors so a dead pooled connection doesn't
+// crash the process — mysql2 will discard it and open a fresh one on the next query.
+const TRANSIENT_DB_CODES = [
+  "ECONNRESET",
+  "PROTOCOL_CONNECTION_LOST",
+  "ETIMEDOUT",
+  "ECONNREFUSED",
+];
+
 pool.on("connection", (conn) => {
   conn.on("error", (err: NodeJS.ErrnoException) => {
-    if (err.code !== "ECONNRESET" && err.code !== "PROTOCOL_CONNECTION_LOST") {
-      throw err;
-    }
+    if (!TRANSIENT_DB_CODES.includes(err.code ?? "")) throw err;
   });
+});
+
+// Pool-level safety net (catches errors not handled at the connection level)
+(pool as any).on("error", (err: NodeJS.ErrnoException) => {
+  if (!TRANSIENT_DB_CODES.includes(err.code ?? "")) throw err;
 });
 
 // ============================================================================
@@ -1420,6 +1429,62 @@ function buildApp() {
   });
 
   // ============================================================
+  // SMOKE-TEST HELPERS (only active when SMOKE_TEST_SECRET is set)
+  // ============================================================
+  const SMOKE_SECRET = process.env.SMOKE_TEST_SECRET;
+  if (SMOKE_SECRET) {
+    // POST /api/smoke/token — returns a real session token for admin or client
+    app.post("/api/smoke/token", async (req, res) => {
+      const { secret, actor, email } = req.body || {};
+      if (!secret || secret !== SMOKE_SECRET)
+        return res.status(401).json({ error: "Unauthorized" });
+      if (!["admin", "client"].includes(String(actor)) || !email)
+        return res
+          .status(400)
+          .json({ error: "actor (admin|client) and email required" });
+      const table = actor === "admin" ? "admins" : "clients";
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, email FROM \`${table}\` WHERE email = ? LIMIT 1`,
+        [String(email).trim().toLowerCase()],
+      );
+      if (rows.length === 0)
+        return res.status(404).json({ error: `${actor} not found: ${email}` });
+      const token = await createSession(
+        actor as "admin" | "client",
+        rows[0].id as number,
+        rows[0].email as string,
+        "127.0.0.1",
+        "smoke-test",
+      );
+      res.json({ token, id: rows[0].id, email: rows[0].email });
+    });
+
+    // DELETE /api/smoke/cleanup — removes test data created during smoke run
+    app.delete("/api/smoke/cleanup", async (req, res) => {
+      const { secret, ticket_id, faq_id, session_revoke_token } =
+        req.body || {};
+      if (!secret || secret !== SMOKE_SECRET)
+        return res.status(401).json({ error: "Unauthorized" });
+      if (faq_id)
+        await pool.query("DELETE FROM support_faq WHERE id = ?", [
+          Number(faq_id),
+        ]);
+      if (ticket_id) {
+        await pool.query(
+          "DELETE FROM support_ticket_replies WHERE ticket_id = ?",
+          [Number(ticket_id)],
+        );
+        await pool.query("DELETE FROM support_tickets WHERE id = ?", [
+          Number(ticket_id),
+        ]);
+      }
+      if (session_revoke_token)
+        await revokeSession(String(session_revoke_token));
+      res.json({ ok: true });
+    });
+  }
+
+  // ============================================================
   // AUTH (CLIENT + ADMIN)
   // ============================================================
   app.post("/api/auth/client/request-otp", async (req, res) => {
@@ -2128,6 +2193,14 @@ function buildApp() {
     },
   );
 
+  // Support FAQ — public read for portal clients
+  app.get("/api/portal/support-faq", requireClient, async (_req, res) => {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, question, answer, category, sort_order FROM support_faq WHERE is_active = 1 ORDER BY sort_order ASC, id ASC`,
+    );
+    res.json({ faqs: rows });
+  });
+
   app.get(
     "/api/portal/ai-chat/sessions",
     requireClient,
@@ -2226,14 +2299,38 @@ function buildApp() {
         (SELECT COUNT(*) FROM client_documents WHERE review_status = 'pending') AS pending_doc_reviews,
         (SELECT COUNT(*) FROM support_tickets WHERE status IN ('open','in_progress')) AS open_tickets,
         (SELECT COALESCE(SUM(amount_cents),0) FROM payments WHERE status = 'succeeded' AND paid_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)) AS revenue_cents_30d,
-        (SELECT COUNT(*) FROM clients WHERE created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)) AS new_clients_30d`,
+        (SELECT COUNT(*) FROM clients WHERE created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)) AS new_clients_30d,
+        (SELECT COUNT(*) FROM clients WHERE pipeline_stage = 'completed') AS completed_clients,
+        (SELECT COALESCE(ROUND(AVG(score_after - score_before),0),0) FROM client_round_reports WHERE score_before IS NOT NULL AND score_after IS NOT NULL) AS avg_score_improvement`,
     );
     const [recent] = await pool.query<RowDataPacket[]>(
       `SELECT c.id, c.first_name, c.last_name, c.email, c.pipeline_stage, c.status, c.created_at, p.name AS package_name
        FROM clients c LEFT JOIN packages p ON p.id = c.package_id
-       ORDER BY c.created_at DESC LIMIT 8`,
+       ORDER BY c.created_at DESC LIMIT 6`,
     );
-    res.json({ stages, stats: stats[0] || {}, recent_clients: recent });
+    const [recent_tickets] = await pool.query<RowDataPacket[]>(
+      `SELECT t.id, t.subject, t.status, t.priority, t.category, t.created_at,
+              c.first_name, c.last_name, c.id AS client_id
+       FROM support_tickets t
+       JOIN clients c ON c.id = t.client_id
+       WHERE t.status IN ('open','in_progress','waiting_client')
+       ORDER BY t.created_at DESC LIMIT 5`,
+    );
+    const [recent_payments] = await pool.query<RowDataPacket[]>(
+      `SELECT p.id, p.amount_cents, p.status, p.paid_at, p.created_at,
+              c.first_name, c.last_name, c.id AS client_id
+       FROM payments p
+       JOIN clients c ON c.id = p.client_id
+       WHERE p.status = 'succeeded'
+       ORDER BY p.paid_at DESC LIMIT 5`,
+    );
+    res.json({
+      stages,
+      stats: stats[0] || {},
+      recent_clients: recent,
+      recent_tickets,
+      recent_payments,
+    });
   });
 
   app.get("/api/admin/clients", requireAdmin, async (req, res) => {
@@ -2804,10 +2901,11 @@ function buildApp() {
       if (!resolvedEmail)
         return res.status(400).json({ error: "Provide clientId or email" });
 
-      // Forward internally to webhook handler (simulate Zapier POST)
+      // Forward internally to webhook handler (simulate Zapier POST).
+      // Must call Express directly on its plain-HTTP port (not the Vite HTTPS port).
       const webhookSecret = process.env.CRC_WEBHOOK_SECRET || "";
       const internalRes = await fetch(
-        `http://localhost:${process.env.PORT || 8080}/api/webhooks/crc`,
+        `http://localhost:${process.env.EXPRESS_PORT || 8081}/api/webhooks/crc`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -3447,6 +3545,58 @@ function buildApp() {
       `UPDATE support_tickets SET status = ?, resolved_at = CASE WHEN ? IN ('resolved','closed') THEN NOW() ELSE NULL END WHERE id = ?`,
       [status, status, req.params.id],
     );
+    res.json({ ok: true });
+  });
+
+  // Support FAQ — admin CRUD
+  app.get("/api/admin/support-faq", requireAdmin, async (_req, res) => {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, question, answer, category, sort_order, is_active, created_at, updated_at FROM support_faq ORDER BY sort_order ASC, id ASC`,
+    );
+    res.json({ faqs: rows });
+  });
+
+  app.post("/api/admin/support-faq", requireAdmin, async (req, res) => {
+    const { question, answer, category, sort_order, is_active } =
+      req.body || {};
+    if (!question || !answer)
+      return res
+        .status(400)
+        .json({ error: "question and answer are required" });
+    const [r] = await pool.query<ResultSetHeader>(
+      `INSERT INTO support_faq (question, answer, category, sort_order, is_active) VALUES (?, ?, ?, ?, ?)`,
+      [
+        question,
+        answer,
+        category || "general",
+        sort_order ?? 0,
+        is_active !== false ? 1 : 0,
+      ],
+    );
+    res.json({ id: r.insertId });
+  });
+
+  app.put("/api/admin/support-faq/:id", requireAdmin, async (req, res) => {
+    const { question, answer, category, sort_order, is_active } =
+      req.body || {};
+    await pool.query<ResultSetHeader>(
+      `UPDATE support_faq SET question = COALESCE(?, question), answer = COALESCE(?, answer), category = COALESCE(?, category), sort_order = COALESCE(?, sort_order), is_active = COALESCE(?, is_active) WHERE id = ?`,
+      [
+        question ?? null,
+        answer ?? null,
+        category ?? null,
+        sort_order ?? null,
+        is_active != null ? (is_active ? 1 : 0) : null,
+        req.params.id,
+      ],
+    );
+    res.json({ ok: true });
+  });
+
+  app.delete("/api/admin/support-faq/:id", requireAdmin, async (req, res) => {
+    await pool.query<ResultSetHeader>(`DELETE FROM support_faq WHERE id = ?`, [
+      req.params.id,
+    ]);
     res.json({ ok: true });
   });
 

@@ -872,6 +872,215 @@ paths:
         "422":
           description: Unknown stage name
 
+  /smoke/token:
+    post:
+      tags: [Smoke Tests]
+      summary: Issue a real session token for smoke testing (requires SMOKE_TEST_SECRET)
+      description: |
+        Only available when the `SMOKE_TEST_SECRET` environment variable is set.
+        Returns a fully valid session token for the given actor and email so that
+        smoke tests can authenticate without going through the OTP email flow.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [secret, actor, email]
+              properties:
+                secret:
+                  type: string
+                  description: Must match SMOKE_TEST_SECRET env var
+                actor:
+                  type: string
+                  enum: [admin, client]
+                email:
+                  type: string
+                  format: email
+      responses:
+        "200":
+          description: Token issued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                  id:
+                    type: integer
+                  email:
+                    type: string
+        "401":
+          description: Wrong secret
+        "404":
+          description: Actor not found
+
+  /smoke/cleanup:
+    delete:
+      tags: [Smoke Tests]
+      summary: Delete test data created during a smoke run (requires SMOKE_TEST_SECRET)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [secret]
+              properties:
+                secret:
+                  type: string
+                ticket_id:
+                  type: integer
+                  nullable: true
+                faq_id:
+                  type: integer
+                  nullable: true
+                session_revoke_token:
+                  type: string
+                  nullable: true
+      responses:
+        "200":
+          description: Cleanup successful
+        "401":
+          description: Wrong secret
+
+  /portal/support-faq:
+    get:
+      tags: [Portal]
+      summary: List active FAQs for the client portal
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Active FAQ list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  faqs:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SupportFaqPortal"
+        "401":
+          description: Unauthorized
+
+  /admin/support-faq:
+    get:
+      tags: [Admin]
+      summary: List all FAQs (admin, includes inactive)
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Full FAQ list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  faqs:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SupportFaq"
+        "401":
+          description: Unauthorized
+
+    post:
+      tags: [Admin]
+      summary: Create a new FAQ entry
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [question, answer]
+              properties:
+                question:
+                  type: string
+                answer:
+                  type: string
+                category:
+                  type: string
+                  enum: [billing, documents, process, technical, general]
+                  default: general
+                sort_order:
+                  type: integer
+                  default: 0
+                is_active:
+                  type: boolean
+                  default: true
+      responses:
+        "200":
+          description: FAQ created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: integer
+        "400":
+          description: question and answer are required
+        "401":
+          description: Unauthorized
+
+  /admin/support-faq/{id}:
+    put:
+      tags: [Admin]
+      summary: Update an existing FAQ entry
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                question:
+                  type: string
+                answer:
+                  type: string
+                category:
+                  type: string
+                  enum: [billing, documents, process, technical, general]
+                sort_order:
+                  type: integer
+                is_active:
+                  type: boolean
+      responses:
+        "200":
+          description: Updated
+        "401":
+          description: Unauthorized
+
+    delete:
+      tags: [Admin]
+      summary: Delete a FAQ entry
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Deleted
+        "401":
+          description: Unauthorized
+
 components:
   securitySchemes:
     BearerAuth:
@@ -1052,5 +1261,44 @@ components:
           type: string
           nullable: true
         created_at:
+          type: string
+          format: date-time
+
+    SupportFaqPortal:
+      type: object
+      properties:
+        id:
+          type: integer
+        question:
+          type: string
+        answer:
+          type: string
+        category:
+          type: string
+          enum: [billing, documents, process, technical, general]
+        sort_order:
+          type: integer
+
+    SupportFaq:
+      type: object
+      properties:
+        id:
+          type: integer
+        question:
+          type: string
+        answer:
+          type: string
+        category:
+          type: string
+          enum: [billing, documents, process, technical, general]
+        sort_order:
+          type: integer
+        is_active:
+          type: integer
+          enum: [0, 1]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
           type: string
           format: date-time

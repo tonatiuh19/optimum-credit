@@ -394,7 +394,7 @@ export default function AdminVideos() {
                 <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
                   <BookOpen className="w-4 h-4 text-primary" />
                 </div>
-                <h2 className="font-semibold text-foreground">
+                <h2 className="text-base font-semibold text-foreground">
                   {editing ? "Edit Content" : "Add New Content"}
                 </h2>
               </div>

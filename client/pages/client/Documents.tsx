@@ -16,6 +16,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
+import ClientPageHeader from "@/components/ClientPageHeader";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { fetchDashboard, uploadDocuments } from "@/store/slices/portalSlice";
 import { useToast } from "@/hooks/use-toast";
@@ -74,14 +75,10 @@ export default function Documents() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div>
-        <h1 className="text-3xl font-bold">My Documents</h1>
-        <p className="text-muted-foreground mt-1">
-          Upload these to verify your identity. Our team reviews each document
-          within 1 business day.
-        </p>
-      </div>
+      <ClientPageHeader
+        title="My Documents"
+        description="Upload these to verify your identity. Our team reviews each document within 1 business day."
+      />
 
       {/* All approved banner */}
       {allApproved && (

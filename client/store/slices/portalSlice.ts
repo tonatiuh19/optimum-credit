@@ -4,6 +4,7 @@ import type {
   ClientDocument,
   RoundReport,
   SectionLock,
+  SupportFaq,
   SupportTicket,
   AiChatSession,
   AiChatMessage,
@@ -15,6 +16,7 @@ interface PortalState {
   documents: ClientDocument[];
   reports: RoundReport[];
   tickets: SupportTicket[];
+  faqs: SupportFaq[];
   videos: EducationalVideo[];
   chatSessions: AiChatSession[];
   chatMessages: AiChatMessage[];
@@ -29,6 +31,7 @@ const initialState: PortalState = {
   documents: [],
   reports: [],
   tickets: [],
+  faqs: [],
   videos: [],
   chatSessions: [],
   chatMessages: [],
@@ -132,6 +135,11 @@ export const sendChatMessage = createAsyncThunk<
   return data;
 });
 
+export const fetchFaqs = createAsyncThunk("portal/faqs", async () => {
+  const { data } = await api.get("/portal/support-faq");
+  return data.faqs as SupportFaq[];
+});
+
 export const fetchVideos = createAsyncThunk("portal/videos", async () => {
   const { data } = await api.get("/portal/videos");
   return data.videos as EducationalVideo[];
@@ -162,6 +170,9 @@ const slice = createSlice({
 
     b.addCase(fetchTickets.fulfilled, (s, a) => {
       s.tickets = a.payload;
+    });
+    b.addCase(fetchFaqs.fulfilled, (s, a) => {
+      s.faqs = a.payload;
     });
     b.addCase(fetchVideos.fulfilled, (s, a) => {
       s.videos = a.payload;

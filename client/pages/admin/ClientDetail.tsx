@@ -211,7 +211,7 @@ function Card({
   return (
     <div className="bg-card rounded-2xl border border-border p-6">
       <div className="flex items-center justify-between mb-4">
-        <h2 className="font-semibold text-foreground">{title}</h2>
+        <h2 className="text-base font-semibold text-foreground">{title}</h2>
         {right}
       </div>
       {children}

@@ -476,6 +476,22 @@ CREATE TABLE IF NOT EXISTS `support_ticket_replies` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================================
+-- SUPPORT FAQ — admin-managed FAQ items shown on client support page
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `support_faq` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `question` VARCHAR(512) NOT NULL,
+  `answer` MEDIUMTEXT NOT NULL,
+  `category` ENUM('billing','documents','process','technical','general') NOT NULL DEFAULT 'general',
+  `sort_order` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `is_active` TINYINT(1) NOT NULL DEFAULT 1,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_faq_active_order` (`is_active`, `sort_order`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================================
 -- AI CHAT (Optibot) — conversation history
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS `ai_chat_sessions` (

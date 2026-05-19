@@ -3,6 +3,8 @@ import api from "@/lib/api";
 import type {
   AdminClientListItem,
   AdminDashboardStats,
+  AdminDashboardTicket,
+  AdminDashboardPayment,
   AdminPaymentsResponse,
   AdminUserListItem,
   CommunicationTemplate,
@@ -14,6 +16,7 @@ import type {
   EducationalVideo,
   Payment,
   PipelineStage,
+  SupportFaq,
   SupportTicket,
   SectionLock,
   SystemSetting,
@@ -25,6 +28,8 @@ interface AdminState {
     stats: AdminDashboardStats | null;
     stages: { pipeline_stage: PipelineStage; count: number }[];
     recent_clients: AdminClientListItem[];
+    recent_tickets: AdminDashboardTicket[];
+    recent_payments: AdminDashboardPayment[];
   };
   clients: AdminClientListItem[];
   pipelineClients: AdminClientListItem[];
@@ -50,6 +55,7 @@ interface AdminState {
   tickets: SupportTicket[];
   selectedTicket: any | null;
   ticketReplies: any[];
+  faqs: SupportFaq[];
   templates: CommunicationTemplate[];
   videos: EducationalVideo[];
   settings: SystemSetting[];
@@ -73,7 +79,13 @@ interface AdminState {
 }
 
 const initialState: AdminState = {
-  dashboard: { stats: null, stages: [], recent_clients: [] },
+  dashboard: {
+    stats: null,
+    stages: [],
+    recent_clients: [],
+    recent_tickets: [],
+    recent_payments: [],
+  },
   clients: [],
   pipelineClients: [],
   pipelineCases: [],
@@ -87,6 +99,7 @@ const initialState: AdminState = {
   tickets: [],
   selectedTicket: null,
   ticketReplies: [],
+  faqs: [],
   templates: [],
   videos: [],
   settings: [],
@@ -269,6 +282,46 @@ export const updateTicketStatus = createAsyncThunk<
 >("admin/ticketStatus", async ({ ticketId, status }) => {
   await api.post(`/admin/tickets/${ticketId}/status`, { status });
 });
+
+export const fetchAdminFaqs = createAsyncThunk("admin/faqs", async () => {
+  const { data } = await api.get("/admin/support-faq");
+  return data.faqs as SupportFaq[];
+});
+
+export const createAdminFaq = createAsyncThunk<
+  { id: number },
+  {
+    question: string;
+    answer: string;
+    category: string;
+    sort_order?: number;
+    is_active?: boolean;
+  }
+>("admin/createFaq", async (args) => {
+  const { data } = await api.post("/admin/support-faq", args);
+  return data;
+});
+
+export const updateAdminFaq = createAsyncThunk<
+  void,
+  {
+    id: number;
+    question?: string;
+    answer?: string;
+    category?: string;
+    sort_order?: number;
+    is_active?: boolean;
+  }
+>("admin/updateFaq", async ({ id, ...rest }) => {
+  await api.put(`/admin/support-faq/${id}`, rest);
+});
+
+export const deleteAdminFaq = createAsyncThunk<void, number>(
+  "admin/deleteFaq",
+  async (id) => {
+    await api.delete(`/admin/support-faq/${id}`);
+  },
+);
 
 export const fetchTemplates = createAsyncThunk("admin/templates", async () => {
   const { data } = await api.get("/admin/templates");
@@ -594,6 +647,18 @@ const slice = createSlice({
     b.addCase(fetchAdminTicket.fulfilled, (s, a) => {
       s.selectedTicket = a.payload.ticket;
       s.ticketReplies = a.payload.replies;
+    });
+    b.addCase(fetchAdminFaqs.fulfilled, (s, a) => {
+      s.faqs = a.payload;
+    });
+    b.addCase(createAdminFaq.fulfilled, (_s, _a) => {
+      /* refetch after create */
+    });
+    b.addCase(updateAdminFaq.fulfilled, (_s, _a) => {
+      /* refetch after update */
+    });
+    b.addCase(deleteAdminFaq.fulfilled, (s, a) => {
+      s.faqs = s.faqs.filter((f) => f.id !== (a.meta.arg as number));
     });
     b.addCase(fetchTemplates.fulfilled, (s, a) => {
       s.loading = false;
