@@ -7,14 +7,14 @@ import {
   User,
   Edit2,
   X,
-  ShieldCheck,
+  // ShieldCheck, // TODO: restore when Smart Credit section is re-enabled
 } from "lucide-react";
 import { useFormik } from "formik";
 import * as Yup from "yup";
 import { useTranslation } from "react-i18next";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
-  submitSmartCredit,
+  // submitSmartCredit, // TODO: re-enable when ConsumerDirect API keys are ready
   updateProfile,
   updateLanguage,
 } from "@/store/slices/portalSlice";
@@ -25,16 +25,17 @@ export default function Profile() {
   const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const { user } = useAppSelector((s) => s.clientAuth);
-  const [scSaved, setScSaved] = useState(false);
+  // const [scSaved, setScSaved] = useState(false); // TODO: Smart Credit
   const [editingInfo, setEditingInfo] = useState(false);
   const [infoSaved, setInfoSaved] = useState(false);
 
+  /* TODO: re-enable Smart Credit form when ConsumerDirect API keys are ready
   const scForm = useFormik({
-    initialValues: { smart_credit_email: "" },
+    initialValues: { smart_credit_email: '' },
     validationSchema: Yup.object({
       smart_credit_email: Yup.string()
-        .email(t("profile.invalidEmail"))
-        .required(t("profile.required")),
+        .email(t('profile.invalidEmail'))
+        .required(t('profile.required')),
     }),
     onSubmit: async (values) => {
       const r = await dispatch(submitSmartCredit(values));
@@ -44,6 +45,7 @@ export default function Profile() {
       }
     },
   });
+  */
 
   const infoForm = useFormik({
     enableReinitialize: true,
@@ -185,61 +187,11 @@ export default function Profile() {
         )}
       </div>
 
-      {/* Smart Credit */}
+      {/* TODO: Smart Credit — re-enable when ConsumerDirect API keys are provisioned
       <div className="bg-card rounded-2xl border border-border p-6 shadow-sm">
-        <div className="flex items-start gap-3 mb-4">
-          <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
-            <ShieldCheck className="w-5 h-5 text-primary" />
-          </div>
-          <div>
-            <h2 className="text-base font-semibold">
-              {t("profile.smartCreditHeading")}
-            </h2>
-            <p className="text-sm text-muted-foreground mt-0.5">
-              {t("profile.smartCreditDesc")}
-            </p>
-          </div>
-        </div>
-
-        {user?.smart_credit_connected_at ? (
-          <div className="flex items-center gap-2 text-accent text-sm font-medium bg-accent/10 rounded-xl px-4 py-3">
-            <CheckCircle2 className="w-5 h-5 shrink-0" />
-            {t("profile.connected")}
-          </div>
-        ) : (
-          <form onSubmit={scForm.handleSubmit} className="space-y-3">
-            <div>
-              <label className="text-xs font-medium text-muted-foreground block mb-1">
-                {t("profile.smartCreditEmail")}
-              </label>
-              <input
-                {...scForm.getFieldProps("smart_credit_email")}
-                type="email"
-                placeholder={t("profile.smartCreditPlaceholder")}
-                className="w-full h-10 px-3 rounded-lg border border-border bg-input focus:outline-none focus:ring-2 focus:ring-primary text-sm"
-              />
-              {scForm.touched.smart_credit_email &&
-                scForm.errors.smart_credit_email && (
-                  <p className="text-xs text-destructive mt-1">
-                    {scForm.errors.smart_credit_email}
-                  </p>
-                )}
-            </div>
-            <button
-              type="submit"
-              disabled={scForm.isSubmitting}
-              className="h-9 px-4 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 disabled:opacity-50 transition-colors"
-            >
-              {scForm.isSubmitting ? "Connecting…" : "Connect Smart Credit"}
-            </button>
-            {scSaved && (
-              <p className="text-sm text-accent flex items-center gap-1.5">
-                <CheckCircle2 className="w-4 h-4" /> Connected successfully
-              </p>
-            )}
-          </form>
-        )}
+        ...
       </div>
+      */}
 
       {/* Language Preference */}
       <div className="bg-card rounded-2xl border border-border p-6 shadow-sm">
