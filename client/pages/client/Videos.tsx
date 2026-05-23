@@ -9,6 +9,7 @@ import {
   Video,
   X,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { fetchVideos } from "@/store/slices/portalSlice";
 import type { EducationalVideo } from "@shared/api";
@@ -206,6 +207,7 @@ function ContentCard({
 }
 
 export default function Videos() {
+  const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const { videos } = useAppSelector((s) => s.portal);
   const [filter, setFilter] = useState<FilterTab>("all");
@@ -234,11 +236,10 @@ export default function Videos() {
             Education Center
           </div>
           <h1 className="text-2xl md:text-3xl font-bold text-foreground">
-            Build Your Credit Knowledge
+            {t("videos.heading")}
           </h1>
           <p className="text-muted-foreground mt-2 max-w-md">
-            Expert videos, guides and resources to help you understand credit
-            and accelerate your journey.
+            {t("videos.subheading")}
           </p>
           <div className="flex gap-3 mt-4 text-sm text-muted-foreground">
             <span className="flex items-center gap-1">

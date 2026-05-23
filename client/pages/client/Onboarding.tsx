@@ -1,10 +1,12 @@
 import { useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { redeemOnboardingToken } from "@/store/slices/clientAuthSlice";
 import { Loader2, AlertCircle, CheckCircle2 } from "lucide-react";
 
 export default function Onboarding() {
+  const { t } = useTranslation();
   const { token } = useParams<{ token: string }>();
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
@@ -40,7 +42,7 @@ export default function Onboarding() {
             className="h-10 w-auto"
           />
           <p className="text-sm text-muted-foreground">
-            Secure onboarding link
+            {t("onboarding.secureLink")}
           </p>
         </div>
 
@@ -54,10 +56,10 @@ export default function Onboarding() {
                 </div>
               </div>
               <p className="text-sm font-medium text-foreground">
-                Verifying your secure link&hellip;
+                {t("onboarding.verifying")}
               </p>
               <p className="text-xs text-muted-foreground">
-                This only takes a moment
+                {t("onboarding.verifyingNote")}
               </p>
             </div>
           )}
@@ -68,10 +70,10 @@ export default function Onboarding() {
                 <CheckCircle2 className="w-6 h-6 text-accent" />
               </div>
               <p className="text-sm font-medium text-foreground">
-                Welcome, {user.first_name}!
+                {t("onboarding.welcome", { name: user.first_name })}
               </p>
               <p className="text-xs text-muted-foreground">
-                Redirecting you to document upload&hellip;
+                {t("onboarding.redirecting")}
               </p>
             </div>
           )}
@@ -83,12 +85,10 @@ export default function Onboarding() {
               </div>
               <div className="space-y-1 text-center">
                 <p className="text-sm font-semibold text-foreground">
-                  This link has expired
+                  {t("onboarding.expiredHeading")}
                 </p>
                 <p className="text-xs text-muted-foreground max-w-[240px] leading-relaxed">
-                  Onboarding links are valid for 72 hours and can only be used
-                  once. Sign in to your portal to upload your documents and get
-                  started.
+                  {t("onboarding.expiredBody")}
                 </p>
               </div>
               <button
@@ -100,7 +100,7 @@ export default function Onboarding() {
                 }
                 className="w-full btn-primary rounded-xl text-sm py-2.5"
               >
-                Sign in to upload documents
+                {t("onboarding.signIn")}
               </button>
             </div>
           )}

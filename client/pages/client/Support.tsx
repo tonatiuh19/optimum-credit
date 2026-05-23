@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { useFormik } from "formik";
 import * as Yup from "yup";
+import { useTranslation } from "react-i18next";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
   createTicket,
@@ -25,64 +26,52 @@ import {
 import api from "@/lib/api";
 
 // ── Category definitions ────────────────────────────────────────────────────
-const CATEGORIES = [
+const CATEGORY_VALUES = [
+  "billing",
+  "documents",
+  "process",
+  "technical",
+  "other",
+] as const;
+type CategoryValue = (typeof CATEGORY_VALUES)[number];
+
+const CATEGORY_META = [
   {
-    value: "billing",
-    label: "Billing & Payments",
+    value: "billing" as CategoryValue,
     icon: CreditCard,
     color: "text-accent",
     bg: "bg-accent/10",
     border: "border-accent/30",
-    hint: "Include your invoice number or payment date. Our team resolves billing questions within 1 business day.",
-    placeholder:
-      "e.g. I see a charge dated May 12 for $99 that I don't recognize. My plan is the Standard package.",
   },
   {
-    value: "documents",
-    label: "Documents & Files",
+    value: "documents" as CategoryValue,
     icon: FileText,
     color: "text-primary",
     bg: "bg-primary/10",
     border: "border-primary/30",
-    hint: "Mention the document type (credit report, ID, etc.) and when you tried to upload it. Screenshots help!",
-    placeholder:
-      "e.g. I tried uploading my Experian credit report PDF (March 2026) but the upload shows a spinner and never completes.",
   },
   {
-    value: "process",
-    label: "Credit Repair Process",
+    value: "process" as CategoryValue,
     icon: RefreshCw,
     color: "text-violet-500",
     bg: "bg-violet-500/10",
     border: "border-violet-500/30",
-    hint: "Tell us which dispute round or bureau is affected. Include your Smart Credit score if you have it.",
-    placeholder:
-      "e.g. Round 2 finished 3 weeks ago but I haven't received any updates. My Experian score was 582.",
   },
   {
-    value: "technical",
-    label: "Technical Issue",
+    value: "technical" as CategoryValue,
     icon: Wrench,
     color: "text-orange-500",
     bg: "bg-orange-500/10",
     border: "border-orange-500/30",
-    hint: "Tell us what page or feature you were using and exactly what error message (if any) appeared.",
-    placeholder:
-      "e.g. When I click Sign Contract I get a white screen with the message 'Something went wrong'. Using Chrome on iPhone.",
   },
   {
-    value: "other",
-    label: "Other / General",
+    value: "other" as CategoryValue,
     icon: HelpCircle,
     color: "text-muted-foreground",
     bg: "bg-muted",
     border: "border-border",
-    hint: "Describe your question or concern in as much detail as possible so we can route it to the right team member.",
-    placeholder: "Describe how we can help you…",
   },
-] as const;
-
-type CategoryValue = (typeof CATEGORIES)[number]["value"];
+];
 
 // ── FAQ accordion item ──────────────────────────────────────────────────────
 function FaqItem({ question, answer }: { question: string; answer: string }) {
@@ -137,7 +126,16 @@ function StatusBadge({ status }: { status: string }) {
 
 // ── Main page ───────────────────────────────────────────────────────────────
 export default function Support() {
+  const { t } = useTranslation();
   const dispatch = useAppDispatch();
+
+  const CATEGORIES = CATEGORY_META.map((c) => ({
+    ...c,
+    label: t(`support.categories.${c.value}.label`),
+    hint: t(`support.categories.${c.value}.hint`),
+    placeholder: t(`support.categories.${c.value}.placeholder`),
+  }));
+
   const { tickets, faqs } = useAppSelector((s) => s.portal);
   const [showForm, setShowForm] = useState(false);
   const [selectedCategory, setSelectedCategory] =
@@ -163,11 +161,11 @@ export default function Support() {
     },
     validationSchema: Yup.object({
       subject: Yup.string()
-        .min(5, "Please write a more descriptive subject")
-        .required("Subject is required"),
+        .min(5, t("support.validation.subjectMin"))
+        .required(t("support.validation.subjectRequired")),
       body: Yup.string()
-        .min(20, "Please add at least 20 characters so we can help you better")
-        .required("Description is required"),
+        .min(20, t("support.validation.bodyMin"))
+        .required(t("support.validation.bodyRequired")),
     }),
     onSubmit: async (values, { resetForm }) => {
       const r = await dispatch(createTicket(values));
@@ -202,9 +200,9 @@ export default function Support() {
   return (
     <div className="space-y-8 max-w-3xl">
       <ClientPageHeader
-        title="Support"
+        title={t("support.title")}
         icon={LifeBuoy}
-        description="We typically reply within 24 hours."
+        description={t("support.description")}
         actions={
           showForm ? (
             <button
@@ -221,9 +219,11 @@ export default function Support() {
       {showForm && (
         <div className="bg-card rounded-2xl border border-border shadow-sm overflow-hidden">
           <div className="px-6 pt-6 pb-4 border-b border-border">
-            <h2 className="text-base font-semibold">Create a support ticket</h2>
+            <h2 className="text-base font-semibold">
+              {t("support.createTicket")}
+            </h2>
             <p className="text-sm text-muted-foreground mt-0.5">
-              Select the type of issue so we can route it to the right team.
+              {t("support.createTicketDesc")}
             </p>
           </div>
 
@@ -231,7 +231,7 @@ export default function Support() {
             {/* Category selector */}
             <div>
               <label className="text-xs font-medium text-muted-foreground block mb-2 uppercase tracking-wide">
-                Type of issue
+                {t("support.typeOfIssue")}
               </label>
               <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-2">
                 {CATEGORIES.map((cat) => {
@@ -269,7 +269,7 @@ export default function Support() {
             {/* Subject */}
             <div>
               <label className="text-xs font-medium text-muted-foreground block mb-1">
-                Subject
+                {t("support.subjectLabel")}
               </label>
               <input
                 placeholder={`Brief title — e.g. "Unrecognized charge on May 12"`}
@@ -286,7 +286,7 @@ export default function Support() {
             {/* Description */}
             <div>
               <label className="text-xs font-medium text-muted-foreground block mb-1">
-                Description
+                {t("support.descriptionLabel")}
               </label>
               <textarea
                 placeholder={activeCat.placeholder}
@@ -304,7 +304,7 @@ export default function Support() {
             {/* Priority */}
             <div className="flex items-center gap-3">
               <label className="text-xs font-medium text-muted-foreground whitespace-nowrap">
-                Priority
+                {t("support.priorityLabel")}
               </label>
               <div className="flex gap-2">
                 {(["low", "normal", "high"] as const).map((p) => (
@@ -334,7 +334,9 @@ export default function Support() {
                 disabled={form.isSubmitting}
                 className="btn-primary disabled:opacity-50"
               >
-                {form.isSubmitting ? "Submitting…" : "Submit ticket"}
+                {form.isSubmitting
+                  ? t("support.submitting")
+                  : t("support.submitTicket")}
               </button>
             </div>
           </form>
@@ -346,7 +348,7 @@ export default function Support() {
         <div>
           <h2 className="text-base font-semibold mb-3 flex items-center gap-2">
             <HelpCircle className="w-4 h-4 text-primary" />
-            Frequently Asked Questions
+            {t("support.faqHeading")}
           </h2>
           <div className="space-y-2">
             {faqs.map((faq) => (
@@ -358,14 +360,14 @@ export default function Support() {
             ))}
           </div>
           <p className="text-sm text-muted-foreground mt-4">
-            Didn't find your answer?{" "}
+            {t("support.faqCta")}{" "}
             <button
               className="text-primary underline underline-offset-2 hover:no-underline"
               onClick={() => setShowForm(true)}
             >
-              Open a support ticket
+              {t("support.openTicket")}
             </button>{" "}
-            and we'll get back to you within 24 hours.
+            {t("support.faqCtaEnd")}
           </p>
         </div>
       )}
@@ -375,13 +377,13 @@ export default function Support() {
         {tickets.length === 0 ? (
           <div className="bg-card rounded-2xl border border-border p-10 text-center">
             <MessageSquare className="w-10 h-10 text-muted-foreground mx-auto mb-3" />
-            <p className="text-muted-foreground">No support tickets yet.</p>
+            <p className="text-muted-foreground">{t("support.noTickets")}</p>
             {faqs.length === 0 && (
               <button
                 onClick={() => setShowForm(true)}
                 className="mt-4 btn-primary"
               >
-                Open a ticket
+                {t("support.openTicket")}
               </button>
             )}
           </div>

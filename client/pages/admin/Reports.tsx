@@ -126,7 +126,9 @@ function PackageBreakdownGrid({ data }: { data: any[] }) {
       key: "package_name",
       label: "Package",
       sortable: true,
-      render: (p) => <span className="font-medium">{p.package_name}</span>,
+      render: (p) => (
+        <span className="font-medium">{p.package_name ?? "—"}</span>
+      ),
     },
     {
       key: "sold",
@@ -154,7 +156,7 @@ function PackageBreakdownGrid({ data }: { data: any[] }) {
     <DataGrid
       data={sorted}
       columns={columns}
-      rowKey={(p) => p.package_id ?? p.package_name}
+      rowKey={(p) => p.package_id ?? p.package_name ?? "unknown"}
       sortBy={sortBy}
       sortDir={sortDir}
       onSort={handleSort}

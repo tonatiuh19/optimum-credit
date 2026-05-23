@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { CheckCircle2, ScrollText, Sparkles } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { fetchDashboard, signContract } from "@/store/slices/portalSlice";
 import api from "@/lib/api";
 
 export default function Contract() {
+  const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const { dashboard } = useAppSelector((s) => s.portal);
   const { user } = useAppSelector((s) => s.clientAuth);
@@ -82,7 +84,7 @@ export default function Contract() {
 
   const submit = async () => {
     if (!agreed || !name.trim()) {
-      setError("Please type your full name and agree to the terms.");
+      setError(t("contract.signError"));
       return;
     }
     setSigning(true);
@@ -93,7 +95,7 @@ export default function Contract() {
     );
     setSigning(false);
     if (signContract.rejected.match(result)) {
-      setError("Could not save signature.");
+      setError(t("contract.saveError"));
     } else {
       await dispatch(fetchDashboard());
     }
@@ -102,19 +104,19 @@ export default function Contract() {
   if (signedAt) {
     return (
       <div className="space-y-6">
-        <h1 className="text-3xl font-bold">Service Agreement</h1>
+        <h1 className="text-3xl font-bold">{t("contract.heading")}</h1>
         <div className="bg-card rounded-2xl border border-accent/30 p-8 shadow-sm">
           <div className="w-14 h-14 rounded-full bg-accent/15 text-accent flex items-center justify-center mb-4">
             <CheckCircle2 className="w-7 h-7" />
           </div>
-          <h2 className="text-2xl font-bold mb-1">Contract signed</h2>
+          <h2 className="text-2xl font-bold mb-1">{t("contract.signed")}</h2>
           <p className="text-muted-foreground">
-            Signed on{" "}
-            {new Date(signedAt).toLocaleString(undefined, {
-              dateStyle: "long",
-              timeStyle: "short",
+            {t("contract.signedDate", {
+              date: new Date(signedAt!).toLocaleString(undefined, {
+                dateStyle: "long",
+                timeStyle: "short",
+              }),
             })}
-            . A copy was emailed to you.
           </p>
         </div>
       </div>
@@ -125,10 +127,11 @@ export default function Contract() {
     <div className="space-y-6">
       <div>
         <h1 className="text-3xl font-bold flex items-center gap-2">
-          <ScrollText className="w-7 h-7 text-primary" /> Service Agreement
+          <ScrollText className="w-7 h-7 text-primary" />{" "}
+          {t("contract.heading")}
         </h1>
         <p className="text-muted-foreground mt-1">
-          Read and e-sign to authorize us to dispute items on your behalf.
+          {t("contract.unsignedSub")}
         </p>
       </div>
 
@@ -141,25 +144,25 @@ export default function Contract() {
 
       <div className="bg-card rounded-2xl border border-border p-6 shadow-sm space-y-5">
         <h2 className="font-semibold text-lg flex items-center gap-2">
-          <Sparkles className="w-5 h-5 text-primary" /> Sign here
+          <Sparkles className="w-5 h-5 text-primary" /> {t("contract.signHere")}
         </h2>
 
         <div>
           <label className="block text-sm font-medium mb-1.5">
-            Full legal name
+            {t("contract.fullName")}
           </label>
           <input
             type="text"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="Type your full name"
+            placeholder={t("contract.fullNamePlaceholder")}
             className="w-full h-11 px-3 rounded-lg border border-border bg-input focus:outline-none focus:ring-2 focus:ring-primary"
           />
         </div>
 
         <div>
           <label className="block text-sm font-medium mb-1.5">
-            Draw your signature
+            {t("contract.drawSignature")}
           </label>
           <div className="border-2 border-dashed border-border rounded-lg bg-secondary/40">
             <canvas
@@ -178,7 +181,7 @@ export default function Contract() {
             onClick={clearSig}
             className="text-xs text-muted-foreground hover:text-foreground mt-1"
           >
-            Clear signature
+            {t("contract.clearSignature")}
           </button>
         </div>
 
@@ -189,10 +192,7 @@ export default function Contract() {
             onChange={(e) => setAgreed(e.target.checked)}
             className="mt-0.5"
           />
-          <span>
-            I have read and agree to the Service Agreement and authorize Optimum
-            Credit Repair to act on my behalf.
-          </span>
+          <span>{t("contract.agreeCheckbox")}</span>
         </label>
 
         {error && (
@@ -206,7 +206,7 @@ export default function Contract() {
           disabled={signing}
           className="btn-primary w-full sm:w-auto"
         >
-          {signing ? "Saving…" : "Sign & continue"}
+          {signing ? t("common.saving") : t("contract.signContinue")}
         </button>
       </div>
     </div>

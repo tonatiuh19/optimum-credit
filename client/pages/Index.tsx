@@ -16,10 +16,12 @@ import PageMeta, {
   organizationSchema,
   localBusinessSchema,
 } from "@/components/PageMeta";
+import { useTranslation } from "react-i18next";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { fetchPackages } from "@/store/slices/packagesSlice";
 
 export default function Index() {
+  const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
   const { packages, loading: packagesLoading } = useAppSelector(
@@ -57,13 +59,12 @@ export default function Index() {
             style={{ animationDelay: "0.05s" }}
           >
             <h1 className="text-[2.6rem] font-extrabold tracking-tight text-foreground leading-[1.1] mb-3">
-              Fix Your Credit.
+              {t("hero.headline1")}
               <br />
-              <span className="gradient-text">Start Today.</span>
+              <span className="gradient-text">{t("hero.headline2")}</span>
             </h1>
             <p className="text-[0.95rem] text-muted-foreground leading-relaxed max-w-xs mx-auto">
-              Our experts remove negative items, dispute errors, and boost your
-              score — fast.
+              {t("hero.body")}
             </p>
           </div>
 
@@ -76,17 +77,17 @@ export default function Index() {
               {/* Card header */}
               <div className="bg-gradient-to-r from-primary to-primary/80 px-5 py-3 flex items-center justify-between">
                 <span className="text-xs font-semibold text-primary-foreground/80 uppercase tracking-widest">
-                  Credit Score Journey
+                  {t("hero.creditJourney")}
                 </span>
                 <span className="text-[10px] bg-accent text-accent-foreground font-bold px-2 py-0.5 rounded-full">
-                  Avg result
+                  {t("hero.avgResult")}
                 </span>
               </div>
               {/* Score comparison row */}
               <div className="px-5 py-4 flex items-center justify-between gap-3">
                 <div className="flex flex-col items-center">
                   <span className="text-[11px] text-muted-foreground font-medium mb-1">
-                    Before
+                    {t("hero.before")}
                   </span>
                   <div className="w-16 h-16 rounded-full border-4 border-destructive/30 flex items-center justify-center bg-destructive/5">
                     <span className="text-xl font-extrabold text-destructive">
@@ -94,7 +95,7 @@ export default function Index() {
                     </span>
                   </div>
                   <span className="text-[10px] text-muted-foreground mt-1">
-                    Poor
+                    {t("hero.poor")}
                   </span>
                 </div>
                 {/* Arrow / improvement */}
@@ -114,12 +115,12 @@ export default function Index() {
                     +140 pts
                   </span>
                   <span className="text-[9px] text-muted-foreground">
-                    in ~6 months
+                    {t("hero.months")}
                   </span>
                 </div>
                 <div className="flex flex-col items-center">
                   <span className="text-[11px] text-muted-foreground font-medium mb-1">
-                    After
+                    {t("hero.after")}
                   </span>
                   <div className="w-16 h-16 rounded-full border-4 border-accent/50 flex items-center justify-center bg-accent/10 shadow-md shadow-accent/20">
                     <span className="text-xl font-extrabold text-accent">
@@ -127,16 +128,16 @@ export default function Index() {
                     </span>
                   </div>
                   <span className="text-[10px] text-muted-foreground mt-1">
-                    Good
+                    {t("hero.good")}
                   </span>
                 </div>
               </div>
               {/* Stat strip */}
               <div className="border-t border-border grid grid-cols-3 divide-x divide-border">
                 {[
-                  { value: "98%", label: "Success" },
-                  { value: "15K+", label: "Clients" },
-                  { value: "~6mo", label: "Avg Time" },
+                  { value: "98%", label: t("hero.success") },
+                  { value: "15K+", label: t("hero.clients") },
+                  { value: "~6mo", label: t("hero.avgTime") },
                 ].map(({ value, label }) => (
                   <div
                     key={label}
@@ -163,14 +164,14 @@ export default function Index() {
               to="/register"
               className="btn-primary w-full flex items-center justify-center gap-2 h-13 text-base shadow-lg shadow-primary/20 hover:shadow-primary/30 group"
             >
-              Get Started Free
+              {t("hero.ctaMain")}
               <ArrowRight className="w-5 h-5 group-hover:translate-x-0.5 transition-transform" />
             </Link>
             <a
               href="#how-it-works"
               className="btn-secondary w-full flex items-center justify-center h-12 text-sm"
             >
-              See How It Works
+              {t("hero.ctaSeeHow")}
             </a>
           </div>
 
@@ -188,8 +189,7 @@ export default function Index() {
               ))}
             </div>
             <span className="text-xs text-muted-foreground font-medium">
-              Trusted by <strong className="text-foreground">15,000+</strong>{" "}
-              clients
+              {t("hero.trustBadge1")}
             </span>
           </div>
         </div>
@@ -215,15 +215,13 @@ export default function Index() {
                 style={{ animationDelay: "0s" }}
               >
                 <h1 className="text-5xl lg:text-6xl font-bold tracking-tight text-foreground leading-tight">
-                  Fix Your Credit.{" "}
+                  {t("hero.headline1")}{" "}
                   <span className="gradient-text inline-block">
-                    Start Today.
+                    {t("hero.headline2")}
                   </span>
                 </h1>
                 <p className="text-xl text-muted-foreground leading-relaxed max-w-lg">
-                  Stop waiting for better credit. Our expert team removes
-                  negative items, improves your score, and opens doors to better
-                  rates and opportunities.
+                  {t("hero.bodyDesktop")}
                 </p>
               </div>
 
@@ -236,14 +234,14 @@ export default function Index() {
                   to="/register"
                   className="btn-primary flex items-center justify-center gap-2 h-12 px-8 group hover:gap-3 transition-all duration-300 shadow-md hover:shadow-lg"
                 >
-                  Get Started{" "}
+                  {t("hero.ctaGetStarted")}{" "}
                   <ArrowRight className="w-5 h-5 group-hover:translate-x-0.5 transition-transform" />
                 </Link>
                 <a
                   href="#how-it-works"
                   className="btn-secondary flex items-center justify-center gap-2 h-12 px-8 hover:bg-muted transition-colors duration-300"
                 >
-                  See How It Works
+                  {t("hero.ctaSeeHow")}
                 </a>
               </div>
 
@@ -259,17 +257,17 @@ export default function Index() {
                     ))}
                   </div>
                   <span className="text-muted-foreground font-medium">
-                    Trusted by 15,000+ clients
+                    {t("hero.trustBadge1")}
                   </span>
                 </div>
                 <div className="flex flex-wrap gap-4 text-sm text-muted-foreground">
                   <div className="flex items-center gap-2">
                     <CheckCircle className="w-4 h-4 text-accent" />
-                    <span className="font-medium">98% Success Rate</span>
+                    <span className="font-medium">{t("hero.trustBadge2")}</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <CheckCircle className="w-4 h-4 text-accent" />
-                    <span className="font-medium">Avg 140 Points Up</span>
+                    <span className="font-medium">{t("hero.trustBadge3")}</span>
                   </div>
                 </div>
               </div>
@@ -296,11 +294,10 @@ export default function Index() {
         <div className="section-inner">
           <div className="max-w-3xl mx-auto text-center mb-12 md:mb-16">
             <h2 className="text-3xl md:text-4xl lg:text-5xl font-bold mb-4">
-              How It Works
+              {t("howItWorks.heading")}
             </h2>
             <p className="text-lg text-muted-foreground">
-              A simple, transparent process designed to fix your credit
-              efficiently and effectively.
+              {t("howItWorks.subheading")}
             </p>
           </div>
 
@@ -309,30 +306,26 @@ export default function Index() {
             {[
               {
                 number: "01",
-                title: "Choose Your Plan",
-                description:
-                  "Select the package that matches your credit situation and goals.",
+                title: t("howItWorks.step1Title"),
+                description: t("howItWorks.step1Body"),
                 icon: <Zap className="w-6 h-6" />,
               },
               {
                 number: "02",
-                title: "Upload Documents",
-                description:
-                  "Securely share your credit reports and financial documents.",
+                title: t("howItWorks.step2Title"),
+                description: t("howItWorks.step2Body"),
                 icon: <Lock className="w-6 h-6" />,
               },
               {
                 number: "03",
-                title: "We Fix Your Credit",
-                description:
-                  "Our experts challenge negative items and dispute inaccuracies.",
+                title: t("howItWorks.step3Title"),
+                description: t("howItWorks.step3Body"),
                 icon: <TrendingUp className="w-6 h-6" />,
               },
               {
                 number: "04",
-                title: "Track Progress",
-                description:
-                  "Monitor improvements in real-time via your personal dashboard.",
+                title: t("howItWorks.step4Title"),
+                description: t("howItWorks.step4Body"),
                 icon: <MessageSquare className="w-6 h-6" />,
               },
             ].map((step, index) => (
@@ -368,11 +361,10 @@ export default function Index() {
         <div className="section-inner">
           <div className="max-w-3xl mx-auto text-center mb-12 md:mb-16">
             <h2 className="text-3xl md:text-4xl lg:text-5xl font-bold mb-4">
-              Simple, Transparent Pricing
+              {t("packages.heading")}
             </h2>
             <p className="text-lg text-muted-foreground">
-              Choose the package that fits your needs. No hidden fees, no
-              surprises.
+              {t("packages.subheading")}
             </p>
           </div>
 
@@ -384,7 +376,7 @@ export default function Index() {
               </div>
             ) : packages.length === 0 ? (
               <div className="col-span-3 text-center py-16 text-muted-foreground">
-                Packages unavailable. Please try again later.
+                {t("packages.unavailable")}
               </div>
             ) : (
               packages.map((pkg, idx) => {
@@ -405,7 +397,7 @@ export default function Index() {
                   >
                     {isPopular && (
                       <div className="bg-gradient-to-r from-primary to-primary-600 text-primary-foreground py-2 px-4 text-center text-sm font-semibold">
-                        Most Popular
+                        {t("packages.popular")}
                       </div>
                     )}
 
@@ -420,7 +412,9 @@ export default function Index() {
                           {price}
                         </div>
                         <p className="text-sm text-muted-foreground">
-                          per service • {pkg.duration_months} months
+                          {t("packages.perService", {
+                            months: pkg.duration_months,
+                          })}
                         </p>
                       </div>
 
@@ -437,7 +431,7 @@ export default function Index() {
                           navigate(`/register?plan=${pkg.slug}`);
                         }}
                       >
-                        Select Plan
+                        {t("packages.selectPlan")}
                         <ArrowRight className="w-4 h-4" />
                       </button>
 
@@ -465,11 +459,10 @@ export default function Index() {
         <div className="section-inner">
           <div className="max-w-3xl mx-auto text-center mb-12 md:mb-16">
             <h2 className="text-3xl md:text-4xl lg:text-5xl font-bold mb-4">
-              Trusted by Thousands
+              {t("testimonials.heading")}
             </h2>
             <p className="text-lg text-muted-foreground">
-              Real results from real people. See how we've transformed credit
-              profiles.
+              {t("testimonials.subheading")}
             </p>
           </div>
 

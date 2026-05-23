@@ -2,6 +2,8 @@ import { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { Menu, X } from "lucide-react";
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
+import LanguageSwitcher from "@/components/LanguageSwitcher";
 
 interface LayoutProps {
   children: ReactNode;
@@ -9,6 +11,7 @@ interface LayoutProps {
 
 export default function Layout({ children }: LayoutProps) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const { t } = useTranslation();
 
   return (
     <div className="flex flex-col min-h-screen bg-background text-foreground">
@@ -34,53 +37,55 @@ export default function Layout({ children }: LayoutProps) {
                 to="/"
                 className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
               >
-                Home
+                {t("nav.home")}
               </Link>
               <a
                 href="#how-it-works"
                 className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
               >
-                How It Works
+                {t("nav.howItWorks")}
               </a>
               <a
                 href="#packages"
                 className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
               >
-                Packages
+                {t("nav.packages")}
               </a>
               <a
                 href="#testimonials"
                 className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
               >
-                Testimonials
+                {t("nav.testimonials")}
               </a>
             </nav>
 
             {/* CTA Button */}
-            <div className="hidden md:flex items-center gap-4">
+            <div className="hidden md:flex items-center gap-3">
               <Link
                 to="/portal/login"
                 className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
               >
-                Client Portal
+                {t("nav.clientPortal")}
               </Link>
               <Link to="/register" className="btn-primary">
-                Get Started
+                {t("nav.getStarted")}
               </Link>
             </div>
 
             {/* Mobile Menu Button */}
-            <button
-              className="md:hidden inline-flex items-center justify-center p-2 rounded-lg hover:bg-secondary transition-colors"
-              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-              aria-label="Toggle menu"
-            >
-              {mobileMenuOpen ? (
-                <X className="w-6 h-6" />
-              ) : (
-                <Menu className="w-6 h-6" />
-              )}
-            </button>
+            <div className="md:hidden flex items-center gap-2">
+              <button
+                className="inline-flex items-center justify-center p-2 rounded-lg hover:bg-secondary transition-colors"
+                onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+                aria-label="Toggle menu"
+              >
+                {mobileMenuOpen ? (
+                  <X className="w-6 h-6" />
+                ) : (
+                  <Menu className="w-6 h-6" />
+                )}
+              </button>
+            </div>
           </div>
 
           {/* Mobile Navigation */}
@@ -91,42 +96,42 @@ export default function Layout({ children }: LayoutProps) {
                 className="block px-4 py-2 rounded-lg text-foreground hover:bg-secondary transition-colors"
                 onClick={() => setMobileMenuOpen(false)}
               >
-                Home
+                {t("nav.home")}
               </Link>
               <a
                 href="#how-it-works"
                 className="block px-4 py-2 rounded-lg text-foreground hover:bg-secondary transition-colors"
                 onClick={() => setMobileMenuOpen(false)}
               >
-                How It Works
+                {t("nav.howItWorks")}
               </a>
               <a
                 href="#packages"
                 className="block px-4 py-2 rounded-lg text-foreground hover:bg-secondary transition-colors"
                 onClick={() => setMobileMenuOpen(false)}
               >
-                Packages
+                {t("nav.packages")}
               </a>
               <a
                 href="#testimonials"
                 className="block px-4 py-2 rounded-lg text-foreground hover:bg-secondary transition-colors"
                 onClick={() => setMobileMenuOpen(false)}
               >
-                Testimonials
+                {t("nav.testimonials")}
               </a>
               <Link
                 to="/portal/login"
                 className="block px-4 py-2 rounded-lg text-foreground hover:bg-secondary transition-colors"
                 onClick={() => setMobileMenuOpen(false)}
               >
-                Client Portal
+                {t("nav.clientPortal")}
               </Link>
               <Link
                 to="/register"
                 className="w-full mt-4 btn-primary"
                 onClick={() => setMobileMenuOpen(false)}
               >
-                Get Started
+                {t("nav.getStarted")}
               </Link>
             </nav>
           )}
@@ -150,21 +155,22 @@ export default function Layout({ children }: LayoutProps) {
                 />
               </div>
               <p className="text-sm text-muted-foreground">
-                Fixing credit profiles with transparency and expertise since
-                2020.
+                {t("footer.tagline")}
               </p>
             </div>
 
             {/* Product */}
             <div>
-              <h4 className="font-semibold mb-4 text-sm">Product</h4>
+              <h4 className="font-semibold mb-4 text-sm">
+                {t("footer.product")}
+              </h4>
               <ul className="space-y-2 text-sm text-muted-foreground">
                 <li>
                   <a
                     href="#how-it-works"
                     className="hover:text-foreground transition-colors"
                   >
-                    How It Works
+                    {t("footer.howItWorks")}
                   </a>
                 </li>
                 <li>
@@ -172,7 +178,7 @@ export default function Layout({ children }: LayoutProps) {
                     href="#packages"
                     className="hover:text-foreground transition-colors"
                   >
-                    Packages
+                    {t("footer.packages")}
                   </a>
                 </li>
                 <li>
@@ -180,7 +186,7 @@ export default function Layout({ children }: LayoutProps) {
                     href="#"
                     className="hover:text-foreground transition-colors"
                   >
-                    Pricing
+                    {t("footer.pricing")}
                   </a>
                 </li>
               </ul>
@@ -188,14 +194,16 @@ export default function Layout({ children }: LayoutProps) {
 
             {/* Company */}
             <div>
-              <h4 className="font-semibold mb-4 text-sm">Company</h4>
+              <h4 className="font-semibold mb-4 text-sm">
+                {t("footer.company")}
+              </h4>
               <ul className="space-y-2 text-sm text-muted-foreground">
                 <li>
                   <a
                     href="#"
                     className="hover:text-foreground transition-colors"
                   >
-                    About Us
+                    {t("footer.aboutUs")}
                   </a>
                 </li>
                 <li>
@@ -263,6 +271,7 @@ export default function Layout({ children }: LayoutProps) {
               © 2024 Optimum Credit Repair. All rights reserved.
             </p>
             <div className="flex items-center gap-4">
+              <LanguageSwitcher variant="compact" />
               <a
                 href="#"
                 target="_blank"

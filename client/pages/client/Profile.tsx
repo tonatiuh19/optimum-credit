@@ -1,6 +1,7 @@
 import { useState } from "react";
 import {
   CheckCircle2,
+  Globe,
   Mail,
   Phone,
   User,
@@ -10,11 +11,18 @@ import {
 } from "lucide-react";
 import { useFormik } from "formik";
 import * as Yup from "yup";
+import { useTranslation } from "react-i18next";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
-import { submitSmartCredit, updateProfile } from "@/store/slices/portalSlice";
+import {
+  submitSmartCredit,
+  updateProfile,
+  updateLanguage,
+} from "@/store/slices/portalSlice";
 import { fetchClientMe } from "@/store/slices/clientAuthSlice";
+import i18n from "@/i18n";
 
 export default function Profile() {
+  const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const { user } = useAppSelector((s) => s.clientAuth);
   const [scSaved, setScSaved] = useState(false);
@@ -25,8 +33,8 @@ export default function Profile() {
     initialValues: { smart_credit_email: "" },
     validationSchema: Yup.object({
       smart_credit_email: Yup.string()
-        .email("Invalid email")
-        .required("Required"),
+        .email(t("profile.invalidEmail"))
+        .required(t("profile.required")),
     }),
     onSubmit: async (values) => {
       const r = await dispatch(submitSmartCredit(values));
@@ -45,8 +53,8 @@ export default function Profile() {
       phone: user?.phone || "",
     },
     validationSchema: Yup.object({
-      first_name: Yup.string().required("Required"),
-      last_name: Yup.string().required("Required"),
+      first_name: Yup.string().required(t("profile.required")),
+      last_name: Yup.string().required(t("profile.required")),
       phone: Yup.string().optional(),
     }),
     onSubmit: async (values) => {
@@ -63,22 +71,22 @@ export default function Profile() {
   return (
     <div className="space-y-6 max-w-2xl">
       <div>
-        <h1 className="text-3xl font-bold">My Profile</h1>
-        <p className="text-muted-foreground mt-1">
-          Manage your account info and credit-monitoring connection.
-        </p>
+        <h1 className="text-3xl font-bold">{t("profile.heading")}</h1>
+        <p className="text-muted-foreground mt-1">{t("profile.subheading")}</p>
       </div>
 
       {/* Account info */}
       <div className="bg-card rounded-2xl border border-border p-6 shadow-sm">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-base font-semibold">Account Information</h2>
+          <h2 className="text-base font-semibold">
+            {t("profile.accountInfo")}
+          </h2>
           {!editingInfo ? (
             <button
               onClick={() => setEditingInfo(true)}
               className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
             >
-              <Edit2 className="w-3.5 h-3.5" /> Edit
+              <Edit2 className="w-3.5 h-3.5" /> {t("profile.edit")}
             </button>
           ) : (
             <button
@@ -88,7 +96,7 @@ export default function Profile() {
               }}
               className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
             >
-              <X className="w-3.5 h-3.5" /> Cancel
+              <X className="w-3.5 h-3.5" /> {t("profile.cancel")}
             </button>
           )}
         </div>
@@ -97,17 +105,25 @@ export default function Profile() {
           <div className="space-y-3 text-sm">
             <InfoRow
               icon={User}
-              label="Name"
+              label={t("profile.name")}
               value={
                 `${user?.first_name || ""} ${user?.last_name || ""}`.trim() ||
                 "—"
               }
             />
-            <InfoRow icon={Mail} label="Email" value={user?.email || "—"} />
-            <InfoRow icon={Phone} label="Phone" value={user?.phone || "—"} />
+            <InfoRow
+              icon={Mail}
+              label={t("profile.email")}
+              value={user?.email || "—"}
+            />
+            <InfoRow
+              icon={Phone}
+              label={t("profile.phone")}
+              value={user?.phone || "—"}
+            />
             {infoSaved && (
               <p className="text-xs text-accent flex items-center gap-1.5 pt-1">
-                <CheckCircle2 className="w-4 h-4" /> Changes saved
+                <CheckCircle2 className="w-4 h-4" /> {t("profile.changesSaved")}
               </p>
             )}
           </div>
@@ -116,7 +132,7 @@ export default function Profile() {
             <div className="grid sm:grid-cols-2 gap-3">
               <div>
                 <label className="text-xs font-medium text-muted-foreground block mb-1">
-                  First name
+                  {t("profile.firstName")}
                 </label>
                 <input
                   {...infoForm.getFieldProps("first_name")}
@@ -130,7 +146,7 @@ export default function Profile() {
               </div>
               <div>
                 <label className="text-xs font-medium text-muted-foreground block mb-1">
-                  Last name
+                  {t("profile.lastName")}
                 </label>
                 <input
                   {...infoForm.getFieldProps("last_name")}
@@ -145,12 +161,12 @@ export default function Profile() {
             </div>
             <div>
               <label className="text-xs font-medium text-muted-foreground block mb-1">
-                Phone (optional)
+                {t("profile.phoneOptional")}
               </label>
               <input
                 {...infoForm.getFieldProps("phone")}
                 type="tel"
-                placeholder="+1 (555) 000-0000"
+                placeholder={t("profile.phonePlaceholder")}
                 className="w-full h-10 px-3 rounded-lg border border-border bg-input focus:outline-none focus:ring-2 focus:ring-primary text-sm"
               />
             </div>
@@ -160,7 +176,9 @@ export default function Profile() {
                 disabled={infoForm.isSubmitting}
                 className="h-9 px-4 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 disabled:opacity-50 transition-colors"
               >
-                {infoForm.isSubmitting ? "Saving…" : "Save changes"}
+                {infoForm.isSubmitting
+                  ? t("profile.saving")
+                  : t("profile.saveChanges")}
               </button>
             </div>
           </form>
@@ -174,10 +192,11 @@ export default function Profile() {
             <ShieldCheck className="w-5 h-5 text-primary" />
           </div>
           <div>
-            <h2 className="text-base font-semibold">Smart Credit Monitoring</h2>
+            <h2 className="text-base font-semibold">
+              {t("profile.smartCreditHeading")}
+            </h2>
             <p className="text-sm text-muted-foreground mt-0.5">
-              We use Smart Credit to pull your three-bureau report and track
-              score changes after every dispute round.
+              {t("profile.smartCreditDesc")}
             </p>
           </div>
         </div>
@@ -185,18 +204,18 @@ export default function Profile() {
         {user?.smart_credit_connected_at ? (
           <div className="flex items-center gap-2 text-accent text-sm font-medium bg-accent/10 rounded-xl px-4 py-3">
             <CheckCircle2 className="w-5 h-5 shrink-0" />
-            Connected — your credit monitoring is active
+            {t("profile.connected")}
           </div>
         ) : (
           <form onSubmit={scForm.handleSubmit} className="space-y-3">
             <div>
               <label className="text-xs font-medium text-muted-foreground block mb-1">
-                Smart Credit account email
+                {t("profile.smartCreditEmail")}
               </label>
               <input
                 {...scForm.getFieldProps("smart_credit_email")}
                 type="email"
-                placeholder="you@example.com"
+                placeholder={t("profile.smartCreditPlaceholder")}
                 className="w-full h-10 px-3 rounded-lg border border-border bg-input focus:outline-none focus:ring-2 focus:ring-primary text-sm"
               />
               {scForm.touched.smart_credit_email &&
@@ -220,6 +239,46 @@ export default function Profile() {
             )}
           </form>
         )}
+      </div>
+
+      {/* Language Preference */}
+      <div className="bg-card rounded-2xl border border-border p-6 shadow-sm">
+        <div className="flex items-start gap-3 mb-4">
+          <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
+            <Globe className="w-5 h-5 text-primary" />
+          </div>
+          <div>
+            <h2 className="text-base font-semibold">
+              {t("profile.languagePreference")}
+            </h2>
+            <p className="text-sm text-muted-foreground mt-0.5">
+              {t("profile.languageDesc")}
+            </p>
+          </div>
+        </div>
+        <div className="flex gap-3">
+          {(["en", "es"] as const).map((lang) => {
+            const isActive = i18n.language === lang;
+            return (
+              <button
+                key={lang}
+                onClick={async () => {
+                  if (isActive) return;
+                  await i18n.changeLanguage(lang);
+                  await dispatch(updateLanguage({ language: lang }));
+                  dispatch(fetchClientMe());
+                }}
+                className={`flex-1 h-10 rounded-lg text-sm font-medium border transition-all ${
+                  isActive
+                    ? "bg-primary text-primary-foreground border-primary"
+                    : "bg-background border-border text-muted-foreground hover:text-foreground hover:border-primary/40"
+                }`}
+              >
+                {lang === "en" ? t("profile.english") : t("profile.spanish")}
+              </button>
+            );
+          })}
+        </div>
       </div>
     </div>
   );

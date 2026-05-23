@@ -11,6 +11,7 @@ import type {
   Conversation,
   ConversationMessage,
   Coupon,
+  CouponValidateResponse,
   CreateCouponPayload,
   CreditRepairCase,
   EducationalVideo,
@@ -21,6 +22,9 @@ import type {
   SectionLock,
   SystemSetting,
   UpdateCouponPayload,
+  PaymentSplit,
+  CreateCasePayload,
+  CalendarSplit,
 } from "@shared/api";
 
 interface AdminState {
@@ -44,6 +48,7 @@ interface AdminState {
     };
     client: any;
     documents: any[];
+    reports: any[];
     payments: any[];
     pipeline_history: any[];
   } | null;
@@ -70,10 +75,27 @@ interface AdminState {
   paymentsPagination: AdminPaymentsResponse["pagination"] | null;
   coupons: Coupon[];
   couponsSaving: boolean;
+  couponPreview: CouponValidateResponse | null;
+  couponPreviewing: boolean;
   sectionLocks: SectionLock[];
   sectionLocksLoading: boolean;
   sectionLocksInitialized: boolean;
   sectionLocksSaving: boolean;
+  // Payment splits
+  paymentSplits: PaymentSplit[];
+  paymentSplitsLoading: boolean;
+  paymentSplitsPagination: {
+    page: number;
+    limit: number;
+    total: number;
+    pages: number;
+  } | null;
+  caseSplits: PaymentSplit[];
+  caseSplitsLoading: boolean;
+  calendarSplits: CalendarSplit[];
+  calendarLoading: boolean;
+  clientSearchResults: AdminClientListItem[];
+  clientSearchLoading: boolean;
   loading: boolean;
   saving: boolean;
 }
@@ -110,10 +132,21 @@ const initialState: AdminState = {
   paymentsPagination: null,
   coupons: [],
   couponsSaving: false,
+  couponPreview: null,
+  couponPreviewing: false,
   sectionLocks: [],
   sectionLocksLoading: true,
   sectionLocksInitialized: false,
   sectionLocksSaving: false,
+  paymentSplits: [],
+  paymentSplitsLoading: false,
+  paymentSplitsPagination: null,
+  caseSplits: [],
+  caseSplitsLoading: false,
+  calendarSplits: [],
+  calendarLoading: false,
+  clientSearchResults: [],
+  clientSearchLoading: false,
   loading: false,
   saving: false,
 };
@@ -128,14 +161,40 @@ export const fetchAdminDashboard = createAsyncThunk(
 
 export const fetchAdminClients = createAsyncThunk<
   AdminClientListItem[],
-  { stage?: string; search?: string } | undefined
+  | {
+      stage?: string;
+      search?: string;
+      status?: string;
+      language?: string;
+      billing?: string;
+      joined_from?: string;
+      joined_to?: string;
+      has_notes?: string;
+    }
+  | undefined
 >("admin/clients", async (args) => {
   const params: any = {};
   if (args?.stage) params.stage = args.stage;
   if (args?.search) params.search = args.search;
+  if (args?.status) params.status = args.status;
+  if (args?.language) params.language = args.language;
+  if (args?.billing) params.billing = args.billing;
+  if (args?.joined_from) params.joined_from = args.joined_from;
+  if (args?.joined_to) params.joined_to = args.joined_to;
+  if (args?.has_notes) params.has_notes = args.has_notes;
   const { data } = await api.get("/admin/clients", { params });
   return data.clients;
 });
+
+export const searchClients = createAsyncThunk<AdminClientListItem[], string>(
+  "admin/clients/search",
+  async (query) => {
+    const { data } = await api.get("/admin/clients", {
+      params: { search: query, limit: 10 },
+    });
+    return data.clients as AdminClientListItem[];
+  },
+);
 
 export const fetchAdminClient = createAsyncThunk<any, { id: number }>(
   "admin/client",
@@ -220,6 +279,28 @@ export const createRoundReport = createAsyncThunk<
   }
 >("admin/createRoundReport", async ({ clientId, ...rest }) => {
   await api.post(`/admin/clients/${clientId}/round-reports`, rest);
+});
+
+export const uploadRoundReportPdf = createAsyncThunk<
+  { pdf: any; report: any },
+  { clientId: number; roundNumber: number; file: File }
+>("admin/uploadRoundReportPdf", async ({ clientId, roundNumber, file }) => {
+  const fd = new FormData();
+  fd.append("pdf", file);
+  const { data } = await api.post(
+    `/admin/clients/${clientId}/round-reports/${roundNumber}/pdf`,
+    fd,
+    { headers: { "Content-Type": "multipart/form-data" } },
+  );
+  return data; // { ok, pdf, report }
+});
+
+export const deleteRoundReportPdf = createAsyncThunk<
+  { pdfId: number; roundNumber: number },
+  { pdfId: number; roundNumber: number }
+>("admin/deleteRoundReportPdf", async ({ pdfId, roundNumber }) => {
+  await api.delete(`/admin/round-report-pdfs/${pdfId}`);
+  return { pdfId, roundNumber };
 });
 
 export const fetchConversations = createAsyncThunk("admin/convs", async () => {
@@ -539,6 +620,17 @@ export const deleteAdminCoupon = createAsyncThunk<void, { id: number }>(
   },
 );
 
+export const adminValidateCoupon = createAsyncThunk<
+  CouponValidateResponse,
+  { code: string; package_id?: number; amount_cents?: number }
+>("admin/coupons/validate", async (payload) => {
+  const { data } = await api.post<CouponValidateResponse>(
+    "/validate-coupon",
+    payload,
+  );
+  return data;
+});
+
 export const fetchAdminPayments = createAsyncThunk<
   AdminPaymentsResponse,
   | {
@@ -560,12 +652,102 @@ export const fetchAdminPayments = createAsyncThunk<
   return data as AdminPaymentsResponse;
 });
 
+// ── Cases ──────────────────────────────────────────────────────────────────
+export const createAdminCase = createAsyncThunk(
+  "admin/createAdminCase",
+  async (payload: CreateCasePayload) => {
+    const { data } = await api.post("/admin/cases", payload);
+    return data.case;
+  },
+);
+
+// ── Payment Splits (per case) ──────────────────────────────────────────────
+export const fetchCaseSplits = createAsyncThunk(
+  "admin/fetchCaseSplits",
+  async (caseId: number) => {
+    const { data } = await api.get(`/admin/cases/${caseId}/splits`);
+    return data.splits as PaymentSplit[];
+  },
+);
+
+export const createCaseSplit = createAsyncThunk(
+  "admin/createCaseSplit",
+  async ({ caseId, split }: { caseId: number; split: any }) => {
+    const { data } = await api.post(`/admin/cases/${caseId}/splits`, split);
+    return data.split as PaymentSplit;
+  },
+);
+
+export const updateCaseSplit = createAsyncThunk(
+  "admin/updateCaseSplit",
+  async ({
+    caseId,
+    splitId,
+    updates,
+  }: {
+    caseId: number;
+    splitId: number;
+    updates: any;
+  }) => {
+    const { data } = await api.put(
+      `/admin/cases/${caseId}/splits/${splitId}`,
+      updates,
+    );
+    return data.split as PaymentSplit;
+  },
+);
+
+export const deleteCaseSplit = createAsyncThunk(
+  "admin/deleteCaseSplit",
+  async ({ caseId, splitId }: { caseId: number; splitId: number }) => {
+    await api.delete(`/admin/cases/${caseId}/splits/${splitId}`);
+    return splitId;
+  },
+);
+
+export const markSplitPaid = createAsyncThunk(
+  "admin/markSplitPaid",
+  async ({ caseId, splitId }: { caseId: number; splitId: number }) => {
+    const { data } = await api.put(`/admin/cases/${caseId}/splits/${splitId}`, {
+      status: "paid",
+      completion_source: "manual",
+    });
+    return data.split as PaymentSplit;
+  },
+);
+
+// ── Payment Splits overview (all cases) ───────────────────────────────────
+export const fetchAdminPaymentSplits = createAsyncThunk(
+  "admin/fetchAdminPaymentSplits",
+  async (args?: { status?: string; page?: number; limit?: number }) => {
+    const params: any = {};
+    if (args?.status) params.status = args.status;
+    if (args?.page) params.page = args.page;
+    if (args?.limit) params.limit = args.limit;
+    const { data } = await api.get("/admin/payment-splits", { params });
+    return data;
+  },
+);
+
+// ── Calendar ──────────────────────────────────────────────────────────────
+export const fetchAdminCalendar = createAsyncThunk(
+  "admin/fetchAdminCalendar",
+  async ({ from, to }: { from: string; to: string }) => {
+    const { data } = await api.get("/admin/calendar", { params: { from, to } });
+    return data.splits as CalendarSplit[];
+  },
+);
+
 const slice = createSlice({
   name: "admin",
   initialState,
   reducers: {
     clearPanelClient(s) {
       s.panelClient = null;
+    },
+    clearCouponPreview(s) {
+      s.couponPreview = null;
+      s.couponPreviewing = false;
     },
   },
   extraReducers: (b) => {
@@ -599,6 +781,16 @@ const slice = createSlice({
     b.addCase(fetchAdminClients.fulfilled, (s, a) => {
       s.loading = false;
       s.clients = a.payload;
+    });
+    b.addCase(searchClients.pending, (s) => {
+      s.clientSearchLoading = true;
+    });
+    b.addCase(searchClients.rejected, (s) => {
+      s.clientSearchLoading = false;
+    });
+    b.addCase(searchClients.fulfilled, (s, a) => {
+      s.clientSearchLoading = false;
+      s.clientSearchResults = a.payload;
     });
     b.addCase(fetchAdminClient.fulfilled, (s, a) => {
       s.selectedClient = a.payload;
@@ -737,6 +929,17 @@ const slice = createSlice({
     b.addCase(deleteAdminCoupon.fulfilled, (s, a) => {
       s.coupons = s.coupons.filter((c) => c.id !== a.meta.arg.id);
     });
+    b.addCase(adminValidateCoupon.pending, (s) => {
+      s.couponPreviewing = true;
+      s.couponPreview = null;
+    });
+    b.addCase(adminValidateCoupon.rejected, (s) => {
+      s.couponPreviewing = false;
+    });
+    b.addCase(adminValidateCoupon.fulfilled, (s, a) => {
+      s.couponPreviewing = false;
+      s.couponPreview = a.payload;
+    });
     b.addCase(fetchSectionLocks.pending, (s) => {
       s.sectionLocksLoading = true;
     });
@@ -762,6 +965,77 @@ const slice = createSlice({
       if (idx !== -1) s.sectionLocks[idx] = a.payload;
       else s.sectionLocks.push(a.payload);
     });
+    b.addCase(uploadRoundReportPdf.fulfilled, (s, a) => {
+      if (s.panelClient && a.payload.report) {
+        const updated = a.payload.report;
+        const idx = s.panelClient.reports.findIndex(
+          (r: any) => r.round_number === updated.round_number,
+        );
+        if (idx !== -1) {
+          s.panelClient.reports[idx] = updated;
+        } else {
+          s.panelClient.reports.push(updated);
+        }
+      }
+    });
+    b.addCase(deleteRoundReportPdf.fulfilled, (s, a) => {
+      if (!s.panelClient) return;
+      const { pdfId, roundNumber } = a.payload;
+      const report = s.panelClient.reports.find(
+        (r: any) => r.round_number === roundNumber,
+      );
+      if (report && report.pdfs) {
+        report.pdfs = report.pdfs.filter((p: any) => p.id !== pdfId);
+      }
+    });
+    // Payment splits
+    b.addCase(fetchCaseSplits.pending, (s) => {
+      s.caseSplitsLoading = true;
+    });
+    b.addCase(fetchCaseSplits.rejected, (s) => {
+      s.caseSplitsLoading = false;
+    });
+    b.addCase(fetchCaseSplits.fulfilled, (s, a) => {
+      s.caseSplitsLoading = false;
+      s.caseSplits = a.payload;
+    });
+    b.addCase(createCaseSplit.fulfilled, (s, a) => {
+      s.caseSplits.push(a.payload);
+    });
+    b.addCase(updateCaseSplit.fulfilled, (s, a) => {
+      const idx = s.caseSplits.findIndex((sp) => sp.id === a.payload.id);
+      if (idx !== -1) s.caseSplits[idx] = a.payload;
+    });
+    b.addCase(markSplitPaid.fulfilled, (s, a) => {
+      const idx = s.caseSplits.findIndex((sp) => sp.id === a.payload.id);
+      if (idx !== -1) s.caseSplits[idx] = a.payload;
+      const idx2 = s.paymentSplits.findIndex((sp) => sp.id === a.payload.id);
+      if (idx2 !== -1) s.paymentSplits[idx2] = a.payload;
+    });
+    b.addCase(deleteCaseSplit.fulfilled, (s, a) => {
+      s.caseSplits = s.caseSplits.filter((sp) => sp.id !== a.payload);
+    });
+    b.addCase(fetchAdminPaymentSplits.pending, (s) => {
+      s.paymentSplitsLoading = true;
+    });
+    b.addCase(fetchAdminPaymentSplits.rejected, (s) => {
+      s.paymentSplitsLoading = false;
+    });
+    b.addCase(fetchAdminPaymentSplits.fulfilled, (s, a) => {
+      s.paymentSplitsLoading = false;
+      s.paymentSplits = a.payload.splits;
+      s.paymentSplitsPagination = a.payload.pagination;
+    });
+    b.addCase(fetchAdminCalendar.pending, (s) => {
+      s.calendarLoading = true;
+    });
+    b.addCase(fetchAdminCalendar.rejected, (s) => {
+      s.calendarLoading = false;
+    });
+    b.addCase(fetchAdminCalendar.fulfilled, (s, a) => {
+      s.calendarLoading = false;
+      s.calendarSplits = a.payload;
+    });
   },
 });
 
@@ -784,5 +1058,5 @@ export const updateSectionLock = createAsyncThunk<
   return data.section_lock as SectionLock;
 });
 
-export const { clearPanelClient } = slice.actions;
+export const { clearPanelClient, clearCouponPreview } = slice.actions;
 export default slice.reducer;

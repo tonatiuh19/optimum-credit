@@ -15,18 +15,24 @@ import {
   CheckCircle2,
   Clock,
   ChevronDown,
-  Link2,
+  Hash,
 } from "lucide-react";
 import AdminPageHeader from "@/components/AdminPageHeader";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { DataGridColumn } from "@/components/ui/data-grid";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { fetchAllDocuments } from "@/store/slices/adminSlice";
-import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogClose,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import api from "@/lib/api";
 import { useDebounce } from "@/hooks/use-debounce";
+import { LangBadge } from "@/components/ui/lang-badge";
 
 const DOC_TYPE_LABELS: Record<string, string> = {
   id_front: "Gov ID — Front",
@@ -35,22 +41,6 @@ const DOC_TYPE_LABELS: Record<string, string> = {
   proof_of_address: "Proof of Address",
   other: "Other",
 };
-
-const PIPELINE_ROUNDS: { value: string; label: string }[] = [
-  { value: "new_client", label: "New Client" },
-  { value: "docs_ready", label: "Docs Verified" },
-  { value: "round_1", label: "Round 1" },
-  { value: "round_2", label: "Round 2" },
-  { value: "round_3", label: "Round 3" },
-  { value: "round_4", label: "Round 4" },
-  { value: "round_5", label: "Round 5" },
-  { value: "completed", label: "Completed" },
-  { value: "cancelled", label: "Cancelled" },
-];
-
-const ROUND_LABEL: Record<string, string> = Object.fromEntries(
-  PIPELINE_ROUNDS.map((r) => [r.value, r.label]),
-);
 
 const DOC_TYPE_COLORS: Record<string, string> = {
   id_front: "bg-blue-500/10 text-blue-400 border-blue-500/20",
@@ -96,6 +86,8 @@ interface DocRecord {
   first_name: string;
   last_name: string;
   email: string;
+  preferred_language?: "en" | "es" | null;
+  case_number?: string | null;
 }
 
 function formatBytes(b: number) {
@@ -205,10 +197,19 @@ export default function AdminDocuments() {
       sticky: true,
       render: (d) => (
         <div>
-          <div className="font-medium">
+          <div className="flex items-center gap-1.5 font-medium">
             {d.first_name} {d.last_name}
+            <LangBadge lang={d.preferred_language} />
           </div>
-          <div className="text-xs text-muted-foreground">{d.email}</div>
+          <div className="flex items-center gap-2 mt-0.5">
+            <div className="text-xs text-muted-foreground">{d.email}</div>
+            {d.case_number && (
+              <span className="inline-flex items-center gap-0.5 text-[10px] font-mono font-medium text-primary/70 bg-primary/8 border border-primary/15 px-1.5 py-0.5 rounded">
+                <Hash className="w-2.5 h-2.5" />
+                {d.case_number}
+              </span>
+            )}
+          </div>
         </div>
       ),
     },
@@ -225,9 +226,11 @@ export default function AdminDocuments() {
               {d.file_name}
             </span>
           </div>
-          <div className="text-xs text-muted-foreground mt-0.5">
-            {formatBytes(d.file_size)}
-          </div>
+          {d.file_size > 0 && (
+            <div className="text-xs text-muted-foreground mt-0.5">
+              {formatBytes(d.file_size)}
+            </div>
+          )}
         </div>
       ),
     },
@@ -245,21 +248,6 @@ export default function AdminDocuments() {
           {DOC_TYPE_LABELS[d.doc_type] || d.doc_type}
         </span>
       ),
-    },
-    {
-      key: "pipeline_round",
-      label: "Pipeline",
-      sortable: true,
-      shrink: true,
-      render: (d) =>
-        d.pipeline_round ? (
-          <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full border bg-primary/10 text-primary border-primary/20">
-            <Link2 className="w-2.5 h-2.5" />
-            {ROUND_LABEL[d.pipeline_round] ?? d.pipeline_round}
-          </span>
-        ) : (
-          <span className="text-[10px] text-muted-foreground/50">—</span>
-        ),
     },
     {
       key: "uploaded_at",
@@ -412,7 +400,7 @@ export default function AdminDocuments() {
 
       {/* View-only preview overlay */}
       <Dialog open={!!selected} onOpenChange={(open) => !open && closeDoc()}>
-        <DialogContent className="max-w-3xl w-full bg-card border-border p-0 gap-0 overflow-hidden max-h-[90vh]">
+        <DialogContent className="max-w-3xl w-full bg-card border-border p-0 gap-0 overflow-hidden max-h-[90vh] [&>button:last-child]:hidden">
           <DialogTitle className="sr-only">
             {selected
               ? DOC_TYPE_LABELS[selected.doc_type] || selected.doc_type
@@ -458,6 +446,12 @@ export default function AdminDocuments() {
                       </a>
                     </>
                   )}
+                  <DialogClose
+                    onClick={closeDoc}
+                    className="inline-flex items-center justify-center w-7 h-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                  >
+                    <X className="w-4 h-4" />
+                  </DialogClose>
                 </div>
               </div>
 

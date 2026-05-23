@@ -17,6 +17,8 @@ import {
   Code2,
   Eye,
   LayoutPanelLeft,
+  Globe,
+  Languages,
 } from "lucide-react";
 import CodeMirror from "@uiw/react-codemirror";
 import { html } from "@codemirror/lang-html";
@@ -215,6 +217,7 @@ function CreateTemplateDialog({
     variables: "",
   });
   const [saving, setSaving] = useState(false);
+  const [createEsPair, setCreateEsPair] = useState(true);
 
   const set = (k: string, v: string) => setForm((p) => ({ ...p, [k]: v }));
 
@@ -249,7 +252,38 @@ function CreateTemplateDialog({
           variables: variables.length ? variables : undefined,
         }),
       ).unwrap();
-      toast({ title: "Template created" });
+
+      // Optionally create a paired ES version
+      const isEsSlug = form.slug.endsWith("_es");
+      if (createEsPair && !isEsSlug) {
+        try {
+          await dispatch(
+            createTemplate({
+              slug: `${form.slug}_es`,
+              name: `${form.name} (ES)`,
+              channel: form.channel,
+              subject: form.subject
+                ? `${form.subject} [ES — traducir]`
+                : undefined,
+              body: `<!-- TRADUCIR AL ESPAÑOL -->\n${form.body}`,
+              variables: variables.length ? variables : undefined,
+            }),
+          ).unwrap();
+        } catch {
+          toast({
+            title:
+              "EN template created but ES pair failed — create it manually",
+            variant: "destructive",
+          });
+        }
+      }
+
+      toast({
+        title:
+          createEsPair && !isEsSlug
+            ? "Template pair created (EN + ES)"
+            : "Template created",
+      });
       onCreated();
       onClose();
       setForm({
@@ -260,6 +294,7 @@ function CreateTemplateDialog({
         body: "",
         variables: "",
       });
+      setCreateEsPair(true);
     } catch (e: any) {
       toast({
         title: e?.response?.data?.error ?? "Failed to create template",
@@ -378,6 +413,33 @@ function CreateTemplateDialog({
               <code className="text-primary">{`{{variable}}`}</code> tokens.
             </p>
           </div>
+
+          {/* ES pair option */}
+          {!form.slug.endsWith("_es") && (
+            <div
+              className={`flex items-start gap-2.5 rounded-lg border px-3 py-2.5 cursor-pointer transition-colors ${createEsPair ? "border-amber-300 bg-amber-50" : "border-border bg-muted/30"}`}
+              onClick={() => setCreateEsPair((v) => !v)}
+            >
+              <div
+                className={`mt-0.5 w-4 h-4 rounded border-2 flex items-center justify-center shrink-0 transition-colors ${createEsPair ? "bg-amber-500 border-amber-500" : "border-muted-foreground"}`}
+              >
+                {createEsPair && (
+                  <CheckCircle2 className="w-3 h-3 text-white" />
+                )}
+              </div>
+              <div>
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
+                  <Globe className="w-3.5 h-3.5 text-amber-600" />
+                  Also create Spanish (ES) version
+                </div>
+                <p className="text-[10px] text-muted-foreground mt-0.5">
+                  Creates a paired{" "}
+                  <code className="text-primary">{form.slug || "slug"}_es</code>{" "}
+                  template with placeholder Spanish content.
+                </p>
+              </div>
+            </div>
+          )}
         </div>
 
         <DialogFooter>
@@ -444,26 +506,46 @@ function DeleteBlockedDialog({
 
 function TemplateCard({
   t,
+  allTemplates,
   onSaved,
   onDeleted,
 }: {
   t: CommunicationTemplate;
+  allTemplates: CommunicationTemplate[];
   onSaved: () => void;
   onDeleted: () => void;
 }) {
   const dispatch = useAppDispatch();
   const { toast } = useToast();
   const [open, setOpen] = useState(false);
-  const [subject, setSubject] = useState(t.subject ?? "");
-  const [body, setBody] = useState(t.body ?? "");
-  const [isActive, setIsActive] = useState(!!t.is_active);
+  // Language tab: "en" or "es"
+  const isEsVariant = t.slug.endsWith("_es");
+  const baseSlug = isEsVariant ? t.slug.slice(0, -3) : t.slug;
+  const esPair = isEsVariant
+    ? null // this IS the ES variant — EN is the base
+    : (allTemplates.find((x) => x.slug === `${t.slug}_es`) ?? null);
+  const [langTab, setLangTab] = useState<"en" | "es">("en");
+  // The currently active template data (either t for EN or esPair for ES)
+  const activeT = langTab === "es" && esPair ? esPair : t;
+
+  const [subject, setSubject] = useState(activeT.subject ?? "");
+  const [body, setBody] = useState(activeT.body ?? "");
+  const [isActive, setIsActive] = useState(!!activeT.is_active);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+
+  // Reset form when switching lang tab
+  useEffect(() => {
+    setSubject(activeT.subject ?? "");
+    setBody(activeT.body ?? "");
+    setIsActive(!!activeT.is_active);
+  }, [activeT.id, activeT.subject, activeT.body, activeT.is_active]);
 
   // Flow-edit warning (shown before saving a flow_ template)
   const [showFlowEditWarning, setShowFlowEditWarning] = useState(false);
   // Delete confirm
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleteEsPair, setDeleteEsPair] = useState(false);
   // Delete blocked by flows
   const [blockedFlows, setBlockedFlows] = useState<string[]>([]);
 
@@ -474,20 +556,20 @@ function TemplateCard({
   }, [t.id, t.subject, t.body, t.is_active]);
 
   const isDirty =
-    subject !== (t.subject ?? "") ||
-    body !== (t.body ?? "") ||
-    isActive !== !!t.is_active;
+    subject !== (activeT.subject ?? "") ||
+    body !== (activeT.body ?? "") ||
+    isActive !== !!activeT.is_active;
 
   const doSave = async () => {
     setSaving(true);
     try {
       await dispatch(
-        updateTemplate({ id: t.id, subject, body, is_active: isActive }),
+        updateTemplate({ id: activeT.id, subject, body, is_active: isActive }),
       ).unwrap();
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
       onSaved();
-      toast({ title: "Template saved" });
+      toast({ title: `Template saved${langTab === "es" ? " (ES)" : ""}` });
     } catch {
       toast({ title: "Save failed", variant: "destructive" });
     } finally {
@@ -507,7 +589,16 @@ function TemplateCard({
     setShowDeleteConfirm(false);
     const result = await dispatch(deleteTemplate({ id: t.id }));
     if (deleteTemplate.fulfilled.match(result)) {
-      toast({ title: "Template deleted" });
+      // Also delete ES pair if requested
+      if (deleteEsPair && esPair) {
+        await dispatch(deleteTemplate({ id: esPair.id }));
+      }
+      toast({
+        title:
+          deleteEsPair && esPair
+            ? "Templates deleted (EN + ES)"
+            : "Template deleted",
+      });
       onDeleted();
     } else if (deleteTemplate.rejected.match(result)) {
       const payload = result.payload as
@@ -522,10 +613,10 @@ function TemplateCard({
   };
 
   const ch = CHANNEL_META[t.channel] ?? CHANNEL_META.email;
-  const vars: string[] = Array.isArray(t.variables_json)
-    ? t.variables_json
-    : t.variables_json
-      ? Object.keys(t.variables_json)
+  const vars: string[] = Array.isArray(activeT.variables_json)
+    ? activeT.variables_json
+    : activeT.variables_json
+      ? Object.keys(activeT.variables_json)
       : [];
 
   return (
@@ -549,6 +640,16 @@ function TemplateCard({
               >
                 {ch.icon} {ch.label}
               </Badge>
+              {/* Language pairing indicator */}
+              {isEsVariant ? (
+                <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold font-mono border bg-amber-500/10 text-amber-600 border-amber-500/25 shrink-0">
+                  <Globe className="w-2.5 h-2.5" /> ES
+                </span>
+              ) : esPair ? (
+                <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold font-mono border bg-primary/10 text-primary border-primary/25 shrink-0">
+                  <Globe className="w-2.5 h-2.5" /> EN+ES
+                </span>
+              ) : null}
               <div className="min-w-0">
                 <div className="font-semibold text-sm truncate">{t.name}</div>
                 <div className="text-[11px] text-muted-foreground font-mono">
@@ -600,6 +701,79 @@ function TemplateCard({
         {/* Expanded body */}
         {open && (
           <div className="px-4 pb-4 border-t pt-4 space-y-4">
+            {/* Language tab switcher (only for templates that have a paired _es version) */}
+            {!isEsVariant && (
+              <div className="flex items-center justify-between">
+                {esPair ? (
+                  <div className="flex items-center gap-1 rounded-lg border bg-muted/30 p-0.5">
+                    <button
+                      onClick={() => setLangTab("en")}
+                      className={cn(
+                        "flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold transition-colors",
+                        langTab === "en"
+                          ? "bg-primary text-primary-foreground shadow-sm"
+                          : "text-muted-foreground hover:text-foreground",
+                      )}
+                    >
+                      <Globe className="w-3 h-3" /> EN
+                    </button>
+                    <button
+                      onClick={() => setLangTab("es")}
+                      className={cn(
+                        "flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold transition-colors",
+                        langTab === "es"
+                          ? "bg-amber-500 text-white shadow-sm"
+                          : "text-muted-foreground hover:text-foreground",
+                      )}
+                    >
+                      <Globe className="w-3 h-3" /> ES
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] text-muted-foreground flex items-center gap-1">
+                      <Languages className="w-3.5 h-3.5" /> No Spanish version
+                      paired
+                    </span>
+                    <button
+                      className="text-[11px] text-amber-600 hover:text-amber-700 font-semibold border border-amber-300 bg-amber-50 hover:bg-amber-100 px-2 py-0.5 rounded-md transition-colors"
+                      onClick={async () => {
+                        try {
+                          await dispatch(
+                            createTemplate({
+                              slug: `${baseSlug}_es`,
+                              name: `${t.name} (ES)`,
+                              channel: t.channel,
+                              subject: t.subject
+                                ? `${t.subject} [ES — traducir]`
+                                : undefined,
+                              body: `<!-- TRADUCIR AL ESPAÑOL -->\n${t.body}`,
+                              variables: Array.isArray(t.variables_json)
+                                ? t.variables_json
+                                : undefined,
+                            }),
+                          ).unwrap();
+                          toast({
+                            title: "ES version created — translate the content",
+                          });
+                          onSaved();
+                        } catch {
+                          toast({
+                            title: "Failed to create ES version",
+                            variant: "destructive",
+                          });
+                        }
+                      }}
+                    >
+                      + Create ES version
+                    </button>
+                  </div>
+                )}
+                <span className="text-[10px] text-muted-foreground font-mono">
+                  {langTab === "es" && esPair ? esPair.slug : t.slug}
+                </span>
+              </div>
+            )}
             {/* Flow template warning banner */}
             {isFlowTemplate(t) && (
               <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
@@ -746,6 +920,30 @@ function TemplateCard({
               )}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {/* Offer to also delete ES pair */}
+          {esPair && (
+            <div
+              className={`flex items-start gap-2.5 rounded-lg border px-3 py-2.5 cursor-pointer transition-colors mx-1 ${deleteEsPair ? "border-destructive/40 bg-destructive/5" : "border-border bg-muted/30"}`}
+              onClick={() => setDeleteEsPair((v) => !v)}
+            >
+              <div
+                className={`mt-0.5 w-4 h-4 rounded border-2 flex items-center justify-center shrink-0 transition-colors ${deleteEsPair ? "bg-destructive border-destructive" : "border-muted-foreground"}`}
+              >
+                {deleteEsPair && (
+                  <CheckCircle2 className="w-3 h-3 text-white" />
+                )}
+              </div>
+              <div>
+                <div className="text-xs font-semibold text-foreground">
+                  Also delete Spanish version
+                </div>
+                <p className="text-[10px] text-muted-foreground mt-0.5">
+                  Will also delete{" "}
+                  <code className="text-destructive">{esPair.slug}</code>
+                </p>
+              </div>
+            </div>
+          )}
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
@@ -794,7 +992,13 @@ export default function AdminTemplates() {
     ) : (
       <div className="space-y-2">
         {list.map((t) => (
-          <TemplateCard key={t.id} t={t} onSaved={reload} onDeleted={reload} />
+          <TemplateCard
+            key={t.id}
+            t={t}
+            allTemplates={templates}
+            onSaved={reload}
+            onDeleted={reload}
+          />
         ))}
       </div>
     );

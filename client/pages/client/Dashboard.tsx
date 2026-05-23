@@ -5,6 +5,7 @@ import {
   ArrowRight,
   CheckCircle2,
   Circle,
+  ClipboardList,
   FileText,
   LifeBuoy,
   PlayCircle,
@@ -12,20 +13,9 @@ import {
   TrendingUp,
   User,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
-import { fetchDashboard } from "@/store/slices/portalSlice";
-
-const STAGE_LABELS: Record<string, string> = {
-  new_client: "New Client",
-  docs_ready: "Docs Verified",
-  round_1: "Round 1",
-  round_2: "Round 2",
-  round_3: "Round 3",
-  round_4: "Round 4",
-  round_5: "Round 5",
-  completed: "Complete",
-  cancelled: "Cancelled",
-};
+import { fetchDashboard, fetchPortalTasks } from "@/store/slices/portalSlice";
 
 const STAGE_ORDER = [
   "new_client",
@@ -39,13 +29,36 @@ const STAGE_ORDER = [
 ];
 
 export default function Dashboard() {
+  const { t } = useTranslation();
   const dispatch = useAppDispatch();
-  const { dashboard, loading } = useAppSelector((s) => s.portal);
+  const { dashboard, loading, tasks } = useAppSelector((s) => s.portal);
   const { user } = useAppSelector((s) => s.clientAuth);
+
+  const STAGE_LABELS: Record<string, string> = {
+    new_client: t("dashboard.stages.new_client"),
+    docs_ready: t("dashboard.stages.docs_ready"),
+    round_1: t("dashboard.stages.round_1"),
+    round_2: t("dashboard.stages.round_2"),
+    round_3: t("dashboard.stages.round_3"),
+    round_4: t("dashboard.stages.round_4"),
+    round_5: t("dashboard.stages.round_5"),
+    completed: t("dashboard.stages.completed"),
+    cancelled: t("dashboard.stages.cancelled"),
+  };
 
   useEffect(() => {
     dispatch(fetchDashboard());
+    dispatch(fetchPortalTasks());
   }, [dispatch]);
+
+  const pendingTasks = tasks.filter(
+    (t) => (t as any).completion_status !== "completed",
+  ).length;
+  const totalTasks = tasks.length;
+  const taskProgressPct =
+    totalTasks > 0
+      ? Math.round(((totalTasks - pendingTasks) / totalTasks) * 100)
+      : 0;
 
   const stage =
     dashboard?.client?.pipeline_stage || user?.pipeline_stage || "new_client";
@@ -59,24 +72,11 @@ export default function Dashboard() {
     !!user?.smart_credit_connected_at ||
     !!dashboard?.client?.smart_credit_connected_at;
 
-  const onboardingTodos = [
-    {
-      label: "Upload your documents",
-      done: docsApproved >= 4,
-      to: "/portal/documents",
-    },
-    {
-      label: "Connect Smart Credit monitoring",
-      done: smartCreditConnected,
-      to: "/portal/profile",
-    },
-  ];
-
   return (
     <div className="space-y-8">
       <ClientPageHeader
-        title={`Welcome back, ${user?.first_name || "there"}!`}
-        description="Here's a snapshot of your credit repair journey."
+        title={t("dashboard.title", { name: user?.first_name || "" })}
+        description={t("dashboard.description")}
       />
 
       {loading && !dashboard ? (
@@ -93,7 +93,9 @@ export default function Dashboard() {
           {/* Pipeline progress */}
           <div className="bg-card rounded-2xl border border-border p-6 shadow-sm">
             <div className="flex items-center justify-between mb-5">
-              <h2 className="text-lg font-semibold">Your Progress</h2>
+              <h2 className="text-lg font-semibold">
+                {t("dashboard.yourProgress")}
+              </h2>
               <div className="flex items-center gap-2">
                 {dashboard?.active_case?.case_number && (
                   <span className="font-mono text-[11px] font-bold text-muted-foreground bg-muted border border-border px-2 py-0.5 rounded">
@@ -135,7 +137,7 @@ export default function Dashboard() {
           <div className="grid sm:grid-cols-3 gap-4">
             <StatCard
               icon={TrendingUp}
-              label="Items Removed"
+              label={t("dashboard.itemsRemoved")}
               value={String(
                 reports.reduce(
                   (acc: number, r: any) => acc + (r.items_removed || 0),
@@ -147,45 +149,112 @@ export default function Dashboard() {
             />
             <StatCard
               icon={FileText}
-              label="Documents Approved"
+              label={t("dashboard.docsApproved")}
               value={`${docsApproved}/4`}
               tint="from-primary/10 to-transparent"
               color="text-primary"
             />
             <StatCard
               icon={Sparkles}
-              label="Latest Credit Score"
+              label={t("dashboard.latestScore")}
               value={latest?.score_after ? String(latest.score_after) : "—"}
               tint="from-yellow-500/10 to-transparent"
               color="text-yellow-600"
             />
           </div>
 
+          {/* Onboarding Tasks widget */}
+          {totalTasks > 0 && (
+            <Link
+              to="/portal/tasks"
+              className="block bg-card rounded-2xl border border-border p-5 shadow-sm hover:border-primary/30 hover:shadow-md transition-all group"
+            >
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <ClipboardList className="h-5 w-5 text-primary" />
+                  <h2 className="font-semibold">{t("tasks.heading")}</h2>
+                </div>
+                <ArrowRight className="h-4 w-4 text-muted-foreground group-hover:text-primary transition-colors" />
+              </div>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-muted-foreground">
+                    {t("tasks.progress", {
+                      completed: totalTasks - pendingTasks,
+                      total: totalTasks,
+                    })}
+                  </span>
+                  <span
+                    className={
+                      taskProgressPct === 100
+                        ? "text-accent font-bold"
+                        : "text-primary font-bold"
+                    }
+                  >
+                    {taskProgressPct}%
+                  </span>
+                </div>
+                <div className="w-full bg-secondary rounded-full h-2">
+                  <div
+                    className={`h-2 rounded-full transition-all duration-500 ${
+                      taskProgressPct === 100 ? "bg-accent" : "bg-primary"
+                    }`}
+                    style={{ width: `${taskProgressPct}%` }}
+                  />
+                </div>
+                {pendingTasks > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    {pendingTasks} task{pendingTasks !== 1 ? "s" : ""} remaining
+                  </p>
+                )}
+                {pendingTasks === 0 && (
+                  <p className="text-xs text-accent flex items-center gap-1 font-medium">
+                    <CheckCircle2 className="h-3 w-3" />
+                    {t("tasks.allDone")}
+                  </p>
+                )}
+              </div>
+            </Link>
+          )}
+
           {/* Onboarding checklist */}
           <div className="bg-card rounded-2xl border border-border p-6 shadow-sm">
-            <h2 className="text-lg font-semibold mb-4">Get started</h2>
+            <h2 className="text-lg font-semibold mb-4">
+              {t("dashboard.getStarted")}
+            </h2>
             <ul className="space-y-2">
-              {onboardingTodos.map((t) => (
-                <li key={t.label}>
+              {[
+                {
+                  label: t("dashboard.uploadDocuments"),
+                  done: docsApproved >= 4,
+                  to: "/portal/documents",
+                },
+                {
+                  label: t("dashboard.connectSmartCredit"),
+                  done: smartCreditConnected,
+                  to: "/portal/profile",
+                },
+              ].map((item) => (
+                <li key={item.label}>
                   <Link
-                    to={t.to}
+                    to={item.to}
                     className="flex items-center gap-3 p-3 -mx-3 rounded-xl hover:bg-secondary/60 transition-colors"
                   >
-                    {t.done ? (
+                    {item.done ? (
                       <CheckCircle2 className="w-5 h-5 text-accent shrink-0" />
                     ) : (
                       <Circle className="w-5 h-5 text-muted-foreground shrink-0" />
                     )}
                     <span
                       className={`flex-1 text-sm ${
-                        t.done
+                        item.done
                           ? "line-through text-muted-foreground"
                           : "font-medium"
                       }`}
                     >
-                      {t.label}
+                      {item.label}
                     </span>
-                    {!t.done && (
+                    {!item.done && (
                       <ArrowRight className="w-4 h-4 text-muted-foreground" />
                     )}
                   </Link>

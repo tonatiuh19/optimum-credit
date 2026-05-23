@@ -27,6 +27,8 @@ import {
   UserCog,
   CreditCard,
   Lock,
+  ClipboardList,
+  CalendarDays,
 } from "lucide-react";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { adminLogout, fetchAdminMe } from "@/store/slices/adminAuthSlice";
@@ -75,6 +77,18 @@ const NAV_GROUPS = [
         label: "Payments",
         icon: CreditCard,
         sectionKey: "payments",
+      },
+      {
+        to: "/admin/calendar",
+        label: "Calendar",
+        icon: CalendarDays,
+        sectionKey: "calendar",
+      },
+      {
+        to: "/admin/tasks",
+        label: "Tasks",
+        icon: ClipboardList,
+        sectionKey: "tasks",
       },
       {
         to: "/admin/conversations",

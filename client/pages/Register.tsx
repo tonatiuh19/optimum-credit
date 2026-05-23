@@ -15,6 +15,9 @@ import {
   Mail,
   PartyPopper,
   CreditCard,
+  Tag,
+  X,
+  BadgePercent,
 } from "lucide-react";
 import {
   SiVisa,
@@ -22,12 +25,15 @@ import {
   SiAmericanexpress,
   SiDiscover,
 } from "react-icons/si";
+import { useTranslation } from "react-i18next";
 import PageMeta from "@/components/PageMeta";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
   fetchPackages,
   submitRegistration,
   resetRegistration,
+  validateCoupon,
+  clearCoupon,
 } from "@/store/slices/packagesSlice";
 import api from "@/lib/api";
 import type { RegistrationResponse } from "@shared/api";
@@ -67,20 +73,19 @@ const AUTHORIZENET_CLIENT_KEY = (import.meta as any).env
 const AUTHORIZENET_SANDBOX =
   (import.meta as any).env?.VITE_AUTHORIZENET_SANDBOX !== "false";
 
-const REG_SCHEMA = Yup.object({
-  firstName: Yup.string().required("Required"),
-  lastName: Yup.string().required("Required"),
-  email: Yup.string().email("Invalid email").required("Required"),
-  phone: Yup.string().required("Required"),
-});
-
 export default function Register() {
+  const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
   const location = useLocation();
-  const { packages, loading, registering, error } = useAppSelector(
-    (s) => s.packages,
-  );
+  const {
+    packages,
+    loading,
+    registering,
+    error,
+    couponValidation,
+    couponValidating,
+  } = useAppSelector((s) => s.packages);
   const [step, setStep] = useState(1);
   const [direction, setDirection] = useState<"forward" | "back">("forward");
   const [selectedSlug, setSelectedSlug] = useState<string>("");
@@ -95,10 +100,14 @@ export default function Register() {
   const [paying, setPaying] = useState(false);
   const [scriptLoaded, setScriptLoaded] = useState(false);
 
+  // Coupon fields
+  const [couponInput, setCouponInput] = useState("");
+
   useEffect(() => {
     dispatch(fetchPackages());
     return () => {
       dispatch(resetRegistration());
+      dispatch(clearCoupon());
     };
   }, [dispatch]);
 
@@ -114,6 +123,14 @@ export default function Register() {
       setSelectedSlug(packages[0].slug);
     }
   }, [packages, location.search]);
+
+  // Clear coupon when selected package changes (coupon may be package-specific)
+  useEffect(() => {
+    if (selectedSlug) {
+      dispatch(clearCoupon());
+      setCouponInput("");
+    }
+  }, [selectedSlug, dispatch]);
 
   // Load Accept.js from Authorize.net CDN
   useEffect(() => {
@@ -133,6 +150,15 @@ export default function Register() {
       setPayError("Failed to load payment library. Please refresh the page.");
     document.head.appendChild(script);
   }, []);
+
+  const REG_SCHEMA = Yup.object({
+    firstName: Yup.string().required(t("common.required")),
+    lastName: Yup.string().required(t("common.required")),
+    email: Yup.string()
+      .email(t("common.invalidEmail"))
+      .required(t("common.required")),
+    phone: Yup.string().required(t("common.required")),
+  });
 
   const form = useFormik({
     initialValues: {
@@ -215,6 +241,10 @@ export default function Register() {
             packageSlug: selectedSlug,
             dataDescriptor: response.opaqueData!.dataDescriptor,
             dataValue: response.opaqueData!.dataValue,
+            coupon_code:
+              couponValidation?.valid && couponInput.trim()
+                ? couponInput.trim().toUpperCase()
+                : undefined,
           }),
         );
 
@@ -240,6 +270,29 @@ export default function Register() {
 
   const selectedPackage = packages.find((p) => p.slug === selectedSlug);
   const isBusy = paying || registering;
+
+  const appliedDiscount = couponValidation?.valid
+    ? couponValidation.discount_cents
+    : 0;
+  const finalPriceCents = selectedPackage
+    ? Math.max(0, selectedPackage.price_cents - appliedDiscount)
+    : 0;
+
+  const handleApplyCoupon = () => {
+    if (!couponInput.trim() || !selectedPackage) return;
+    dispatch(
+      validateCoupon({
+        code: couponInput.trim().toUpperCase(),
+        package_id: selectedPackage.id,
+        amount_cents: selectedPackage.price_cents,
+      }),
+    );
+  };
+
+  const handleRemoveCoupon = () => {
+    dispatch(clearCoupon());
+    setCouponInput("");
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-primary/5 via-background to-accent/5 flex flex-col">
@@ -279,8 +332,8 @@ export default function Register() {
         {step < 3 && (
           <div className="flex items-center justify-center mb-10">
             {[
-              { n: 1, label: "Choose plan" },
-              { n: 2, label: "Your info & payment" },
+              { n: 1, label: t("register.stepChoosePlan") },
+              { n: 2, label: t("register.stepYourInfo") },
             ].map((s, i) => (
               <div key={s.n} className="flex items-center">
                 <div
@@ -325,11 +378,10 @@ export default function Register() {
           {step === 1 && (
             <div>
               <h1 className="text-3xl md:text-4xl font-bold mb-2 text-center">
-                Pick the plan that fits your goals
+                {t("register.planHeading")}
               </h1>
               <p className="text-muted-foreground text-center mb-8">
-                All plans include unlimited disputes, 24/7 portal access, and
-                free cancellation.
+                {t("register.planSubheading")}
               </p>
 
               {loading ? (
@@ -587,6 +639,103 @@ export default function Register() {
                     </div>
                   </div>
                 </div>
+
+                {/* ── Coupon code ── */}
+                <div className="mt-5 pt-5 border-t border-border">
+                  {couponValidation?.valid ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between bg-accent/10 border border-accent/30 rounded-xl px-4 py-3">
+                        <div className="flex items-center gap-2">
+                          <BadgePercent className="w-4 h-4 text-accent shrink-0" />
+                          <div>
+                            <p className="text-sm font-semibold text-accent">
+                              {t("register.couponApplied")}
+                            </p>
+                            <p className="text-xs text-muted-foreground font-mono">
+                              {couponValidation.coupon?.code}
+                            </p>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleRemoveCoupon}
+                          className="text-muted-foreground hover:text-destructive transition-colors"
+                          aria-label={t("register.couponRemove")}
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                      <div className="bg-muted/40 rounded-xl px-4 py-3 space-y-1.5 text-sm">
+                        <div className="flex justify-between text-muted-foreground">
+                          <span>{t("register.couponOriginal")}</span>
+                          <span className="line-through">
+                            $
+                            {(
+                              (selectedPackage?.price_cents ?? 0) / 100
+                            ).toFixed(2)}
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-accent font-medium">
+                          <span>{t("register.couponDiscount")}</span>
+                          <span>-${(appliedDiscount / 100).toFixed(2)}</span>
+                        </div>
+                        <div className="flex justify-between font-bold text-foreground border-t border-border pt-1.5 mt-1">
+                          <span>{t("register.couponTotal")}</span>
+                          <span>${(finalPriceCents / 100).toFixed(2)}</span>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div>
+                      <label className="block text-sm font-medium mb-2 text-muted-foreground">
+                        <Tag className="w-3.5 h-3.5 inline mr-1.5 opacity-70" />
+                        {t("register.couponCode")}
+                      </label>
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          placeholder={t("register.couponPlaceholder")}
+                          value={couponInput}
+                          onChange={(e) =>
+                            setCouponInput(
+                              e.target.value
+                                .toUpperCase()
+                                .replace(/[^A-Z0-9_-]/g, ""),
+                            )
+                          }
+                          onKeyDown={(e) =>
+                            e.key === "Enter" &&
+                            (e.preventDefault(), handleApplyCoupon())
+                          }
+                          className={`${inputCls(couponValidation !== null && !couponValidation?.valid)} flex-1 uppercase`}
+                          disabled={couponValidating}
+                        />
+                        <button
+                          type="button"
+                          onClick={handleApplyCoupon}
+                          disabled={!couponInput.trim() || couponValidating}
+                          className="btn-secondary shrink-0 min-w-[90px] flex items-center justify-center gap-1.5"
+                        >
+                          {couponValidating ? (
+                            <>
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              {t("register.couponApplying")}
+                            </>
+                          ) : (
+                            t("register.couponApply")
+                          )}
+                        </button>
+                      </div>
+                      {couponValidation !== null && !couponValidation.valid && (
+                        <p className="text-xs text-destructive mt-1.5 flex items-center gap-1">
+                          <X className="w-3 h-3" />
+                          {couponValidation.error ??
+                            t("register.couponInvalid")}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
 
               {/* Error */}
@@ -628,8 +777,7 @@ export default function Register() {
                     </>
                   ) : (
                     <>
-                      Pay $
-                      {((selectedPackage?.price_cents || 0) / 100).toFixed(2)}
+                      Pay ${(finalPriceCents / 100).toFixed(2)}
                       <ArrowRight className="w-4 h-4" />
                     </>
                   )}

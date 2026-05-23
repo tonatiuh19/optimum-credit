@@ -107,6 +107,9 @@ paths:
                 ssnLast4: { type: string, pattern: '^\d{4}$' }
                 packageSlug: { type: string }
                 affiliateCode: { type: string }
+                coupon_code:
+                  type: string
+                  description: Optional promotional coupon code to apply a discount to the charge
       responses:
         "200":
           description: Client registered
@@ -239,6 +242,58 @@ paths:
                 error:
                   type: string
                   example: Link expired or already used
+
+  /portal/payments:
+    get:
+      tags: [Portal]
+      summary: Get authenticated client's payment history
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: List of payments for the client
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  payments:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        package_name:
+                          type: string
+                          nullable: true
+                        amount_cents:
+                          type: integer
+                        discount_cents:
+                          type: integer
+                        original_amount_cents:
+                          type: integer
+                          nullable: true
+                        currency:
+                          type: string
+                        status:
+                          type: string
+                          enum:
+                            [pending, succeeded, failed, refunded, cancelled]
+                        provider:
+                          type: string
+                        coupon_code:
+                          type: string
+                          nullable: true
+                        paid_at:
+                          type: string
+                          format: date-time
+                          nullable: true
+                        created_at:
+                          type: string
+                          format: date-time
+        "401":
+          description: Unauthorized
 
   /portal/documents:
     post:
@@ -412,6 +467,107 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/CreditRepairCase"
+        "401":
+          description: Unauthorized
+
+  /admin/task-templates:
+    get:
+      tags: [Admin]
+      summary: List onboarding task templates with optional search and filters
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: search
+          schema:
+            type: string
+          description: Full-text search across title_en, title_es, slug, description_en
+        - in: query
+          name: type
+          schema:
+            type: string
+            enum: [all, form, upload, sign_document]
+          description: Filter by task type
+        - in: query
+          name: active
+          schema:
+            type: string
+            enum: [all, active, inactive]
+          description: Filter by active status
+      responses:
+        "200":
+          description: Filtered list of task templates
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tasks:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/OnboardingTaskTemplate"
+        "401":
+          description: Unauthorized
+    post:
+      tags: [Admin]
+      summary: Create a new onboarding task template
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTaskTemplatePayload"
+      responses:
+        "201":
+          description: Task template created
+        "400":
+          description: Validation error
+        "401":
+          description: Unauthorized
+
+  /admin/task-templates/{id}:
+    put:
+      tags: [Admin]
+      summary: Update an existing task template
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTaskTemplatePayload"
+      responses:
+        "200":
+          description: Updated task template
+        "404":
+          description: Not found
+        "401":
+          description: Unauthorized
+    delete:
+      tags: [Admin]
+      summary: Delete a task template (blocked if system task or has completions)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Deleted
+        "400":
+          description: Cannot delete (system task or has completions)
         "401":
           description: Unauthorized
 
@@ -769,6 +925,178 @@ paths:
                   webhook_response:
                     type: object
 
+  /admin/clients/{clientId}/round-reports/{round}/pdf:
+    post:
+      tags: [Admin]
+      summary: Upload a PDF report for a specific dispute round
+      description: |
+        Accepts a PDF file (multipart/form-data). Encrypts and stores it on the CDN.
+        Upserts the round report row and sends a notification email to the client.
+        Requires `super_admin` role.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: clientId
+          required: true
+          schema:
+            type: integer
+        - in: path
+          name: round
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 5
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [pdf]
+              properties:
+                pdf:
+                  type: string
+                  format: binary
+                  description: The PDF file to upload
+      responses:
+        "200":
+          description: Upload successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  report:
+                    $ref: "#/components/schemas/RoundReport"
+        "400":
+          description: Invalid input or not a PDF
+        "401":
+          description: Unauthorized
+
+  /admin/round-reports/{reportId}/pdf:
+    get:
+      tags: [Admin]
+      summary: Serve (decrypt & stream) a round report PDF for admin preview/download
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: reportId
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: PDF binary stream
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: PDF not found
+
+  /portal/round-reports/{round}/pdf:
+    get:
+      tags: [Portal]
+      summary: Serve a round report PDF to the authenticated client (download)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: round
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 5
+      responses:
+        "200":
+          description: PDF binary stream
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: PDF not found for this round
+
+  /admin/round-report-pdfs/{pdfId}:
+    get:
+      tags: [Admin]
+      summary: Serve (decrypt & stream) a specific round report PDF (admin)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: pdfId
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: PDF binary stream
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: PDF not found
+    delete:
+      tags: [Admin]
+      summary: Delete a specific round report PDF
+      description: Requires `super_admin` role.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: pdfId
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+        "404":
+          description: PDF not found
+
+  /portal/round-report-pdfs/{pdfId}:
+    get:
+      tags: [Portal]
+      summary: Download a specific round report PDF (client)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: pdfId
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: PDF binary stream
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        "403":
+          description: Forbidden (PDF does not belong to this client)
+        "404":
+          description: PDF not found
+
   /admin/clients/{id}/crc-sync:
     post:
       tags: [CRC]
@@ -1081,6 +1409,355 @@ paths:
         "401":
           description: Unauthorized
 
+  /admin/cases:
+    post:
+      tags: [Admin - Cases]
+      summary: Create a new credit repair case
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [client_id]
+              properties:
+                client_id:
+                  type: integer
+                package_id:
+                  type: integer
+                  nullable: true
+                pipeline_stage:
+                  type: string
+                notes:
+                  type: string
+                  nullable: true
+                send_case_email:
+                  type: boolean
+                splits:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/CreateSplitPayload"
+      responses:
+        "201":
+          description: Case created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  case_id:
+                    type: integer
+                  case_number:
+                    type: string
+        "400":
+          description: Missing client_id
+        "401":
+          description: Unauthorized
+
+  /admin/cases/{id}/splits:
+    get:
+      tags: [Admin - Payment Splits]
+      summary: List splits for a case
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Array of splits
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  splits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PaymentSplit"
+        "401":
+          description: Unauthorized
+    post:
+      tags: [Admin - Payment Splits]
+      summary: Add a split to a case
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSplitPayload"
+      responses:
+        "201":
+          description: Split created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  split_id:
+                    type: integer
+        "401":
+          description: Unauthorized
+
+  /admin/cases/{id}/splits/{splitId}:
+    put:
+      tags: [Admin - Payment Splits]
+      summary: Update a split
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: splitId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                label:
+                  type: string
+                amount_cents:
+                  type: integer
+                due_date:
+                  type: string
+                  format: date
+                status:
+                  type: string
+                  enum: [pending, paid, cancelled]
+                notes:
+                  type: string
+                  nullable: true
+      responses:
+        "200":
+          description: Split updated
+        "401":
+          description: Unauthorized
+    delete:
+      tags: [Admin - Payment Splits]
+      summary: Delete a split
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: splitId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Split deleted
+        "401":
+          description: Unauthorized
+
+  /admin/payment-splits:
+    get:
+      tags: [Admin - Payment Splits]
+      summary: Paginated overview of all payment splits
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, paid, overdue, cancelled]
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        "200":
+          description: Paginated splits
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  splits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PaymentSplit"
+                  pagination:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                      page:
+                        type: integer
+                      pages:
+                        type: integer
+        "401":
+          description: Unauthorized
+
+  /admin/calendar:
+    get:
+      tags: [Admin - Calendar]
+      summary: Splits in a date range for the calendar view
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+      responses:
+        "200":
+          description: Array of calendar splits
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  splits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PaymentSplit"
+        "401":
+          description: Unauthorized
+
+  /portal/payment-splits:
+    get:
+      tags: [Client Portal]
+      summary: Client's own payment schedule
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Array of client payment splits
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  splits:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PaymentSplit"
+        "401":
+          description: Unauthorized
+
+  /pay/{token}:
+    get:
+      tags: [Public]
+      summary: Get public split payment info by token
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Split payment details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  split_id:
+                    type: integer
+                  case_number:
+                    type: string
+                    nullable: true
+                  label:
+                    type: string
+                  amount_cents:
+                    type: integer
+                  due_date:
+                    type: string
+                    format: date
+                  status:
+                    type: string
+                  client_first_name:
+                    type: string
+                    nullable: true
+                  has_stored_card:
+                    type: boolean
+        "404":
+          description: Token not found or expired
+    post:
+      tags: [Public]
+      summary: Process a split payment via token
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [method]
+              properties:
+                method:
+                  type: string
+                  enum: [stored_profile, new_card]
+                data_descriptor:
+                  type: string
+                  description: Accept.js nonce descriptor (new_card only)
+                data_value:
+                  type: string
+                  description: Accept.js nonce value (new_card only)
+      responses:
+        "200":
+          description: Payment successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  transaction_id:
+                    type: string
+        "400":
+          description: Invalid payment or split already paid
+        "404":
+          description: Token not found
 components:
   securitySchemes:
     BearerAuth:
@@ -1302,3 +1979,62 @@ components:
         updated_at:
           type: string
           format: date-time
+
+    # ─── Payment Splits ───────────────────────────────────────────────────────────
+
+    PaymentSplit:
+      type: object
+      properties:
+        id:
+          type: integer
+        case_id:
+          type: integer
+        label:
+          type: string
+        amount_cents:
+          type: integer
+        due_date:
+          type: string
+          format: date
+        status:
+          type: string
+          enum: [pending, paid, cancelled]
+        completion_source:
+          type: string
+          enum: [authorize_link, manual]
+          nullable: true
+        notes:
+          type: string
+          nullable: true
+        payment_link:
+          type: string
+          nullable: true
+        case_number:
+          type: string
+          nullable: true
+        client_first_name:
+          type: string
+          nullable: true
+        client_last_name:
+          type: string
+          nullable: true
+
+    CreateSplitPayload:
+      type: object
+      required: [label, amount_cents, due_date, send_payment_link]
+      properties:
+        label:
+          type: string
+        amount_cents:
+          type: integer
+        due_date:
+          type: string
+          format: date
+        send_payment_link:
+          type: boolean
+        reminder_flow_id:
+          type: integer
+          nullable: true
+        notes:
+          type: string
+          nullable: true

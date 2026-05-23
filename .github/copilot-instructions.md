@@ -15,6 +15,7 @@
 - **Always think about mobile responsiveness and cool, engaging UI/UX when making frontend changes**
 - **if there is an opportunity to add reusable components or utilities, do it immediately to avoid technical debt**
 - **Avoid any breaking changes**
+- **i18n: When making any UI change that introduces new user-visible strings, ALWAYS add the corresponding key to BOTH `client/locales/en/translation.json` AND `client/locales/es/translation.json`, and use `t('key')` via `useTranslation()` — NEVER hardcode user-facing strings in components**
 - **NO EXCEPTIONS to these rules**
 
 ### Package Manager

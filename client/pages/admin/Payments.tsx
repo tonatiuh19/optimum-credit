@@ -30,6 +30,9 @@ import {
   Hash,
   ShieldAlert,
   Loader2,
+  Ban,
+  Zap,
+  SplitSquareVertical,
 } from "lucide-react";
 import AdminPageHeader from "@/components/AdminPageHeader";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
@@ -39,6 +42,10 @@ import {
   createAdminCoupon,
   updateAdminCoupon,
   deleteAdminCoupon,
+  adminValidateCoupon,
+  clearCouponPreview,
+  fetchAdminPaymentSplits,
+  markSplitPaid,
 } from "@/store/slices/adminSlice";
 import type {
   Coupon,
@@ -46,6 +53,8 @@ import type {
   Payment,
   PaymentStatus,
   PipelineStage,
+  PaymentSplit,
+  PaymentSplitStatus,
 } from "@shared/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -1048,14 +1057,12 @@ function CouponRow({
   const { toast } = useToast();
 
   const copyCode = () => {
-    navigator.clipboard
-      .writeText(coupon.code)
-      .then(() =>
-        toast({
-          title: "Copied!",
-          description: `${coupon.code} copied to clipboard`,
-        }),
-      );
+    navigator.clipboard.writeText(coupon.code).then(() =>
+      toast({
+        title: "Copied!",
+        description: `${coupon.code} copied to clipboard`,
+      }),
+    );
   };
 
   const isExpired =
@@ -1241,6 +1248,204 @@ function CouponRow({
   );
 }
 
+// ─── Coupon validator panel ───────────────────────────────────────────────────
+
+function CouponValidator() {
+  const dispatch = useAppDispatch();
+  const { couponPreview, couponPreviewing } = useAppSelector((s) => s.admin);
+
+  const [code, setCode] = useState("");
+  const [amountInput, setAmountInput] = useState("");
+
+  const handleValidate = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!code.trim()) return;
+    dispatch(clearCouponPreview());
+    dispatch(
+      adminValidateCoupon({
+        code: code.trim().toUpperCase(),
+        amount_cents: amountInput
+          ? Math.round(Number(amountInput) * 100)
+          : undefined,
+      }),
+    );
+  };
+
+  const handleClear = () => {
+    dispatch(clearCouponPreview());
+    setCode("");
+    setAmountInput("");
+  };
+
+  const isValid = couponPreview?.valid === true;
+  const isInvalid = couponPreview !== null && !couponPreview.valid;
+
+  return (
+    <div className="bg-card border border-border rounded-2xl p-5">
+      <div className="flex items-center gap-2 mb-4">
+        <ShieldAlert className="w-4 h-4 text-muted-foreground" />
+        <h3 className="font-semibold text-sm">Coupon Validator</h3>
+        <span className="text-[10px] text-muted-foreground bg-muted px-2 py-0.5 rounded-full uppercase tracking-wide font-medium ml-auto">
+          Test Tool
+        </span>
+      </div>
+
+      <form
+        onSubmit={handleValidate}
+        className="flex flex-col sm:flex-row gap-3"
+      >
+        <div className="flex-1 relative">
+          <Tag className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground pointer-events-none" />
+          <Input
+            placeholder="Coupon code (e.g. SAVE20)"
+            className="pl-9 uppercase font-mono"
+            value={code}
+            onChange={(e) =>
+              setCode(e.target.value.toUpperCase().replace(/[^A-Z0-9_-]/g, ""))
+            }
+          />
+        </div>
+        <div className="relative sm:w-44">
+          <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground pointer-events-none" />
+          <Input
+            type="number"
+            min="0"
+            step="0.01"
+            placeholder="Test amount ($)"
+            className="pl-8"
+            value={amountInput}
+            onChange={(e) => setAmountInput(e.target.value)}
+          />
+        </div>
+        <div className="flex gap-2 shrink-0">
+          <Button
+            type="submit"
+            disabled={!code.trim() || couponPreviewing}
+            className="gap-1.5"
+          >
+            {couponPreviewing ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <ShieldAlert className="w-3.5 h-3.5" />
+            )}
+            Validate
+          </Button>
+          {couponPreview !== null && (
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              onClick={handleClear}
+            >
+              <XCircle className="w-4 h-4" />
+            </Button>
+          )}
+        </div>
+      </form>
+
+      {/* Result */}
+      {couponPreview !== null && (
+        <div
+          className={`mt-4 rounded-xl border p-4 ${
+            isValid
+              ? "bg-accent/5 border-accent/30"
+              : "bg-destructive/5 border-destructive/20"
+          }`}
+        >
+          {isValid ? (
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-accent shrink-0" />
+                <span className="font-semibold text-accent text-sm">
+                  Valid coupon
+                </span>
+                <span className="font-mono text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded ml-auto">
+                  {couponPreview.coupon?.code}
+                </span>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                <div className="bg-background rounded-lg px-3 py-2 border border-border">
+                  <p className="text-muted-foreground mb-0.5">Type</p>
+                  <p className="font-semibold capitalize">
+                    {couponPreview.coupon?.discount_type}
+                  </p>
+                </div>
+                <div className="bg-background rounded-lg px-3 py-2 border border-border">
+                  <p className="text-muted-foreground mb-0.5">Discount</p>
+                  <p className="font-semibold text-accent">
+                    {couponPreview.coupon?.discount_type === "percentage"
+                      ? `${couponPreview.coupon.discount_value}%`
+                      : fmt(couponPreview.coupon?.discount_value ?? 0)}
+                  </p>
+                </div>
+                {couponPreview.discount_cents > 0 && (
+                  <>
+                    <div className="bg-background rounded-lg px-3 py-2 border border-border">
+                      <p className="text-muted-foreground mb-0.5">You save</p>
+                      <p className="font-semibold text-accent">
+                        -{fmt(couponPreview.discount_cents)}
+                      </p>
+                    </div>
+                    <div className="bg-background rounded-lg px-3 py-2 border border-border">
+                      <p className="text-muted-foreground mb-0.5">
+                        Final price
+                      </p>
+                      <p className="font-semibold">
+                        {fmt(couponPreview.final_amount_cents)}
+                      </p>
+                    </div>
+                  </>
+                )}
+              </div>
+              <div className="text-xs text-muted-foreground flex flex-wrap gap-3">
+                <span>
+                  Uses:{" "}
+                  <strong className="text-foreground">
+                    {couponPreview.coupon?.uses_count}
+                  </strong>
+                  {couponPreview.coupon?.max_uses != null
+                    ? ` / ${couponPreview.coupon.max_uses}`
+                    : " (unlimited)"}
+                </span>
+                {couponPreview.coupon?.expires_at && (
+                  <span>
+                    Expires:{" "}
+                    <strong
+                      className={
+                        new Date(couponPreview.coupon.expires_at) < new Date()
+                          ? "text-destructive"
+                          : "text-foreground"
+                      }
+                    >
+                      {fmtDate(couponPreview.coupon.expires_at)}
+                    </strong>
+                  </span>
+                )}
+                {couponPreview.coupon?.min_amount_cents != null &&
+                  couponPreview.coupon.min_amount_cents > 0 && (
+                    <span>
+                      Min. order:{" "}
+                      <strong className="text-foreground">
+                        {fmt(couponPreview.coupon.min_amount_cents)}
+                      </strong>
+                    </span>
+                  )}
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-destructive shrink-0" />
+              <span className="text-sm font-medium text-destructive">
+                {couponPreview.error ?? "Invalid coupon"}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Coupons tab ──────────────────────────────────────────────────────────────
 
 function CouponsTab() {
@@ -1373,6 +1578,9 @@ function CouponsTab() {
 
   return (
     <div className="space-y-5">
+      {/* Validator */}
+      <CouponValidator />
+
       {/* Stats */}
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
         <SummaryCard
@@ -1534,6 +1742,233 @@ function CouponsTab() {
   );
 }
 
+// ─── Payment Splits Tab ────────────────────────────────────────────────────────
+
+const SPLIT_STATUS_STYLE: Record<
+  PaymentSplitStatus | "overdue",
+  { badge: string; label: string }
+> = {
+  pending: {
+    badge: "bg-yellow-500/10 text-yellow-700 border-yellow-300",
+    label: "Pending",
+  },
+  paid: { badge: "bg-accent/10 text-accent border-accent/30", label: "Paid" },
+  overdue: {
+    badge: "bg-destructive/10 text-destructive border-destructive/30",
+    label: "Overdue",
+  },
+  cancelled: {
+    badge: "bg-muted text-muted-foreground border-border",
+    label: "Cancelled",
+  },
+};
+
+function effectiveStatus(s: PaymentSplit): PaymentSplitStatus | "overdue" {
+  if (s.status === "pending" && new Date(s.due_date) < new Date())
+    return "overdue";
+  return s.status;
+}
+
+function PaymentSplitsTab() {
+  const dispatch = useAppDispatch();
+  const { toast } = useToast();
+  const { paymentSplits, paymentSplitsLoading, paymentSplitsPagination } =
+    useAppSelector((s) => s.admin);
+  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [page, setPage] = useState(1);
+
+  useEffect(() => {
+    dispatch(
+      fetchAdminPaymentSplits({
+        status: statusFilter === "all" ? undefined : statusFilter,
+        page,
+      }),
+    );
+  }, [statusFilter, page, dispatch]);
+
+  const handleMarkPaid = async (split: PaymentSplit) => {
+    try {
+      await dispatch(
+        markSplitPaid({ caseId: split.case_id, splitId: split.id }),
+      ).unwrap();
+      toast({ title: "Split marked as paid" });
+      dispatch(
+        fetchAdminPaymentSplits({
+          status: statusFilter === "all" ? undefined : statusFilter,
+          page,
+        }),
+      );
+    } catch {
+      toast({
+        title: "Error",
+        description: "Could not mark split as paid",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const statusPills: Array<{ value: string; label: string }> = [
+    { value: "all", label: "All" },
+    { value: "pending", label: "Pending" },
+    { value: "paid", label: "Paid" },
+    { value: "overdue", label: "Overdue" },
+    { value: "cancelled", label: "Cancelled" },
+  ];
+
+  return (
+    <div className="space-y-5">
+      {/* Status filters */}
+      <div className="flex flex-wrap gap-2">
+        {statusPills.map((p) => (
+          <button
+            key={p.value}
+            onClick={() => {
+              setStatusFilter(p.value);
+              setPage(1);
+            }}
+            className={`px-3 py-1.5 rounded-xl text-xs font-semibold border transition-colors ${
+              statusFilter === p.value
+                ? "bg-primary text-white border-primary"
+                : "bg-card border-border text-muted-foreground hover:bg-muted"
+            }`}
+          >
+            {p.label}
+          </button>
+        ))}
+      </div>
+
+      {paymentSplitsLoading ? (
+        <div className="flex justify-center py-16">
+          <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
+        </div>
+      ) : paymentSplits.length === 0 ? (
+        <div className="text-center py-16 text-muted-foreground text-sm">
+          No payment splits found.
+        </div>
+      ) : (
+        <div className="bg-card border border-border rounded-2xl overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-muted/50">
+                <tr>
+                  {[
+                    "Client",
+                    "Case #",
+                    "Description",
+                    "Amount",
+                    "Due Date",
+                    "Status",
+                    "",
+                  ].map((h) => (
+                    <th
+                      key={h}
+                      className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground"
+                    >
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {paymentSplits.map((s) => {
+                  const eff = effectiveStatus(s);
+                  const ss = SPLIT_STATUS_STYLE[eff];
+                  return (
+                    <tr
+                      key={s.id}
+                      className="hover:bg-muted/30 transition-colors"
+                    >
+                      <td className="px-4 py-3 font-medium text-foreground">
+                        {s.client_first_name} {s.client_last_name}
+                      </td>
+                      <td className="px-4 py-3 text-muted-foreground font-mono text-xs">
+                        {s.case_number ?? "—"}
+                      </td>
+                      <td className="px-4 py-3 text-foreground max-w-[200px] truncate">
+                        {s.label}
+                      </td>
+                      <td className="px-4 py-3 font-semibold">
+                        {fmt(s.amount_cents)}
+                      </td>
+                      <td className="px-4 py-3 text-muted-foreground">
+                        {new Date(s.due_date).toLocaleDateString("en-US", {
+                          month: "short",
+                          day: "numeric",
+                          year: "numeric",
+                        })}
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold border ${ss.badge}`}
+                          >
+                            {eff === "paid" &&
+                              s.completion_source === "authorize_link" && (
+                                <Zap className="w-2.5 h-2.5" />
+                              )}
+                            {eff === "paid" &&
+                              s.completion_source === "manual" && (
+                                <CheckCircle2 className="w-2.5 h-2.5" />
+                              )}
+                            {eff === "cancelled" && (
+                              <Ban className="w-2.5 h-2.5" />
+                            )}
+                            {ss.label}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3">
+                        {(eff === "pending" || eff === "overdue") && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 text-xs"
+                            onClick={() => handleMarkPaid(s)}
+                          >
+                            Mark Paid
+                          </Button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Pagination */}
+          {paymentSplitsPagination && paymentSplitsPagination.pages > 1 && (
+            <div className="flex items-center justify-between px-4 py-3 border-t border-border">
+              <p className="text-xs text-muted-foreground">
+                {paymentSplitsPagination.total} total
+              </p>
+              <div className="flex gap-2">
+                <button
+                  disabled={page <= 1}
+                  onClick={() => setPage((p) => p - 1)}
+                  className="w-7 h-7 rounded-lg border border-border flex items-center justify-center disabled:opacity-40 hover:bg-muted"
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" />
+                </button>
+                <span className="text-xs self-center text-muted-foreground">
+                  {page} / {paymentSplitsPagination.pages}
+                </span>
+                <button
+                  disabled={page >= paymentSplitsPagination.pages}
+                  onClick={() => setPage((p) => p + 1)}
+                  className="w-7 h-7 rounded-lg border border-border flex items-center justify-center disabled:opacity-40 hover:bg-muted"
+                >
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function AdminPayments() {
@@ -1555,6 +1990,13 @@ export default function AdminPayments() {
             Transactions
           </TabsTrigger>
           <TabsTrigger
+            value="splits"
+            className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm flex items-center gap-2 px-4 py-2"
+          >
+            <SplitSquareVertical className="w-3.5 h-3.5" />
+            Payment Splits
+          </TabsTrigger>
+          <TabsTrigger
             value="coupons"
             className="rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm flex items-center gap-2 px-4 py-2"
           >
@@ -1565,6 +2007,9 @@ export default function AdminPayments() {
 
         <TabsContent value="transactions" className="mt-0">
           <TransactionsTab />
+        </TabsContent>
+        <TabsContent value="splits" className="mt-0">
+          <PaymentSplitsTab />
         </TabsContent>
         <TabsContent value="coupons" className="mt-0">
           <CouponsTab />

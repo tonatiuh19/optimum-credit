@@ -7,10 +7,8 @@ import {
   useLocation,
 } from "react-router-dom";
 import {
-  Construction,
   LayoutDashboard,
   FileText,
-  ScrollText,
   TrendingUp,
   LifeBuoy,
   PlayCircle,
@@ -19,10 +17,13 @@ import {
   Menu,
   X,
   Lock,
+  CreditCard,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { clientLogout, fetchClientMe } from "@/store/slices/clientAuthSlice";
 import { fetchPortalSectionLocks } from "@/store/slices/portalSlice";
+import LanguageSwitcher from "@/components/LanguageSwitcher";
 
 interface Props {
   children: ReactNode;
@@ -31,51 +32,51 @@ interface Props {
 const NAV: {
   to: string;
   end?: boolean;
-  label: string;
+  labelKey: string;
   icon: React.ComponentType<{ className?: string }>;
   sectionKey?: string;
 }[] = [
   {
     to: "/portal",
     end: true,
-    label: "Dashboard",
+    labelKey: "sidebar.dashboard",
     icon: LayoutDashboard,
     sectionKey: "portal_dashboard",
   },
-  { to: "/portal/documents", label: "My Documents", icon: FileText },
-  {
-    to: "/portal/contract",
-    label: "Service Agreement",
-    icon: ScrollText,
-    sectionKey: "portal_contract",
-  },
+  { to: "/portal/documents", labelKey: "sidebar.documents", icon: FileText },
   {
     to: "/portal/reports",
-    label: "Progress Reports",
+    labelKey: "sidebar.reports",
     icon: TrendingUp,
     sectionKey: "portal_reports",
   },
   {
     to: "/portal/videos",
-    label: "Education",
+    labelKey: "sidebar.education",
     icon: PlayCircle,
     sectionKey: "portal_videos",
   },
   {
     to: "/portal/support",
-    label: "Support",
+    labelKey: "sidebar.support",
     icon: LifeBuoy,
     sectionKey: "portal_support",
   },
   {
     to: "/portal/profile",
-    label: "My Profile",
+    labelKey: "sidebar.profile",
     icon: User,
     sectionKey: "portal_profile",
+  },
+  {
+    to: "/portal/payments",
+    labelKey: "sidebar.payments",
+    icon: CreditCard,
   },
 ];
 
 export default function ClientLayout({ children }: Props) {
+  const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
   const location = useLocation();
@@ -172,7 +173,7 @@ export default function ClientLayout({ children }: Props) {
           {/* User card */}
           <div className="p-4 mx-3 my-4 rounded-xl bg-gradient-to-br from-primary/5 to-primary/0 border border-primary/10">
             <div className="text-xs uppercase tracking-wider text-muted-foreground font-semibold">
-              Welcome back
+              {t("sidebar.welcomeBack")}
             </div>
             <div className="font-semibold mt-1">
               {user?.first_name || "Client"} {user?.last_name || ""}
@@ -215,7 +216,7 @@ export default function ClientLayout({ children }: Props) {
                     className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium cursor-not-allowed select-none text-muted-foreground/40"
                   >
                     <item.icon className="w-5 h-5 shrink-0" />
-                    <span className="flex-1">{item.label}</span>
+                    <span className="flex-1">{t(item.labelKey)}</span>
                     <Lock className="w-3 h-3 shrink-0" />
                   </div>
                 ) : (
@@ -233,34 +234,29 @@ export default function ClientLayout({ children }: Props) {
                     }
                   >
                     <item.icon className="w-5 h-5" />
-                    {item.label}
+                    {t(item.labelKey)}
                   </NavLink>
                 );
               })
             )}
           </nav>
 
-          <div className="p-3 mt-2 border-t border-border">
+          <div className="p-3 mt-2 border-t border-border space-y-1">
+            <div className="px-3 py-1.5">
+              <LanguageSwitcher variant="full" />
+            </div>
             <button
               onClick={handleLogout}
               className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-muted-foreground hover:text-destructive hover:bg-destructive/5 transition-colors"
             >
               <LogOut className="w-5 h-5" />
-              Log out
+              {t("sidebar.signOut")}
             </button>
           </div>
         </aside>
 
         {/* Main content */}
         <main className="flex-1 min-w-0">
-          {/* Work in progress banner */}
-          <div className="flex items-center gap-3 px-4 sm:px-6 lg:px-8 py-2.5 bg-amber-500/10 border-b border-amber-500/20">
-            <Construction className="w-4 h-4 text-amber-500 shrink-0" />
-            <p className="text-xs text-amber-600 font-medium">
-              Client portal is currently under active development — some
-              features may be incomplete or change.
-            </p>
-          </div>
           {!sectionLocksInitialized ? (
             <div className="flex items-center justify-center h-64">
               <div className="w-6 h-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />

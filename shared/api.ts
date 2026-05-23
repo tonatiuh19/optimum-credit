@@ -18,6 +18,7 @@ export interface ClientUser {
   contract_signed_at?: string | null;
   smart_credit_connected_at?: string | null;
   email_verified_at?: string | null;
+  preferred_language?: "en" | "es" | null;
   created_at: string;
 }
 
@@ -75,6 +76,8 @@ export interface RegistrationPayload {
   dataValue: string;
   // Collected later during portal onboarding:
   affiliateCode?: string;
+  // Optional promotional coupon code
+  coupon_code?: string;
 }
 
 export interface RegistrationResponse {
@@ -110,6 +113,15 @@ export interface ClientDocument {
 // ============================================================
 // REPORTS / TICKETS / CONVERSATIONS / CHAT
 // ============================================================
+export interface RoundReportPdf {
+  id: number;
+  client_id: number;
+  round_number: number;
+  round_report_id?: number | null;
+  file_name: string;
+  uploaded_at: string;
+}
+
 export interface RoundReport {
   id: number;
   round_number: number;
@@ -119,6 +131,12 @@ export interface RoundReport {
   items_disputed: number;
   summary_md?: string | null;
   created_at: string;
+  /** PDFs uploaded by admin for this round */
+  pdfs: RoundReportPdf[];
+  /** Legacy single-PDF fields (kept for backward compat) */
+  pdf_file_name?: string | null;
+  has_pdf?: boolean | 0 | 1;
+  pdf_uploaded_at?: string | null;
 }
 
 export interface SupportTicket {
@@ -227,11 +245,25 @@ export interface AdminClientListItem {
   // CRC integration
   crc_client_id?: string | null;
   crc_synced_at?: string | null;
-  // doc task counts (from pipeline endpoint)
-  docs_total?: number;
-  docs_approved?: number;
-  docs_pending?: number;
-  docs_rejected?: number;
+  // language preference
+  preferred_language?: "en" | "es" | null;
+  // task counts (from pipeline endpoint)
+  tasks_total?: number;
+  tasks_required_total?: number;
+  tasks_approved?: number;
+  tasks_pending_review?: number;
+  tasks_rejected?: number;
+  // admin notes
+  admin_notes?: string | null;
+  // payment summary (from clients list endpoint)
+  total_paid_cents?: number;
+  payment_count?: number;
+  splits_total?: number;
+  splits_paid?: number;
+  splits_pending?: number;
+  splits_overdue?: number;
+  splits_amount_cents?: number;
+  splits_paid_cents?: number;
 }
 
 // ============================================================
@@ -252,16 +284,18 @@ export interface CreditRepairCase {
   package_slug?: string | null;
   crc_client_id?: string | null;
   crc_synced_at?: string | null;
+  preferred_language?: "en" | "es" | null;
   pipeline_stage: PipelineStage;
   pipeline_stage_changed_at?: string | null;
   /** active | completed | cancelled | on_hold */
   status: "active" | "completed" | "cancelled" | "on_hold";
   client_status: string;
   created_at: string;
-  docs_total?: number;
-  docs_approved?: number;
-  docs_pending?: number;
-  docs_rejected?: number;
+  tasks_total?: number;
+  tasks_required_total?: number;
+  tasks_approved?: number;
+  tasks_pending_review?: number;
+  tasks_rejected?: number;
 }
 
 // ============================================================
@@ -501,6 +535,119 @@ export interface AdminPaymentsResponse {
   pagination: PaginationInfo;
 }
 
+export interface ClientPayment {
+  id: number;
+  package_name: string | null;
+  amount_cents: number;
+  discount_cents: number;
+  original_amount_cents: number | null;
+  currency: string;
+  status: PaymentStatus;
+  provider: PaymentProvider;
+  coupon_code: string | null;
+  paid_at: string | null;
+  created_at: string;
+}
+
+// ============================================================
+// PAYMENT SPLITS
+// ============================================================
+export type PaymentSplitStatus = "pending" | "paid" | "overdue" | "cancelled";
+export type SplitCompletionSource = "authorize_link" | "manual";
+
+export interface PaymentSplit {
+  id: number;
+  case_id: number;
+  case_number: string | null;
+  client_id: number;
+  client_first_name: string | null;
+  client_last_name: string | null;
+  client_email: string | null;
+  label: string;
+  amount_cents: number;
+  currency: string;
+  due_date: string;
+  status: PaymentSplitStatus;
+  completion_source: SplitCompletionSource | null;
+  paid_at: string | null;
+  payments_id: number | null;
+  reminder_flow_id: number | null;
+  reminder_flow_name: string | null;
+  send_payment_link: boolean;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateSplitPayload {
+  label: string;
+  amount_cents: number;
+  due_date: string;
+  send_payment_link: boolean;
+  reminder_flow_id: number | null;
+  notes?: string | null;
+}
+
+export interface ClientPaymentSplit {
+  id: number;
+  case_number: string | null;
+  label: string;
+  amount_cents: number;
+  currency: string;
+  due_date: string;
+  status: PaymentSplitStatus;
+  completion_source: SplitCompletionSource | null;
+  paid_at: string | null;
+  send_payment_link: boolean;
+  payment_token: string | null;
+}
+
+// ============================================================
+// CASES (manual creation)
+// ============================================================
+export interface CreateCasePayload {
+  client_id: number;
+  package_id?: number | null;
+  pipeline_stage?: string;
+  notes?: string | null;
+  send_case_email?: boolean;
+  splits?: CreateSplitPayload[];
+}
+
+export interface AdminCase {
+  id: number;
+  case_number: string | null;
+  client_id: number;
+  client_first_name: string | null;
+  client_last_name: string | null;
+  client_email: string | null;
+  package_id: number | null;
+  package_name: string | null;
+  pipeline_stage: string;
+  status: string;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// ============================================================
+// CALENDAR
+// ============================================================
+export interface CalendarSplit {
+  id: number;
+  case_id: number;
+  case_number: string | null;
+  client_id: number;
+  client_first_name: string | null;
+  client_last_name: string | null;
+  label: string;
+  amount_cents: number;
+  currency: string;
+  due_date: string;
+  status: PaymentSplitStatus;
+  completion_source: SplitCompletionSource | null;
+}
+
 // ============================================================
 // COUPONS
 // ============================================================
@@ -547,3 +694,87 @@ export interface CreateCouponPayload {
 }
 
 export type UpdateCouponPayload = Partial<CreateCouponPayload>;
+
+// ============================================================
+// ONBOARDING TASKS
+// ============================================================
+export type OnboardingTaskType = "form" | "upload" | "sign_document";
+export type OnboardingTaskStatus = "pending" | "completed" | "skipped";
+
+export interface TaskFormField {
+  key: string;
+  label_en: string;
+  label_es: string;
+  type: "text" | "date" | "checkbox" | "select" | "textarea";
+  required: boolean;
+  options?: string[]; // for select type
+  placeholder_en?: string;
+  placeholder_es?: string;
+}
+
+export interface TaskUploadConfig {
+  accept: string; // e.g. "image/*,application/pdf"
+  max_mb: number;
+}
+
+export interface OnboardingTaskTemplate {
+  id: number;
+  slug: string;
+  task_type: OnboardingTaskType;
+  title_en: string;
+  title_es: string;
+  description_en?: string | null;
+  description_es?: string | null;
+  content_html_en?: string | null;
+  content_html_es?: string | null;
+  form_fields_json?: TaskFormField[] | null;
+  upload_config_json?: TaskUploadConfig | null;
+  is_required: number;
+  is_system: number;
+  sort_order: number;
+  is_active: number;
+  auto_assign: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ClientTaskCompletion {
+  id: number;
+  client_id: number;
+  task_template_id: number;
+  status: OnboardingTaskStatus;
+  form_data_json?: Record<string, unknown> | null;
+  file_storage_key?: string | null;
+  file_name?: string | null;
+  file_mime?: string | null;
+  signature_name?: string | null;
+  signature_ip?: string | null;
+  completed_at?: string | null;
+  admin_review_status?: "pending" | "approved" | "rejected" | null;
+  admin_notes?: string | null;
+  admin_reviewed_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Template merged with this client's completion (used in portal) */
+export interface ClientTaskWithStatus extends OnboardingTaskTemplate {
+  completion?: ClientTaskCompletion | null;
+}
+
+export interface CreateTaskTemplatePayload {
+  slug: string;
+  task_type: OnboardingTaskType;
+  title_en: string;
+  title_es: string;
+  description_en?: string;
+  description_es?: string;
+  content_html_en?: string;
+  content_html_es?: string;
+  form_fields_json?: TaskFormField[];
+  upload_config_json?: TaskUploadConfig;
+  is_required?: boolean;
+  sort_order?: number;
+  is_active?: boolean;
+  auto_assign?: boolean;
+}

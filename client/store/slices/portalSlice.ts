@@ -2,6 +2,8 @@ import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
 import api from "@/lib/api";
 import type {
   ClientDocument,
+  ClientPayment,
+  ClientPaymentSplit,
   RoundReport,
   SectionLock,
   SupportFaq,
@@ -9,6 +11,7 @@ import type {
   AiChatSession,
   AiChatMessage,
   EducationalVideo,
+  ClientTaskWithStatus,
 } from "@shared/api";
 
 interface PortalState {
@@ -22,6 +25,13 @@ interface PortalState {
   chatMessages: AiChatMessage[];
   sectionLocks: SectionLock[];
   sectionLocksInitialized: boolean;
+  tasks: ClientTaskWithStatus[];
+  tasksLoading: boolean;
+  tasksSaving: boolean;
+  payments: ClientPayment[];
+  paymentsLoading: boolean;
+  splits: ClientPaymentSplit[];
+  splitsLoading: boolean;
   loading: boolean;
   error: string | null;
 }
@@ -37,6 +47,13 @@ const initialState: PortalState = {
   chatMessages: [],
   sectionLocks: [],
   sectionLocksInitialized: false,
+  tasks: [],
+  tasksLoading: false,
+  tasksSaving: false,
+  payments: [],
+  paymentsLoading: false,
+  splits: [],
+  splitsLoading: false,
   loading: false,
   error: null,
 };
@@ -87,6 +104,14 @@ export const updateProfile = createAsyncThunk<
   { first_name: string; last_name: string; phone?: string }
 >("portal/updateProfile", async (args) => {
   await api.put("/portal/profile", args);
+});
+
+export const updateLanguage = createAsyncThunk<
+  { language: "en" | "es" },
+  { language: "en" | "es" }
+>("portal/updateLanguage", async (args) => {
+  await api.put("/portal/language", args);
+  return args;
 });
 
 export const fetchTickets = createAsyncThunk("portal/tickets", async () => {
@@ -145,6 +170,48 @@ export const fetchVideos = createAsyncThunk("portal/videos", async () => {
   return data.videos as EducationalVideo[];
 });
 
+export const fetchPortalTasks = createAsyncThunk(
+  "portal/fetchTasks",
+  async () => {
+    const { data } = await api.get("/portal/tasks");
+    return data.tasks as ClientTaskWithStatus[];
+  },
+);
+
+export const completePortalTask = createAsyncThunk(
+  "portal/completeTask",
+  async (
+    {
+      taskId,
+      formData,
+      signatureName,
+      file,
+    }: {
+      taskId: number;
+      formData?: Record<string, unknown>;
+      signatureName?: string;
+      file?: File;
+    },
+    { rejectWithValue, dispatch },
+  ) => {
+    try {
+      const fd = new FormData();
+      if (file) fd.append("file", file);
+      if (formData) fd.append("form_data", JSON.stringify(formData));
+      if (signatureName) fd.append("signature_name", signatureName);
+      const { data } = await api.post(`/portal/tasks/${taskId}/complete`, fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      dispatch(fetchPortalTasks());
+      return { taskId, completed_at: data.completed_at };
+    } catch (err: any) {
+      return rejectWithValue(
+        err?.response?.data?.error ?? "Failed to submit task",
+      );
+    }
+  },
+);
+
 const slice = createSlice({
   name: "portal",
   initialState,
@@ -187,8 +254,66 @@ const slice = createSlice({
       s.sectionLocks = a.payload;
       s.sectionLocksInitialized = true;
     });
+
+    b.addCase(fetchPortalTasks.pending, (s) => {
+      s.tasksLoading = true;
+    });
+    b.addCase(fetchPortalTasks.fulfilled, (s, a) => {
+      s.tasksLoading = false;
+      s.tasks = a.payload;
+    });
+    b.addCase(fetchPortalTasks.rejected, (s) => {
+      s.tasksLoading = false;
+    });
+
+    b.addCase(completePortalTask.pending, (s) => {
+      s.tasksSaving = true;
+    });
+    b.addCase(completePortalTask.fulfilled, (s) => {
+      s.tasksSaving = false;
+    });
+    b.addCase(completePortalTask.rejected, (s) => {
+      s.tasksSaving = false;
+    });
+
+    b.addCase(fetchClientPayments.pending, (s) => {
+      s.paymentsLoading = true;
+    });
+    b.addCase(fetchClientPayments.fulfilled, (s, a) => {
+      s.paymentsLoading = false;
+      s.payments = a.payload;
+    });
+    b.addCase(fetchClientPayments.rejected, (s) => {
+      s.paymentsLoading = false;
+    });
+    b.addCase(fetchClientPaymentSplits.pending, (s) => {
+      s.splitsLoading = true;
+    });
+    b.addCase(fetchClientPaymentSplits.fulfilled, (s, a) => {
+      s.splitsLoading = false;
+      s.splits = a.payload;
+    });
+    b.addCase(fetchClientPaymentSplits.rejected, (s) => {
+      s.splitsLoading = false;
+    });
   },
 });
+
+export const fetchClientPayments = createAsyncThunk<ClientPayment[]>(
+  "portal/payments",
+  async () => {
+    const { data } = await api.get("/portal/payments");
+    return data.payments as ClientPayment[];
+  },
+);
+
+export const fetchClientPaymentSplits = createAsyncThunk<ClientPaymentSplit[]>(
+  "portal/paymentSplits",
+  async () => {
+    const { data } = await api.get("/portal/payment-splits");
+    return data.splits as ClientPaymentSplit[];
+  },
+);
 
 export const { addLocalChatMessage } = slice.actions;
 export default slice.reducer;

@@ -61,7 +61,13 @@ Expected response when live:
 { "configured": true, "dry_run": false, "mode": "live" }
 ```
 
-Expected response in dry-run (keys not set or `CRC_DRY_RUN=true`):
+Expected response in dry-run (`CRC_DRY_RUN=true`, keys are set):
+
+```json
+{ "configured": true, "dry_run": true, "mode": "dry_run" }
+```
+
+Expected response when keys are not set:
 
 ```json
 { "configured": false, "dry_run": false, "mode": "disabled" }
@@ -176,12 +182,12 @@ Or use `crc_client_id` (the base64 ID from CRC) instead of email:
 
 - `New Client`
 - `Docs Ready`
-- `Round 1` or `Round 1 (Month 1)`
-- `Round 2` or `Round 2 (Month 2)`
-- `Round 3` or `Round 3 (Month 3)`
-- `Round 4` or `Round 4 (Month 4)`
-- `Round 5` or `Round 5 (Month 5)`
-- `Completed`
+- `Round 1`, `Round 1 (Month 1)`, `Round 1 Out`, `Round 1 Out!`, `Round 1 In`, `Round 1 In!`
+- `Round 2`, `Round 2 (Month 2)`, `Round 2 Out`, `Round 2 Out!`, `Round 2 In`, `Round 2 In!`
+- `Round 3`, `Round 3 (Month 3)`, `Round 3 Out`, `Round 3 Out!`, `Round 3 In`, `Round 3 In!`
+- `Round 4`, `Round 4 (Month 4)`, `Round 4 Out`, `Round 4 Out!`, `Round 4 In`, `Round 4 In!`
+- `Round 5`, `Round 5 (Month 5)`, `Round 5 Out`, `Round 5 Out!`, `Round 5 In`, `Round 5 In!`
+- `Completed`, `Graduated`, `Deleted Client`
 
 ### Webhook Response Codes
 

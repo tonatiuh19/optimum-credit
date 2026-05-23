@@ -1,6 +1,7 @@
 import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
 import api from "@/lib/api";
 import type {
+  CouponValidateResponse,
   CreditPackage,
   RegistrationPayload,
   RegistrationResponse,
@@ -12,6 +13,8 @@ interface PackagesState {
   registration: RegistrationResponse | null;
   registering: boolean;
   error: string | null;
+  couponValidation: CouponValidateResponse | null;
+  couponValidating: boolean;
 }
 
 const initialState: PackagesState = {
@@ -20,6 +23,8 @@ const initialState: PackagesState = {
   registration: null,
   registering: false,
   error: null,
+  couponValidation: null,
+  couponValidating: false,
 };
 
 export const fetchPackages = createAsyncThunk<{ packages: CreditPackage[] }>(
@@ -53,6 +58,24 @@ export const confirmMockPayment = createAsyncThunk<
   await api.post("/registration/confirm-mock", args);
 });
 
+export const validateCoupon = createAsyncThunk<
+  CouponValidateResponse,
+  { code: string; package_id?: number; amount_cents?: number },
+  { rejectValue: string }
+>("packages/validateCoupon", async (payload, { rejectWithValue }) => {
+  try {
+    const { data } = await api.post<CouponValidateResponse>(
+      "/validate-coupon",
+      payload,
+    );
+    return data;
+  } catch (e: any) {
+    return rejectWithValue(
+      e?.response?.data?.error || "Could not validate coupon",
+    );
+  }
+});
+
 const slice = createSlice({
   name: "packages",
   initialState,
@@ -60,6 +83,10 @@ const slice = createSlice({
     resetRegistration(state) {
       state.registration = null;
       state.error = null;
+    },
+    clearCoupon(state) {
+      state.couponValidation = null;
+      state.couponValidating = false;
     },
   },
   extraReducers: (b) => {
@@ -86,8 +113,21 @@ const slice = createSlice({
       s.registering = false;
       s.error = a.payload || "Failed";
     });
+
+    b.addCase(validateCoupon.pending, (s) => {
+      s.couponValidating = true;
+      s.couponValidation = null;
+    });
+    b.addCase(validateCoupon.fulfilled, (s, a) => {
+      s.couponValidating = false;
+      s.couponValidation = a.payload;
+    });
+    b.addCase(validateCoupon.rejected, (s) => {
+      s.couponValidating = false;
+      s.couponValidation = null;
+    });
   },
 });
 
-export const { resetRegistration } = slice.actions;
+export const { resetRegistration, clearCoupon } = slice.actions;
 export default slice.reducer;

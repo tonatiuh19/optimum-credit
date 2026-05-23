@@ -1,11 +1,41 @@
-import { useEffect } from "react";
-import { TrendingUp, TrendingDown, Minus } from "lucide-react";
+import { useEffect, useState } from "react";
+import {
+  TrendingUp,
+  TrendingDown,
+  Minus,
+  Download,
+  FileText,
+  Loader2,
+} from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { fetchDashboard } from "@/store/slices/portalSlice";
+import api from "@/lib/api";
 
 export default function Reports() {
+  const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const { reports, loading } = useAppSelector((s) => s.portal);
+  const [pdfLoading, setPdfLoading] = useState<Record<number, boolean>>({});
+
+  const handleDownloadPdf = async (pdfId: number, fileName: string) => {
+    setPdfLoading((prev) => ({ ...prev, [pdfId]: true }));
+    try {
+      const resp = await api.get(`/portal/round-report-pdfs/${pdfId}`, {
+        responseType: "blob",
+      });
+      const url = URL.createObjectURL(resp.data as Blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fileName || `report-${pdfId}.pdf`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch {
+      // silent
+    } finally {
+      setPdfLoading((prev) => ({ ...prev, [pdfId]: false }));
+    }
+  };
 
   useEffect(() => {
     dispatch(fetchDashboard());
@@ -30,10 +60,8 @@ export default function Reports() {
   return (
     <div className="space-y-8">
       <div>
-        <h1 className="text-3xl font-bold">Progress Reports</h1>
-        <p className="text-muted-foreground mt-1">
-          Detailed breakdown of every dispute round.
-        </p>
+        <h1 className="text-3xl font-bold">{t("reports.heading")}</h1>
+        <p className="text-muted-foreground mt-1">{t("reports.subheading")}</p>
       </div>
 
       {loading && reports.length === 0 ? (
@@ -50,10 +78,9 @@ export default function Reports() {
           <div className="w-14 h-14 rounded-2xl bg-primary/10 flex items-center justify-center mx-auto mb-4">
             <TrendingUp className="w-7 h-7 text-primary" />
           </div>
-          <h3 className="font-semibold text-lg mb-2">No reports yet</h3>
+          <h3 className="font-semibold text-lg mb-2">{t("reports.empty")}</h3>
           <p className="text-muted-foreground text-sm max-w-sm mx-auto">
-            Your first round summary will appear here once we complete your
-            initial dispute round.
+            {t("reports.emptyNote")}
           </p>
         </div>
       ) : (
@@ -63,7 +90,7 @@ export default function Reports() {
             <div className="grid sm:grid-cols-3 gap-4">
               <div className="bg-card rounded-2xl border border-border p-5 shadow-sm">
                 <div className="text-xs text-muted-foreground uppercase tracking-wide mb-1">
-                  Total Items Removed
+                  {t("reports.totalRemoved")}
                 </div>
                 <div className="text-3xl font-bold text-accent">
                   {totalRemoved}
@@ -71,13 +98,13 @@ export default function Reports() {
               </div>
               <div className="bg-card rounded-2xl border border-border p-5 shadow-sm">
                 <div className="text-xs text-muted-foreground uppercase tracking-wide mb-1">
-                  Rounds Completed
+                  {t("reports.roundsCompleted")}
                 </div>
                 <div className="text-3xl font-bold">{reports.length}</div>
               </div>
               <div className="bg-card rounded-2xl border border-border p-5 shadow-sm">
                 <div className="text-xs text-muted-foreground uppercase tracking-wide mb-1">
-                  Score Change
+                  {t("reports.scoreChange")}
                 </div>
                 <div className="text-3xl font-bold flex items-center gap-1.5">
                   {scoreDelta === null ? (
@@ -180,7 +207,7 @@ export default function Reports() {
                   key={r.id}
                   className="bg-card rounded-2xl border border-border p-6 shadow-sm"
                 >
-                  <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-start justify-between mb-4">
                     <div className="flex items-center gap-3">
                       <div className="w-9 h-9 rounded-xl bg-primary/10 flex items-center justify-center">
                         <span className="text-sm font-bold text-primary">
@@ -240,6 +267,49 @@ export default function Reports() {
                   {r.summary_md && (
                     <div className="border-t border-border pt-4 text-sm text-muted-foreground whitespace-pre-wrap leading-relaxed">
                       {r.summary_md}
+                    </div>
+                  )}
+
+                  {/* PDF attachments list */}
+                  {Array.isArray(r.pdfs) && r.pdfs.length > 0 && (
+                    <div className="border-t border-border pt-4 space-y-2">
+                      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                        {t("reports.downloadPdf")}
+                      </p>
+                      {r.pdfs.map((pdf: any) => (
+                        <button
+                          key={pdf.id}
+                          onClick={() =>
+                            handleDownloadPdf(pdf.id, pdf.file_name)
+                          }
+                          disabled={pdfLoading[pdf.id]}
+                          className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl border border-border bg-muted/30 hover:bg-primary/[0.05] hover:border-primary/25 transition-all group text-left"
+                        >
+                          <div className="w-8 h-8 rounded-lg bg-destructive/10 border border-destructive/15 flex items-center justify-center shrink-0">
+                            {pdfLoading[pdf.id] ? (
+                              <Loader2 className="w-3.5 h-3.5 text-destructive animate-spin" />
+                            ) : (
+                              <FileText className="w-3.5 h-3.5 text-destructive" />
+                            )}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className="text-sm font-medium truncate group-hover:text-primary transition-colors">
+                              {pdf.file_name}
+                            </p>
+                            <p className="text-[11px] text-muted-foreground">
+                              {new Date(pdf.uploaded_at).toLocaleDateString(
+                                "en-US",
+                                {
+                                  month: "short",
+                                  day: "numeric",
+                                  year: "numeric",
+                                },
+                              )}
+                            </p>
+                          </div>
+                          <Download className="w-4 h-4 text-muted-foreground group-hover:text-primary transition-colors shrink-0" />
+                        </button>
+                      ))}
                     </div>
                   )}
                 </div>

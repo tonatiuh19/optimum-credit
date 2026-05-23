@@ -16,6 +16,7 @@ import {
   PartyPopper,
   Clock,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import PageMeta from "@/components/PageMeta";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import OtpInput from "@/components/OtpInput";
@@ -34,6 +35,7 @@ const STATS = [
 ];
 
 export default function ClientLogin() {
+  const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
   const location = useLocation();
@@ -50,7 +52,9 @@ export default function ClientLogin() {
   const emailForm = useFormik({
     initialValues: { email: locationState.email || "" },
     validationSchema: Yup.object({
-      email: Yup.string().email("Invalid email").required("Required"),
+      email: Yup.string()
+        .email(t("common.invalidEmail"))
+        .required(t("common.required")),
     }),
     onSubmit: async (values) => {
       const result = await dispatch(requestClientOtp({ email: values.email }));
@@ -63,7 +67,7 @@ export default function ClientLogin() {
     validationSchema: Yup.object({
       code: Yup.string()
         .matches(/^\d{6}$/, "6-digit code")
-        .required("Required"),
+        .required(t("common.required")),
     }),
     onSubmit: async (values) => {
       const email = otpSentTo || emailForm.values.email;
@@ -118,8 +122,12 @@ export default function ClientLogin() {
                 <div className="w-full mb-5 flex items-start gap-3 bg-accent/10 border border-accent/30 rounded-xl px-4 py-3 text-left">
                   <PartyPopper className="w-4 h-4 text-accent mt-0.5 shrink-0" />
                   <p className="text-sm text-foreground">
-                    <strong>Payment confirmed!</strong> Your account is ready.
-                    Enter your email below and we'll send you a sign-in code.
+                    <strong>Payment confirmed!</strong>{" "}
+                    {t("clientLogin.registeredBanner")
+                      .split("!")
+                      .slice(1)
+                      .join("!")
+                      .trim()}
                   </p>
                 </div>
               )}
@@ -139,16 +147,21 @@ export default function ClientLogin() {
               <h1 className="text-2xl font-bold text-foreground leading-tight mb-1.5">
                 {step === "email" ? (
                   <>
-                    Welcome <span className="gradient-text">back</span>
+                    {t("clientLogin.heading").split(" ").slice(0, -1).join(" ")}{" "}
+                    <span className="gradient-text">
+                      {t("clientLogin.heading").split(" ").slice(-1)}
+                    </span>
                   </>
                 ) : (
-                  "Check your email"
+                  t("clientLogin.checkEmail")
                 )}
               </h1>
               <p className="text-sm text-muted-foreground max-w-xs">
                 {step === "email"
-                  ? "Enter your email to receive a secure one-time sign-in code."
-                  : `We sent a 6-digit code to ${otpSentTo || emailForm.values.email}`}
+                  ? t("clientLogin.subheading")
+                  : t("clientLogin.codeSentTo", {
+                      email: otpSentTo || emailForm.values.email,
+                    })}
               </p>
             </div>
 
@@ -156,7 +169,7 @@ export default function ClientLogin() {
               <form onSubmit={emailForm.handleSubmit} className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-foreground mb-1.5">
-                    Email address
+                    {t("clientLogin.emailLabel")}
                   </label>
                   <div className="relative">
                     <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
@@ -164,7 +177,7 @@ export default function ClientLogin() {
                       type="email"
                       {...emailForm.getFieldProps("email")}
                       className="w-full h-12 pl-10 pr-4 rounded-xl border border-input bg-background hover:border-primary/40 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20 text-foreground placeholder:text-muted-foreground/60 transition-all"
-                      placeholder="you@example.com"
+                      placeholder={t("clientLogin.emailPlaceholder")}
                       autoComplete="email"
                       autoFocus
                     />
@@ -181,14 +194,14 @@ export default function ClientLogin() {
                     <p className="text-sm text-destructive">{error}</p>
                     <div className="border-t border-destructive/10 pt-3 space-y-1.5">
                       <p className="text-xs text-muted-foreground">
-                        Haven't started your credit journey yet?
+                        {t("clientLogin.noAccount")}
                       </p>
                       <Link
                         to={`/register?email=${encodeURIComponent(emailForm.values.email)}`}
                         className="w-full btn-primary rounded-xl gap-2 flex items-center justify-center text-sm"
                       >
                         <Sparkles className="w-4 h-4" />
-                        Get started — create your account
+                        {t("clientLogin.createAccount")}
                       </Link>
                     </div>
                   </div>
@@ -201,10 +214,11 @@ export default function ClientLogin() {
                 >
                   {requestingOtp ? (
                     <>
-                      <Loader2 className="w-4 h-4 animate-spin" /> Sending code…
+                      <Loader2 className="w-4 h-4 animate-spin" />{" "}
+                      {t("clientLogin.sendingCode")}
                     </>
                   ) : (
-                    "Continue"
+                    t("clientLogin.continue")
                   )}
                 </button>
 
@@ -235,7 +249,7 @@ export default function ClientLogin() {
               <form onSubmit={codeForm.handleSubmit} className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-foreground mb-3 text-center">
-                    Verification code
+                    {t("clientLogin.verificationCode")}
                   </label>
                   <OtpInput
                     value={codeForm.values.code}
@@ -263,10 +277,11 @@ export default function ClientLogin() {
                 >
                   {verifyingOtp ? (
                     <>
-                      <Loader2 className="w-4 h-4 animate-spin" /> Verifying…
+                      <Loader2 className="w-4 h-4 animate-spin" />{" "}
+                      {t("clientLogin.verifying")}
                     </>
                   ) : (
-                    "Sign in to Portal"
+                    t("clientLogin.signIn")
                   )}
                 </button>
 
@@ -275,7 +290,7 @@ export default function ClientLogin() {
                   onClick={() => setStep("email")}
                   className="w-full text-sm text-muted-foreground hover:text-foreground transition-colors py-1"
                 >
-                  ← Use a different email
+                  {t("clientLogin.useDifferentEmail")}
                 </button>
               </form>
             )}

@@ -161,6 +161,7 @@ CREATE TABLE IF NOT EXISTS `clients` (
   `anet_payment_profile_id` VARCHAR(64) DEFAULT NULL,
   -- Status
   `status` ENUM('pending_payment','onboarding','active','paused','cancelled') NOT NULL DEFAULT 'pending_payment',
+  `admin_notes` TEXT DEFAULT NULL COMMENT 'Internal notes visible only to admins',
   -- Credit Repair Cloud integration
   `crc_client_id` VARCHAR(64) DEFAULT NULL COMMENT 'Base64-encoded CRC lead/client ID from CRC API',
   `crc_synced_at` DATETIME DEFAULT NULL COMMENT 'Last successful sync with CRC API',
@@ -216,6 +217,8 @@ CREATE TABLE IF NOT EXISTS `payments` (
   `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
   `client_id` INT UNSIGNED NOT NULL,
   `package_id` INT UNSIGNED DEFAULT NULL,
+  `case_id` INT UNSIGNED DEFAULT NULL COMMENT 'Linked credit repair case, set when payment originates from a split',
+  `split_id` INT UNSIGNED DEFAULT NULL COMMENT 'payment_splits row that triggered this charge',
   `amount_cents` INT UNSIGNED NOT NULL,
   `currency` CHAR(3) NOT NULL DEFAULT 'USD',
   `status` ENUM('pending','succeeded','failed','refunded','cancelled') NOT NULL DEFAULT 'pending',
@@ -232,7 +235,9 @@ CREATE TABLE IF NOT EXISTS `payments` (
   KEY `idx_payments_status` (`status`),
   KEY `idx_payments_paid_at` (`paid_at`),
   CONSTRAINT `fk_payments_client` FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE CASCADE,
-  CONSTRAINT `fk_payments_package` FOREIGN KEY (`package_id`) REFERENCES `packages`(`id`) ON DELETE SET NULL
+  CONSTRAINT `fk_payments_package` FOREIGN KEY (`package_id`) REFERENCES `packages`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_payments_case` FOREIGN KEY (`case_id`) REFERENCES `credit_repair_cases`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_payments_split` FOREIGN KEY (`split_id`) REFERENCES `payment_splits`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================================
@@ -342,6 +347,12 @@ CREATE TABLE IF NOT EXISTS `client_round_reports` (
   `items_disputed` INT UNSIGNED NOT NULL DEFAULT 0,
   `summary_md` MEDIUMTEXT DEFAULT NULL,
   `pdf_storage_key` VARCHAR(500) DEFAULT NULL,
+  `pdf_file_name` VARCHAR(255) DEFAULT NULL,
+  `pdf_storage_provider` ENUM('local','cdn') DEFAULT 'cdn',
+  `pdf_encrypted` TINYINT(1) NOT NULL DEFAULT 0,
+  `pdf_enc_iv` CHAR(32) DEFAULT NULL COMMENT 'AES-256-GCM IV (16 bytes hex)',
+  `pdf_enc_tag` CHAR(32) DEFAULT NULL COMMENT 'AES-256-GCM auth tag (16 bytes hex)',
+  `pdf_uploaded_at` DATETIME DEFAULT NULL,
   `created_by_admin_id` INT UNSIGNED DEFAULT NULL,
   `delivered_via_sms` TINYINT(1) NOT NULL DEFAULT 0,
   `delivered_via_email` TINYINT(1) NOT NULL DEFAULT 0,
@@ -353,6 +364,29 @@ CREATE TABLE IF NOT EXISTS `client_round_reports` (
   CONSTRAINT `fk_round_reports_admin` FOREIGN KEY (`created_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL,
   CONSTRAINT `fk_reports_case` FOREIGN KEY (`case_id`) REFERENCES `credit_repair_cases`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================================
+-- ROUND REPORT PDFs (multiple attachments per round)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `round_report_pdfs` (
+  `id`                  INT UNSIGNED        NOT NULL AUTO_INCREMENT,
+  `client_id`           INT UNSIGNED        NOT NULL,
+  `round_number`        TINYINT UNSIGNED    NOT NULL,
+  `round_report_id`     INT UNSIGNED        DEFAULT NULL,
+  `file_name`           VARCHAR(255)        NOT NULL,
+  `storage_key`         VARCHAR(500)        NOT NULL,
+  `storage_provider`    ENUM('local','cdn') NOT NULL DEFAULT 'cdn',
+  `encrypted`           TINYINT(1)          NOT NULL DEFAULT 0,
+  `enc_iv`              CHAR(32)            DEFAULT NULL,
+  `enc_tag`             CHAR(32)            DEFAULT NULL,
+  `uploaded_by_admin_id` INT UNSIGNED       DEFAULT NULL,
+  `uploaded_at`         DATETIME            NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  INDEX `idx_rrp_client_round` (`client_id`, `round_number`),
+  INDEX `idx_rrp_round_report` (`round_report_id`),
+  CONSTRAINT `fk_rrp_client` FOREIGN KEY (`client_id`)
+    REFERENCES `clients` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ============================================================================
 -- PIPELINE STAGE HISTORY (audit)
@@ -567,7 +601,27 @@ INSERT INTO `communication_templates` (`slug`,`name`,`channel`,`subject`,`body`,
   ('sms_day3','New Client SMS Day 3','sms',NULL,'Final reminder: Please upload your documents today so we can begin: {{onboarding_link}}', JSON_ARRAY('onboarding_link')),
   ('sms_round_complete','Round Complete SMS','sms',NULL,'{{first_name}}, your Round {{round_number}} report is ready! View progress: {{report_link}}', JSON_ARRAY('first_name','round_number','report_link')),
   ('sms_doc_rejected','Doc Rejected SMS','sms',NULL,'{{first_name}}, your document was rejected: {{reason}}. Please re-upload: {{onboarding_link}}', JSON_ARRAY('first_name','reason','onboarding_link')),
-  ('email_round_complete','Round Complete Email','email','Your Round {{round_number}} report is ready','<h1>Round {{round_number}} Complete</h1><p>{{first_name}}, see your latest progress in your client portal.</p>', JSON_ARRAY('first_name','round_number'))
+  ('email_round_complete','Round Complete Email','email','Your Round {{round_number}} report is ready','<h1>Round {{round_number}} Complete</h1><p>{{first_name}}, see your latest progress in your client portal.</p>', JSON_ARRAY('first_name','round_number')),
+  -- Flow templates (EN) — seeded by 20260506_000000_reminder_flows.sql
+  ('flow_new_client_day1','[Flow] New Client — Day 1 Welcome','email','Welcome to Optimum Credit, {{first_name}}! Upload your documents to start.','',JSON_ARRAY('first_name','portal_url')),
+  ('flow_new_client_day2','[Flow] New Client — Day 2 Reminder','email','Reminder: We are waiting for your documents, {{first_name}}','',JSON_ARRAY('first_name','portal_url')),
+  ('flow_new_client_day3','[Flow] New Client — Day 3 Final Reminder','email','Final reminder: Please upload your documents today, {{first_name}}','',JSON_ARRAY('first_name','portal_url')),
+  ('flow_round_1_complete','[Flow] Round 1 Progress Report','email','Your Round 1 progress report is ready, {{first_name}}','',JSON_ARRAY('first_name','portal_url','items_removed','score_change')),
+  ('flow_round_2_complete','[Flow] Round 2 Progress Report','email','Your Round 2 progress report is ready, {{first_name}}','',JSON_ARRAY('first_name','portal_url','items_removed','score_change')),
+  ('flow_round_3_complete','[Flow] Round 3 Progress Report','email','Your Round 3 progress report is ready, {{first_name}}','',JSON_ARRAY('first_name','portal_url','items_removed','score_change')),
+  ('flow_round_4_complete','[Flow] Round 4 Progress Report','email','Your Round 4 progress report is ready, {{first_name}}','',JSON_ARRAY('first_name','portal_url','items_removed','score_change')),
+  ('flow_round_5_complete','[Flow] Round 5 Final Report','email','Your final progress report is ready, {{first_name}}!','',JSON_ARRAY('first_name','portal_url','items_removed','score_change')),
+  ('flow_completed','[Flow] Credit Repair Complete','email','Your credit repair journey is complete, {{first_name}}!','',JSON_ARRAY('first_name','portal_url')),
+  -- Flow templates (ES) — seeded by 20260520_000000_reminder_flow_spanish_templates.sql
+  ('flow_new_client_day1_es','[Flow] Nuevo Cliente — Día 1 Bienvenida (ES)','email','¡Bienvenido a Optimum Credit, {{first_name}}! Sube tus documentos para comenzar.','',JSON_ARRAY('first_name','portal_url')),
+  ('flow_new_client_day2_es','[Flow] Nuevo Cliente — Día 2 Recordatorio (ES)','email','Recordatorio: Estamos esperando tus documentos, {{first_name}}','',JSON_ARRAY('first_name','portal_url')),
+  ('flow_new_client_day3_es','[Flow] Nuevo Cliente — Día 3 Recordatorio Final (ES)','email','Recordatorio final: Por favor sube tus documentos hoy, {{first_name}}','',JSON_ARRAY('first_name','portal_url')),
+  ('flow_round_1_complete_es','[Flow] Informe de Progreso Ronda 1 (ES)','email','Tu informe de progreso de la Ronda 1 está listo, {{first_name}}','',JSON_ARRAY('first_name','portal_url','items_removed','score_change')),
+  ('flow_round_2_complete_es','[Flow] Informe de Progreso Ronda 2 (ES)','email','Tu informe de progreso de la Ronda 2 está listo, {{first_name}}','',JSON_ARRAY('first_name','portal_url','items_removed','score_change')),
+  ('flow_round_3_complete_es','[Flow] Informe de Progreso Ronda 3 (ES)','email','Tu informe de progreso de la Ronda 3 está listo, {{first_name}}','',JSON_ARRAY('first_name','portal_url','items_removed','score_change')),
+  ('flow_round_4_complete_es','[Flow] Informe de Progreso Ronda 4 (ES)','email','Tu informe de progreso de la Ronda 4 está listo, {{first_name}}','',JSON_ARRAY('first_name','portal_url','items_removed','score_change')),
+  ('flow_round_5_complete_es','[Flow] Informe Final Ronda 5 (ES)','email','¡Tu informe final de progreso está listo, {{first_name}}!','',JSON_ARRAY('first_name','portal_url','items_removed','score_change')),
+  ('flow_completed_es','[Flow] Reparación de Crédito Completada (ES)','email','¡Tu proceso de reparación de crédito está completo, {{first_name}}!','',JSON_ARRAY('first_name','portal_url'))
 ON DUPLICATE KEY UPDATE `name`=VALUES(`name`);
 
 -- ============================================================================
@@ -683,7 +737,7 @@ CREATE TABLE IF NOT EXISTS `reminder_flows` (
   `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
   `name` VARCHAR(200) NOT NULL,
   `description` TEXT DEFAULT NULL,
-  `trigger_event` ENUM('payment_confirmed','docs_ready','round_1_complete','round_2_complete','round_3_complete','round_4_complete','round_5_complete','completed') NOT NULL,
+  `trigger_event` ENUM('payment_confirmed','docs_ready','round_1_complete','round_2_complete','round_3_complete','round_4_complete','round_5_complete','completed','payment_due') NOT NULL,
   `is_active` TINYINT(1) NOT NULL DEFAULT 1,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -707,6 +761,57 @@ CREATE TABLE IF NOT EXISTS `reminder_flow_steps` (
   PRIMARY KEY (`id`),
   CONSTRAINT `fk_rfs_flow` FOREIGN KEY (`flow_id`) REFERENCES `reminder_flows` (`id`) ON DELETE CASCADE,
   INDEX `idx_flow_order` (`flow_id`,`step_order`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================================
+-- PAYMENT SPLITS (installment schedule per credit repair case)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `payment_splits` (
+  `id`                   INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `case_id`              INT UNSIGNED NOT NULL,
+  `client_id`            INT UNSIGNED NOT NULL  COMMENT 'Denormalised for fast queries',
+  `label`                VARCHAR(200) NOT NULL  DEFAULT 'Payment',
+  `amount_cents`         INT UNSIGNED NOT NULL,
+  `currency`             CHAR(3)      NOT NULL  DEFAULT 'USD',
+  `due_date`             DATE         NOT NULL,
+  `status`               ENUM('pending','paid','overdue','cancelled') NOT NULL DEFAULT 'pending',
+  `completion_source`    ENUM('authorize_link','manual') DEFAULT NULL,
+  `paid_at`              DATETIME     DEFAULT NULL,
+  `payments_id`          INT UNSIGNED DEFAULT NULL,
+  `reminder_flow_id`     INT UNSIGNED DEFAULT NULL,
+  `send_payment_link`    TINYINT(1)   NOT NULL DEFAULT 0,
+  `notes`                TEXT         DEFAULT NULL,
+  `created_by_admin_id`  INT UNSIGNED DEFAULT NULL,
+  `created_at`           DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at`           DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_splits_case`     (`case_id`),
+  KEY `idx_splits_client`   (`client_id`),
+  KEY `idx_splits_status`   (`status`),
+  KEY `idx_splits_due_date` (`due_date`),
+  CONSTRAINT `fk_splits_case`    FOREIGN KEY (`case_id`)    REFERENCES `credit_repair_cases`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_splits_client`  FOREIGN KEY (`client_id`)  REFERENCES `clients`(`id`)             ON DELETE CASCADE,
+  CONSTRAINT `fk_splits_payment` FOREIGN KEY (`payments_id`) REFERENCES `payments`(`id`)           ON DELETE SET NULL,
+  CONSTRAINT `fk_splits_flow`    FOREIGN KEY (`reminder_flow_id`) REFERENCES `reminder_flows`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_splits_admin`   FOREIGN KEY (`created_by_admin_id`) REFERENCES `admins`(`id`)     ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================================
+-- PAYMENT SPLIT TOKENS (secure one-time payment links per split)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `payment_split_tokens` (
+  `id`         INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `split_id`   INT UNSIGNED NOT NULL,
+  `token`      CHAR(36)     NOT NULL UNIQUE COMMENT 'UUID v4',
+  `expires_at` DATETIME     NOT NULL,
+  `used_at`    DATETIME     DEFAULT NULL,
+  `created_at` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_split_tokens_token`   (`token`),
+  KEY `idx_split_tokens_split`   (`split_id`),
+  KEY `idx_split_tokens_expires` (`expires_at`),
+  CONSTRAINT `fk_split_tokens_split`
+    FOREIGN KEY (`split_id`) REFERENCES `payment_splits`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================================
@@ -751,3 +856,74 @@ CREATE TABLE IF NOT EXISTS `reminder_flow_executions` (
   INDEX `idx_rfe_client` (`client_id`),
   INDEX `idx_rfe_triggered_at` (`triggered_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================================
+-- ONBOARDING TASK TEMPLATES (admin-managed checklist library)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `onboarding_task_templates` (
+  `id`                 INT UNSIGNED  NOT NULL AUTO_INCREMENT,
+  `slug`               VARCHAR(100)  NOT NULL UNIQUE,
+  `task_type`          ENUM('form','upload','sign_document') NOT NULL DEFAULT 'form',
+  `title_en`           VARCHAR(255)  NOT NULL,
+  `title_es`           VARCHAR(255)  NOT NULL,
+  `description_en`     TEXT          DEFAULT NULL,
+  `description_es`     TEXT          DEFAULT NULL,
+  `content_html_en`    MEDIUMTEXT    DEFAULT NULL COMMENT 'sign_document EN body',
+  `content_html_es`    MEDIUMTEXT    DEFAULT NULL COMMENT 'sign_document ES body',
+  `form_fields_json`   JSON          DEFAULT NULL COMMENT 'array of field defs for form type',
+  `upload_config_json` JSON          DEFAULT NULL COMMENT '{accept, max_mb} for upload type',
+  `is_required`        TINYINT(1)    NOT NULL DEFAULT 1,
+  `is_system`          TINYINT(1)    NOT NULL DEFAULT 0 COMMENT 'system tasks cannot be deleted',
+  `sort_order`         SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `is_active`          TINYINT(1)    NOT NULL DEFAULT 1,
+  `auto_assign`        TINYINT(1)    NOT NULL DEFAULT 1 COMMENT 'Auto-assign to new clients on payment confirmation',
+  `created_at`         DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at`         DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_ott_active_order` (`is_active`, `sort_order`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================================
+-- CLIENT TASK COMPLETIONS (per-client task progress)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `client_task_completions` (
+  `id`               INT UNSIGNED  NOT NULL AUTO_INCREMENT,
+  `client_id`        INT UNSIGNED  NOT NULL,
+  `task_template_id` INT UNSIGNED  NOT NULL,
+  `status`           ENUM('pending','completed','skipped') NOT NULL DEFAULT 'pending',
+  `form_data_json`   JSON          DEFAULT NULL,
+  `file_storage_key` VARCHAR(500)  DEFAULT NULL,
+  `file_name`        VARCHAR(255)  DEFAULT NULL,
+  `file_mime`        VARCHAR(100)  DEFAULT NULL,
+  `signature_name`   VARCHAR(150)  DEFAULT NULL,
+  `signature_ip`     VARCHAR(45)   DEFAULT NULL,
+  `completed_at`          DATETIME      DEFAULT NULL,
+  `admin_review_status`   ENUM('pending','approved','rejected') NOT NULL DEFAULT 'pending',
+  `admin_notes`           TEXT          DEFAULT NULL,
+  `admin_reviewed_at`     DATETIME      DEFAULT NULL,
+  `created_at`       DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at`       DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_client_task` (`client_id`, `task_template_id`),
+  KEY `idx_ctc_client`        (`client_id`),
+  KEY `idx_ctc_template`      (`task_template_id`),
+  KEY `idx_ctc_admin_review`  (`admin_review_status`),
+  CONSTRAINT `fk_ctc_client`
+    FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_ctc_template`
+    FOREIGN KEY (`task_template_id`) REFERENCES `onboarding_task_templates`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================================
+-- SEED: Onboarding Task Templates
+-- Applied by: 20260520_210000_seed_doc_templates_cleanup.sql
+-- ============================================================================
+INSERT INTO `onboarding_task_templates`
+  (`id`, `slug`, `task_type`, `title_en`, `title_es`, `description_en`, `description_es`, `upload_config_json`, `is_required`, `is_system`, `sort_order`, `is_active`, `auto_assign`)
+VALUES
+  (664266, 'id_front',         'upload',        'Government ID — Front', 'ID Oficial — Frente',       'Front of your driver''s license or passport.', 'Frente de tu licencia de conducir o pasaporte.',          '{"accept":"image/*,application/pdf","max_mb":10}', 1, 1, 10, 1, 1),
+  (664267, 'id_back',          'upload',        'Government ID — Back',  'ID Oficial — Reverso',      'Back of your photo ID.',                       'Reverso de tu identificación con foto.',                  '{"accept":"image/*,application/pdf","max_mb":10}', 1, 1, 20, 1, 1),
+  (664268, 'ssn_card',         'upload',        'Social Security Card',  'Tarjeta de Seguro Social',  'Clear photo of your SSN card or a W-2.',       'Foto clara de tu tarjeta SSN o un W-2.',                  '{"accept":"image/*,application/pdf","max_mb":10}', 1, 1, 30, 1, 1),
+  (664269, 'proof_of_address', 'upload',        'Proof of Address',      'Comprobante de Domicilio',  'Utility bill, lease, or bank statement.',      'Recibo de servicios, contrato o estado de cuenta.',       '{"accept":"image/*,application/pdf","max_mb":10}', 1, 1, 40, 1, 1),
+  (1,      'service_agreement','sign_document', 'Service Agreement',     'Contrato de Servicios',     'Read and e-sign your service agreement.',      'Lee y firma electrónicamente tu contrato de servicios.',  NULL,                                              1, 1, 50, 1, 1)
+ON DUPLICATE KEY UPDATE `sort_order` = VALUES(`sort_order`), `auto_assign` = VALUES(`auto_assign`);

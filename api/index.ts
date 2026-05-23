@@ -487,9 +487,17 @@ function emailLayout(opts: {
   title: string;
   preheader?: string;
   bodyHtml: string;
+  lang?: string;
 }) {
+  const isEs = opts.lang === "es";
+  const tagline = isEs
+    ? "Reparación de Crédito, Bien Hecha"
+    : "Credit Repair, Done Right";
+  const footer = isEs
+    ? `Recibes este correo porque tienes una cuenta con Optimum Credit Repair.<br/>© ${new Date().getFullYear()} Optimum Credit Repair. Todos los derechos reservados.`
+    : `You're receiving this email because you have an account with Optimum Credit Repair.<br/>© ${new Date().getFullYear()} Optimum Credit Repair. All rights reserved.`;
   return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" /><title>${escapeHtml(opts.title)}</title></head>
+<html lang="${isEs ? "es" : "en"}"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" /><title>${escapeHtml(opts.title)}</title></head>
 <body style="margin:0;padding:0;background:#f4f5f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0f172a;">
 ${opts.preheader ? `<div style="display:none;max-height:0;overflow:hidden;">${escapeHtml(opts.preheader)}</div>` : ""}
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4f5f9;padding:40px 16px;">
@@ -500,13 +508,12 @@ ${opts.preheader ? `<div style="display:none;max-height:0;overflow:hidden;">${es
           <td>
             <img src="https://disruptinglabs.com/data/optimum/assets/images/logo_horizontal_gold_white_text.png" alt="Optimum Credit" height="40" style="display:block;height:40px;width:auto;border:0;" />
           </td>
-          <td align="right" style="font-size:12px;color:#C0A06A;font-weight:600;letter-spacing:0.03em;">Credit Repair, Done Right</td>
+          <td align="right" style="font-size:12px;color:#C0A06A;font-weight:600;letter-spacing:0.03em;">${tagline}</td>
         </tr></table>
       </td></tr>
       <tr><td style="padding:32px;">${opts.bodyHtml}</td></tr>
       <tr><td style="padding:24px 32px;background:#f8fafc;border-top:1px solid #e2e8f0;font-size:12px;color:#64748b;text-align:center;">
-        You're receiving this email because you have an account with Optimum Credit Repair.<br/>
-        © ${new Date().getFullYear()} Optimum Credit Repair. All rights reserved.
+        ${footer}
       </td></tr>
     </table>
   </td></tr>
@@ -524,20 +531,41 @@ function tplOtpLogin(opts: {
   firstName?: string;
   code: string;
   isAdmin?: boolean;
+  lang?: string;
 }) {
-  const greeting = opts.firstName ? `Hi ${escapeHtml(opts.firstName)},` : "Hi,";
-  const role = opts.isAdmin ? "admin panel" : "client portal";
-  const body = `
+  const isEs = opts.lang === "es" && !opts.isAdmin;
+  const greeting = opts.firstName
+    ? isEs
+      ? `Hola ${escapeHtml(opts.firstName)},`
+      : `Hi ${escapeHtml(opts.firstName)},`
+    : isEs
+      ? "Hola,"
+      : "Hi,";
+  const role = opts.isAdmin
+    ? "admin panel"
+    : isEs
+      ? "portal de clientes"
+      : "client portal";
+  const body = isEs
+    ? `
+    <h1 style="margin:0 0 16px;font-size:24px;font-weight:800;color:#0f172a;">Tu código de acceso</h1>
+    <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">${greeting} usa el código de verificación a continuación para iniciar sesión en tu ${role}.</p>
+    <div style="margin:24px 0;padding:24px;background:#f1f5f9;border-radius:12px;text-align:center;font-family:'SF Mono',Menlo,monospace;font-size:36px;font-weight:800;letter-spacing:8px;color:#0f172a;">${escapeHtml(opts.code)}</div>
+    <p style="margin:0;font-size:13px;color:#64748b;">Este código expira en 10 minutos. Si no lo solicitaste, puedes ignorar este correo de forma segura.</p>`
+    : `
     <h1 style="margin:0 0 16px;font-size:24px;font-weight:800;color:#0f172a;">Your sign-in code</h1>
     <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">${greeting} use the verification code below to sign in to your ${role}.</p>
     <div style="margin:24px 0;padding:24px;background:#f1f5f9;border-radius:12px;text-align:center;font-family:'SF Mono',Menlo,monospace;font-size:36px;font-weight:800;letter-spacing:8px;color:#0f172a;">${escapeHtml(opts.code)}</div>
     <p style="margin:0;font-size:13px;color:#64748b;">This code expires in 10 minutes. If you didn't request this, you can safely ignore this email.</p>`;
   return {
-    subject: `Your Optimum Credit code: ${opts.code}`,
+    subject: isEs
+      ? `Tu código de Optimum Credit: ${opts.code}`
+      : `Your Optimum Credit code: ${opts.code}`,
     html: emailLayout({
-      title: "Sign-in code",
-      preheader: `Code: ${opts.code}`,
+      title: isEs ? "Código de acceso" : "Sign-in code",
+      preheader: isEs ? `Código: ${opts.code}` : `Code: ${opts.code}`,
       bodyHtml: body,
+      lang: opts.lang,
     }),
   };
 }
@@ -616,14 +644,37 @@ const DOC_TYPE_LABELS: Record<string, string> = {
   other: "Document",
 };
 
+const DOC_TYPE_LABELS_ES: Record<string, string> = {
+  id_front: "Identificación oficial (frente)",
+  id_back: "Identificación oficial (reverso)",
+  ssn_card: "Tarjeta de Seguro Social",
+  proof_of_address: "Comprobante de domicilio",
+  other: "Documento",
+};
+
 function tplDocumentRejected(opts: {
   firstName: string;
   docType: string;
   reason: string;
   portalUrl: string;
+  lang?: string;
 }) {
-  const label = DOC_TYPE_LABELS[opts.docType] || opts.docType;
-  const body = `
+  const isEs = opts.lang === "es";
+  const label = isEs
+    ? DOC_TYPE_LABELS_ES[opts.docType] || opts.docType
+    : DOC_TYPE_LABELS[opts.docType] || opts.docType;
+  const body = isEs
+    ? `
+    <h1 style="margin:0 0 12px;font-size:24px;font-weight:800;color:#0f172a;">Acción requerida: por favor vuelve a subir tu documento</h1>
+    <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">Hola ${escapeHtml(opts.firstName)}, revisamos tu <strong>${escapeHtml(label)}</strong> pero no pudimos aceptarlo. Por favor sube una nueva copia desde tu portal.</p>
+    <div style="margin:20px 0;padding:16px 20px;background:#fef2f2;border-left:4px solid #ef4444;border-radius:8px;">
+      <div style="font-size:13px;font-weight:700;color:#991b1b;">Motivo del rechazo</div>
+      <div style="margin-top:6px;font-size:14px;color:#7f1d1d;">${escapeHtml(opts.reason)}</div>
+    </div>
+    <p style="margin:16px 0;font-size:14px;color:#334155;">Consejos frecuentes: asegúrate de que el documento esté enfocado, no recortado, muestre claramente las cuatro esquinas y sea una copia reciente (no mayor a 3 meses para comprobante de domicilio).</p>
+    ${emailButton(opts.portalUrl, "Volver a subir desde mi portal")}
+    <p style="margin:16px 0 0;font-size:13px;color:#64748b;">¿Preguntas? Responde a este correo y nuestro equipo te ayudará.</p>`
+    : `
     <h1 style="margin:0 0 12px;font-size:24px;font-weight:800;color:#0f172a;">Action needed: please re-upload your document</h1>
     <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">Hi ${escapeHtml(opts.firstName)}, we reviewed your <strong>${escapeHtml(label)}</strong> but were unable to accept it. Please upload a new copy from your portal.</p>
     <div style="margin:20px 0;padding:16px 20px;background:#fef2f2;border-left:4px solid #ef4444;border-radius:8px;">
@@ -634,17 +685,38 @@ function tplDocumentRejected(opts: {
     ${emailButton(opts.portalUrl, "Re-upload from My Portal")}
     <p style="margin:16px 0 0;font-size:13px;color:#64748b;">Questions? Reply to this email and our team will help you out.</p>`;
   return {
-    subject: `Optimum Credit: action needed — re-upload your ${label}`,
+    subject: isEs
+      ? `Optimum Credit: acción requerida — vuelve a subir tu ${label}`
+      : `Optimum Credit: action needed — re-upload your ${label}`,
     html: emailLayout({
-      title: "Re-upload required",
-      preheader: `We need a new copy of your ${label}.`,
+      title: isEs ? "Nueva subida requerida" : "Re-upload required",
+      preheader: isEs
+        ? `Necesitamos una nueva copia de tu ${label}.`
+        : `We need a new copy of your ${label}.`,
       bodyHtml: body,
+      lang: opts.lang,
     }),
   };
 }
 
-function tplAllDocsApproved(opts: { firstName: string; portalUrl: string }) {
-  const body = `
+function tplAllDocsApproved(opts: {
+  firstName: string;
+  portalUrl: string;
+  lang?: string;
+}) {
+  const isEs = opts.lang === "es";
+  const body = isEs
+    ? `
+    <h1 style="margin:0 0 12px;font-size:24px;font-weight:800;color:#0f172a;">¡Buenas noticias &#127881; — todos tus documentos han sido verificados!</h1>
+    <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">Hola ${escapeHtml(opts.firstName)}, nuestro equipo ha revisado y aprobado los cuatro documentos de identidad. Tu expediente ha pasado a la siguiente etapa y nuestros especialistas comenzarán a trabajar en tu caso de inmediato.</p>
+    <div style="margin:20px 0;padding:16px 20px;background:#f0fdf4;border-left:4px solid #22c55e;border-radius:8px;">
+      <div style="font-size:13px;font-weight:700;color:#15803d;">¿Qué sigue?</div>
+      <div style="margin-top:6px;font-size:14px;color:#166534;line-height:1.6;">Nuestros especialistas comenzarán a revisar tus reportes de crédito y a preparar cartas de disputa con las principales agencias de crédito. Recibirás una actualización de progreso después de que se complete cada ronda — generalmente dentro de 30&ndash;45 días.</div>
+    </div>
+    <p style="margin:16px 0;font-size:14px;line-height:1.6;color:#334155;">Puedes seguir tu progreso y ver los informes de cada ronda directamente desde tu portal.</p>
+    ${emailButton(opts.portalUrl, "Ver mi portal")}
+    <p style="margin:24px 0 0;font-size:13px;color:#64748b;">¿Preguntas? Responde a este correo y nuestro equipo estará feliz de ayudarte.</p>`
+    : `
     <h1 style="margin:0 0 12px;font-size:24px;font-weight:800;color:#0f172a;">Great news &#127881; — your documents are all verified!</h1>
     <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">Hi ${escapeHtml(opts.firstName)}, our team has reviewed and approved all four of your identity documents. Your file has been moved to the next stage and our specialists will begin working on your case right away.</p>
     <div style="margin:20px 0;padding:16px 20px;background:#f0fdf4;border-left:4px solid #22c55e;border-radius:8px;">
@@ -655,11 +727,16 @@ function tplAllDocsApproved(opts: { firstName: string; portalUrl: string }) {
     ${emailButton(opts.portalUrl, "View My Portal")}
     <p style="margin:24px 0 0;font-size:13px;color:#64748b;">Questions? Reply to this email and our team will be happy to assist.</p>`;
   return {
-    subject: `Optimum Credit: all documents verified — we're getting started!`,
+    subject: isEs
+      ? `Optimum Credit: documentos verificados — ¡comenzamos!`
+      : `Optimum Credit: all documents verified — we're getting started!`,
     html: emailLayout({
-      title: "Documents Verified",
-      preheader: "All your documents have been approved. We're on it!",
+      title: isEs ? "Documentos Verificados" : "Documents Verified",
+      preheader: isEs
+        ? "Todos tus documentos han sido aprobados. ¡Manos a la obra!"
+        : "All your documents have been approved. We're on it!",
       bodyHtml: body,
+      lang: opts.lang,
     }),
   };
 }
@@ -671,32 +748,276 @@ function tplRoundComplete(opts: {
   scoreAfter?: number | null;
   itemsRemoved: number;
   portalUrl: string;
+  lang?: string;
 }) {
+  const isEs = opts.lang === "es";
   const delta =
     opts.scoreBefore != null && opts.scoreAfter != null
       ? opts.scoreAfter - opts.scoreBefore
       : null;
   const body = `
-    <h1 style="margin:0 0 12px;font-size:26px;font-weight:800;color:#0f172a;">Round ${opts.roundNumber} is complete</h1>
-    <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">Hi ${escapeHtml(opts.firstName)}, here's your monthly progress update.</p>
+    <h1 style="margin:0 0 12px;font-size:26px;font-weight:800;color:#0f172a;">${isEs ? `Ronda ${opts.roundNumber} completada` : `Round ${opts.roundNumber} is complete`}</h1>
+    <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">${isEs ? `Hola ${escapeHtml(opts.firstName)}, aquí está tu actualización de progreso mensual.` : `Hi ${escapeHtml(opts.firstName)}, here's your monthly progress update.`}</p>
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:20px 0;">
       <tr>
         <td style="padding:16px;background:#f1f5f9;border-radius:12px;text-align:center;width:33%;">
-          <div style="font-size:12px;color:#64748b;font-weight:600;text-transform:uppercase;">Items Removed</div>
+          <div style="font-size:12px;color:#64748b;font-weight:600;text-transform:uppercase;">${isEs ? "Elementos eliminados" : "Items Removed"}</div>
           <div style="margin-top:6px;font-size:24px;font-weight:800;color:#16a34a;">${opts.itemsRemoved}</div>
         </td>
         <td style="width:8px;"></td>
         <td style="padding:16px;background:#f1f5f9;border-radius:12px;text-align:center;">
-          <div style="font-size:12px;color:#64748b;font-weight:600;text-transform:uppercase;">Score Change</div>
+          <div style="font-size:12px;color:#64748b;font-weight:600;text-transform:uppercase;">${isEs ? "Cambio de puntaje" : "Score Change"}</div>
           <div style="margin-top:6px;font-size:24px;font-weight:800;color:${delta != null && delta >= 0 ? "#16a34a" : "#0f172a"};">${delta != null ? (delta >= 0 ? "+" : "") + delta : "—"}</div>
         </td>
       </tr>
     </table>
-    ${emailButton(opts.portalUrl, "View Full Report")}`;
+    ${emailButton(opts.portalUrl, isEs ? "Ver informe completo" : "View Full Report")}`;
   return {
-    subject: `Round ${opts.roundNumber} complete — your progress report is ready`,
-    html: emailLayout({ title: "Round complete", bodyHtml: body }),
+    subject: isEs
+      ? `Ronda ${opts.roundNumber} completada — tu informe de progreso está listo`
+      : `Round ${opts.roundNumber} complete — your progress report is ready`,
+    html: emailLayout({
+      title: isEs ? "Ronda completada" : "Round complete",
+      bodyHtml: body,
+      lang: opts.lang,
+    }),
   };
+}
+
+// ============================================================================
+// ROUND PDF REPORT READY EMAIL TEMPLATE
+// ============================================================================
+
+/** Attach pdfs[] to each round report row from the round_report_pdfs table. */
+async function attachPdfsToReports(
+  clientId: number,
+  reports: RowDataPacket[],
+): Promise<void> {
+  if (!reports.length) return;
+  const [pdfRows] = await pool.query<RowDataPacket[]>(
+    `SELECT id, client_id, round_number, round_report_id, file_name, uploaded_at
+     FROM round_report_pdfs WHERE client_id = ? ORDER BY round_number ASC, uploaded_at ASC`,
+    [clientId],
+  );
+  const byRound: Record<number, RowDataPacket[]> = {};
+  for (const p of pdfRows) {
+    const rn = p.round_number as number;
+    if (!byRound[rn]) byRound[rn] = [];
+    byRound[rn].push(p);
+  }
+  for (const r of reports) {
+    r.pdfs = byRound[r.round_number as number] ?? [];
+  }
+}
+
+function tplRoundPdfReady(opts: {
+  firstName: string;
+  roundNumber: number;
+  portalUrl: string;
+  lang?: string;
+}) {
+  const isEs = opts.lang === "es";
+  const body = `
+    <h1 style="margin:0 0 12px;font-size:26px;font-weight:800;color:#0f172a;">${isEs ? `Tu informe PDF de la Ronda ${opts.roundNumber} ya está disponible` : `Your Round ${opts.roundNumber} PDF report is ready`}</h1>
+    <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">${isEs ? `Hola ${escapeHtml(opts.firstName)}, tu asesor de crédito ha subido el informe detallado de la Ronda ${opts.roundNumber}. Puedes descargarlo desde tu portal en cualquier momento.` : `Hi ${escapeHtml(opts.firstName)}, your credit advisor has uploaded the detailed Round ${opts.roundNumber} report. You can download it from your portal at any time.`}</p>
+    <div style="margin:20px 0;padding:20px 24px;background:#f1f5f9;border-radius:12px;border-left:4px solid #C0A06A;">
+      <div style="font-size:13px;font-weight:700;color:#0f172a;margin-bottom:6px;">📄 ${isEs ? `Informe de la Ronda ${opts.roundNumber}` : `Round ${opts.roundNumber} Report`}</div>
+      <div style="font-size:13px;color:#64748b;">${isEs ? "Este informe incluye el desglose completo de los elementos disputados, eliminados y los cambios en tu puntuación crediticia." : "This report includes the complete breakdown of disputed items, removals, and credit score changes for this round."}</div>
+    </div>
+    ${emailButton(opts.portalUrl, isEs ? "Descargar mi informe" : "Download My Report")}
+    <p style="margin:20px 0 0;font-size:13px;color:#94a3b8;">${isEs ? "Si tienes preguntas sobre tu informe, no dudes en contactar a tu asesor a través del portal." : "If you have questions about your report, feel free to contact your advisor through the portal."}</p>`;
+  return {
+    subject: isEs
+      ? `Tu informe PDF de la Ronda ${opts.roundNumber} ya está listo — Optimum Credit`
+      : `Round ${opts.roundNumber} PDF report ready — Optimum Credit`,
+    html: emailLayout({
+      title: isEs ? "Informe PDF listo" : "PDF Report Ready",
+      preheader: isEs
+        ? `Tu informe de la Ronda ${opts.roundNumber} está disponible para descargar.`
+        : `Your Round ${opts.roundNumber} report is available to download.`,
+      bodyHtml: body,
+      lang: opts.lang,
+    }),
+  };
+}
+
+// ============================================================================
+// CLIENT WELCOME EMAIL (manual admin-created client)
+// ============================================================================
+function tplClientWelcome(opts: {
+  firstName: string;
+  portalUrl: string;
+  lang?: string;
+}) {
+  const isEs = opts.lang === "es";
+  const body = isEs
+    ? `<h1 style="margin:0 0 16px;font-size:26px;font-weight:800;color:#0f172a;">¡Bienvenido, ${escapeHtml(opts.firstName)}!</h1>
+       <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">Tu cuenta con Optimum Credit ha sido creada. Haz clic en el botón de abajo para acceder a tu portal de cliente.</p>
+       ${emailButton(opts.portalUrl, "Acceder a mi portal")}
+       <p style="margin:24px 0 0;font-size:13px;color:#64748b;">¿Necesitas ayuda? Responde a este correo y te asistiremos.</p>`
+    : `<h1 style="margin:0 0 16px;font-size:26px;font-weight:800;color:#0f172a;">Welcome, ${escapeHtml(opts.firstName)}!</h1>
+       <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">Your Optimum Credit account has been created. Click below to access your client portal.</p>
+       ${emailButton(opts.portalUrl, "Access My Portal")}
+       <p style="margin:24px 0 0;font-size:13px;color:#64748b;">Need help? Just reply to this email — we're here for you.</p>`;
+  return {
+    subject: isEs
+      ? `Bienvenido a Optimum Credit, ${opts.firstName}`
+      : `Welcome to Optimum Credit, ${opts.firstName}`,
+    html: emailLayout({
+      title: isEs ? "Bienvenido" : "Welcome",
+      preheader: isEs ? "Tu cuenta está lista." : "Your account is ready.",
+      bodyHtml: body,
+      lang: opts.lang,
+    }),
+  };
+}
+
+// ============================================================================
+// CASE STARTED EMAIL (manual CR- case)
+// ============================================================================
+function tplCaseStarted(opts: {
+  firstName: string;
+  caseNumber: string;
+  portalUrl: string;
+  lang?: string;
+}) {
+  const isEs = opts.lang === "es";
+  const body = isEs
+    ? `<h1 style="margin:0 0 16px;font-size:26px;font-weight:800;color:#0f172a;">¡Tu caso ha sido activado!</h1>
+       <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">Hola ${escapeHtml(opts.firstName)}, tu expediente de reparación de crédito <strong>${escapeHtml(opts.caseNumber)}</strong> ya está activo.</p>
+       <div style="margin:20px 0;padding:16px 20px;background:#f0fdf4;border-left:4px solid #22c55e;border-radius:8px;">
+         <div style="font-size:13px;font-weight:700;color:#15803d;">Número de caso: ${escapeHtml(opts.caseNumber)}</div>
+       </div>
+       ${emailButton(opts.portalUrl, "Ver mi portal")}
+       <p style="margin:24px 0 0;font-size:13px;color:#64748b;">¿Preguntas? Responde este correo.</p>`
+    : `<h1 style="margin:0 0 16px;font-size:26px;font-weight:800;color:#0f172a;">Your case is now active!</h1>
+       <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">Hi ${escapeHtml(opts.firstName)}, your credit repair case <strong>${escapeHtml(opts.caseNumber)}</strong> is now active. Our team will begin working on it right away.</p>
+       <div style="margin:20px 0;padding:16px 20px;background:#f0fdf4;border-left:4px solid #22c55e;border-radius:8px;">
+         <div style="font-size:13px;font-weight:700;color:#15803d;">Case number: ${escapeHtml(opts.caseNumber)}</div>
+       </div>
+       ${emailButton(opts.portalUrl, "View My Portal")}
+       <p style="margin:24px 0 0;font-size:13px;color:#64748b;">Have questions? Just reply to this email.</p>`;
+  return {
+    subject: isEs
+      ? `Tu caso ${opts.caseNumber} está activo — Optimum Credit`
+      : `Your case ${opts.caseNumber} is active — Optimum Credit`,
+    html: emailLayout({
+      title: isEs ? "Caso activado" : "Case started",
+      preheader: isEs
+        ? `Tu expediente ${opts.caseNumber} está en marcha.`
+        : `Your case ${opts.caseNumber} is now underway.`,
+      bodyHtml: body,
+      lang: opts.lang,
+    }),
+  };
+}
+
+// ============================================================================
+// PAYMENT DUE EMAIL (split reminder — used by scheduleSplitReminders)
+// ============================================================================
+function tplPaymentDue(opts: {
+  firstName: string;
+  label: string;
+  amountFormatted: string;
+  dueDateFormatted: string;
+  paymentLink: string;
+  lang?: string;
+}) {
+  const isEs = opts.lang === "es";
+  const body = isEs
+    ? `<h1 style="margin:0 0 16px;font-size:24px;font-weight:800;color:#0f172a;">Recordatorio de pago</h1>
+       <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">Hola ${escapeHtml(opts.firstName)}, tienes un pago próximo:</p>
+       <div style="margin:20px 0;padding:20px 24px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;">
+         <div style="font-size:13px;color:#64748b;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">${escapeHtml(opts.label)}</div>
+         <div style="font-size:32px;font-weight:800;color:#0f172a;margin:8px 0;">${escapeHtml(opts.amountFormatted)}</div>
+         <div style="font-size:13px;color:#64748b;">Fecha de vencimiento: <strong style="color:#0f172a;">${escapeHtml(opts.dueDateFormatted)}</strong></div>
+       </div>
+       ${emailButton(opts.paymentLink, "Pagar ahora")}
+       <p style="margin:24px 0 0;font-size:13px;color:#64748b;">Si ya realizaste el pago, ignora este mensaje.</p>`
+    : `<h1 style="margin:0 0 16px;font-size:24px;font-weight:800;color:#0f172a;">Payment reminder</h1>
+       <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">Hi ${escapeHtml(opts.firstName)}, you have an upcoming payment:</p>
+       <div style="margin:20px 0;padding:20px 24px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;">
+         <div style="font-size:13px;color:#64748b;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">${escapeHtml(opts.label)}</div>
+         <div style="font-size:32px;font-weight:800;color:#0f172a;margin:8px 0;">${escapeHtml(opts.amountFormatted)}</div>
+         <div style="font-size:13px;color:#64748b;">Due date: <strong style="color:#0f172a;">${escapeHtml(opts.dueDateFormatted)}</strong></div>
+       </div>
+       ${emailButton(opts.paymentLink, "Pay Now")}
+       <p style="margin:24px 0 0;font-size:13px;color:#64748b;">If you've already paid, please disregard this message.</p>`;
+  return {
+    subject: isEs
+      ? `Recordatorio: ${opts.amountFormatted} vence el ${opts.dueDateFormatted}`
+      : `Payment reminder: ${opts.amountFormatted} due ${opts.dueDateFormatted}`,
+    html: emailLayout({
+      title: isEs ? "Recordatorio de pago" : "Payment reminder",
+      preheader: isEs
+        ? `${opts.amountFormatted} vence el ${opts.dueDateFormatted}.`
+        : `${opts.amountFormatted} due on ${opts.dueDateFormatted}.`,
+      bodyHtml: body,
+      lang: opts.lang,
+    }),
+  };
+}
+
+// ============================================================================
+// SPLIT REMINDER SCHEDULER
+// Seeds notification_queue for a split based on reminder flow steps.
+// delay_days means "days BEFORE due_date" (inverse of pipeline flows).
+// ============================================================================
+async function scheduleSplitReminders(opts: {
+  splitId: number;
+  clientId: number;
+  flowId: number;
+  dueDate: Date;
+  paymentLink: string;
+  label: string;
+  amountFormatted: string;
+  dueDateFormatted: string;
+}): Promise<void> {
+  const [clientRows] = await pool.query<RowDataPacket[]>(
+    `SELECT first_name, email, preferred_language FROM clients WHERE id = ? LIMIT 1`,
+    [opts.clientId],
+  );
+  if (clientRows.length === 0) return;
+  const client = clientRows[0];
+  const lang = (client.preferred_language as string) || "en";
+
+  const [steps] = await pool.query<RowDataPacket[]>(
+    `SELECT delay_days FROM reminder_flow_steps WHERE flow_id = ? ORDER BY step_order ASC`,
+    [opts.flowId],
+  );
+  if (steps.length === 0) return;
+
+  const now = new Date();
+  for (const step of steps) {
+    const delayDays = step.delay_days as number;
+    const scheduledFor = new Date(
+      opts.dueDate.getTime() - delayDays * 86400000,
+    );
+    if (scheduledFor <= now) continue; // skip past dates
+
+    const tpl = tplPaymentDue({
+      firstName: client.first_name as string,
+      label: opts.label,
+      amountFormatted: opts.amountFormatted,
+      dueDateFormatted: opts.dueDateFormatted,
+      paymentLink: opts.paymentLink,
+      lang,
+    });
+
+    await pool.query<ResultSetHeader>(
+      `INSERT INTO notification_queue
+         (client_id, channel, to_address, subject, body, scheduled_for, payload_json)
+       VALUES (?, 'email', ?, ?, ?, ?, ?)`,
+      [
+        opts.clientId,
+        client.email as string,
+        tpl.subject,
+        tpl.html,
+        scheduledFor,
+        JSON.stringify({ split_id: opts.splitId }),
+      ],
+    );
+  }
 }
 
 // ============================================================================
@@ -927,6 +1248,28 @@ async function chargeCard(opts: {
 // SHARED — payment success processing
 // ============================================================================
 
+/**
+ * Creates client_task_completions rows for all active, auto_assign=1 templates
+ * that the client doesn't already have. Safe to call multiple times (INSERT IGNORE).
+ */
+async function autoAssignTasksForClient(clientId: number): Promise<void> {
+  const [templates] = await pool.query<RowDataPacket[]>(
+    `SELECT id FROM onboarding_task_templates
+     WHERE is_active = 1 AND auto_assign = 1
+     ORDER BY sort_order ASC, id ASC`,
+  );
+  if (templates.length === 0) return;
+
+  const values = templates.map(() => "(?, ?, 'pending')").join(", ");
+  const params = templates.flatMap((t) => [clientId, t.id]);
+
+  await pool.query<ResultSetHeader>(
+    `INSERT IGNORE INTO client_task_completions (client_id, task_template_id, status)
+     VALUES ${values}`,
+    params,
+  );
+}
+
 async function markPaymentSucceeded(clientId: number, transactionId: string) {
   await pool.query<ResultSetHeader>(
     `UPDATE payments SET status='succeeded', paid_at=NOW() WHERE provider_transaction_id = ? AND status <> 'succeeded'`,
@@ -984,6 +1327,11 @@ async function markPaymentSucceeded(clientId: number, transactionId: string) {
   // Trigger the "payment_confirmed" reminder flow (Day 1/2/3 email sequence)
   triggerReminderFlow("payment_confirmed", clientId).catch((e) =>
     console.error("[flow:payment_confirmed]", e?.message),
+  );
+
+  // Auto-assign onboarding tasks to this client
+  autoAssignTasksForClient(clientId).catch((e) =>
+    console.error("[tasks:auto-assign]", e?.message),
   );
 
   // Push new client to Credit Repair Cloud (async — don't block payment confirmation)
@@ -1079,11 +1427,12 @@ async function triggerReminderFlow(
   if (steps.length === 0) return;
 
   const [clientRows] = await pool.query<RowDataPacket[]>(
-    `SELECT first_name, last_name, email, phone FROM clients WHERE id = ? LIMIT 1`,
+    `SELECT first_name, last_name, email, phone, preferred_language FROM clients WHERE id = ? LIMIT 1`,
     [clientId],
   );
   if (clientRows.length === 0) return;
   const client = clientRows[0];
+  const lang = (client.preferred_language as string | null) || "en";
 
   const vars: Record<string, string> = {
     first_name: client.first_name as string,
@@ -1110,13 +1459,25 @@ async function triggerReminderFlow(
         let bodyHtml = step.body as string | null;
 
         if (step.template_slug) {
-          const [tmplRows] = await pool.query<RowDataPacket[]>(
-            `SELECT subject, body FROM communication_templates WHERE slug = ? AND is_active = 1 LIMIT 1`,
-            [step.template_slug],
-          );
-          if (tmplRows.length > 0) {
-            subj = tmplRows[0].subject as string | null;
-            bodyHtml = tmplRows[0].body as string | null;
+          // Prefer language-specific template (e.g. flow_new_client_day1_es) when available
+          const preferredSlug =
+            lang !== "en"
+              ? `${step.template_slug}_${lang}`
+              : step.template_slug;
+          const slugsToTry =
+            preferredSlug !== step.template_slug
+              ? [preferredSlug, step.template_slug]
+              : [step.template_slug];
+          for (const slug of slugsToTry) {
+            const [tmplRows] = await pool.query<RowDataPacket[]>(
+              `SELECT subject, body FROM communication_templates WHERE slug = ? AND is_active = 1 LIMIT 1`,
+              [slug],
+            );
+            if (tmplRows.length > 0) {
+              subj = tmplRows[0].subject as string | null;
+              bodyHtml = tmplRows[0].body as string | null;
+              break;
+            }
           }
         }
 
@@ -1136,9 +1497,11 @@ async function triggerReminderFlow(
 
         const resolvedSubj = stepReplaceVars(subj);
         const resolvedBody = stepReplaceVars(bodyHtml);
+        const btnLabel = lang === "es" ? "Ir a mi portal" : "Go to My Portal";
         const fullHtml = emailLayout({
           title: resolvedSubj,
-          bodyHtml: resolvedBody + emailButton(magicLink, "Go to My Portal"),
+          bodyHtml: resolvedBody + emailButton(magicLink, btnLabel),
+          lang,
         });
 
         if (isImmediate) {
@@ -1284,6 +1647,21 @@ async function crcPost(
 
   const text = await resp.text();
   let raw: any;
+
+  // CRC returns XML: <success>True</success><result><id>MzA5</id></result>
+  if (text.trimStart().startsWith("<")) {
+    const successMatch = text.match(/<success>(True|1)<\/success>/i);
+    const idMatch = text.match(/<id>([^<]+)<\/id>/);
+    raw = { raw: text };
+    if (resp.ok && successMatch) {
+      const crcId = idMatch?.[1]?.trim() || undefined;
+      return { success: true, crcId, raw };
+    }
+    console.error("[crc:error]", path, text);
+    return { success: false, raw };
+  }
+
+  // Fallback: JSON response
   try {
     raw = JSON.parse(text);
   } catch {
@@ -1371,15 +1749,37 @@ const CRC_STAGE_MAP: Record<string, string> = {
   "docs ready": "docs_ready",
   "round 1": "round_1",
   "round 1 (month 1)": "round_1",
+  "round 1 out": "round_1",
+  "round 1 out!": "round_1",
+  "round 1 in": "round_1",
+  "round 1 in!": "round_1",
   "round 2": "round_2",
   "round 2 (month 2)": "round_2",
+  "round 2 out": "round_2",
+  "round 2 out!": "round_2",
+  "round 2 in": "round_2",
+  "round 2 in!": "round_2",
   "round 3": "round_3",
   "round 3 (month 3)": "round_3",
+  "round 3 out": "round_3",
+  "round 3 out!": "round_3",
+  "round 3 in": "round_3",
+  "round 3 in!": "round_3",
   "round 4": "round_4",
   "round 4 (month 4)": "round_4",
+  "round 4 out": "round_4",
+  "round 4 out!": "round_4",
+  "round 4 in": "round_4",
+  "round 4 in!": "round_4",
   "round 5": "round_5",
   "round 5 (month 5)": "round_5",
+  "round 5 out": "round_5",
+  "round 5 out!": "round_5",
+  "round 5 in": "round_5",
+  "round 5 in!": "round_5",
   completed: "completed",
+  graduated: "completed",
+  "deleted client": "completed",
 };
 
 // ============================================================================
@@ -1495,7 +1895,7 @@ function buildApp() {
       return res.status(400).json({ error: "Valid email required" });
     }
     const [rows] = await pool.query<RowDataPacket[]>(
-      "SELECT id, first_name FROM clients WHERE email = ? LIMIT 1",
+      "SELECT id, first_name, preferred_language FROM clients WHERE email = ? LIMIT 1",
       [email],
     );
     if (rows.length === 0) {
@@ -1509,7 +1909,11 @@ function buildApp() {
       "login",
       req.ip,
     );
-    const tpl = tplOtpLogin({ firstName: rows[0].first_name, code });
+    const tpl = tplOtpLogin({
+      firstName: rows[0].first_name,
+      code,
+      lang: rows[0].preferred_language || "en",
+    });
     await sendEmail({ to: email, subject: tpl.subject, html: tpl.html });
     res.json({ ok: true, message: "Verification code sent." });
   });
@@ -1765,6 +2169,60 @@ function buildApp() {
       if (afs.length > 0) affiliateId = afs[0].id as number;
     }
 
+    // ── Coupon validation ──────────────────────────────────────────────────────
+    let couponId: number | null = null;
+    let discountCents = 0;
+    let originalAmountCents: number | null = null;
+    let chargeAmountCents: number = pkg.price_cents as number;
+
+    if (b.coupon_code) {
+      const upperCode = String(b.coupon_code).toUpperCase().trim();
+      const [couponRows] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM coupons WHERE code = ? AND is_active = 1 LIMIT 1`,
+        [upperCode],
+      );
+      if (couponRows.length > 0) {
+        const c = couponRows[0];
+        const now = new Date();
+        const isValid =
+          (!c.valid_from || new Date(c.valid_from) <= now) &&
+          (!c.expires_at || new Date(c.expires_at) >= now) &&
+          (c.max_uses == null || Number(c.uses_count) < Number(c.max_uses)) &&
+          Number(pkg.price_cents) >= Number(c.min_amount_cents);
+
+        if (isValid) {
+          // Check package applicability
+          let pkgAllowed = true;
+          if (c.applicable_packages) {
+            let pkgs: number[] = [];
+            try {
+              pkgs =
+                typeof c.applicable_packages === "string"
+                  ? JSON.parse(c.applicable_packages)
+                  : c.applicable_packages;
+            } catch {}
+            if (pkgs.length > 0 && !pkgs.includes(Number(pkg.id))) {
+              pkgAllowed = false;
+            }
+          }
+
+          if (pkgAllowed) {
+            couponId = c.id as number;
+            originalAmountCents = pkg.price_cents as number;
+            if (c.discount_type === "percentage") {
+              discountCents = Math.round(
+                (Number(pkg.price_cents) * Number(c.discount_value)) / 100,
+              );
+            } else {
+              discountCents = Number(c.discount_value);
+            }
+            discountCents = Math.min(discountCents, Number(pkg.price_cents));
+            chargeAmountCents = Number(pkg.price_cents) - discountCents;
+          }
+        }
+      }
+    }
+
     // Use a temporary clientId placeholder for the charge (real ID assigned after insert).
     // For re-attempts on pending_payment accounts, reuse the existing id.
     const tempClientId = existing.length > 0 ? (existing[0].id as number) : 0;
@@ -1811,7 +2269,7 @@ function buildApp() {
       chargeResult = await processAuthorizeNetPayment(
         clientId,
         email,
-        pkg.price_cents as number,
+        chargeAmountCents,
         pkg.id as number,
         String(b.dataDescriptor),
         String(b.dataValue),
@@ -1829,11 +2287,31 @@ function buildApp() {
       return res.status(402).json({ error: e.message || "Payment failed" });
     }
 
+    // ── Apply coupon to payment record + increment usage ────────────────────
+    if (couponId !== null && discountCents > 0 && chargeResult?.transactionId) {
+      await Promise.all([
+        pool.query(
+          `UPDATE payments SET coupon_id=?, discount_cents=?, original_amount_cents=?
+           WHERE provider_transaction_id=? LIMIT 1`,
+          [
+            couponId,
+            discountCents,
+            originalAmountCents,
+            chargeResult.transactionId,
+          ],
+        ),
+        pool.query(
+          `UPDATE coupons SET uses_count = uses_count + 1 WHERE id = ?`,
+          [couponId],
+        ),
+      ]);
+    }
+
     res.json({
       clientId,
       packageId: pkg.id,
       packageName: pkg.name,
-      amountCents: pkg.price_cents,
+      amountCents: chargeAmountCents,
     });
   });
 
@@ -1913,10 +2391,12 @@ function buildApp() {
         [clientId],
       );
       const [reportRows] = await pool.query<RowDataPacket[]>(
-        `SELECT id, round_number, score_before, score_after, items_removed, items_disputed, summary_md, created_at
+        `SELECT id, round_number, score_before, score_after, items_removed, items_disputed, summary_md,
+              pdf_file_name, (pdf_storage_key IS NOT NULL) AS has_pdf, pdf_uploaded_at, created_at
        FROM client_round_reports WHERE client_id = ? ORDER BY round_number DESC`,
         [clientId],
       );
+      await attachPdfsToReports(clientId, reportRows);
       const [ticketRows] = await pool.query<RowDataPacket[]>(
         `SELECT id, subject, status, priority, created_at FROM support_tickets WHERE client_id = ? ORDER BY created_at DESC LIMIT 5`,
         [clientId],
@@ -2135,6 +2615,24 @@ function buildApp() {
     },
   );
 
+  app.put(
+    "/api/portal/language",
+    requireClient,
+    async (req: AuthedRequest, res) => {
+      const { language } = req.body || {};
+      if (!["en", "es"].includes(language)) {
+        return res
+          .status(400)
+          .json({ error: "Invalid language. Supported: en, es" });
+      }
+      await pool.query<ResultSetHeader>(
+        `UPDATE clients SET preferred_language = ? WHERE id = ?`,
+        [language, req.auth!.id],
+      );
+      res.json({ ok: true, language });
+    },
+  );
+
   app.get(
     "/api/portal/tickets",
     requireClient,
@@ -2285,6 +2783,328 @@ function buildApp() {
     res.json({ videos: rows });
   });
 
+  app.get(
+    "/api/portal/payments",
+    requireClient,
+    async (req: AuthedRequest, res) => {
+      const clientId = req.auth!.id;
+      try {
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT
+           p.id,
+           pk.name                              AS package_name,
+           p.amount_cents,
+           COALESCE(p.discount_cents, 0)        AS discount_cents,
+           p.original_amount_cents,
+           p.currency,
+           p.status,
+           p.provider,
+           c.code                               AS coupon_code,
+           p.paid_at,
+           p.created_at
+         FROM payments p
+         LEFT JOIN packages pk ON pk.id = p.package_id
+         LEFT JOIN coupons   c ON  c.id = p.coupon_id
+         WHERE p.client_id = ?
+         ORDER BY p.created_at DESC`,
+          [clientId],
+        );
+        res.json({ payments: rows });
+      } catch (err) {
+        console.error("GET /api/portal/payments error:", err);
+        res.status(500).json({ error: "Failed to fetch payments" });
+      }
+    },
+  );
+
+  // ── Client: list own payment splits ────────────────────────────────────────
+  app.get(
+    "/api/portal/payment-splits",
+    requireClient,
+    async (req: AuthedRequest, res) => {
+      const clientId = req.auth!.id;
+      try {
+        const [splits] = await pool.query<RowDataPacket[]>(
+          `SELECT ps.id, cr.case_number, ps.label, ps.amount_cents, ps.currency,
+                  ps.due_date, ps.status, ps.completion_source, ps.paid_at,
+                  ps.send_payment_link, pst.token AS payment_token
+           FROM payment_splits ps
+           JOIN credit_repair_cases cr ON cr.id = ps.case_id
+           LEFT JOIN payment_split_tokens pst ON pst.split_id = ps.id
+             AND (pst.expires_at > NOW() AND pst.used_at IS NULL)
+           WHERE ps.client_id = ?
+           ORDER BY ps.due_date ASC`,
+          [clientId],
+        );
+        res.json({ splits });
+      } catch (err) {
+        console.error("GET /api/portal/payment-splits error:", err);
+        res.status(500).json({ error: "Failed to fetch payment splits" });
+      }
+    },
+  );
+
+  // ============================================================================
+  // PUBLIC PAYMENT PAGE  /api/pay/:token
+  // No auth middleware — validated by the token itself
+  // ============================================================================
+  app.get("/api/pay/:token", async (req, res) => {
+    const { token } = req.params;
+    if (!token) return res.status(400).json({ error: "Missing token" });
+
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT pst.id AS token_id, pst.split_id, pst.expires_at, pst.used_at,
+              ps.id, ps.case_id, cr.case_number, ps.client_id,
+              c.first_name AS client_first_name, c.last_name AS client_last_name,
+              c.email AS client_email, c.preferred_language,
+              c.anet_customer_profile_id, c.anet_payment_profile_id,
+              ps.label, ps.amount_cents, ps.currency, ps.due_date,
+              ps.status, ps.completion_source, ps.paid_at, ps.payments_id,
+              ps.reminder_flow_id, ps.send_payment_link, ps.notes,
+              ps.created_at, ps.updated_at
+       FROM payment_split_tokens pst
+       JOIN payment_splits ps ON ps.id = pst.split_id
+       JOIN credit_repair_cases cr ON cr.id = ps.case_id
+       JOIN clients c ON c.id = ps.client_id
+       WHERE pst.token = ? LIMIT 1`,
+      [token],
+    );
+    if (rows.length === 0)
+      return res.status(404).json({ error: "Payment link not found" });
+
+    const row = rows[0];
+    if (row.used_at)
+      return res
+        .status(410)
+        .json({ error: "This payment link has already been used" });
+    if (new Date(row.expires_at) < new Date())
+      return res.status(410).json({ error: "This payment link has expired" });
+    if (row.status === "paid")
+      return res
+        .status(410)
+        .json({ error: "This split has already been paid" });
+    if (row.status === "cancelled")
+      return res.status(410).json({ error: "This payment has been cancelled" });
+
+    const hasStoredCard = !!(
+      row.anet_customer_profile_id && row.anet_payment_profile_id
+    );
+
+    res.json({
+      split: {
+        id: row.id,
+        case_id: row.case_id,
+        case_number: row.case_number,
+        client_id: row.client_id,
+        label: row.label,
+        amount_cents: row.amount_cents,
+        currency: row.currency,
+        due_date: row.due_date,
+        status: row.status,
+        notes: row.notes,
+        created_at: row.created_at,
+      },
+      client_first_name: row.client_first_name,
+      client_last_name: row.client_last_name,
+      has_stored_card: hasStoredCard,
+      card_last4: null, // Authorize.net doesn't expose last4 without additional API call
+      preferred_language: row.preferred_language,
+    });
+  });
+
+  // ── POST /api/pay/:token — charge payment ─────────────────────────────────
+  app.post("/api/pay/:token", async (req, res) => {
+    const { token } = req.params;
+    if (!token) return res.status(400).json({ error: "Missing token" });
+
+    const { method, data_descriptor, data_value } = req.body || {};
+    if (!method || !["stored_profile", "new_card"].includes(method))
+      return res
+        .status(400)
+        .json({ error: "method must be 'stored_profile' or 'new_card'" });
+    if (method === "new_card" && (!data_descriptor || !data_value))
+      return res.status(400).json({
+        error: "data_descriptor and data_value required for new_card",
+      });
+
+    // Load token
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT pst.id AS token_id, pst.split_id, pst.expires_at, pst.used_at,
+              ps.id AS split_id_direct, ps.case_id, ps.client_id,
+              ps.label, ps.amount_cents, ps.currency, ps.status,
+              c.first_name, c.last_name, c.email, c.preferred_language,
+              c.anet_customer_profile_id, c.anet_payment_profile_id
+       FROM payment_split_tokens pst
+       JOIN payment_splits ps ON ps.id = pst.split_id
+       JOIN clients c ON c.id = ps.client_id
+       WHERE pst.token = ? LIMIT 1`,
+      [token],
+    );
+    if (rows.length === 0)
+      return res.status(404).json({ error: "Payment link not found" });
+    const row = rows[0];
+
+    if (row.used_at)
+      return res
+        .status(410)
+        .json({ error: "This payment link has already been used" });
+    if (new Date(row.expires_at) < new Date())
+      return res.status(410).json({ error: "Payment link has expired" });
+    if (row.status === "paid")
+      return res.status(410).json({ error: "Already paid" });
+    if (row.status === "cancelled")
+      return res.status(410).json({ error: "Payment cancelled" });
+
+    const amountDollars = (Number(row.amount_cents) / 100).toFixed(2);
+    const splitId = row.split_id as number;
+    const caseId = row.case_id as number;
+    const clientId = row.client_id as number;
+
+    let chargeResult: { transactionId: string };
+
+    if (method === "stored_profile") {
+      if (!row.anet_customer_profile_id || !row.anet_payment_profile_id)
+        return res
+          .status(400)
+          .json({ error: "No stored card on file. Please use a new card." });
+
+      // Charge via Authorize.net CIM
+      const anetApiUrl =
+        process.env.ANET_ENV === "production"
+          ? "https://api.authorize.net/xml/v1/request.api"
+          : "https://apitest.authorize.net/xml/v1/request.api";
+
+      const payload = {
+        createCustomerProfileTransactionRequest: {
+          merchantAuthentication: {
+            name: process.env.ANET_API_LOGIN_ID,
+            transactionKey: process.env.ANET_TRANSACTION_KEY,
+          },
+          transaction: {
+            profileTransAuthCapture: {
+              amount: amountDollars,
+              customerProfileId: row.anet_customer_profile_id,
+              customerPaymentProfileId: row.anet_payment_profile_id,
+              order: {
+                description: String(row.label).slice(0, 255),
+              },
+            },
+          },
+        },
+      };
+
+      const anetResp = await fetch(anetApiUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const anetData = (await anetResp.json()) as any;
+
+      const txResp =
+        anetData?.createCustomerProfileTransactionResponse?.directResponse;
+      if (!txResp) {
+        console.error("[pay/token] CIM error:", JSON.stringify(anetData));
+        return res
+          .status(402)
+          .json({ error: "Payment declined. Please try a different card." });
+      }
+      const parts = txResp.split(",");
+      // Position 0: result code (1=approved, 2=declined, 3=error)
+      if (parts[0] !== "1") {
+        return res.status(402).json({ error: parts[3] || "Payment declined" });
+      }
+      chargeResult = { transactionId: parts[6] || `CIM-${Date.now()}` };
+    } else {
+      // new_card — charge via Accept.js nonce
+      const result = await chargeCard({
+        amountDollars,
+        dataDescriptor: data_descriptor,
+        dataValue: data_value,
+        clientId,
+        email: row.email as string,
+        firstName: row.first_name as string,
+        lastName: row.last_name as string,
+      });
+      if (!result.transactionId)
+        return res.status(402).json({ error: "Payment failed" });
+      chargeResult = { transactionId: result.transactionId };
+
+      // Persist anet profile IDs if returned
+      if (result.customerProfileId) {
+        try {
+          await pool.query(
+            `UPDATE clients SET anet_customer_profile_id = ?, anet_payment_profile_id = ? WHERE id = ?`,
+            [
+              result.customerProfileId,
+              result.customerPaymentProfileId ?? null,
+              clientId,
+            ],
+          );
+        } catch (e) {
+          console.error("[pay/token] anet profile update failed:", e);
+        }
+      }
+    }
+
+    // Record payment and update split atomically
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+
+      const [payResult] = await conn.query<ResultSetHeader>(
+        `INSERT INTO payments
+           (client_id, case_id, split_id, amount_cents, currency,
+            status, provider, provider_transaction_id, paid_at)
+         VALUES (?, ?, ?, ?, ?, 'succeeded', 'authorize_net', ?, NOW())`,
+        [
+          clientId,
+          caseId,
+          splitId,
+          row.amount_cents,
+          row.currency || "USD",
+          chargeResult.transactionId,
+        ],
+      );
+      const paymentId = payResult.insertId;
+
+      await conn.query(
+        `UPDATE payment_splits
+         SET status = 'paid', completion_source = ?, paid_at = NOW(), payments_id = ?
+         WHERE id = ?`,
+        [
+          method === "stored_profile" ? "authorize_link" : "authorize_link",
+          paymentId,
+          splitId,
+        ],
+      );
+
+      await conn.query(
+        `UPDATE payment_split_tokens SET used_at = NOW() WHERE split_id = ?`,
+        [splitId],
+      );
+
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+
+    // Cancel pending notifications for this split
+    try {
+      await pool.query(
+        `UPDATE notification_queue SET status = 'cancelled'
+         WHERE payload_json->>'$.split_id' = ? AND status = 'pending'`,
+        [splitId],
+      );
+    } catch (e) {
+      console.error("[pay/token] cancel notifications failed:", e);
+    }
+
+    res.json({ ok: true, transaction_id: chargeResult.transactionId });
+  });
+
   // ============================================================
   // ADMIN
   // ============================================================
@@ -2336,6 +3156,16 @@ function buildApp() {
   app.get("/api/admin/clients", requireAdmin, async (req, res) => {
     const stage = req.query.stage as string | undefined;
     const search = req.query.search as string | undefined;
+    const status = req.query.status as string | undefined;
+    const language = req.query.language as string | undefined;
+    const billing = req.query.billing as string | undefined;
+    const joined_from = req.query.joined_from as string | undefined;
+    const joined_to = req.query.joined_to as string | undefined;
+    const has_notes = req.query.has_notes as string | undefined;
+    const limit = Math.min(
+      parseInt((req.query.limit as string) || "200", 10),
+      200,
+    );
     const where: string[] = [];
     const args: any[] = [];
     if (stage) {
@@ -2344,17 +3174,90 @@ function buildApp() {
     }
     if (search) {
       where.push(
-        "(c.email LIKE ? OR c.first_name LIKE ? OR c.last_name LIKE ?)",
+        "(c.email LIKE ? OR c.first_name LIKE ? OR c.last_name LIKE ? OR CONCAT(c.first_name,' ',c.last_name) LIKE ? OR c.phone LIKE ?)",
       );
       const s = `%${search}%`;
-      args.push(s, s, s);
+      args.push(s, s, s, s, s);
+    }
+    if (status) {
+      where.push("c.status = ?");
+      args.push(status);
+    }
+    if (language === "en" || language === "es") {
+      where.push("c.preferred_language = ?");
+      args.push(language);
+    }
+    if (joined_from) {
+      where.push("DATE(c.created_at) >= ?");
+      args.push(joined_from);
+    }
+    if (joined_to) {
+      where.push("DATE(c.created_at) <= ?");
+      args.push(joined_to);
+    }
+    if (has_notes === "yes") {
+      where.push("(c.admin_notes IS NOT NULL AND c.admin_notes != '')");
+    } else if (has_notes === "no") {
+      where.push("(c.admin_notes IS NULL OR c.admin_notes = '')");
+    }
+    if (billing === "overdue") {
+      where.push(
+        "EXISTS (SELECT 1 FROM payment_splits ps WHERE ps.client_id = c.id AND ps.status = 'overdue')",
+      );
+    } else if (billing === "split_plan") {
+      where.push(
+        "EXISTS (SELECT 1 FROM payment_splits ps WHERE ps.client_id = c.id)",
+      );
+    } else if (billing === "paid_full") {
+      where.push(
+        "EXISTS (SELECT 1 FROM payment_splits ps WHERE ps.client_id = c.id)" +
+          " AND NOT EXISTS (SELECT 1 FROM payment_splits ps2 WHERE ps2.client_id = c.id AND ps2.status IN ('pending','overdue'))",
+      );
+    } else if (billing === "direct_paid") {
+      where.push(
+        "EXISTS (SELECT 1 FROM payments py WHERE py.client_id = c.id AND py.status = 'succeeded')" +
+          " AND NOT EXISTS (SELECT 1 FROM payment_splits ps WHERE ps.client_id = c.id)",
+      );
+    } else if (billing === "no_payment") {
+      where.push(
+        "NOT EXISTS (SELECT 1 FROM payments py WHERE py.client_id = c.id AND py.status = 'succeeded')" +
+          " AND NOT EXISTS (SELECT 1 FROM payment_splits ps WHERE ps.client_id = c.id)",
+      );
     }
     const [rows] = await pool.query<RowDataPacket[]>(
       `SELECT c.id, c.first_name, c.last_name, c.email, c.phone, c.pipeline_stage,
-              c.status, c.created_at, p.name AS package_name, p.slug AS package_slug
-       FROM clients c LEFT JOIN packages p ON p.id = c.package_id
+              c.status, c.admin_notes, c.created_at, c.preferred_language,
+              p.name AS package_name, p.slug AS package_slug,
+              COALESCE(pay_agg.total_paid_cents, 0)  AS total_paid_cents,
+              COALESCE(pay_agg.payment_count,   0)   AS payment_count,
+              COALESCE(sp_agg.splits_total,     0)   AS splits_total,
+              COALESCE(sp_agg.splits_paid,      0)   AS splits_paid,
+              COALESCE(sp_agg.splits_pending,   0)   AS splits_pending,
+              COALESCE(sp_agg.splits_overdue,   0)   AS splits_overdue,
+              COALESCE(sp_agg.splits_amount_cents, 0) AS splits_amount_cents,
+              COALESCE(sp_agg.splits_paid_cents,   0) AS splits_paid_cents
+       FROM clients c
+       LEFT JOIN packages p ON p.id = c.package_id
+       LEFT JOIN (
+         SELECT client_id,
+                SUM(amount_cents) AS total_paid_cents,
+                COUNT(*)          AS payment_count
+         FROM payments WHERE status = 'succeeded'
+         GROUP BY client_id
+       ) pay_agg ON pay_agg.client_id = c.id
+       LEFT JOIN (
+         SELECT client_id,
+                COUNT(*)                                                        AS splits_total,
+                SUM(status = 'paid')                                            AS splits_paid,
+                SUM(status IN ('pending','overdue'))                            AS splits_pending,
+                SUM(status = 'overdue')                                         AS splits_overdue,
+                SUM(amount_cents)                                               AS splits_amount_cents,
+                SUM(CASE WHEN status = 'paid' THEN amount_cents ELSE 0 END)    AS splits_paid_cents
+         FROM payment_splits
+         GROUP BY client_id
+       ) sp_agg ON sp_agg.client_id = c.id
        ${where.length ? "WHERE " + where.join(" AND ") : ""}
-       ORDER BY c.created_at DESC LIMIT 200`,
+       ORDER BY c.created_at DESC LIMIT ${limit}`,
       args,
     );
     res.json({ clients: rows });
@@ -2375,10 +3278,12 @@ function buildApp() {
       [id],
     );
     const [reports] = await pool.query<RowDataPacket[]>(
-      `SELECT id, round_number, score_before, score_after, items_removed, items_disputed, summary_md, created_at
+      `SELECT id, round_number, score_before, score_after, items_removed, items_disputed, summary_md,
+              pdf_file_name, (pdf_storage_key IS NOT NULL) AS has_pdf, pdf_uploaded_at, created_at
        FROM client_round_reports WHERE client_id = ? ORDER BY round_number DESC`,
       [id],
     );
+    await attachPdfsToReports(Number(id), reports);
     const [payments] = await pool.query<RowDataPacket[]>(
       `SELECT id, amount_cents, status, paid_at, created_at, provider_transaction_id
        FROM payments WHERE client_id = ? ORDER BY created_at DESC`,
@@ -2402,35 +3307,587 @@ function buildApp() {
       `SELECT cr.id, cr.case_number, cr.client_id, cr.pipeline_stage,
               cr.pipeline_stage_changed_at, cr.status, cr.created_at,
               c.first_name, c.last_name, c.email, c.phone,
-              c.status AS client_status,
+              c.status AS client_status, c.preferred_language,
               c.crc_client_id, c.crc_synced_at,
               p.name AS package_name, p.slug AS package_slug,
-              COALESCE(ds.docs_total,    0) AS docs_total,
-              COALESCE(ds.docs_approved, 0) AS docs_approved,
-              COALESCE(ds.docs_pending,  0) AS docs_pending,
-              COALESCE(ds.docs_rejected, 0) AS docs_rejected
+              (SELECT COUNT(*) FROM onboarding_task_templates
+               WHERE is_active = 1) AS tasks_total,
+              (SELECT COUNT(*) FROM onboarding_task_templates
+               WHERE is_active = 1 AND is_required = 1) AS tasks_required_total,
+              COALESCE(ts.tasks_approved,      0) AS tasks_approved,
+              COALESCE(ts.tasks_pending_review,0) AS tasks_pending_review,
+              COALESCE(ts.tasks_rejected,      0) AS tasks_rejected
        FROM credit_repair_cases cr
        JOIN clients c ON c.id = cr.client_id
        LEFT JOIN packages p ON p.id = cr.package_id
        LEFT JOIN (
-         SELECT case_id,
-           COUNT(*) AS docs_total,
-           SUM(CASE WHEN review_status = 'approved' THEN 1 ELSE 0 END) AS docs_approved,
-           SUM(CASE WHEN review_status = 'pending'  THEN 1 ELSE 0 END) AS docs_pending,
-           SUM(CASE WHEN review_status = 'rejected' THEN 1 ELSE 0 END) AS docs_rejected
-         FROM (
-           SELECT case_id, doc_type, review_status,
-             ROW_NUMBER() OVER (PARTITION BY case_id, doc_type ORDER BY uploaded_at DESC) AS rn
-           FROM client_documents
-           WHERE case_id IS NOT NULL
-         ) latest
-         WHERE rn = 1
-         GROUP BY case_id
-       ) ds ON ds.case_id = cr.id
+         SELECT ctc.client_id,
+           SUM(CASE WHEN ctc.admin_review_status = 'approved'  THEN 1 ELSE 0 END) AS tasks_approved,
+           SUM(CASE WHEN ctc.status = 'completed'
+                     AND ctc.admin_review_status = 'pending'  THEN 1 ELSE 0 END) AS tasks_pending_review,
+           SUM(CASE WHEN ctc.admin_review_status = 'rejected'  THEN 1 ELSE 0 END) AS tasks_rejected
+         FROM client_task_completions ctc
+         JOIN onboarding_task_templates ott ON ott.id = ctc.task_template_id AND ott.is_active = 1
+         GROUP BY ctc.client_id
+       ) ts ON ts.client_id = c.id
        WHERE cr.status NOT IN ('cancelled')
        ORDER BY cr.pipeline_stage_changed_at DESC, cr.created_at DESC`,
     );
     res.json({ cases: rows });
+  });
+
+  // ── Create case manually (admin) ──────────────────────────────────────────
+  app.post("/api/admin/cases", requireAdmin, async (req, res) => {
+    const {
+      client_id,
+      package_id,
+      pipeline_stage,
+      notes,
+      send_case_email,
+      splits,
+    } = req.body || {};
+    if (!client_id)
+      return res.status(400).json({ error: "client_id is required" });
+    const cId = Number(client_id);
+    if (!cId || isNaN(cId))
+      return res.status(400).json({ error: "Invalid client_id" });
+
+    const [clientRows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, first_name, last_name, email, preferred_language,
+              anet_customer_profile_id
+       FROM clients WHERE id = ? LIMIT 1`,
+      [cId],
+    );
+    if (clientRows.length === 0)
+      return res.status(404).json({ error: "Client not found" });
+    const client = clientRows[0];
+
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+
+      // Insert case
+      const stage = pipeline_stage || "lead";
+      const [caseResult] = await conn.query<ResultSetHeader>(
+        `INSERT INTO credit_repair_cases (client_id, package_id, pipeline_stage, notes)
+         VALUES (?, ?, ?, ?)`,
+        [cId, package_id ? Number(package_id) : null, stage, notes || null],
+      );
+      const caseId = caseResult.insertId;
+
+      // Generate case number CR-XXXXXX
+      const caseNumber = `CR-${String(caseId).padStart(6, "0")}`;
+      await conn.query(
+        `UPDATE credit_repair_cases SET case_number = ? WHERE id = ?`,
+        [caseNumber, caseId],
+      );
+
+      // Insert splits if provided
+      const splitDefs: any[] = Array.isArray(splits) ? splits : [];
+      const insertedSplits: Array<{
+        id: number;
+        token: string | null;
+        label: string;
+        amount_cents: number;
+        due_date: Date;
+        flow_id: number | null;
+        send_link: boolean;
+      }> = [];
+
+      for (const sp of splitDefs) {
+        if (!sp.label || !sp.amount_cents || !sp.due_date) continue;
+        const [spResult] = await conn.query<ResultSetHeader>(
+          `INSERT INTO payment_splits
+             (case_id, client_id, label, amount_cents, due_date,
+              reminder_flow_id, send_payment_link, notes, created_by_admin_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            caseId,
+            cId,
+            String(sp.label).trim(),
+            Number(sp.amount_cents),
+            sp.due_date,
+            sp.reminder_flow_id ? Number(sp.reminder_flow_id) : null,
+            sp.send_payment_link ? 1 : 0,
+            sp.notes || null,
+            (req as AuthedRequest).auth!.id,
+          ],
+        );
+        const splitId = spResult.insertId;
+        let tokenStr: string | null = null;
+
+        if (sp.send_payment_link) {
+          tokenStr = crypto.randomUUID();
+          const expiresAt = new Date(sp.due_date);
+          expiresAt.setDate(expiresAt.getDate() + 7); // token valid 7 days after due date
+          await conn.query(
+            `INSERT INTO payment_split_tokens (split_id, token, expires_at)
+             VALUES (?, ?, ?)`,
+            [splitId, tokenStr, expiresAt],
+          );
+        }
+
+        insertedSplits.push({
+          id: splitId,
+          token: tokenStr,
+          label: String(sp.label).trim(),
+          amount_cents: Number(sp.amount_cents),
+          due_date: new Date(sp.due_date),
+          flow_id: sp.reminder_flow_id ? Number(sp.reminder_flow_id) : null,
+          send_link: !!sp.send_payment_link,
+        });
+      }
+
+      await conn.commit();
+
+      // Post-commit: emails + reminders (best effort)
+      const lang = (client.preferred_language as string) || "en";
+      const appUrl = process.env.APP_URL || "https://optimumcredit.com";
+
+      if (send_case_email) {
+        try {
+          const tpl = tplCaseStarted({
+            firstName: client.first_name as string,
+            caseNumber,
+            portalUrl: `${appUrl}/portal/payments`,
+            lang,
+          });
+          await sendEmail({
+            to: client.email as string,
+            subject: tpl.subject,
+            html: tpl.html,
+          });
+        } catch (e) {
+          console.error("[admin/cases] case-started email failed:", e);
+        }
+      }
+
+      // Trigger payment_confirmed reminder flow
+      try {
+        await triggerReminderFlow("payment_confirmed", cId, {});
+      } catch (e) {
+        console.error("[admin/cases] triggerReminderFlow failed:", e);
+      }
+
+      // Auto-assign tasks
+      try {
+        await autoAssignTasksForClient(cId);
+      } catch (e) {
+        console.error("[admin/cases] autoAssignTasks failed:", e);
+      }
+
+      // Schedule split reminders
+      for (const sp of insertedSplits) {
+        if (!sp.flow_id || !sp.token) continue;
+        try {
+          const paymentLink = `${appUrl}/pay/${sp.token}`;
+          const amountFormatted = `$${(sp.amount_cents / 100).toFixed(2)}`;
+          const dueDateFormatted = sp.due_date.toLocaleDateString("en-US", {
+            year: "numeric",
+            month: "long",
+            day: "numeric",
+          });
+          await scheduleSplitReminders({
+            splitId: sp.id,
+            clientId: cId,
+            flowId: sp.flow_id,
+            dueDate: sp.due_date,
+            paymentLink,
+            label: sp.label,
+            amountFormatted,
+            dueDateFormatted,
+          });
+        } catch (e) {
+          console.error("[admin/cases] scheduleSplitReminders failed:", e);
+        }
+      }
+
+      const [caseRow] = await pool.query<RowDataPacket[]>(
+        `SELECT cr.id, cr.case_number, cr.pipeline_stage, cr.status, cr.notes, cr.created_at,
+                c.id AS client_id, c.first_name AS client_first_name,
+                c.last_name AS client_last_name, c.email AS client_email,
+                p.id AS package_id, p.name AS package_name
+         FROM credit_repair_cases cr
+         JOIN clients c ON c.id = cr.client_id
+         LEFT JOIN packages p ON p.id = cr.package_id
+         WHERE cr.id = ? LIMIT 1`,
+        [caseId],
+      );
+
+      res.status(201).json({ case: caseRow[0] });
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+  });
+
+  // ── List splits for a case ────────────────────────────────────────────────
+  app.get("/api/admin/cases/:id/splits", requireAdmin, async (req, res) => {
+    const caseId = Number(req.params.id);
+    if (!caseId || isNaN(caseId))
+      return res.status(400).json({ error: "Invalid case id" });
+    const [splits] = await pool.query<RowDataPacket[]>(
+      `SELECT ps.id, ps.case_id, ps.client_id, ps.label, ps.amount_cents, ps.currency,
+              ps.due_date, ps.status, ps.completion_source, ps.paid_at, ps.payments_id,
+              ps.reminder_flow_id, rf.name AS reminder_flow_name,
+              ps.send_payment_link, ps.notes, ps.created_at, ps.updated_at,
+              pst.token AS payment_token, pst.expires_at AS token_expires_at, pst.used_at AS token_used_at
+       FROM payment_splits ps
+       LEFT JOIN reminder_flows rf ON rf.id = ps.reminder_flow_id
+       LEFT JOIN payment_split_tokens pst ON pst.split_id = ps.id
+       WHERE ps.case_id = ?
+       ORDER BY ps.due_date ASC`,
+      [caseId],
+    );
+    const appUrl = process.env.APP_URL || "https://optimumcredit.com";
+    const result = splits.map((s) => ({
+      ...s,
+      payment_link: s.payment_token ? `${appUrl}/pay/${s.payment_token}` : null,
+    }));
+    res.json({ splits: result });
+  });
+
+  // ── Create split for a case ───────────────────────────────────────────────
+  app.post("/api/admin/cases/:id/splits", requireAdmin, async (req, res) => {
+    const caseId = Number(req.params.id);
+    if (!caseId || isNaN(caseId))
+      return res.status(400).json({ error: "Invalid case id" });
+
+    const [caseRows] = await pool.query<RowDataPacket[]>(
+      `SELECT cr.id, cr.client_id, c.email, c.first_name, c.preferred_language
+       FROM credit_repair_cases cr JOIN clients c ON c.id = cr.client_id
+       WHERE cr.id = ? LIMIT 1`,
+      [caseId],
+    );
+    if (caseRows.length === 0)
+      return res.status(404).json({ error: "Case not found" });
+    const cr = caseRows[0];
+
+    const {
+      label,
+      amount_cents,
+      due_date,
+      send_payment_link,
+      reminder_flow_id,
+      notes,
+    } = req.body || {};
+    if (!label || !amount_cents || !due_date)
+      return res
+        .status(400)
+        .json({ error: "label, amount_cents, and due_date are required" });
+
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+
+      const [spResult] = await conn.query<ResultSetHeader>(
+        `INSERT INTO payment_splits
+           (case_id, client_id, label, amount_cents, due_date,
+            reminder_flow_id, send_payment_link, notes, created_by_admin_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          caseId,
+          cr.client_id,
+          String(label).trim(),
+          Number(amount_cents),
+          due_date,
+          reminder_flow_id ? Number(reminder_flow_id) : null,
+          send_payment_link ? 1 : 0,
+          notes || null,
+          (req as AuthedRequest).auth!.id,
+        ],
+      );
+      const splitId = spResult.insertId;
+      let tokenStr: string | null = null;
+
+      if (send_payment_link) {
+        tokenStr = crypto.randomUUID();
+        const expiresAt = new Date(due_date);
+        expiresAt.setDate(expiresAt.getDate() + 7);
+        await conn.query(
+          `INSERT INTO payment_split_tokens (split_id, token, expires_at) VALUES (?, ?, ?)`,
+          [splitId, tokenStr, expiresAt],
+        );
+      }
+
+      await conn.commit();
+
+      // Schedule reminders
+      if (reminder_flow_id && tokenStr) {
+        try {
+          const appUrl = process.env.APP_URL || "https://optimumcredit.com";
+          const dueDate = new Date(due_date);
+          const amountFormatted = `$${(Number(amount_cents) / 100).toFixed(2)}`;
+          const dueDateFormatted = dueDate.toLocaleDateString("en-US", {
+            year: "numeric",
+            month: "long",
+            day: "numeric",
+          });
+          await scheduleSplitReminders({
+            splitId,
+            clientId: cr.client_id as number,
+            flowId: Number(reminder_flow_id),
+            dueDate,
+            paymentLink: `${appUrl}/pay/${tokenStr}`,
+            label: String(label).trim(),
+            amountFormatted,
+            dueDateFormatted,
+          });
+        } catch (e) {
+          console.error("[admin/splits] scheduleSplitReminders failed:", e);
+        }
+      }
+
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT ps.*, pst.token AS payment_token, pst.expires_at AS token_expires_at
+         FROM payment_splits ps
+         LEFT JOIN payment_split_tokens pst ON pst.split_id = ps.id
+         WHERE ps.id = ? LIMIT 1`,
+        [splitId],
+      );
+      res.status(201).json({ split: rows[0] });
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+  });
+
+  // ── Update split ──────────────────────────────────────────────────────────
+  app.put(
+    "/api/admin/cases/:id/splits/:splitId",
+    requireAdmin,
+    async (req, res) => {
+      const caseId = Number(req.params.id);
+      const splitId = Number(req.params.splitId);
+      if (!caseId || !splitId)
+        return res.status(400).json({ error: "Invalid ids" });
+
+      const [existing] = await pool.query<RowDataPacket[]>(
+        `SELECT ps.*, pst.token FROM payment_splits ps
+         LEFT JOIN payment_split_tokens pst ON pst.split_id = ps.id
+         WHERE ps.id = ? AND ps.case_id = ? LIMIT 1`,
+        [splitId, caseId],
+      );
+      if (existing.length === 0)
+        return res.status(404).json({ error: "Split not found" });
+      const current = existing[0];
+
+      const {
+        label,
+        amount_cents,
+        due_date,
+        status,
+        completion_source,
+        notes,
+        reminder_flow_id,
+      } = req.body || {};
+
+      const updates: string[] = [];
+      const args: any[] = [];
+      if (label != null) {
+        updates.push("label = ?");
+        args.push(String(label).trim());
+      }
+      if (amount_cents != null) {
+        updates.push("amount_cents = ?");
+        args.push(Number(amount_cents));
+      }
+      if (due_date != null) {
+        updates.push("due_date = ?");
+        args.push(due_date);
+      }
+      if (notes !== undefined) {
+        updates.push("notes = ?");
+        args.push(notes || null);
+      }
+      if (reminder_flow_id !== undefined) {
+        updates.push("reminder_flow_id = ?");
+        args.push(reminder_flow_id ? Number(reminder_flow_id) : null);
+      }
+      const allowedStatuses = ["pending", "paid", "overdue", "cancelled"];
+      if (status != null && allowedStatuses.includes(status)) {
+        updates.push("status = ?");
+        args.push(status);
+        if (status === "paid" && completion_source) {
+          updates.push("completion_source = ?");
+          args.push(completion_source);
+          updates.push("paid_at = NOW()");
+        }
+      }
+      if (updates.length === 0)
+        return res.status(400).json({ error: "No valid fields to update" });
+
+      args.push(splitId);
+      await pool.query<ResultSetHeader>(
+        `UPDATE payment_splits SET ${updates.join(", ")} WHERE id = ?`,
+        args,
+      );
+
+      // If due_date changed, cancel old notifications and reschedule
+      const dueDateChanged =
+        due_date != null &&
+        new Date(due_date).toISOString().slice(0, 10) !==
+          new Date(current.due_date).toISOString().slice(0, 10);
+      const markAsPaid = status === "paid" || status === "cancelled";
+
+      if (markAsPaid || dueDateChanged) {
+        // Cancel pending notifications for this split
+        await pool.query(
+          `UPDATE notification_queue SET status = 'cancelled'
+           WHERE payload_json->>'$.split_id' = ? AND status = 'pending'`,
+          [splitId],
+        );
+      }
+
+      // Reschedule if due_date changed and split still has a flow + token
+      if (
+        dueDateChanged &&
+        !markAsPaid &&
+        current.token &&
+        (reminder_flow_id || current.reminder_flow_id)
+      ) {
+        try {
+          const newDueDate = new Date(due_date);
+          const flowId = reminder_flow_id
+            ? Number(reminder_flow_id)
+            : (current.reminder_flow_id as number);
+          const appUrl = process.env.APP_URL || "https://optimumcredit.com";
+          const amountCents = amount_cents ?? (current.amount_cents as number);
+          await scheduleSplitReminders({
+            splitId,
+            clientId: current.client_id as number,
+            flowId,
+            dueDate: newDueDate,
+            paymentLink: `${appUrl}/pay/${current.token}`,
+            label: label ?? (current.label as string),
+            amountFormatted: `$${(Number(amountCents) / 100).toFixed(2)}`,
+            dueDateFormatted: newDueDate.toLocaleDateString("en-US", {
+              year: "numeric",
+              month: "long",
+              day: "numeric",
+            }),
+          });
+        } catch (e) {
+          console.error("[admin/splits] reschedule failed:", e);
+        }
+      }
+
+      const [updated] = await pool.query<RowDataPacket[]>(
+        `SELECT ps.*, pst.token AS payment_token FROM payment_splits ps
+         LEFT JOIN payment_split_tokens pst ON pst.split_id = ps.id
+         WHERE ps.id = ? LIMIT 1`,
+        [splitId],
+      );
+      res.json({ split: updated[0] });
+    },
+  );
+
+  // ── Delete split ──────────────────────────────────────────────────────────
+  app.delete(
+    "/api/admin/cases/:id/splits/:splitId",
+    requireAdmin,
+    async (req, res) => {
+      const caseId = Number(req.params.id);
+      const splitId = Number(req.params.splitId);
+      if (!caseId || !splitId)
+        return res.status(400).json({ error: "Invalid ids" });
+
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM payment_splits WHERE id = ? AND case_id = ? LIMIT 1`,
+        [splitId, caseId],
+      );
+      if (rows.length === 0)
+        return res.status(404).json({ error: "Split not found" });
+
+      // Cancel pending notifications
+      await pool.query(
+        `UPDATE notification_queue SET status = 'cancelled'
+         WHERE payload_json->>'$.split_id' = ? AND status = 'pending'`,
+        [splitId],
+      );
+      // Tokens cascade via FK
+      await pool.query(`DELETE FROM payment_splits WHERE id = ?`, [splitId]);
+      res.json({ ok: true });
+    },
+  );
+
+  // ── Admin payment splits overview (all cases) ─────────────────────────────
+  app.get("/api/admin/payment-splits", requireAdmin, async (req, res) => {
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25));
+    const offset = (page - 1) * limit;
+    const status = req.query.status as string | undefined;
+    const allowedStatuses = ["pending", "paid", "overdue", "cancelled"];
+
+    const conditions: string[] = [];
+    const args: any[] = [];
+    if (status && allowedStatuses.includes(status)) {
+      conditions.push("ps.status = ?");
+      args.push(status);
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    const [[countRow]] = await pool.query<RowDataPacket[]>(
+      `SELECT COUNT(*) AS total FROM payment_splits ps ${where}`,
+      args,
+    );
+    const total = (countRow.total as number) || 0;
+
+    const [splits] = await pool.query<RowDataPacket[]>(
+      `SELECT ps.id, ps.case_id, cr.case_number, ps.client_id,
+              c.first_name AS client_first_name, c.last_name AS client_last_name,
+              c.email AS client_email,
+              ps.label, ps.amount_cents, ps.currency, ps.due_date,
+              ps.status, ps.completion_source, ps.paid_at, ps.payments_id,
+              ps.reminder_flow_id, rf.name AS reminder_flow_name,
+              ps.send_payment_link, ps.notes, ps.created_at, ps.updated_at,
+              pst.token AS payment_token
+       FROM payment_splits ps
+       JOIN credit_repair_cases cr ON cr.id = ps.case_id
+       JOIN clients c ON c.id = ps.client_id
+       LEFT JOIN reminder_flows rf ON rf.id = ps.reminder_flow_id
+       LEFT JOIN payment_split_tokens pst ON pst.split_id = ps.id
+       ${where}
+       ORDER BY ps.due_date ASC
+       LIMIT ? OFFSET ?`,
+      [...args, limit, offset],
+    );
+    const appUrl = process.env.APP_URL || "https://optimumcredit.com";
+    const result = splits.map((s) => ({
+      ...s,
+      payment_link: s.payment_token ? `${appUrl}/pay/${s.payment_token}` : null,
+    }));
+    res.json({
+      splits: result,
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    });
+  });
+
+  // ── Admin calendar: splits in date range ──────────────────────────────────
+  app.get("/api/admin/calendar", requireAdmin, async (req, res) => {
+    const { from, to } = req.query as { from?: string; to?: string };
+    if (!from || !to)
+      return res
+        .status(400)
+        .json({ error: "from and to query params required" });
+
+    const [splits] = await pool.query<RowDataPacket[]>(
+      `SELECT ps.id, ps.case_id, cr.case_number, ps.client_id,
+              c.first_name AS client_first_name, c.last_name AS client_last_name,
+              ps.label, ps.amount_cents, ps.currency, ps.due_date,
+              ps.status, ps.completion_source
+       FROM payment_splits ps
+       JOIN credit_repair_cases cr ON cr.id = ps.case_id
+       JOIN clients c ON c.id = ps.client_id
+       WHERE ps.due_date BETWEEN ? AND ?
+       ORDER BY ps.due_date ASC`,
+      [from, to],
+    );
+    res.json({ splits });
   });
 
   // ── Get single case detail (pipeline panel) ──────────────────────────────
@@ -2445,7 +3902,7 @@ function buildApp() {
               c.id, c.first_name, c.last_name, c.email, c.phone,
               cr.pipeline_stage,
               c.status, c.contract_signed_at, c.smart_credit_connected_at,
-              c.crc_client_id, c.crc_synced_at,
+              c.crc_client_id, c.crc_synced_at, c.preferred_language,
               p.name AS package_name, p.price_cents AS package_price_cents
        FROM credit_repair_cases cr
        JOIN clients c ON c.id = cr.client_id
@@ -2459,20 +3916,27 @@ function buildApp() {
     const row = caseRows[0];
     const clientId = row.id as number;
 
-    const [docs] = await pool.query<RowDataPacket[]>(
-      `SELECT id, doc_type, pipeline_round, file_name, file_size, mime_type,
-              review_status, rejection_reason, uploaded_at, reviewed_at
-       FROM client_documents
-       WHERE case_id = ?
-       ORDER BY uploaded_at DESC`,
-      [caseId],
+    const [taskCompletions] = await pool.query<RowDataPacket[]>(
+      `SELECT ctc.id, ctc.task_template_id, ctc.status AS completion_status,
+              ctc.form_data_json, ctc.file_name, ctc.file_mime,
+              ctc.signature_name, ctc.completed_at,
+              ctc.admin_review_status, ctc.admin_notes, ctc.admin_reviewed_at,
+              ott.slug, ott.task_type, ott.title_en, ott.title_es,
+              ott.description_en, ott.description_es, ott.sort_order, ott.is_required
+       FROM client_task_completions ctc
+       JOIN onboarding_task_templates ott ON ott.id = ctc.task_template_id
+       WHERE ctc.client_id = ?
+       ORDER BY ott.sort_order ASC`,
+      [clientId],
     );
     const [reports] = await pool.query<RowDataPacket[]>(
       `SELECT id, round_number, score_before, score_after, items_removed,
-              items_disputed, summary_md, created_at
+              items_disputed, summary_md,
+              pdf_file_name, (pdf_storage_key IS NOT NULL) AS has_pdf, pdf_uploaded_at, created_at
        FROM client_round_reports WHERE client_id = ? ORDER BY round_number DESC`,
       [clientId],
     );
+    await attachPdfsToReports(clientId, reports);
     const [payments] = await pool.query<RowDataPacket[]>(
       `SELECT p.id, p.amount_cents, p.status, p.paid_at, p.created_at,
               pk.name AS package_name
@@ -2506,10 +3970,11 @@ function buildApp() {
         smart_credit_connected_at: row.smart_credit_connected_at,
         crc_client_id: row.crc_client_id,
         crc_synced_at: row.crc_synced_at,
+        preferred_language: row.preferred_language,
         package_name: row.package_name,
         package_price_cents: row.package_price_cents,
       },
-      documents: docs,
+      documents: taskCompletions,
       reports,
       payments,
       pipeline_history: pipeline,
@@ -2551,28 +4016,27 @@ function buildApp() {
       const clientId = cur[0].client_id as number;
       if (fromStage === stage) return res.json({ ok: true, unchanged: true });
 
-      // Enforce docs_ready rule: all 4 required docs must be approved for this case
+      // Enforce docs_ready rule: all required tasks must be approved
       if (stage === "docs_ready") {
-        const REQUIRED = [
-          "id_front",
-          "id_back",
-          "ssn_card",
-          "proof_of_address",
-        ];
-        const [docRows] = await pool.query<RowDataPacket[]>(
-          `SELECT doc_type, review_status FROM client_documents
-           WHERE case_id = ? AND doc_type IN (?) ORDER BY uploaded_at DESC`,
-          [caseId, REQUIRED],
+        const [[requiredRow]] = await pool.query<RowDataPacket[]>(
+          `SELECT COUNT(*) AS required_total FROM onboarding_task_templates
+           WHERE is_active = 1 AND is_required = 1`,
         );
-        const latestByType: Record<string, string> = {};
-        for (const d of docRows) {
-          if (!latestByType[d.doc_type as string])
-            latestByType[d.doc_type as string] = d.review_status as string;
-        }
-        const approved = REQUIRED.filter((t) => latestByType[t] === "approved");
-        if (approved.length < 4) {
+        const requiredTotal = Number(requiredRow.required_total);
+
+        const [[approvedRow]] = await pool.query<RowDataPacket[]>(
+          `SELECT COUNT(*) AS approved_count
+           FROM client_task_completions ctc
+           JOIN onboarding_task_templates ott ON ott.id = ctc.task_template_id
+           WHERE ctc.client_id = ? AND ctc.admin_review_status = 'approved'
+             AND ott.is_required = 1 AND ott.is_active = 1`,
+          [clientId],
+        );
+        const approvedCount = Number(approvedRow.approved_count);
+
+        if (approvedCount < requiredTotal) {
           return res.status(422).json({
-            error: `Cannot advance to Docs Verified — ${4 - approved.length} required document(s) still need approval.`,
+            error: `Cannot advance to Docs Verified — ${requiredTotal - approvedCount} required task(s) still need approval.`,
           });
         }
       }
@@ -2607,8 +4071,17 @@ function buildApp() {
 
   // ── Create client ────────────────────────────────────────────────────────
   app.post("/api/admin/clients", requireAdmin, async (req, res) => {
-    const { first_name, last_name, email, phone, package_id, status } =
-      req.body || {};
+    const {
+      first_name,
+      last_name,
+      email,
+      phone,
+      package_id,
+      status,
+      admin_notes,
+      send_welcome_email,
+      preferred_language,
+    } = req.body || {};
     if (!first_name || !last_name || !email)
       return res
         .status(400)
@@ -2626,10 +4099,11 @@ function buildApp() {
     const clientStatus = allowedStatus.includes(status)
       ? status
       : "pending_payment";
+    const lang = preferred_language === "es" ? "es" : "en";
     try {
       const [result] = await pool.query<ResultSetHeader>(
-        `INSERT INTO clients (first_name, last_name, email, phone, package_id, status)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO clients (first_name, last_name, email, phone, package_id, status, preferred_language, admin_notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           String(first_name).trim(),
           String(last_name).trim(),
@@ -2637,15 +4111,37 @@ function buildApp() {
           phone ? String(phone).trim() : null,
           package_id ? Number(package_id) : null,
           clientStatus,
+          lang,
+          admin_notes ? String(admin_notes).trim() : null,
         ],
       );
+      const clientId = result.insertId;
       const [rows] = await pool.query<RowDataPacket[]>(
         `SELECT c.id, c.first_name, c.last_name, c.email, c.phone, c.pipeline_stage,
                 c.status, c.created_at, p.name AS package_name, p.slug AS package_slug
          FROM clients c LEFT JOIN packages p ON p.id = c.package_id
          WHERE c.id = ? LIMIT 1`,
-        [result.insertId],
+        [clientId],
       );
+      // Optionally send welcome email with portal access link
+      if (send_welcome_email) {
+        try {
+          const token = await createOnboardingToken(clientId, 72);
+          const portalUrl = `${process.env.APP_URL || "https://optimumcredit.com"}/onboarding?token=${token}`;
+          const tpl = tplClientWelcome({
+            firstName: String(first_name).trim(),
+            portalUrl,
+            lang,
+          });
+          await sendEmail({
+            to: String(email).trim().toLowerCase(),
+            subject: tpl.subject,
+            html: tpl.html,
+          });
+        } catch (emailErr) {
+          console.error("[admin/clients] welcome email failed:", emailErr);
+        }
+      }
       res.status(201).json({ client: rows[0] });
     } catch (err: any) {
       if (err?.code === "ER_DUP_ENTRY")
@@ -2659,8 +4155,15 @@ function buildApp() {
   // ── Update client ────────────────────────────────────────────────────────
   app.put("/api/admin/clients/:id", requireAdmin, async (req, res) => {
     const id = Number(req.params.id);
-    const { first_name, last_name, email, phone, package_id, status } =
-      req.body || {};
+    const {
+      first_name,
+      last_name,
+      email,
+      phone,
+      package_id,
+      status,
+      admin_notes,
+    } = req.body || {};
     const [existing] = await pool.query<RowDataPacket[]>(
       "SELECT id FROM clients WHERE id = ? LIMIT 1",
       [id],
@@ -2702,6 +4205,10 @@ function buildApp() {
     if (status != null && allowedStatus.includes(status)) {
       updates.push("status = ?");
       args.push(status);
+    }
+    if (admin_notes !== undefined) {
+      updates.push("admin_notes = ?");
+      args.push(admin_notes ? String(admin_notes).trim() : null);
     }
     if (updates.length === 0)
       return res.status(400).json({ error: "No valid fields to update" });
@@ -3073,34 +4580,47 @@ function buildApp() {
   });
 
   app.get("/api/admin/documents", requireAdmin, async (req, res) => {
-    const status = (req.query.status as string) || "pending";
+    const status = (req.query.status as string) || "all";
     const search = ((req.query.search as string) || "").trim();
 
     const params: (string | number)[] = [];
-    const conditions: string[] = [];
+    const conditions: string[] = [
+      "t.task_type = 'upload'",
+      "ctc.file_name IS NOT NULL",
+      "ctc.status = 'completed'",
+    ];
 
     if (status !== "all") {
-      conditions.push("d.review_status = ?");
+      conditions.push("ctc.admin_review_status = ?");
       params.push(status);
     }
     if (search) {
       conditions.push(
-        "(c.first_name LIKE ? OR c.last_name LIKE ? OR c.email LIKE ? OR d.file_name LIKE ?)",
+        "(cl.first_name LIKE ? OR cl.last_name LIKE ? OR cl.email LIKE ? OR ctc.file_name LIKE ?)",
       );
       const like = `%${search}%`;
       params.push(like, like, like, like);
     }
 
-    const where =
-      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const where = `WHERE ${conditions.join(" AND ")}`;
 
     const [rows] = await pool.query<RowDataPacket[]>(
-      `SELECT d.id, d.client_id, d.doc_type, d.pipeline_round, d.file_name, d.file_size, d.mime_type,
-              d.review_status, d.rejection_reason, d.uploaded_at, d.reviewed_at,
-              c.first_name, c.last_name, c.email
-       FROM client_documents d JOIN clients c ON c.id = d.client_id
+      `SELECT ctc.id, ctc.client_id,
+              t.slug AS doc_type,
+              NULL AS pipeline_round,
+              ctc.file_name, 0 AS file_size, ctc.file_mime AS mime_type,
+              ctc.admin_review_status AS review_status,
+              ctc.admin_notes AS rejection_reason,
+              ctc.completed_at AS uploaded_at,
+              ctc.admin_reviewed_at AS reviewed_at,
+              cl.first_name, cl.last_name, cl.email, cl.preferred_language,
+              crc.case_number
+       FROM client_task_completions ctc
+       JOIN onboarding_task_templates t ON t.id = ctc.task_template_id
+       JOIN clients cl ON cl.id = ctc.client_id
+       LEFT JOIN credit_repair_cases crc ON crc.client_id = ctc.client_id
        ${where}
-       ORDER BY d.uploaded_at DESC LIMIT 500`,
+       ORDER BY ctc.completed_at DESC LIMIT 500`,
       params,
     );
     res.json({ documents: rows });
@@ -3145,36 +4665,26 @@ function buildApp() {
     async (req: AuthedRequest, res) => {
       const id = Number(req.params.id);
       const [rows] = await pool.query<RowDataPacket[]>(
-        `SELECT file_name, mime_type, storage_provider, storage_key, encrypted, enc_iv, enc_tag
-         FROM client_documents WHERE id = ? LIMIT 1`,
+        `SELECT file_storage_key, file_name, file_mime
+         FROM client_task_completions WHERE id = ? LIMIT 1`,
         [id],
       );
-      if (rows.length === 0)
+      if (rows.length === 0 || !rows[0].file_storage_key)
         return res.status(404).json({ error: "Not found" });
       const doc = rows[0];
+      const parts = (doc.file_storage_key as string).split("|");
+      if (parts.length !== 3)
+        return res.status(500).json({ error: "Invalid storage key format" });
+      const [cdnKey, iv, tag] = parts;
       try {
-        let buf: Buffer;
-        if (doc.storage_provider === "cdn") {
-          const cdnRes = await fetch(doc.storage_key as string);
-          if (!cdnRes.ok)
-            return res.status(404).json({ error: "File not available" });
-          const cdnRaw = Buffer.from(await cdnRes.arrayBuffer());
-          buf =
-            doc.encrypted && doc.enc_iv && doc.enc_tag
-              ? decryptFile(cdnRaw, doc.enc_iv as string, doc.enc_tag as string)
-              : cdnRaw;
-        } else {
-          const raw = await fs.promises.readFile(
-            path.join(UPLOADS_DIR, doc.storage_key as string),
-          );
-          buf =
-            doc.encrypted && doc.enc_iv && doc.enc_tag
-              ? decryptFile(raw, doc.enc_iv as string, doc.enc_tag as string)
-              : raw;
-        }
+        const cdnRes = await fetch(cdnKey);
+        if (!cdnRes.ok)
+          return res.status(404).json({ error: "File not available" });
+        const encrypted = Buffer.from(await cdnRes.arrayBuffer());
+        const buf = decryptFile(encrypted, iv, tag);
         res.set(
           "Content-Type",
-          (doc.mime_type as string) || "application/octet-stream",
+          (doc.file_mime as string) || "application/octet-stream",
         );
         res.set(
           "Content-Disposition",
@@ -3204,7 +4714,7 @@ function buildApp() {
         return res.status(400).json({ error: "Reason required for rejection" });
       }
       const [docs] = await pool.query<RowDataPacket[]>(
-        `SELECT d.id, d.doc_type, d.client_id, c.first_name, c.email, c.phone
+        `SELECT d.id, d.doc_type, d.client_id, c.first_name, c.email, c.phone, c.preferred_language
          FROM client_documents d JOIN clients c ON c.id = d.client_id
          WHERE d.id = ? LIMIT 1`,
         [id],
@@ -3226,6 +4736,7 @@ function buildApp() {
           docType: d.doc_type,
           reason,
           portalUrl,
+          lang: d.preferred_language || "en",
         });
         await sendEmail({
           to: d.email,
@@ -3273,6 +4784,7 @@ function buildApp() {
           const approvedTpl = tplAllDocsApproved({
             firstName: d.first_name,
             portalUrl,
+            lang: d.preferred_language || "en",
           });
           await sendEmail({
             to: d.email,
@@ -3341,7 +4853,7 @@ function buildApp() {
       }
 
       const [crows] = await pool.query<RowDataPacket[]>(
-        `SELECT first_name, email, phone FROM clients WHERE id = ? LIMIT 1`,
+        `SELECT first_name, email, phone, preferred_language FROM clients WHERE id = ? LIMIT 1`,
         [clientId],
       );
       const c = crows[0];
@@ -3353,6 +4865,7 @@ function buildApp() {
           scoreAfter: score_after,
           itemsRemoved: items_removed || 0,
           portalUrl: `${APP_URL}/portal/reports`,
+          lang: c.preferred_language || "en",
         });
         await sendEmail({
           to: c.email,
@@ -3377,6 +4890,333 @@ function buildApp() {
         }).catch(() => null);
       }
       res.json({ ok: true });
+    },
+  );
+
+  // ── Upload PDF for a round report (multiple PDFs per round supported) ────
+  app.post(
+    "/api/admin/clients/:clientId/round-reports/:round/pdf",
+    requireSuperAdmin,
+    upload.single("pdf"),
+    async (req: AuthedRequest, res) => {
+      const clientId = Number(req.params.clientId);
+      const roundNumber = Number(req.params.round);
+      if (
+        !clientId ||
+        isNaN(clientId) ||
+        isNaN(roundNumber) ||
+        roundNumber < 1 ||
+        roundNumber > 5
+      ) {
+        return res
+          .status(400)
+          .json({ error: "Invalid clientId or round number" });
+      }
+      const file = req.file;
+      if (!file) return res.status(400).json({ error: "PDF file required" });
+      if (file.mimetype !== "application/pdf") {
+        return res.status(400).json({ error: "Only PDF files are accepted" });
+      }
+
+      // Encrypt the PDF
+      const { encrypted, iv, tag } = encryptFile(file.buffer);
+      const safeOrigName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const cdnUrl = await uploadToCDN(
+        encrypted,
+        `round${roundNumber}_${Date.now()}_${safeOrigName}.enc`,
+        "application/octet-stream",
+        clientId,
+      );
+
+      // Ensure the round_report row exists (upsert without touching pdf_ columns)
+      await pool.query<ResultSetHeader>(
+        `INSERT INTO client_round_reports (client_id, round_number, created_by_admin_id)
+         VALUES (?, ?, ?)
+         ON DUPLICATE KEY UPDATE created_by_admin_id = created_by_admin_id`,
+        [clientId, roundNumber, req.auth!.id],
+      );
+      const [[roundReportRow]] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM client_round_reports WHERE client_id = ? AND round_number = ? LIMIT 1`,
+        [clientId, roundNumber],
+      );
+      const roundReportId = roundReportRow?.id ?? null;
+
+      // Check if this is the first PDF for this round (for email notification)
+      const [[{ pdfCount }]] = await pool.query<RowDataPacket[]>(
+        `SELECT COUNT(*) AS pdfCount FROM round_report_pdfs WHERE client_id = ? AND round_number = ?`,
+        [clientId, roundNumber],
+      );
+      const isFirstPdf = Number(pdfCount) === 0;
+
+      // Insert into round_report_pdfs
+      const [insertResult] = await pool.query<ResultSetHeader>(
+        `INSERT INTO round_report_pdfs
+           (client_id, round_number, round_report_id, file_name, storage_key, storage_provider, encrypted, enc_iv, enc_tag, uploaded_by_admin_id)
+         VALUES (?, ?, ?, ?, ?, 'cdn', 1, ?, ?, ?)`,
+        [
+          clientId,
+          roundNumber,
+          roundReportId,
+          file.originalname,
+          cdnUrl,
+          iv,
+          tag,
+          req.auth!.id,
+        ],
+      );
+      const newPdfId = insertResult.insertId;
+
+      // Fetch the new pdf row to return
+      const [[newPdf]] = await pool.query<RowDataPacket[]>(
+        `SELECT id, client_id, round_number, round_report_id, file_name, uploaded_at
+         FROM round_report_pdfs WHERE id = ?`,
+        [newPdfId],
+      );
+
+      // Fetch the parent report row
+      const [reportRows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, round_number, score_before, score_after, items_removed, items_disputed, summary_md,
+                pdf_file_name, (pdf_storage_key IS NOT NULL) AS has_pdf, pdf_uploaded_at, created_at
+         FROM client_round_reports WHERE client_id = ? AND round_number = ? LIMIT 1`,
+        [clientId, roundNumber],
+      );
+      await attachPdfsToReports(clientId, reportRows);
+      const report = reportRows[0] ?? null;
+
+      // Notify client via email on first PDF upload for this round
+      if (isFirstPdf) {
+        const [crows] = await pool.query<RowDataPacket[]>(
+          `SELECT first_name, email, preferred_language FROM clients WHERE id = ? LIMIT 1`,
+          [clientId],
+        );
+        const c = crows[0];
+        if (c) {
+          const tpl = tplRoundPdfReady({
+            firstName: c.first_name as string,
+            roundNumber,
+            portalUrl: `${APP_URL}/portal/reports`,
+            lang: c.preferred_language as string,
+          });
+          await sendEmail({
+            to: c.email as string,
+            subject: tpl.subject,
+            html: tpl.html,
+          }).catch(() => null);
+        }
+      }
+
+      res.json({ ok: true, pdf: newPdf, report });
+    },
+  );
+
+  // ── Serve a specific round_report_pdfs entry (admin) ─────────────────────
+  app.get(
+    "/api/admin/round-report-pdfs/:pdfId",
+    requireAdmin,
+    async (req, res) => {
+      const pdfId = Number(req.params.pdfId);
+      if (!pdfId || isNaN(pdfId))
+        return res.status(400).json({ error: "Invalid id" });
+
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT file_name, storage_key, storage_provider, encrypted, enc_iv, enc_tag
+         FROM round_report_pdfs WHERE id = ? LIMIT 1`,
+        [pdfId],
+      );
+      if (rows.length === 0)
+        return res.status(404).json({ error: "PDF not found" });
+      const r = rows[0];
+      try {
+        const cdnRes = await fetch(r.storage_key as string);
+        if (!cdnRes.ok)
+          return res.status(404).json({ error: "File not available" });
+        const raw = Buffer.from(await cdnRes.arrayBuffer());
+        const buf =
+          r.encrypted && r.enc_iv && r.enc_tag
+            ? decryptFile(raw, r.enc_iv as string, r.enc_tag as string)
+            : raw;
+        res.set("Content-Type", "application/pdf");
+        res.set(
+          "Content-Disposition",
+          `inline; filename="${encodeURIComponent(r.file_name as string)}"`,
+        );
+        res.set("Content-Length", String(buf.length));
+        res.set("Cache-Control", "no-store, no-cache");
+        res.send(buf);
+      } catch {
+        res.status(500).json({ error: "Failed to retrieve PDF" });
+      }
+    },
+  );
+
+  // ── Delete a specific round_report_pdfs entry (super_admin) ──────────────
+  app.delete(
+    "/api/admin/round-report-pdfs/:pdfId",
+    requireSuperAdmin,
+    async (req, res) => {
+      const pdfId = Number(req.params.pdfId);
+      if (!pdfId || isNaN(pdfId))
+        return res.status(400).json({ error: "Invalid id" });
+
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, client_id, round_number FROM round_report_pdfs WHERE id = ? LIMIT 1`,
+        [pdfId],
+      );
+      if (rows.length === 0)
+        return res.status(404).json({ error: "PDF not found" });
+
+      await pool.query(`DELETE FROM round_report_pdfs WHERE id = ?`, [pdfId]);
+      res.json({ ok: true });
+    },
+  );
+
+  // ── Legacy: serve latest PDF for a round report row (admin) ──────────────
+  app.get(
+    "/api/admin/round-reports/:reportId/pdf",
+    requireAdmin,
+    async (req, res) => {
+      const reportId = Number(req.params.reportId);
+      if (!reportId || isNaN(reportId))
+        return res.status(400).json({ error: "Invalid id" });
+
+      // Try new table first
+      const [newRows] = await pool.query<RowDataPacket[]>(
+        `SELECT rrp.file_name, rrp.storage_key, rrp.storage_provider, rrp.encrypted, rrp.enc_iv, rrp.enc_tag
+         FROM round_report_pdfs rrp WHERE rrp.round_report_id = ?
+         ORDER BY rrp.uploaded_at DESC LIMIT 1`,
+        [reportId],
+      );
+      // Fall back to legacy pdf_ columns
+      const [legacyRows] =
+        newRows.length === 0
+          ? await pool.query<RowDataPacket[]>(
+              `SELECT pdf_file_name AS file_name, pdf_storage_key AS storage_key,
+                  pdf_storage_provider AS storage_provider, pdf_encrypted AS encrypted,
+                  pdf_enc_iv AS enc_iv, pdf_enc_tag AS enc_tag
+           FROM client_round_reports WHERE id = ? AND pdf_storage_key IS NOT NULL LIMIT 1`,
+              [reportId],
+            )
+          : [[] as RowDataPacket[]];
+      const r = newRows[0] ?? legacyRows[0] ?? null;
+      if (!r) return res.status(404).json({ error: "PDF not found" });
+      try {
+        const cdnRes = await fetch(r.storage_key as string);
+        if (!cdnRes.ok)
+          return res.status(404).json({ error: "File not available" });
+        const raw = Buffer.from(await cdnRes.arrayBuffer());
+        const buf =
+          r.encrypted && r.enc_iv && r.enc_tag
+            ? decryptFile(raw, r.enc_iv as string, r.enc_tag as string)
+            : raw;
+        res.set("Content-Type", "application/pdf");
+        res.set(
+          "Content-Disposition",
+          `inline; filename="${encodeURIComponent((r.file_name as string) || `round-report-${reportId}.pdf`)}"`,
+        );
+        res.set("Content-Length", String(buf.length));
+        res.set("Cache-Control", "no-store, no-cache");
+        res.send(buf);
+      } catch {
+        res.status(500).json({ error: "Failed to retrieve PDF" });
+      }
+    },
+  );
+
+  // ── Serve a specific round_report_pdfs entry (client portal) ─────────────
+  app.get(
+    "/api/portal/round-report-pdfs/:pdfId",
+    requireClient,
+    async (req: AuthedRequest, res) => {
+      const clientId = req.auth!.id;
+      const pdfId = Number(req.params.pdfId);
+      if (!pdfId || isNaN(pdfId))
+        return res.status(400).json({ error: "Invalid id" });
+
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT file_name, storage_key, storage_provider, encrypted, enc_iv, enc_tag
+         FROM round_report_pdfs WHERE id = ? AND client_id = ? LIMIT 1`,
+        [pdfId, clientId],
+      );
+      if (rows.length === 0)
+        return res.status(404).json({ error: "PDF not found" });
+      const r = rows[0];
+      try {
+        const cdnRes = await fetch(r.storage_key as string);
+        if (!cdnRes.ok)
+          return res.status(404).json({ error: "File not available" });
+        const raw = Buffer.from(await cdnRes.arrayBuffer());
+        const buf =
+          r.encrypted && r.enc_iv && r.enc_tag
+            ? decryptFile(raw, r.enc_iv as string, r.enc_tag as string)
+            : raw;
+        res.set("Content-Type", "application/pdf");
+        res.set(
+          "Content-Disposition",
+          `inline; filename="${encodeURIComponent(r.file_name as string)}"`,
+        );
+        res.set("Content-Length", String(buf.length));
+        res.set("Cache-Control", "no-store, no-cache");
+        res.send(buf);
+      } catch {
+        res.status(500).json({ error: "Failed to retrieve PDF" });
+      }
+    },
+  );
+
+  // ── Legacy: serve latest PDF for a round (client portal) ─────────────────
+  app.get(
+    "/api/portal/round-reports/:round/pdf",
+    requireClient,
+    async (req: AuthedRequest, res) => {
+      const clientId = req.auth!.id;
+      const roundNumber = Number(req.params.round);
+      if (isNaN(roundNumber) || roundNumber < 1 || roundNumber > 5) {
+        return res.status(400).json({ error: "Invalid round number" });
+      }
+
+      // Try new table first (latest PDF for this round)
+      const [newRows] = await pool.query<RowDataPacket[]>(
+        `SELECT file_name, storage_key, storage_provider, encrypted, enc_iv, enc_tag
+         FROM round_report_pdfs WHERE client_id = ? AND round_number = ?
+         ORDER BY uploaded_at DESC LIMIT 1`,
+        [clientId, roundNumber],
+      );
+      // Fall back to legacy pdf_ columns
+      const [legacyRows] =
+        newRows.length === 0
+          ? await pool.query<RowDataPacket[]>(
+              `SELECT pdf_file_name AS file_name, pdf_storage_key AS storage_key,
+                  pdf_storage_provider AS storage_provider, pdf_encrypted AS encrypted,
+                  pdf_enc_iv AS enc_iv, pdf_enc_tag AS enc_tag
+           FROM client_round_reports
+           WHERE client_id = ? AND round_number = ? AND pdf_storage_key IS NOT NULL LIMIT 1`,
+              [clientId, roundNumber],
+            )
+          : [[] as RowDataPacket[]];
+      const r = newRows[0] ?? legacyRows[0] ?? null;
+      if (!r) return res.status(404).json({ error: "PDF not found" });
+      try {
+        const cdnRes = await fetch(r.storage_key as string);
+        if (!cdnRes.ok)
+          return res.status(404).json({ error: "File not available" });
+        const raw = Buffer.from(await cdnRes.arrayBuffer());
+        const buf =
+          r.encrypted && r.enc_iv && r.enc_tag
+            ? decryptFile(raw, r.enc_iv as string, r.enc_tag as string)
+            : raw;
+        const fileName =
+          (r.file_name as string) || `round-${roundNumber}-report.pdf`;
+        res.set("Content-Type", "application/pdf");
+        res.set(
+          "Content-Disposition",
+          `inline; filename="${encodeURIComponent(fileName)}"`,
+        );
+        res.set("Content-Length", String(buf.length));
+        res.set("Cache-Control", "no-store, no-cache");
+        res.send(buf);
+      } catch {
+        res.status(500).json({ error: "Failed to retrieve PDF" });
+      }
     },
   );
 
@@ -4172,9 +6012,13 @@ function buildApp() {
        GROUP BY month ORDER BY month ASC`,
     );
     const [packageBreakdown] = await pool.query<RowDataPacket[]>(
-      `SELECT p.name, COUNT(c.id) AS count
-       FROM clients c JOIN packages p ON p.id = c.package_id
-       GROUP BY p.id, p.name ORDER BY count DESC`,
+      `SELECT p.id AS package_id, p.name AS package_name,
+              COUNT(DISTINCT c.id) AS sold,
+              COALESCE(SUM(CASE WHEN pay.status = 'succeeded' THEN pay.amount_cents ELSE 0 END), 0) AS revenue
+       FROM packages p
+       LEFT JOIN clients c ON c.package_id = p.id
+       LEFT JOIN payments pay ON pay.client_id = c.id
+       GROUP BY p.id, p.name ORDER BY sold DESC`,
     );
     res.json({ revenueByMonth, signupsByMonth, packageBreakdown });
   });
@@ -4846,6 +6690,653 @@ function buildApp() {
 
     res.json({ ok: true, processed: rows.length, sent, failed });
   });
+
+  // ============================================================================
+  // ONBOARDING TASK TEMPLATES (admin + portal)
+  // ============================================================================
+
+  // GET /api/admin/task-templates — list task templates with optional search/filter
+  app.get("/api/admin/task-templates", requireAdmin, async (req, res) => {
+    const { search, type, active } = req.query as Record<string, string>;
+
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (search?.trim()) {
+      conditions.push(
+        "(title_en LIKE ? OR title_es LIKE ? OR slug LIKE ? OR COALESCE(description_en,'') LIKE ?)",
+      );
+      const q = `%${search.trim()}%`;
+      params.push(q, q, q, q);
+    }
+    if (type && type !== "all") {
+      conditions.push("task_type = ?");
+      params.push(type);
+    }
+    if (active === "active") {
+      conditions.push("is_active = 1");
+    } else if (active === "inactive") {
+      conditions.push("is_active = 0");
+    }
+
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, slug, task_type, title_en, title_es, description_en, description_es,
+              content_html_en, content_html_es, form_fields_json, upload_config_json,
+              is_required, is_system, sort_order, is_active, auto_assign, created_at, updated_at
+       FROM onboarding_task_templates
+       ${where}
+       ORDER BY sort_order ASC, id ASC`,
+      params,
+    );
+    res.json({ tasks: rows });
+  });
+
+  // POST /api/admin/task-templates — create a new task template
+  app.post("/api/admin/task-templates", requireAdmin, async (req, res) => {
+    const {
+      slug,
+      task_type,
+      title_en,
+      title_es,
+      description_en,
+      description_es,
+      content_html_en,
+      content_html_es,
+      form_fields_json,
+      upload_config_json,
+      is_required,
+      sort_order,
+      is_active,
+      auto_assign,
+    } = req.body || {};
+
+    if (!slug || !task_type || !title_en || !title_es) {
+      return res
+        .status(400)
+        .json({ error: "slug, task_type, title_en, title_es are required" });
+    }
+    const validTypes = ["form", "upload", "sign_document"];
+    if (!validTypes.includes(task_type)) {
+      return res.status(400).json({ error: "Invalid task_type" });
+    }
+
+    const [result] = await pool.query<ResultSetHeader>(
+      `INSERT INTO onboarding_task_templates
+        (slug, task_type, title_en, title_es, description_en, description_es,
+         content_html_en, content_html_es, form_fields_json, upload_config_json,
+         is_required, sort_order, is_active, auto_assign)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        slug.toLowerCase().replace(/\s+/g, "_"),
+        task_type,
+        title_en,
+        title_es,
+        description_en || null,
+        description_es || null,
+        content_html_en || null,
+        content_html_es || null,
+        form_fields_json ? JSON.stringify(form_fields_json) : null,
+        upload_config_json ? JSON.stringify(upload_config_json) : null,
+        is_required !== false ? 1 : 0,
+        sort_order ?? 0,
+        is_active !== false ? 1 : 0,
+        auto_assign !== false ? 1 : 0,
+      ],
+    );
+
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT * FROM onboarding_task_templates WHERE id = ?`,
+      [result.insertId],
+    );
+    res.status(201).json({ task: rows[0] });
+  });
+
+  // PUT /api/admin/task-templates/:id — update a task template
+  app.put("/api/admin/task-templates/:id", requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ error: "Invalid id" });
+
+    const [existing] = await pool.query<RowDataPacket[]>(
+      `SELECT id, is_system FROM onboarding_task_templates WHERE id = ? LIMIT 1`,
+      [id],
+    );
+    if (!existing[0]) return res.status(404).json({ error: "Task not found" });
+
+    const {
+      slug,
+      task_type,
+      title_en,
+      title_es,
+      description_en,
+      description_es,
+      content_html_en,
+      content_html_es,
+      form_fields_json,
+      upload_config_json,
+      is_required,
+      sort_order,
+      is_active,
+      auto_assign,
+    } = req.body || {};
+
+    const updates: Record<string, unknown> = {};
+    if (!existing[0].is_system && slug)
+      updates.slug = slug.toLowerCase().replace(/\s+/g, "_");
+    if (!existing[0].is_system && task_type) updates.task_type = task_type;
+    if (title_en !== undefined) updates.title_en = title_en;
+    if (title_es !== undefined) updates.title_es = title_es;
+    if (description_en !== undefined)
+      updates.description_en = description_en || null;
+    if (description_es !== undefined)
+      updates.description_es = description_es || null;
+    if (content_html_en !== undefined)
+      updates.content_html_en = content_html_en || null;
+    if (content_html_es !== undefined)
+      updates.content_html_es = content_html_es || null;
+    if (form_fields_json !== undefined)
+      updates.form_fields_json = form_fields_json
+        ? JSON.stringify(form_fields_json)
+        : null;
+    if (upload_config_json !== undefined)
+      updates.upload_config_json = upload_config_json
+        ? JSON.stringify(upload_config_json)
+        : null;
+    if (is_required !== undefined) updates.is_required = is_required ? 1 : 0;
+    if (sort_order !== undefined) updates.sort_order = sort_order;
+    if (is_active !== undefined) updates.is_active = is_active ? 1 : 0;
+    if (auto_assign !== undefined) updates.auto_assign = auto_assign ? 1 : 0;
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: "No fields to update" });
+    }
+
+    const setClauses = Object.keys(updates)
+      .map((k) => `\`${k}\` = ?`)
+      .join(", ");
+    const values = [...Object.values(updates), id];
+    await pool.query<ResultSetHeader>(
+      `UPDATE onboarding_task_templates SET ${setClauses} WHERE id = ?`,
+      values,
+    );
+
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT * FROM onboarding_task_templates WHERE id = ?`,
+      [id],
+    );
+    res.json({ task: rows[0] });
+  });
+
+  // DELETE /api/admin/task-templates/:id — delete (blocked for system tasks or those with completions)
+  app.delete(
+    "/api/admin/task-templates/:id",
+    requireAdmin,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!id) return res.status(400).json({ error: "Invalid id" });
+
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, is_system FROM onboarding_task_templates WHERE id = ? LIMIT 1`,
+        [id],
+      );
+      if (!rows[0]) return res.status(404).json({ error: "Task not found" });
+      if (rows[0].is_system) {
+        return res
+          .status(400)
+          .json({ error: "System tasks cannot be deleted" });
+      }
+
+      const [completions] = await pool.query<RowDataPacket[]>(
+        `SELECT COUNT(*) AS cnt FROM client_task_completions WHERE task_template_id = ? AND status = 'completed'`,
+        [id],
+      );
+      if ((completions[0] as RowDataPacket).cnt > 0) {
+        return res.status(400).json({
+          error: `This task has ${(completions[0] as RowDataPacket).cnt} completed submission(s) and cannot be deleted. Deactivate it instead.`,
+        });
+      }
+
+      await pool.query<ResultSetHeader>(
+        `DELETE FROM onboarding_task_templates WHERE id = ?`,
+        [id],
+      );
+      res.json({ ok: true });
+    },
+  );
+
+  // POST /api/admin/clients/:id/assign-tasks — manually trigger auto-assign for a client
+  app.post(
+    "/api/admin/clients/:id/assign-tasks",
+    requireAdmin,
+    async (req, res) => {
+      const clientId = Number(req.params.id);
+      if (!clientId)
+        return res.status(400).json({ error: "Invalid client id" });
+
+      const [client] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM clients WHERE id = ? LIMIT 1`,
+        [clientId],
+      );
+      if (!client[0])
+        return res.status(404).json({ error: "Client not found" });
+
+      await autoAssignTasksForClient(clientId);
+      res.json({ ok: true, message: "Tasks assigned" });
+    },
+  );
+
+  // GET /api/admin/clients/:id/task-completions — view a client's task progress
+  app.get(
+    "/api/admin/clients/:id/task-completions",
+    requireAdmin,
+    async (req, res) => {
+      const clientId = Number(req.params.id);
+      if (!clientId)
+        return res.status(400).json({ error: "Invalid client id" });
+
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT t.id AS template_id, t.slug, t.task_type,
+                t.title_en, t.title_es, t.description_en, t.description_es,
+                t.is_required, t.is_system, t.sort_order, t.is_active,
+                c.id AS completion_id, c.status AS completion_status,
+                c.signature_name, c.file_name, c.file_mime,
+                c.completed_at, c.admin_review_status, c.admin_notes,
+                c.admin_reviewed_at
+         FROM onboarding_task_templates t
+         LEFT JOIN client_task_completions c
+           ON c.task_template_id = t.id AND c.client_id = ?
+         WHERE t.is_active = 1
+         ORDER BY t.sort_order ASC, t.id ASC`,
+        [clientId],
+      );
+
+      // Normalize: `id` = completion row id (used for approve/reject/preview actions)
+      // `template_id` = template reference
+      const tasks = (rows as any[]).map((r) => ({
+        id: r.completion_id ?? null,
+        template_id: r.template_id,
+        slug: r.slug,
+        task_type: r.task_type,
+        title_en: r.title_en,
+        title_es: r.title_es,
+        description_en: r.description_en,
+        description_es: r.description_es,
+        is_required: r.is_required,
+        is_system: r.is_system,
+        sort_order: r.sort_order,
+        is_active: r.is_active,
+        completion_status: r.completion_status ?? null,
+        signature_name: r.signature_name ?? null,
+        file_name: r.file_name ?? null,
+        file_mime: r.file_mime ?? null,
+        completed_at: r.completed_at ?? null,
+        admin_review_status: r.admin_review_status ?? null,
+        admin_notes: r.admin_notes ?? null,
+        admin_reviewed_at: r.admin_reviewed_at ?? null,
+      }));
+
+      res.json({ tasks });
+    },
+  );
+
+  // GET /api/portal/tasks — get all active tasks with this client's completion status
+  app.get(
+    "/api/portal/tasks",
+    requireClient,
+    async (req: AuthedRequest, res) => {
+      const clientId = req.auth!.id;
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT t.id, t.slug, t.task_type, t.title_en, t.title_es,
+              t.description_en, t.description_es,
+              t.content_html_en, t.content_html_es,
+              t.form_fields_json, t.upload_config_json,
+              t.is_required, t.is_system, t.sort_order,
+              c.id AS completion_id, c.status AS completion_status,
+              c.signature_name, c.file_name, c.completed_at,
+              c.admin_review_status, c.admin_notes, c.admin_reviewed_at
+       FROM onboarding_task_templates t
+       LEFT JOIN client_task_completions c
+         ON c.task_template_id = t.id AND c.client_id = ?
+       WHERE t.is_active = 1
+       ORDER BY t.sort_order ASC, t.id ASC`,
+        [clientId],
+      );
+      const tasks = (rows as any[]).map((r) => ({
+        id: r.id,
+        slug: r.slug,
+        task_type: r.task_type,
+        title_en: r.title_en,
+        title_es: r.title_es,
+        description_en: r.description_en,
+        description_es: r.description_es,
+        content_html_en: r.content_html_en,
+        content_html_es: r.content_html_es,
+        form_fields_json: r.form_fields_json,
+        upload_config_json: r.upload_config_json,
+        is_required: r.is_required,
+        is_system: r.is_system,
+        sort_order: r.sort_order,
+        completion: r.completion_id
+          ? {
+              id: r.completion_id,
+              status: r.completion_status,
+              signature_name: r.signature_name,
+              file_name: r.file_name,
+              completed_at: r.completed_at,
+              admin_review_status: r.admin_review_status,
+              admin_notes: r.admin_notes,
+              admin_reviewed_at: r.admin_reviewed_at,
+            }
+          : null,
+      }));
+      res.json({ tasks });
+    },
+  );
+
+  // POST /api/portal/tasks/:id/complete — submit a task
+  app.post(
+    "/api/portal/tasks/:id/complete",
+    requireClient,
+    upload.single("file"),
+    async (req: AuthedRequest, res) => {
+      const clientId = req.auth!.id;
+      const templateId = Number(req.params.id);
+      if (!templateId)
+        return res.status(400).json({ error: "Invalid task id" });
+
+      const [tRows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, task_type FROM onboarding_task_templates WHERE id = ? AND is_active = 1 LIMIT 1`,
+        [templateId],
+      );
+      if (!tRows[0]) return res.status(404).json({ error: "Task not found" });
+      const taskType: string = tRows[0].task_type;
+
+      let fileStorageKey: string | null = null;
+      let fileName: string | null = null;
+      let fileMime: string | null = null;
+      let formData: unknown = null;
+      let signatureName: string | null = null;
+      const signatureIp = req.ip || null;
+
+      if (taskType === "upload") {
+        const file = req.file as Express.Multer.File | undefined;
+        if (!file)
+          return res
+            .status(400)
+            .json({ error: "File is required for upload tasks" });
+        const { encrypted, iv, tag } = encryptFile(file.buffer);
+        const cdnKey = await uploadToCDN(
+          encrypted,
+          file.originalname + ".enc",
+          "application/octet-stream",
+          clientId,
+        );
+        fileStorageKey = `${cdnKey}|${iv}|${tag}`;
+        fileName = file.originalname;
+        fileMime = file.mimetype;
+      } else if (taskType === "form") {
+        try {
+          formData =
+            typeof req.body.form_data === "string"
+              ? JSON.parse(req.body.form_data)
+              : req.body.form_data;
+        } catch {
+          return res.status(400).json({ error: "Invalid form_data JSON" });
+        }
+        if (!formData)
+          return res.status(400).json({ error: "form_data required" });
+      } else if (taskType === "sign_document") {
+        signatureName = (req.body.signature_name || "").trim();
+        if (!signatureName)
+          return res.status(400).json({ error: "signature_name required" });
+      }
+
+      await pool.query<ResultSetHeader>(
+        `INSERT INTO client_task_completions
+          (client_id, task_template_id, status, form_data_json,
+           file_storage_key, file_name, file_mime,
+           signature_name, signature_ip, completed_at)
+         VALUES (?,?, 'completed', ?, ?, ?, ?, ?, ?, NOW())
+         ON DUPLICATE KEY UPDATE
+           status = 'completed',
+           form_data_json = VALUES(form_data_json),
+           file_storage_key = VALUES(file_storage_key),
+           file_name = VALUES(file_name),
+           file_mime = VALUES(file_mime),
+           signature_name = VALUES(signature_name),
+           signature_ip = VALUES(signature_ip),
+           completed_at = NOW(),
+           admin_review_status = 'pending',
+           admin_notes = NULL,
+           admin_reviewed_at = NULL`,
+        [
+          clientId,
+          templateId,
+          formData ? JSON.stringify(formData) : null,
+          fileStorageKey,
+          fileName,
+          fileMime,
+          signatureName,
+          signatureIp,
+        ],
+      );
+
+      res.json({ ok: true, completed_at: new Date().toISOString() });
+    },
+  );
+
+  // GET /api/portal/tasks/:id/file — client views their own submitted file
+  app.get(
+    "/api/portal/tasks/:id/file",
+    requireClient,
+    async (req: AuthedRequest, res) => {
+      const clientId = req.auth!.id;
+      const templateId = Number(req.params.id);
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT file_storage_key, file_name, file_mime
+         FROM client_task_completions
+         WHERE task_template_id = ? AND client_id = ? LIMIT 1`,
+        [templateId, clientId],
+      );
+      if (rows.length === 0 || !rows[0].file_storage_key)
+        return res.status(404).json({ error: "File not found" });
+
+      const { file_storage_key, file_name, file_mime } = rows[0];
+      const parts = (file_storage_key as string).split("|");
+      if (parts.length !== 3)
+        return res.status(500).json({ error: "Invalid storage key" });
+      const [cdnKey, iv, tag] = parts;
+      try {
+        const cdnRes = await fetch(cdnKey);
+        if (!cdnRes.ok)
+          return res.status(404).json({ error: "File not available" });
+        const encrypted = Buffer.from(await cdnRes.arrayBuffer());
+        const decrypted = decryptFile(encrypted, iv, tag);
+        res.set(
+          "Content-Type",
+          (file_mime as string) || "application/octet-stream",
+        );
+        res.set(
+          "Content-Disposition",
+          `inline; filename="${encodeURIComponent(file_name as string)}"`,
+        );
+        res.set("Content-Length", String(decrypted.length));
+        res.set("Cache-Control", "no-store, no-cache");
+        res.send(decrypted);
+      } catch {
+        res.status(404).json({ error: "File could not be decrypted" });
+      }
+    },
+  );
+
+  app.put(
+    "/api/admin/task-completions/:id/review",
+    requireAdmin,
+    async (req: AuthedRequest, res) => {
+      const completionId = Number(req.params.id);
+      if (!completionId || isNaN(completionId))
+        return res.status(400).json({ error: "Invalid completion id" });
+
+      const { admin_review_status, admin_notes } = req.body || {};
+      if (!["approved", "rejected"].includes(admin_review_status))
+        return res
+          .status(400)
+          .json({ error: "admin_review_status must be approved or rejected" });
+
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT ctc.id, ctc.client_id, ctc.status, ctc.task_template_id,
+                ott.title_en, ott.is_required, ott.is_active,
+                c.first_name, c.email, c.phone, c.preferred_language,
+                cr.id AS case_id, cr.pipeline_stage
+         FROM client_task_completions ctc
+         JOIN clients c ON c.id = ctc.client_id
+         JOIN onboarding_task_templates ott ON ott.id = ctc.task_template_id
+         LEFT JOIN credit_repair_cases cr ON cr.client_id = ctc.client_id AND cr.status NOT IN ('cancelled')
+         WHERE ctc.id = ? LIMIT 1`,
+        [completionId],
+      );
+      if (rows.length === 0)
+        return res.status(404).json({ error: "Task completion not found" });
+
+      const row = rows[0];
+      const clientId = row.client_id as number;
+      const caseId = row.case_id as number | null;
+
+      await pool.query<ResultSetHeader>(
+        `UPDATE client_task_completions
+         SET admin_review_status = ?, admin_notes = ?, admin_reviewed_at = NOW()
+         WHERE id = ?`,
+        [admin_review_status, admin_notes ?? null, completionId],
+      );
+
+      // Send rejection notification
+      if (admin_review_status === "rejected") {
+        const taskLabel = row.title_en as string;
+        const portalUrl = `${APP_URL}/portal/documents`;
+        if (row.email) {
+          const subj =
+            row.preferred_language === "es"
+              ? `Acción requerida: ${taskLabel}`
+              : `Action required: ${taskLabel}`;
+          const body =
+            row.preferred_language === "es"
+              ? `<p>Hola ${row.first_name},</p><p>Una de tus tareas fue rechazada: <strong>${taskLabel}</strong>.</p>${admin_notes ? `<p>Motivo: ${admin_notes}</p>` : ""}<p><a href="${portalUrl}">Ingresa al portal</a> para volver a enviarla.</p>`
+              : `<p>Hi ${row.first_name},</p><p>One of your tasks was rejected: <strong>${taskLabel}</strong>.</p>${admin_notes ? `<p>Reason: ${admin_notes}</p>` : ""}<p><a href="${portalUrl}">Log in to the portal</a> to re-submit.</p>`;
+          await sendEmail({
+            to: row.email as string,
+            subject: subj,
+            html: body,
+          }).catch(() => null);
+        }
+        if (row.phone) {
+          await sendSms({
+            to: row.phone as string,
+            body: `Optimum Credit: your task "${taskLabel}" was rejected. ${admin_notes ? `Reason: ${admin_notes}. ` : ""}Log in to re-submit: ${portalUrl}`,
+          }).catch(() => null);
+        }
+      }
+
+      // Auto-advance to docs_ready when all required tasks are approved
+      if (admin_review_status === "approved" && caseId) {
+        const [[reqRow]] = await pool.query<RowDataPacket[]>(
+          `SELECT COUNT(*) AS required_total FROM onboarding_task_templates
+           WHERE is_active = 1 AND is_required = 1`,
+        );
+        const [[approvedRow]] = await pool.query<RowDataPacket[]>(
+          `SELECT COUNT(*) AS approved_count
+           FROM client_task_completions ctc
+           JOIN onboarding_task_templates ott ON ott.id = ctc.task_template_id
+           WHERE ctc.client_id = ? AND ctc.admin_review_status = 'approved'
+             AND ott.is_required = 1 AND ott.is_active = 1`,
+          [clientId],
+        );
+        const requiredTotal = Number(reqRow.required_total);
+        const approvedCount = Number(approvedRow.approved_count);
+
+        if (
+          approvedCount >= requiredTotal &&
+          row.pipeline_stage === "new_client"
+        ) {
+          await pool.query<ResultSetHeader>(
+            `UPDATE credit_repair_cases SET pipeline_stage = 'docs_ready', pipeline_stage_changed_at = NOW() WHERE id = ?`,
+            [caseId],
+          );
+          await pool.query<ResultSetHeader>(
+            `UPDATE clients SET pipeline_stage = 'docs_ready', pipeline_stage_changed_at = NOW(), status = 'active' WHERE id = ?`,
+            [clientId],
+          );
+          await pool.query<ResultSetHeader>(
+            `INSERT INTO client_pipeline_history (client_id, from_stage, to_stage, changed_by_admin_id, notes) VALUES (?, 'new_client', 'docs_ready', ?, 'Auto-advanced: all required tasks approved')`,
+            [clientId, req.auth!.id],
+          );
+          // Notify client
+          const portalUrl = `${APP_URL}/portal/documents`;
+          if (row.email) {
+            const subj =
+              row.preferred_language === "es"
+                ? "¡Tus tareas fueron aprobadas! — Optimum Credit"
+                : "All tasks approved — Optimum Credit";
+            const body =
+              row.preferred_language === "es"
+                ? `<p>Hola ${row.first_name},</p><p>¡Todas tus tareas requeridas han sido aprobadas! Tu caso avanzó a la siguiente etapa.</p><p><a href="${portalUrl}">Accede al portal</a></p>`
+                : `<p>Hi ${row.first_name},</p><p>All your required tasks have been approved! Your case has advanced to the next stage.</p><p><a href="${portalUrl}">Access your portal</a></p>`;
+            await sendEmail({
+              to: row.email as string,
+              subject: subj,
+              html: body,
+            }).catch(() => null);
+          }
+        }
+      }
+
+      res.json({ ok: true });
+    },
+  );
+
+  // ── GET /api/admin/task-completions/:id/file — serve decrypted file ───────
+  app.get(
+    "/api/admin/task-completions/:id/file",
+    requireAdmin,
+    async (_req: AuthedRequest, res) => {
+      const id = Number(_req.params.id);
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT file_storage_key, file_name, file_mime
+         FROM client_task_completions WHERE id = ? LIMIT 1`,
+        [id],
+      );
+      if (rows.length === 0 || !rows[0].file_storage_key)
+        return res.status(404).json({ error: "File not found" });
+
+      const { file_storage_key, file_name, file_mime } = rows[0];
+      // Format: cdnUrl|iv|tag
+      const parts = (file_storage_key as string).split("|");
+      if (parts.length !== 3)
+        return res.status(500).json({ error: "Invalid storage key format" });
+      const [cdnKey, iv, tag] = parts;
+
+      try {
+        const cdnRes = await fetch(cdnKey);
+        if (!cdnRes.ok)
+          return res.status(404).json({ error: "File not available" });
+        const encrypted = Buffer.from(await cdnRes.arrayBuffer());
+        const decrypted = decryptFile(encrypted, iv, tag);
+        res.set(
+          "Content-Type",
+          (file_mime as string) || "application/octet-stream",
+        );
+        res.set(
+          "Content-Disposition",
+          `inline; filename="${encodeURIComponent(file_name as string)}"`,
+        );
+        res.set("Content-Length", String(decrypted.length));
+        res.set("Cache-Control", "no-store, no-cache");
+        res.send(decrypted);
+      } catch {
+        res.status(404).json({ error: "File could not be decrypted" });
+      }
+    },
+  );
 
   // ── Global JSON error handler (must be last use()) ───────────────────────
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
