@@ -18,7 +18,8 @@ export default {
     },
     extend: {
       fontFamily: {
-        sans: ["Plus Jakarta Sans", "system-ui", "-apple-system", "sans-serif"],
+        sans: ["Montserrat", "system-ui", "-apple-system", "sans-serif"],
+        poppins: ["Poppins", "system-ui", "-apple-system", "sans-serif"],
       },
       fontSize: {
         "2xl": ["1.5rem", { lineHeight: "1.8" }],

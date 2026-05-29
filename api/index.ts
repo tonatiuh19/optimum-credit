@@ -503,12 +503,12 @@ ${opts.preheader ? `<div style="display:none;max-height:0;overflow:hidden;">${es
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4f5f9;padding:40px 16px;">
   <tr><td align="center">
     <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 8px 24px rgba(15,23,42,0.06);">
-      <tr><td style="background:#121829;padding:24px 32px;">
+      <tr><td style="background:#11182a;padding:24px 32px;">
         <table width="100%"><tr>
           <td>
-            <img src="https://disruptinglabs.com/data/optimum/assets/images/logo_horizontal_gold_white_text.png" alt="Optimum Credit" height="40" style="display:block;height:40px;width:auto;border:0;" />
+            <img src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white_blue_colored.png" alt="Optimum Credit" height="40" style="display:block;height:40px;width:auto;border:0;" />
           </td>
-          <td align="right" style="font-size:12px;color:#C0A06A;font-weight:600;letter-spacing:0.03em;">${tagline}</td>
+          <td align="right" style="font-size:12px;color:#0098ff;font-weight:600;letter-spacing:0.03em;">${tagline}</td>
         </tr></table>
       </td></tr>
       <tr><td style="padding:32px;">${opts.bodyHtml}</td></tr>

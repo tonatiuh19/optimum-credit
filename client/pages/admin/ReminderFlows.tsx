@@ -124,52 +124,52 @@ const TRIGGER_EVENT_META: Record<
     label: "Payment Confirmed",
     description:
       "Fires when a client's payment succeeds. Starts the new client document upload sequence.",
-    color: "text-emerald-600 bg-emerald-50 border-emerald-200",
+    color: "text-emerald-400 bg-emerald-500/10 border-emerald-500/25",
     icon: Zap,
   },
   docs_ready: {
     label: "Docs Verified",
     description:
       "Fires when all client documents are approved and the client advances to Docs Ready.",
-    color: "text-sky-600 bg-sky-50 border-sky-200",
+    color: "text-sky-400 bg-sky-500/10 border-sky-500/25",
     icon: CheckCircle2,
   },
   round_1_complete: {
     label: "Round 1 Complete",
     description:
       "Fires when admin creates the Round 1 report. Sends monthly progress email.",
-    color: "text-violet-600 bg-violet-50 border-violet-200",
+    color: "text-violet-400 bg-violet-500/10 border-violet-500/25",
     icon: Activity,
   },
   round_2_complete: {
     label: "Round 2 Complete",
     description: "Fires when admin creates the Round 2 report.",
-    color: "text-violet-600 bg-violet-50 border-violet-200",
+    color: "text-violet-400 bg-violet-500/10 border-violet-500/25",
     icon: Activity,
   },
   round_3_complete: {
     label: "Round 3 Complete",
     description: "Fires when admin creates the Round 3 report.",
-    color: "text-violet-600 bg-violet-50 border-violet-200",
+    color: "text-violet-400 bg-violet-500/10 border-violet-500/25",
     icon: Activity,
   },
   round_4_complete: {
     label: "Round 4 Complete",
     description: "Fires when admin creates the Round 4 report.",
-    color: "text-violet-600 bg-violet-50 border-violet-200",
+    color: "text-violet-400 bg-violet-500/10 border-violet-500/25",
     icon: Activity,
   },
   round_5_complete: {
     label: "Round 5 Complete",
     description:
       "Fires when admin creates the Round 5 report. Final progress report.",
-    color: "text-violet-600 bg-violet-50 border-violet-200",
+    color: "text-violet-400 bg-violet-500/10 border-violet-500/25",
     icon: Activity,
   },
   completed: {
     label: "Credit Repair Completed",
     description: "Fires when admin moves the client to the Completed stage.",
-    color: "text-amber-600 bg-amber-50 border-amber-200",
+    color: "text-amber-400 bg-amber-500/10 border-amber-500/25",
     icon: CheckCircle2,
   },
 };
@@ -194,9 +194,9 @@ const STEP_TYPE_META: Record<
   internal_alert: {
     label: "Team Alert",
     icon: AlertTriangle,
-    color: "text-amber-600",
-    border: "border-amber-300",
-    bg: "bg-amber-50",
+    color: "text-amber-400",
+    border: "border-amber-500/30",
+    bg: "bg-amber-500/10",
   },
 };
 
@@ -682,7 +682,7 @@ function ManualTriggerDialog({
               className="h-9"
             />
           </div>
-          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-700">
+          <div className="rounded-lg border border-amber-500/25 bg-amber-500/10 p-3 text-xs text-amber-400">
             <AlertTriangle className="h-3.5 w-3.5 inline mr-1" />
             This will immediately send Day-0 emails and queue future-day emails
             for the specified client.
@@ -1232,17 +1232,17 @@ function StatusBadge({ status }: { status: string }) {
   > = {
     completed: {
       label: "Completed",
-      cls: "border-emerald-300 bg-emerald-50 text-emerald-700",
+      cls: "border-emerald-500/30 bg-emerald-500/10 text-emerald-400",
       icon: <CheckCheck className="h-3 w-3" />,
     },
     partial: {
       label: "Partial",
-      cls: "border-amber-300 bg-amber-50 text-amber-700",
+      cls: "border-amber-500/30 bg-amber-500/10 text-amber-400",
       icon: <AlertTriangle className="h-3 w-3" />,
     },
     failed: {
       label: "Failed",
-      cls: "border-red-300 bg-red-50 text-red-700",
+      cls: "border-red-500/30 bg-red-500/10 text-red-400",
       icon: <XCircle className="h-3 w-3" />,
     },
   };
@@ -1542,13 +1542,15 @@ export default function AdminReminderFlows() {
       />
 
       {/* Info callout */}
-      <div className="rounded-xl border border-sky-200 bg-sky-50 p-4 flex gap-3">
-        <Info className="h-4 w-4 text-sky-600 shrink-0 mt-0.5" />
-        <div className="text-sm text-sky-800">
-          <strong>Email-first automation.</strong> All steps currently send via{" "}
-          <strong>email (Resend)</strong>. SMS support can be added to each step
-          when Twilio is configured. Day-0 emails are sent immediately; future
-          days are queued in the notification queue.
+      <div className="rounded-xl border border-primary/20 bg-primary/5 p-4 flex gap-3">
+        <Info className="h-4 w-4 text-primary shrink-0 mt-0.5" />
+        <div className="text-sm text-foreground/80">
+          <strong className="text-foreground">Email-first automation.</strong>{" "}
+          All steps currently send via{" "}
+          <strong className="text-foreground">email (Resend)</strong>. SMS
+          support can be added to each step when Twilio is configured. Day-0
+          emails are sent immediately; future days are queued in the
+          notification queue.
         </div>
       </div>
 

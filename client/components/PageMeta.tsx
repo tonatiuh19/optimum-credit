@@ -95,7 +95,7 @@ export const organizationSchema = {
   "@type": "Organization",
   name: SITE_NAME,
   url: BASE_URL,
-  logo: "https://disruptinglabs.com/data/optimum/assets/images/logo_horizontal_gold_121829_text.png",
+  logo: "https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_dark.png",
   sameAs: [
     "https://www.facebook.com/OptimumCredit",
     "https://twitter.com/OptimumCredit",
@@ -115,7 +115,7 @@ export const localBusinessSchema = {
   description:
     "Credit repair service helping clients improve their credit scores through expert dispute management and personalized strategies.",
   url: BASE_URL,
-  logo: "https://disruptinglabs.com/data/optimum/assets/images/logo_horizontal_gold_121829_text.png",
+  logo: "https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_dark.png",
   priceRange: "$$",
   aggregateRating: {
     "@type": "AggregateRating",

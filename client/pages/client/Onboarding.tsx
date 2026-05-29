@@ -37,7 +37,7 @@ export default function Onboarding() {
         {/* Logo + brand */}
         <div className="flex flex-col items-center gap-3">
           <img
-            src="https://disruptinglabs.com/data/optimum/assets/images/logo_horizontal_gold_121829_text.png"
+            src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white_blue_colored.png"
             alt="Optimum Credit"
             className="h-10 w-auto"
           />

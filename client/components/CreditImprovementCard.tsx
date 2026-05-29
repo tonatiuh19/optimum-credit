@@ -76,7 +76,7 @@ export default function CreditImprovementCard({
   return (
     <div className="relative w-full">
       {/* Main White Card */}
-      <div className="relative bg-white rounded-3xl shadow-lg overflow-hidden">
+      <div className="relative bg-background rounded-3xl shadow-lg overflow-hidden">
         {/* Gradient overlay (subtle) */}
         <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-br from-primary/5 to-accent/5 rounded-full blur-3xl -mr-48 -mt-48 pointer-events-none" />
 
@@ -87,10 +87,10 @@ export default function CreditImprovementCard({
               <div className="text-sm font-semibold text-muted-foreground uppercase tracking-widest">
                 Credit Score Timeline
               </div>
-              <div className="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-accent/10 text-accent text-xs font-bold">
+              {/* <div className="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-accent/10 text-accent text-xs font-bold">
                 <Zap className="w-3 h-3" />
                 Real-time
-              </div>
+              </div> */}
             </div>
             <p className="text-muted-foreground text-sm">
               Watch your score improve as we work on your credit

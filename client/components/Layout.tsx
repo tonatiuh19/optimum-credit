@@ -25,7 +25,7 @@ export default function Layout({ children }: LayoutProps) {
               className="flex items-center transition-opacity hover:opacity-80"
             >
               <img
-                src="https://disruptinglabs.com/data/optimum/assets/images/logo_horizontal_gold_121829_text.png"
+                src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white_blue_colored.png"
                 alt="Optimum Credit"
                 className="h-8 md:h-9 w-auto"
               />
@@ -149,7 +149,7 @@ export default function Layout({ children }: LayoutProps) {
             <div>
               <div className="mb-4">
                 <img
-                  src="https://disruptinglabs.com/data/optimum/assets/images/logo_horizontal_gold_121829_text.png"
+                  src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white_blue_colored.png"
                   alt="Optimum Credit"
                   className="h-8 w-auto"
                 />

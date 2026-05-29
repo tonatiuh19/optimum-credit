@@ -210,7 +210,7 @@ export default function AdminLayout({ children }: Props) {
   const fullName = `${user?.first_name ?? ""} ${user?.last_name ?? ""}`.trim();
 
   return (
-    <div className="h-screen overflow-hidden flex bg-secondary">
+    <div className="h-screen overflow-hidden flex bg-background">
       {/* Mobile overlay */}
       {mobileOpen && (
         <div
@@ -223,7 +223,7 @@ export default function AdminLayout({ children }: Props) {
       <aside
         className={[
           "fixed md:relative top-0 left-0 z-30 h-full flex flex-col shrink-0",
-          "bg-[#0b0f1a] border-r border-white/[0.07]",
+          "bg-[#11182a] border-r border-white/[0.07]",
           "transition-[width,transform] duration-300 ease-in-out overflow-hidden",
           mobileOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0",
           "w-72",
@@ -242,7 +242,7 @@ export default function AdminLayout({ children }: Props) {
           >
             {!collapsed && (
               <img
-                src="https://disruptinglabs.com/data/optimum/assets/images/logo_horizontal_gold_white_text.png"
+                src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white_blue_colored.png"
                 alt="Optimum Credit"
                 className="h-5 w-auto min-w-0"
               />
@@ -446,7 +446,7 @@ export default function AdminLayout({ children }: Props) {
       {/* ── Main area ───────────────────────────────────────── */}
       <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
         {/* Mobile top bar */}
-        <header className="md:hidden shrink-0 z-20 flex items-center justify-between bg-white/95 backdrop-blur-sm border-b border-slate-200/80 px-4 h-14 shadow-sm">
+        <header className="md:hidden shrink-0 z-20 flex items-center justify-between bg-[#11182a] border-b border-white/[0.07] px-4 h-14">
           <Link to="/admin" className="flex items-center gap-2">
             <div className="w-7 h-7 bg-gradient-to-br from-primary to-primary-600 rounded-lg flex items-center justify-center shadow-sm">
               <ShieldCheck className="w-4 h-4 text-white" />
@@ -457,7 +457,7 @@ export default function AdminLayout({ children }: Props) {
           </Link>
           <button
             onClick={() => setMobileOpen(!mobileOpen)}
-            className="p-2 rounded-lg hover:bg-slate-100 text-slate-600 transition-colors"
+            className="p-2 rounded-lg hover:bg-white/[0.08] text-slate-300 transition-colors"
             aria-label="Toggle menu"
           >
             {mobileOpen ? (
