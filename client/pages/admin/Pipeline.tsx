@@ -604,8 +604,8 @@ export default function AdminPipeline() {
       )}
 
       {/* Kanban */}
-      <div className="overflow-x-auto pb-4 -mx-1 px-1">
-        <div className="flex gap-3 min-w-max">
+      <div className="table-scroll pb-4 -mx-1 px-1 max-w-full">
+        <div className="flex gap-3 w-max min-w-full pr-2">
           {COLUMNS.map((col) => {
             const colCases = grouped[col.stage] ?? [];
             const isDragTarget = dragOverStage === col.stage;
@@ -617,10 +617,10 @@ export default function AdminPipeline() {
                 onDragLeave={() => setDragOverStage(null)}
                 onDrop={(e) => onDrop(e, col.stage as PipelineStage)}
                 className={[
-                  "w-[270px] flex flex-col rounded-2xl border-t-[3px] overflow-hidden transition-all duration-200",
+                  "w-[min(280px,calc(100vw-2.5rem))] sm:w-[270px] shrink-0 flex flex-col rounded-2xl border-t-[3px] overflow-hidden transition-all duration-200",
                   col.topBorder,
                   isDragTarget && canDrop
-                    ? "shadow-xl shadow-primary/15 scale-[1.015] ring-1 ring-primary/30"
+                    ? "shadow-xl shadow-primary/15 md:scale-[1.015] ring-1 ring-primary/30"
                     : isDragTarget && !canDrop
                       ? "ring-1 ring-destructive/40 shadow-lg shadow-destructive/10"
                       : "shadow-sm",

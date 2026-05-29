@@ -173,7 +173,8 @@ export function DataGrid<T>({
     return (
       <div
         className={cn(
-          noBleeding ? "overflow-x-auto" : "-mx-6 px-0 overflow-x-auto",
+          "table-scroll",
+          !noBleeding && "sm:-mx-6 sm:px-0",
         )}
       >
         <Table className="w-max min-w-full">
@@ -248,7 +249,8 @@ export function DataGrid<T>({
       <div
         className={cn(
           mobileCard ? "hidden sm:block" : "block",
-          noBleeding ? "overflow-x-auto" : "-mx-6 px-0 overflow-x-auto",
+          "table-scroll",
+          !noBleeding && "sm:-mx-6 sm:px-0",
         )}
       >
         <Table className="w-max min-w-full">

@@ -56,6 +56,7 @@ export default function AdminClientDetail() {
   const docs = selectedClient.documents || [];
   const reports = selectedClient.reports || [];
   const payments = selectedClient.payments || [];
+  const subscriptions = selectedClient.subscriptions || [];
   const pipelineHistory = selectedClient.pipeline_history || [];
 
   const totalPaidCents = payments
@@ -234,22 +235,71 @@ export default function AdminClientDetail() {
                   </span>
                 </div>
               )}
-              <ul className="space-y-2 text-sm">
+              <ul className="space-y-3 text-sm">
                 {payments.map((p: any) => (
                   <li
                     key={p.id}
-                    className="flex items-center justify-between p-2 rounded-lg bg-muted/50"
+                    className="p-3 rounded-lg bg-muted/50 space-y-2"
                   >
-                    <span className="font-medium text-foreground">
-                      ${(p.amount_cents / 100).toFixed(2)}
-                    </span>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium text-foreground">
+                        {p.package_name ?? "Payment"}
+                      </span>
+                      <span className="font-semibold">
+                        ${(p.amount_cents / 100).toFixed(2)}
+                      </span>
+                    </div>
                     <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       {p.status}
                     </span>
+                    {Array.isArray(p.tradeline_items) &&
+                      p.tradeline_items.length > 0 && (
+                        <ul className="text-xs text-muted-foreground border-t border-border/60 pt-2 space-y-1">
+                          {p.tradeline_items.map((item: any) => (
+                            <li
+                              key={item.id}
+                              className="flex justify-between gap-2"
+                            >
+                              <span>{item.product_name}</span>
+                              <span>
+                                ${((item.price_cents || 0) / 100).toFixed(2)}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
                   </li>
                 ))}
               </ul>
             </>
+          )}
+        </Card>
+
+        <Card title="Subscriptions">
+          {subscriptions.length === 0 ? (
+            <div className="text-muted-foreground text-sm">
+              No subscriptions.
+            </div>
+          ) : (
+            <ul className="space-y-2 text-sm">
+              {subscriptions.map((sub: any) => (
+                <li
+                  key={sub.id}
+                  className="p-3 rounded-lg bg-muted/50 flex flex-col gap-1"
+                >
+                  <span className="font-medium">{sub.package_name}</span>
+                  <span className="text-xs text-muted-foreground">
+                    ${((sub.amount_cents || 0) / 100).toFixed(2)}/mo ·{" "}
+                    {sub.status}
+                  </span>
+                  {sub.started_at && (
+                    <span className="text-xs text-muted-foreground">
+                      Since {new Date(sub.started_at).toLocaleDateString()}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ul>
           )}
         </Card>
       </div>

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useLocation } from "react-router-dom";
 import { useFormik } from "formik";
 import * as Yup from "yup";
@@ -7,7 +7,6 @@ import {
   ArrowRight,
   Check,
   ShieldCheck,
-  Sparkles,
   Lock,
   BadgeCheck,
   Loader2,
@@ -28,43 +27,22 @@ import {
 import { useTranslation } from "react-i18next";
 import PageMeta from "@/components/PageMeta";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
+import TradelinePicker from "@/components/TradelinePicker";
+import PackagesPlanGrid from "@/components/PackagesPlanGrid";
 import {
   fetchPackages,
+  fetchTradelineProducts,
   submitRegistration,
   resetRegistration,
   validateCoupon,
   clearCoupon,
 } from "@/store/slices/packagesSlice";
 import api from "@/lib/api";
+import {
+  formatPackageDollars,
+  isMonthlyPackage,
+} from "@/lib/packageDisplay";
 import type { RegistrationResponse } from "@shared/api";
-
-// Authorize.net Accept.js global type
-declare global {
-  interface Window {
-    Accept?: {
-      dispatchData: (
-        secureData: {
-          authData: { apiLoginID: string; clientKey: string };
-          cardData: {
-            cardNumber: string;
-            month: string;
-            year: string;
-            cardCode: string;
-            zip?: string;
-            fullName?: string;
-          };
-        },
-        callback: (response: {
-          messages: {
-            resultCode: "Ok" | "Error";
-            message: Array<{ code: string; text: string }>;
-          };
-          opaqueData?: { dataDescriptor: string; dataValue: string };
-        }) => void,
-      ) => void;
-    };
-  }
-}
 
 const AUTHORIZENET_API_LOGIN_ID = (import.meta as any).env
   ?.VITE_AUTHORIZENET_API_LOGIN_ID as string | undefined;
@@ -80,6 +58,8 @@ export default function Register() {
   const location = useLocation();
   const {
     packages,
+    tradelineProducts,
+    tradelineLoading,
     loading,
     registering,
     error,
@@ -89,6 +69,7 @@ export default function Register() {
   const [step, setStep] = useState(1);
   const [direction, setDirection] = useState<"forward" | "back">("forward");
   const [selectedSlug, setSelectedSlug] = useState<string>("");
+  const [selectedTradelineIds, setSelectedTradelineIds] = useState<number[]>([]);
   const [paidEmail, setPaidEmail] = useState("");
 
   // Card fields (real payment mode only)
@@ -102,9 +83,11 @@ export default function Register() {
 
   // Coupon fields
   const [couponInput, setCouponInput] = useState("");
+  const tradelinePickerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     dispatch(fetchPackages());
+    dispatch(fetchTradelineProducts());
     return () => {
       dispatch(resetRegistration());
       dispatch(clearCoupon());
@@ -124,11 +107,26 @@ export default function Register() {
     }
   }, [packages, location.search]);
 
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    if (params.get("plan") !== "tradeline" || step !== 1) return;
+    const t = window.setTimeout(() => {
+      tradelinePickerRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    }, 300);
+    return () => window.clearTimeout(t);
+  }, [location.search, step, selectedSlug, tradelineProducts.length]);
+
   // Clear coupon when selected package changes (coupon may be package-specific)
   useEffect(() => {
     if (selectedSlug) {
       dispatch(clearCoupon());
       setCouponInput("");
+      if (selectedSlug !== "tradeline") {
+        setSelectedTradelineIds([]);
+      }
     }
   }, [selectedSlug, dispatch]);
 
@@ -239,6 +237,8 @@ export default function Register() {
           submitRegistration({
             ...form.values,
             packageSlug: selectedSlug,
+            tradelineProductIds:
+              selectedSlug === "tradeline" ? selectedTradelineIds : undefined,
             dataDescriptor: response.opaqueData!.dataDescriptor,
             dataValue: response.opaqueData!.dataValue,
             coupon_code:
@@ -269,14 +269,25 @@ export default function Register() {
     }`;
 
   const selectedPackage = packages.find((p) => p.slug === selectedSlug);
+  const isTradelineCheckout =
+    selectedPackage?.checkout_type === "tradeline_picker" ||
+    selectedSlug === "tradeline";
+  const tradelineSubtotal = tradelineProducts
+    .filter((p) => selectedTradelineIds.includes(p.id))
+    .reduce((s, p) => s + p.price_cents, 0);
+  const basePriceCents = isTradelineCheckout
+    ? tradelineSubtotal
+    : (selectedPackage?.price_cents ?? 0);
   const isBusy = paying || registering;
 
   const appliedDiscount = couponValidation?.valid
     ? couponValidation.discount_cents
     : 0;
-  const finalPriceCents = selectedPackage
-    ? Math.max(0, selectedPackage.price_cents - appliedDiscount)
-    : 0;
+  const finalPriceCents = Math.max(0, basePriceCents - appliedDiscount);
+
+  const canContinueStep1 =
+    !!selectedSlug &&
+    (!isTradelineCheckout || selectedTradelineIds.length > 0);
 
   const handleApplyCoupon = () => {
     if (!couponInput.trim() || !selectedPackage) return;
@@ -284,7 +295,7 @@ export default function Register() {
       validateCoupon({
         code: couponInput.trim().toUpperCase(),
         package_id: selectedPackage.id,
-        amount_cents: selectedPackage.price_cents,
+        amount_cents: basePriceCents,
       }),
     );
   };
@@ -295,7 +306,7 @@ export default function Register() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-primary/5 via-background to-accent/5 flex flex-col">
+    <div className="min-h-[100dvh] bg-gradient-to-br from-primary/5 via-background to-accent/5 flex flex-col w-full max-w-[100vw] overflow-x-hidden">
       <PageMeta
         title="Start Your Credit Repair"
         description="Create your Optimum Credit account and begin your journey to a better credit score. Fast setup, expert support, and results in as little as 6 months."
@@ -310,7 +321,7 @@ export default function Register() {
             className="flex items-center transition-opacity hover:opacity-80"
           >
             <img
-              src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white_blue_colored.png"
+              src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white.png"
               alt="Optimum Credit"
               className="h-8 w-auto"
             />
@@ -330,25 +341,25 @@ export default function Register() {
       <div className="flex-1 container max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 md:py-12">
         {/* Progress — 2 steps, hidden on success */}
         {step < 3 && (
-          <div className="flex items-center justify-center mb-10">
+          <div className="flex items-center justify-center gap-1 sm:gap-0 mb-8 sm:mb-10 max-w-full px-1">
             {[
               { n: 1, label: t("register.stepChoosePlan") },
               { n: 2, label: t("register.stepYourInfo") },
             ].map((s, i) => (
-              <div key={s.n} className="flex items-center">
+              <div key={s.n} className="flex items-center min-w-0">
                 <div
-                  className={`w-9 h-9 rounded-full flex items-center justify-center font-semibold text-sm transition-all duration-300 ${
+                  className={`w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center font-semibold text-xs sm:text-sm transition-all duration-300 shrink-0 ${
                     step === s.n
-                      ? "bg-primary text-primary-foreground shadow-lg shadow-primary/40 scale-110 ring-4 ring-primary/20"
+                      ? "bg-primary text-primary-foreground shadow-lg shadow-primary/40 sm:scale-110 ring-2 sm:ring-4 ring-primary/20"
                       : step > s.n
                         ? "bg-primary text-primary-foreground"
                         : "bg-secondary text-muted-foreground"
                   }`}
                 >
-                  {step > s.n ? <Check className="w-4 h-4" /> : s.n}
+                  {step > s.n ? <Check className="w-3.5 h-3.5 sm:w-4 sm:h-4" /> : s.n}
                 </div>
                 <div
-                  className={`ml-2 mr-4 text-sm font-medium hidden sm:inline transition-colors duration-300 ${
+                  className={`ml-1.5 sm:ml-2 mr-2 sm:mr-4 text-[11px] sm:text-sm font-medium max-w-[4.75rem] sm:max-w-none truncate sm:whitespace-normal transition-colors duration-300 ${
                     step >= s.n ? "text-foreground" : "text-muted-foreground"
                   }`}
                 >
@@ -356,13 +367,13 @@ export default function Register() {
                 </div>
                 {i < 1 && (
                   <div
-                    className={`w-8 sm:w-16 h-0.5 mr-4 transition-all duration-500 rounded-full ${
+                    className={`w-6 sm:w-16 h-0.5 mr-2 sm:mr-4 shrink-0 transition-all duration-500 rounded-full ${
                       step > s.n ? "bg-primary" : "bg-border"
                     }`}
                   />
                 )}
               </div>
-            ))}{" "}
+            ))}
           </div>
         )}
 
@@ -377,108 +388,45 @@ export default function Register() {
         >
           {step === 1 && (
             <div>
-              <h1 className="text-3xl md:text-4xl font-bold mb-2 text-center">
-                {t("register.planHeading")}
-              </h1>
-              <p className="text-muted-foreground text-center mb-8">
-                {t("register.planSubheading")}
-              </p>
+              <div className="max-w-3xl mx-auto text-center mb-10">
+                <h1 className="text-3xl md:text-4xl lg:text-[2.75rem] font-bold mb-3 tracking-tight">
+                  {t("register.planHeading")}
+                </h1>
+                <p className="text-muted-foreground text-base md:text-lg leading-relaxed">
+                  {t("register.planSubheading")}
+                </p>
+              </div>
 
-              {loading ? (
-                <div className="grid md:grid-cols-3 gap-4">
-                  {[...Array(3)].map((_, i) => (
-                    <div
-                      key={i}
-                      className="p-6 rounded-2xl border-2 border-border bg-card animate-pulse"
-                    >
-                      <div className="h-3.5 bg-muted rounded-md w-1/2 mb-5" />
-                      <div className="h-9 bg-muted rounded-md w-1/3 mb-6" />
-                      <div className="space-y-2.5">
-                        {[...Array(5)].map((_, j) => (
-                          <div
-                            key={j}
-                            className="h-2.5 bg-muted rounded-md"
-                            style={{ width: `${90 - j * 10}%` }}
-                          />
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="grid md:grid-cols-3 gap-4">
-                  {packages.map((p, idx) => {
-                    const isSelected = selectedSlug === p.slug;
-                    const features: string[] = Array.isArray(p.features_json)
-                      ? p.features_json
-                      : typeof p.features_json === "string"
-                        ? safeParse(p.features_json)
-                        : [];
-                    return (
-                      <button
-                        key={p.id}
-                        type="button"
-                        onClick={() => setSelectedSlug(p.slug)}
-                        className={`animate-fade-up text-left p-6 rounded-2xl border-2 transition-all duration-200 ${
-                          isSelected
-                            ? "border-primary bg-primary/5 shadow-lg scale-[1.02]"
-                            : "border-border bg-card hover:border-primary/30 hover:shadow-md hover:-translate-y-0.5"
-                        }`}
-                        style={{
-                          animationDelay: `${idx * 0.08}s`,
-                          animationFillMode: "both",
-                        }}
-                      >
-                        {p.slug === "complex" && (
-                          <div className="inline-flex items-center gap-1 text-xs font-semibold uppercase tracking-wide bg-primary text-primary-foreground px-2.5 py-1 rounded-full mb-3">
-                            <Sparkles className="w-3 h-3" /> Most Popular
-                          </div>
-                        )}
-                        <h3 className="text-xl font-bold">{p.name}</h3>
-                        {p.subtitle && (
-                          <p className="text-sm text-muted-foreground mt-1">
-                            {p.subtitle}
-                          </p>
-                        )}
-                        <div className="mt-4 mb-4">
-                          <span className="text-4xl font-bold">
-                            ${(p.price_cents / 100).toFixed(0)}
-                          </span>
-                          <span className="text-muted-foreground ml-1">
-                            one-time
-                          </span>
-                        </div>
-                        <ul className="space-y-2 text-sm">
-                          {features.slice(0, 6).map((f, i) => (
-                            <li key={i} className="flex items-start gap-2">
-                              <Check className="w-4 h-4 text-accent mt-0.5 shrink-0" />
-                              <span>{f}</span>
-                            </li>
-                          ))}
-                        </ul>
-                        <div
-                          className={`mt-5 text-sm font-semibold flex items-center gap-1 ${
-                            isSelected
-                              ? "text-primary"
-                              : "text-muted-foreground"
-                          }`}
-                        >
-                          {isSelected ? "Selected" : "Select"}
-                          <ArrowRight className="w-4 h-4" />
-                        </div>
-                      </button>
-                    );
-                  })}
+              <PackagesPlanGrid
+                packages={packages}
+                loading={loading}
+                mode="register"
+                selectedSlug={selectedSlug}
+                onSelectPlan={setSelectedSlug}
+              />
+
+              {isTradelineCheckout && (
+                <div
+                  ref={tradelinePickerRef}
+                  className="max-w-5xl mx-auto mt-10 pt-10 border-t border-border/60"
+                >
+                  <TradelinePicker
+                    products={tradelineProducts}
+                    selectedIds={selectedTradelineIds}
+                    onChange={setSelectedTradelineIds}
+                    loading={tradelineLoading}
+                  />
                 </div>
               )}
 
-              <div className="text-center mt-8">
+              <div className="flex justify-center mt-10">
                 <button
-                  disabled={!selectedSlug}
+                  type="button"
+                  disabled={!canContinueStep1}
                   onClick={() => goTo(2)}
-                  className="btn-primary"
+                  className="btn-primary w-full max-w-xs sm:min-w-[220px] sm:w-auto !h-12 px-8 text-base shadow-lg shadow-primary/25 hover:shadow-xl hover:shadow-primary/30"
                 >
-                  Continue <ArrowRight className="w-4 h-4 ml-1" />
+                  Continue <ArrowRight className="w-4 h-4 ml-1.5" />
                 </button>
               </div>
             </div>
@@ -550,11 +498,16 @@ export default function Register() {
                     </h3>
                     {selectedPackage && (
                       <p className="text-xs text-muted-foreground mt-0.5">
-                        {selectedPackage.name} —{" "}
+                        {selectedPackage.name}
+                        {isTradelineCheckout &&
+                          ` · ${selectedTradelineIds.length} tradeline(s)`}{" "}
+                        —{" "}
                         <span className="font-medium text-foreground">
-                          ${(selectedPackage.price_cents / 100).toFixed(2)}
+                          ${formatPackageDollars(basePriceCents)}
                         </span>{" "}
-                        one-time
+                        {isMonthlyPackage(selectedPackage)
+                          ? t("packages.perMonth")
+                          : t("register.oneTime")}
                       </p>
                     )}
                   </div>
@@ -604,7 +557,7 @@ export default function Register() {
                       </div>
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
                       <label className="block text-sm font-medium mb-1.5">
                         Expiry date
@@ -669,10 +622,7 @@ export default function Register() {
                         <div className="flex justify-between text-muted-foreground">
                           <span>{t("register.couponOriginal")}</span>
                           <span className="line-through">
-                            $
-                            {(
-                              (selectedPackage?.price_cents ?? 0) / 100
-                            ).toFixed(2)}
+                            ${(basePriceCents / 100).toFixed(2)}
                           </span>
                         </div>
                         <div className="flex justify-between text-accent font-medium">
@@ -890,14 +840,6 @@ export default function Register() {
       </footer>
     </div>
   );
-}
-
-function safeParse(s: string) {
-  try {
-    return JSON.parse(s);
-  } catch {
-    return [];
-  }
 }
 
 function Field({

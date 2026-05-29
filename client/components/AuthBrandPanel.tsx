@@ -87,7 +87,7 @@ export default function AuthBrandPanel({ variant }: Props) {
   const content = BRAND_CONTENT[variant];
 
   return (
-    <div className="hidden lg:flex h-full relative overflow-hidden bg-[#11182a]">
+    <div className="hidden lg:flex h-full relative overflow-hidden bg-[#040a18]">
       {/* ── Video background ── */}
       <video
         autoPlay
@@ -108,15 +108,15 @@ export default function AuthBrandPanel({ variant }: Props) {
       </video>
 
       {/* ── Gradient overlays ── */}
-      <div className="absolute inset-0 bg-gradient-to-br from-[#11182a]/98 via-[#11182a]/80 to-primary/[0.12]" />
-      <div className="absolute inset-0 bg-gradient-to-t from-[#11182a]/95 via-transparent to-[#11182a]/60" />
+      <div className="absolute inset-0 bg-gradient-to-br from-[#040a18]/98 via-[#040a18]/80 to-primary/[0.12]" />
+      <div className="absolute inset-0 bg-gradient-to-t from-[#040a18]/95 via-transparent to-[#040a18]/60" />
 
       {/* ── Subtle grid ── */}
       <div
         className="absolute inset-0 opacity-[0.12]"
         style={{
           backgroundImage:
-            "linear-gradient(rgba(0,152,255,0.2) 1px, transparent 1px), linear-gradient(90deg, rgba(0,152,255,0.2) 1px, transparent 1px)",
+            "linear-gradient(rgba(192,160,106,0.2) 1px, transparent 1px), linear-gradient(90deg, rgba(192,160,106,0.2) 1px, transparent 1px)",
           backgroundSize: "60px 60px",
         }}
       />
@@ -126,14 +126,14 @@ export default function AuthBrandPanel({ variant }: Props) {
         className="absolute -top-20 -right-20 w-96 h-96 rounded-full blur-3xl pointer-events-none"
         style={{
           background:
-            "radial-gradient(circle, rgba(0,152,255,0.15) 0%, transparent 70%)",
+            "radial-gradient(circle, rgba(192,160,106,0.15) 0%, transparent 70%)",
         }}
       />
       <div
         className="absolute bottom-0 -left-10 w-80 h-80 rounded-full blur-3xl pointer-events-none animate-pulse-glow"
         style={{
           background:
-            "radial-gradient(circle, rgba(0,104,198,0.12) 0%, transparent 70%)",
+            "radial-gradient(circle, rgba(192,160,106,0.1) 0%, transparent 70%)",
           animationDelay: "1.5s",
         }}
       />
@@ -141,7 +141,7 @@ export default function AuthBrandPanel({ variant }: Props) {
         className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-72 h-72 rounded-full blur-3xl pointer-events-none animate-pulse-glow"
         style={{
           background:
-            "radial-gradient(circle, rgba(0,152,255,0.08) 0%, transparent 70%)",
+            "radial-gradient(circle, rgba(192,160,106,0.08) 0%, transparent 70%)",
           animationDelay: "3s",
         }}
       />
@@ -152,7 +152,7 @@ export default function AuthBrandPanel({ variant }: Props) {
         <Stagger delay={0} className="flex justify-end">
           <div className="flex flex-col items-end gap-1">
             <img
-              src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white_blue_colored.png"
+              src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white.png"
               alt="Optimum Credit"
               className="h-8 w-auto"
             />

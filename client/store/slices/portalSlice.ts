@@ -12,6 +12,7 @@ import type {
   AiChatMessage,
   EducationalVideo,
   ClientTaskWithStatus,
+  PeaceOfMindPlan,
 } from "@shared/api";
 
 interface PortalState {
@@ -32,6 +33,11 @@ interface PortalState {
   paymentsLoading: boolean;
   splits: ClientPaymentSplit[];
   splitsLoading: boolean;
+  peaceOfMind: PeaceOfMindPlan | null;
+  peaceOfMindLoading: boolean;
+  peaceOfMindSubscribing: boolean;
+  peaceOfMindCancelling: boolean;
+  peaceOfMindError: string | null;
   loading: boolean;
   error: string | null;
 }
@@ -54,6 +60,11 @@ const initialState: PortalState = {
   paymentsLoading: false,
   splits: [],
   splitsLoading: false,
+  peaceOfMind: null,
+  peaceOfMindLoading: false,
+  peaceOfMindSubscribing: false,
+  peaceOfMindCancelling: false,
+  peaceOfMindError: null,
   loading: false,
   error: null,
 };
@@ -296,6 +307,43 @@ const slice = createSlice({
     b.addCase(fetchClientPaymentSplits.rejected, (s) => {
       s.splitsLoading = false;
     });
+
+    b.addCase(fetchPeaceOfMind.pending, (s) => {
+      s.peaceOfMindLoading = true;
+      s.peaceOfMindError = null;
+    });
+    b.addCase(fetchPeaceOfMind.fulfilled, (s, a) => {
+      s.peaceOfMindLoading = false;
+      s.peaceOfMind = a.payload;
+    });
+    b.addCase(fetchPeaceOfMind.rejected, (s) => {
+      s.peaceOfMindLoading = false;
+    });
+
+    b.addCase(subscribePeaceOfMind.pending, (s) => {
+      s.peaceOfMindSubscribing = true;
+      s.peaceOfMindError = null;
+    });
+    b.addCase(subscribePeaceOfMind.fulfilled, (s) => {
+      s.peaceOfMindSubscribing = false;
+    });
+    b.addCase(subscribePeaceOfMind.rejected, (s, a) => {
+      s.peaceOfMindSubscribing = false;
+      s.peaceOfMindError = a.payload || "Subscription failed";
+    });
+
+    b.addCase(cancelPeaceOfMind.pending, (s) => {
+      s.peaceOfMindCancelling = true;
+      s.peaceOfMindError = null;
+    });
+    b.addCase(cancelPeaceOfMind.fulfilled, (s) => {
+      s.peaceOfMindCancelling = false;
+      if (s.peaceOfMind) s.peaceOfMind.subscription = null;
+    });
+    b.addCase(cancelPeaceOfMind.rejected, (s, a) => {
+      s.peaceOfMindCancelling = false;
+      s.peaceOfMindError = a.payload || "Cancellation failed";
+    });
   },
 });
 
@@ -314,6 +362,45 @@ export const fetchClientPaymentSplits = createAsyncThunk<ClientPaymentSplit[]>(
     return data.splits as ClientPaymentSplit[];
   },
 );
+
+export const fetchPeaceOfMind = createAsyncThunk<PeaceOfMindPlan>(
+  "portal/peaceOfMind",
+  async () => {
+    const { data } = await api.get("/portal/peace-of-mind");
+    return data as PeaceOfMindPlan;
+  },
+);
+
+export const subscribePeaceOfMind = createAsyncThunk<
+  void,
+  | { use_stored_card: true }
+  | { dataDescriptor: string; dataValue: string },
+  { rejectValue: string }
+>("portal/subscribePeaceOfMind", async (payload, { rejectWithValue, dispatch }) => {
+  try {
+    await api.post("/portal/peace-of-mind/subscribe", payload);
+    await dispatch(fetchPeaceOfMind());
+  } catch (e: any) {
+    return rejectWithValue(
+      e?.response?.data?.error || "Subscription failed",
+    );
+  }
+});
+
+export const cancelPeaceOfMind = createAsyncThunk<
+  void,
+  void,
+  { rejectValue: string }
+>("portal/cancelPeaceOfMind", async (_, { rejectWithValue, dispatch }) => {
+  try {
+    await api.post("/portal/peace-of-mind/cancel");
+    await dispatch(fetchPeaceOfMind());
+  } catch (e: any) {
+    return rejectWithValue(
+      e?.response?.data?.error || "Cancellation failed",
+    );
+  }
+});
 
 export const { addLocalChatMessage } = slice.actions;
 export default slice.reducer;

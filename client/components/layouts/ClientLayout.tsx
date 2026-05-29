@@ -24,6 +24,7 @@ import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { clientLogout, fetchClientMe } from "@/store/slices/clientAuthSlice";
 import { fetchPortalSectionLocks } from "@/store/slices/portalSlice";
 import LanguageSwitcher from "@/components/LanguageSwitcher";
+import ThemeToggle from "@/components/ThemeToggle";
 
 interface Props {
   children: ReactNode;
@@ -98,6 +99,15 @@ export default function ClientLayout({ children }: Props) {
     if (token) dispatch(fetchPortalSectionLocks());
   }, [token, dispatch]);
 
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [mobileOpen]);
+
   // Build locked key set from DB
   const lockedKeys = new Set(
     sectionLocks.filter((l) => l.is_locked).map((l) => l.section_key),
@@ -120,7 +130,7 @@ export default function ClientLayout({ children }: Props) {
   };
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-[100dvh] bg-background w-full max-w-[100vw] overflow-x-hidden">
       {/* Mobile overlay — closes sidebar on tap outside */}
       {mobileOpen && (
         <div
@@ -136,25 +146,28 @@ export default function ClientLayout({ children }: Props) {
           </div>
           <span>Portal</span>
         </Link>
-        <button
-          onClick={() => setMobileOpen(!mobileOpen)}
-          className="p-2 rounded-md hover:bg-secondary"
-          aria-label="Menu"
-        >
-          {mobileOpen ? (
-            <X className="w-5 h-5" />
-          ) : (
-            <Menu className="w-5 h-5" />
-          )}
-        </button>
+        <div className="flex items-center gap-1">
+          <ThemeToggle zone="portal" compact />
+          <button
+            onClick={() => setMobileOpen(!mobileOpen)}
+            className="p-2 rounded-md hover:bg-secondary"
+            aria-label="Menu"
+          >
+            {mobileOpen ? (
+              <X className="w-5 h-5" />
+            ) : (
+              <Menu className="w-5 h-5" />
+            )}
+          </button>
+        </div>
       </div>
 
-      <div className="flex">
+      <div className="flex w-full min-w-0">
         {/* Sidebar */}
         <aside
           className={`${
             mobileOpen ? "block" : "hidden"
-          } md:block fixed md:sticky top-14 md:top-0 left-0 z-30 w-full md:w-64 lg:w-72 h-[calc(100vh-3.5rem)] md:h-screen bg-card border-r border-border md:flex md:flex-col`}
+          } md:block fixed md:sticky top-14 md:top-0 left-0 z-30 w-[min(100%,20rem)] md:w-64 lg:w-72 h-[calc(100dvh-3.5rem)] md:h-[100dvh] bg-card border-r border-border md:flex md:flex-col shrink-0`}
         >
           {/* Logo (desktop only) */}
           <div className="hidden md:flex items-center gap-2 px-6 h-20 border-b border-border">
@@ -163,7 +176,7 @@ export default function ClientLayout({ children }: Props) {
               className="flex items-center transition-opacity hover:opacity-80"
             >
               <img
-                src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white_blue_colored.png"
+                src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white.png"
                 alt="Optimum Credit"
                 className="h-8 w-auto"
               />
@@ -245,6 +258,7 @@ export default function ClientLayout({ children }: Props) {
             <div className="px-3 py-1.5">
               <LanguageSwitcher variant="full" />
             </div>
+            <ThemeToggle zone="portal" />
             <button
               onClick={handleLogout}
               className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-muted-foreground hover:text-destructive hover:bg-destructive/5 transition-colors"
@@ -256,13 +270,13 @@ export default function ClientLayout({ children }: Props) {
         </aside>
 
         {/* Main content */}
-        <main className="flex-1 min-w-0">
+        <main className="flex-1 min-w-0 overflow-x-hidden">
           {!sectionLocksInitialized ? (
             <div className="flex items-center justify-center h-64">
               <div className="w-6 h-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
             </div>
           ) : (
-            <div className="container max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-6 md:py-10">
+            <div className="app-page container max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-5 sm:py-6 md:py-10">
               {children}
             </div>
           )}

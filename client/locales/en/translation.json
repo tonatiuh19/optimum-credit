@@ -56,7 +56,9 @@
     "subheading": "Choose the package that fits your needs. No hidden fees, no surprises.",
     "unavailable": "Packages unavailable. Please try again later.",
     "popular": "Most Popular",
-    "perService": "per service • {{months}} months",
+    "onePayment": "one payment",
+    "perMonth": "/month",
+    "perService": "one flat payment",
     "selectPlan": "Select Plan"
   },
   "testimonials": {
@@ -68,12 +70,18 @@
     "stepChoosePlan": "Choose plan",
     "stepYourInfo": "Your info & payment",
     "planHeading": "Pick the plan that fits your goals",
-    "planSubheading": "All plans include unlimited disputes, 24/7 portal access, and free cancellation.",
+    "planSubheading": "One flat payment per repair plan. Secure checkout and 24/7 portal access included.",
     "popular": "Most Popular",
-    "oneTime": "one-time",
+    "expedited": "Expedited",
+    "oneTime": "one payment",
     "selected": "Selected",
     "select": "Select",
     "continue": "Continue →",
+    "tradelineCustomPricing": "Choose your tradelines below",
+    "tradelineBadge": "À la carte",
+    "tradelinePickerTitle": "Select tradelines",
+    "tradelinePickerHint": "Pick one or more authorized-user tradelines. Your total updates as you select.",
+    "tradelineSelectedTotal": "{{count}} selected · ${{total}} total",
     "infoHeading": "Tell us about you",
     "firstName": "First name",
     "lastName": "Last name",
@@ -328,7 +336,9 @@
     "payments": "My Payments",
     "welcomeBack": "Welcome back",
     "portal": "Portal",
-    "signOut": "Sign out"
+    "signOut": "Sign out",
+    "themeLight": "Light mode",
+    "themeDark": "Dark mode"
   },
   "payments": {
     "pageTitle": "My Payments",
@@ -343,6 +353,21 @@
     "noScheduledPayments": "No upcoming payments.",
     "payNow": "Pay Now",
     "dueDate": "Due {{date}}"
+  },
+  "peaceOfMind": {
+    "notEligible": "This plan is available after you complete your credit repair program.",
+    "active": "Your Peace of Mind subscription is active",
+    "activeSince": "Since {{date}}",
+    "cancel": "Cancel subscription",
+    "cardHeading": "Payment method",
+    "cardName": "Name on card",
+    "subscribe": "Subscribe now",
+    "subscribeFailed": "Could not start subscription. Please try again.",
+    "cancelFailed": "Could not cancel subscription.",
+    "cardError": "Please enter valid card details.",
+    "paymentLibraryError": "Payment library not loaded. Please refresh.",
+    "subscribeWithCardOnFile": "Subscribe with card on file",
+    "orEnterNewCard": "Or enter a new card below"
   },
   "tasks": {
     "pageTitle": "My Tasks",

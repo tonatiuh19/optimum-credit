@@ -53,6 +53,11 @@ export type ClientStatus =
 // ============================================================
 // PACKAGES + REGISTRATION
 // ============================================================
+export type PackageCheckoutType =
+  | "fixed_price"
+  | "tradeline_picker"
+  | "subscription";
+
 export interface CreditPackage {
   id: number;
   slug: string;
@@ -60,9 +65,43 @@ export interface CreditPackage {
   subtitle?: string | null;
   description?: string | null;
   price_cents: number;
+  compare_price_cents?: number | null;
+  billing_interval?: "one_time" | "monthly";
+  checkout_type?: PackageCheckoutType;
   duration_months: number;
   features_json?: any;
   sort_order: number;
+}
+
+export interface TradelineProduct {
+  id: number;
+  slug: string;
+  name: string;
+  details: string;
+  price_cents: number;
+  compare_price_cents?: number | null;
+  is_active?: number | boolean;
+  sort_order: number;
+}
+
+export interface ClientTradelineSelection {
+  id: number;
+  payment_id: number;
+  tradeline_product_id: number;
+  product_name: string;
+  product_details: string;
+  price_cents: number;
+  created_at?: string;
+}
+
+export interface TradelineProductInput {
+  slug: string;
+  name: string;
+  details: string;
+  price_cents: number;
+  compare_price_cents?: number | null;
+  is_active?: boolean;
+  sort_order?: number;
 }
 
 export interface RegistrationPayload {
@@ -71,6 +110,7 @@ export interface RegistrationPayload {
   email: string;
   phone: string;
   packageSlug: string;
+  tradelineProductIds?: number[];
   // Accept.js nonce — card is tokenized in the browser before this POST is sent
   dataDescriptor: string;
   dataValue: string;
@@ -78,6 +118,28 @@ export interface RegistrationPayload {
   affiliateCode?: string;
   // Optional promotional coupon code
   coupon_code?: string;
+}
+
+export interface ClientSubscription {
+  id: number;
+  package_id: number;
+  package_name: string;
+  package_slug: string;
+  anet_subscription_id: string;
+  status: "active" | "cancelled" | "suspended" | "expired";
+  amount_cents: number;
+  billing_interval: "monthly";
+  started_at: string;
+  cancelled_at?: string | null;
+  next_billing_at?: string | null;
+}
+
+export interface PeaceOfMindPlan {
+  package: CreditPackage;
+  eligible: boolean;
+  eligibility_reason?: string;
+  has_stored_card?: boolean;
+  subscription: ClientSubscription | null;
 }
 
 export interface RegistrationResponse {
@@ -535,9 +597,54 @@ export interface AdminPaymentsResponse {
   pagination: PaginationInfo;
 }
 
+export type SubscriptionStatus =
+  | "active"
+  | "cancelled"
+  | "suspended"
+  | "expired";
+
+export interface AdminSubscriptionListItem {
+  id: number;
+  client_id: number;
+  client_first_name: string;
+  client_last_name: string;
+  client_email: string;
+  client_phone?: string | null;
+  client_pipeline_stage?: PipelineStage | null;
+  client_status?: ClientStatus | null;
+  package_id: number;
+  package_name: string;
+  package_slug: string;
+  anet_subscription_id: string;
+  status: SubscriptionStatus;
+  amount_cents: number;
+  billing_interval: "monthly";
+  started_at: string;
+  cancelled_at?: string | null;
+  next_billing_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AdminSubscriptionsSummary {
+  total_count: number;
+  active_count: number;
+  cancelled_count: number;
+  suspended_count: number;
+  expired_count: number;
+  mrr_cents: number;
+}
+
+export interface AdminSubscriptionsResponse {
+  subscriptions: AdminSubscriptionListItem[];
+  summary: AdminSubscriptionsSummary;
+  pagination: PaginationInfo;
+}
+
 export interface ClientPayment {
   id: number;
   package_name: string | null;
+  package_slug?: string | null;
   amount_cents: number;
   discount_cents: number;
   original_amount_cents: number | null;
@@ -547,6 +654,7 @@ export interface ClientPayment {
   coupon_code: string | null;
   paid_at: string | null;
   created_at: string;
+  tradeline_items?: ClientTradelineSelection[];
 }
 
 // ============================================================

@@ -74,11 +74,44 @@ export default function CreditImprovementCard({
   }, [currentScore, projectedScore]);
 
   return (
-    <div className="relative w-full">
-      {/* Main White Card */}
-      <div className="relative bg-background rounded-3xl shadow-lg overflow-hidden">
-        {/* Gradient overlay (subtle) */}
-        <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-br from-primary/5 to-accent/5 rounded-full blur-3xl -mr-48 -mt-48 pointer-events-none" />
+    <div className="group relative w-full">
+      {/* Ambient gold glow (behind card) */}
+      <div
+        className="pointer-events-none absolute -inset-3 rounded-[1.75rem] bg-gradient-to-br from-primary/30 via-accent/15 to-primary/10 opacity-40 blur-2xl transition-all duration-700 motion-safe:group-hover:opacity-95 motion-safe:group-hover:blur-3xl motion-safe:group-hover:-inset-5 motion-safe:group-hover:animate-card-glow"
+        aria-hidden
+      />
+
+      <div
+        className={[
+          "relative overflow-hidden rounded-3xl border border-border/70 bg-card",
+          "shadow-[0_4px_6px_-1px_rgba(0,0,0,0.25),0_20px_40px_-12px_rgba(0,0,0,0.45),0_0_0_1px_hsl(var(--border)/0.4),0_32px_64px_-24px_hsl(var(--primary)/0.18)]",
+          "transition-[transform,box-shadow,border-color] duration-500 ease-[cubic-bezier(0.16,1,0.3,1)]",
+          "motion-safe:group-hover:-translate-y-2 motion-safe:group-hover:scale-[1.012]",
+          "motion-safe:group-hover:border-primary/45",
+          "motion-safe:group-hover:shadow-[0_8px_16px_-4px_rgba(0,0,0,0.35),0_32px_64px_-16px_rgba(0,0,0,0.55),0_0_0_1px_hsl(var(--primary)/0.35),0_0_72px_-8px_hsl(var(--primary)/0.42),0_0_120px_-24px_hsl(var(--accent)/0.25)]",
+        ].join(" ")}
+      >
+        {/* Hover shimmer sweep */}
+        <div
+          className="pointer-events-none absolute inset-0 overflow-hidden rounded-3xl opacity-0 transition-opacity duration-300 motion-safe:group-hover:opacity-100"
+          aria-hidden
+        >
+          <div className="absolute inset-0 motion-safe:group-hover:animate-card-shimmer">
+            <div className="absolute -inset-y-8 -left-1/2 w-1/2 h-[200%] bg-gradient-to-r from-transparent via-primary/15 to-transparent skew-x-[-18deg]" />
+          </div>
+        </div>
+
+        {/* Inner gradient bloom */}
+        <div
+          className="pointer-events-none absolute top-0 right-0 h-96 w-96 -mr-48 -mt-48 rounded-full bg-gradient-to-br from-primary/8 to-accent/8 blur-3xl transition-all duration-700 motion-safe:group-hover:from-primary/18 motion-safe:group-hover:to-accent/14 motion-safe:group-hover:scale-110"
+          aria-hidden
+        />
+
+        {/* Top edge highlight */}
+        <div
+          className="pointer-events-none absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-primary/50 to-transparent opacity-60 motion-safe:group-hover:opacity-100 transition-opacity duration-500"
+          aria-hidden
+        />
 
         <div className="relative z-10 p-8 md:p-12">
           {/* Header */}
@@ -202,7 +235,7 @@ export default function CreditImprovementCard({
                       style={{ animationDelay: `${0.3 + idx * 0.1}s` }}
                     >
                       <div className="relative flex flex-col items-center">
-                        <div className="w-8 h-8 bg-white border-2 border-primary rounded-full flex items-center justify-center relative z-10">
+                        <div className="w-8 h-8 bg-card border-2 border-primary rounded-full flex items-center justify-center relative z-10 shadow-sm transition-transform duration-500 motion-safe:group-hover:scale-110">
                           <step.icon className="w-4 h-4 text-primary" />
                         </div>
                       </div>

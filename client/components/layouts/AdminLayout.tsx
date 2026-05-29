@@ -26,10 +26,13 @@ import {
   Zap,
   UserCog,
   CreditCard,
+  Layers,
   Lock,
   ClipboardList,
   CalendarDays,
+  Repeat,
 } from "lucide-react";
+import AdminThemeToggle from "@/components/AdminThemeToggle";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { adminLogout, fetchAdminMe } from "@/store/slices/adminAuthSlice";
 import { fetchSectionLocks } from "@/store/slices/adminSlice";
@@ -77,6 +80,18 @@ const NAV_GROUPS = [
         label: "Payments",
         icon: CreditCard,
         sectionKey: "payments",
+      },
+      {
+        to: "/admin/tradelines",
+        label: "Tradelines",
+        icon: Layers,
+        sectionKey: "tradelines",
+      },
+      {
+        to: "/admin/subscriptions",
+        label: "Subscriptions",
+        icon: Repeat,
+        sectionKey: "subscriptions",
       },
       {
         to: "/admin/calendar",
@@ -178,6 +193,15 @@ export default function AdminLayout({ children }: Props) {
     if (!token) navigate("/admin/login", { replace: true });
   }, [token, navigate]);
 
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [mobileOpen]);
+
   // Build a quick lookup: sectionKey → is_locked
   const lockedKeys = new Set(
     sectionLocks.filter((l) => l.is_locked).map((l) => l.section_key),
@@ -210,7 +234,7 @@ export default function AdminLayout({ children }: Props) {
   const fullName = `${user?.first_name ?? ""} ${user?.last_name ?? ""}`.trim();
 
   return (
-    <div className="h-screen overflow-hidden flex bg-background">
+    <div className="h-[100dvh] overflow-hidden flex bg-background w-full max-w-[100vw]">
       {/* Mobile overlay */}
       {mobileOpen && (
         <div
@@ -223,7 +247,7 @@ export default function AdminLayout({ children }: Props) {
       <aside
         className={[
           "fixed md:relative top-0 left-0 z-30 h-full flex flex-col shrink-0",
-          "bg-[#11182a] border-r border-white/[0.07]",
+          "bg-[#0b0f1a] border-r border-white/[0.07]",
           "transition-[width,transform] duration-300 ease-in-out overflow-hidden",
           mobileOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0",
           "w-72",
@@ -242,7 +266,7 @@ export default function AdminLayout({ children }: Props) {
           >
             {!collapsed && (
               <img
-                src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white_blue_colored.png"
+                src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white.png"
                 alt="Optimum Credit"
                 className="h-5 w-auto min-w-0"
               />
@@ -413,6 +437,7 @@ export default function AdminLayout({ children }: Props) {
               </div>
               {/* Divider */}
               <div className="h-px bg-white/[0.07] mx-3" />
+              <AdminThemeToggle />
               {/* Logout */}
               <button
                 onClick={handleLogout}
@@ -423,7 +448,7 @@ export default function AdminLayout({ children }: Props) {
               </button>
             </div>
           ) : (
-            <div className="flex flex-col items-center gap-1.5">
+            <div className="flex flex-col items-center gap-1.5 w-full">
               <div
                 title={`${fullName} — Log out`}
                 onClick={handleLogout}
@@ -431,6 +456,7 @@ export default function AdminLayout({ children }: Props) {
               >
                 {initials}
               </div>
+              <AdminThemeToggle collapsed />
               <button
                 onClick={handleLogout}
                 title="Log out"
@@ -446,7 +472,7 @@ export default function AdminLayout({ children }: Props) {
       {/* ── Main area ───────────────────────────────────────── */}
       <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
         {/* Mobile top bar */}
-        <header className="md:hidden shrink-0 z-20 flex items-center justify-between bg-[#11182a] border-b border-white/[0.07] px-4 h-14">
+        <header className="md:hidden shrink-0 z-20 flex items-center justify-between bg-[#0b0f1a] border-b border-white/[0.07] px-4 h-14">
           <Link to="/admin" className="flex items-center gap-2">
             <div className="w-7 h-7 bg-gradient-to-br from-primary to-primary-600 rounded-lg flex items-center justify-center shadow-sm">
               <ShieldCheck className="w-4 h-4 text-white" />
@@ -455,26 +481,31 @@ export default function AdminLayout({ children }: Props) {
               Optimum Admin
             </span>
           </Link>
-          <button
-            onClick={() => setMobileOpen(!mobileOpen)}
-            className="p-2 rounded-lg hover:bg-white/[0.08] text-slate-300 transition-colors"
-            aria-label="Toggle menu"
-          >
-            {mobileOpen ? (
-              <X className="w-5 h-5" />
-            ) : (
-              <Menu className="w-5 h-5" />
-            )}
-          </button>
+          <div className="flex items-center gap-1">
+            <AdminThemeToggle compact className="!w-auto" />
+            <button
+              onClick={() => setMobileOpen(!mobileOpen)}
+              className="p-2 rounded-lg hover:bg-white/[0.08] text-slate-300 transition-colors"
+              aria-label="Toggle menu"
+            >
+              {mobileOpen ? (
+                <X className="w-5 h-5" />
+              ) : (
+                <Menu className="w-5 h-5" />
+              )}
+            </button>
+          </div>
         </header>
 
-        <main className="flex-1 overflow-y-auto">
+        <main className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden overscroll-y-contain">
           {!sectionLocksInitialized ? (
             <div className="flex items-center justify-center h-full">
               <div className="w-6 h-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
             </div>
           ) : (
-            <div className="px-5 sm:px-7 lg:px-10 py-6 md:py-8">{children}</div>
+            <div className="app-page px-4 sm:px-6 lg:px-10 py-5 sm:py-6 md:py-8">
+              {children}
+            </div>
           )}
         </main>
       </div>

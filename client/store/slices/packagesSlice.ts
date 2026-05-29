@@ -5,10 +5,13 @@ import type {
   CreditPackage,
   RegistrationPayload,
   RegistrationResponse,
+  TradelineProduct,
 } from "@shared/api";
 
 interface PackagesState {
   packages: CreditPackage[];
+  tradelineProducts: TradelineProduct[];
+  tradelineLoading: boolean;
   loading: boolean;
   registration: RegistrationResponse | null;
   registering: boolean;
@@ -19,6 +22,8 @@ interface PackagesState {
 
 const initialState: PackagesState = {
   packages: [],
+  tradelineProducts: [],
+  tradelineLoading: false,
   loading: false,
   registration: null,
   registering: false,
@@ -34,6 +39,13 @@ export const fetchPackages = createAsyncThunk<{ packages: CreditPackage[] }>(
     return data;
   },
 );
+
+export const fetchTradelineProducts = createAsyncThunk<{
+  products: TradelineProduct[];
+}>("packages/tradelineProducts", async () => {
+  const { data } = await api.get("/tradeline-products");
+  return data;
+});
 
 export const submitRegistration = createAsyncThunk<
   RegistrationResponse,
@@ -99,6 +111,17 @@ const slice = createSlice({
     });
     b.addCase(fetchPackages.rejected, (s) => {
       s.loading = false;
+    });
+
+    b.addCase(fetchTradelineProducts.pending, (s) => {
+      s.tradelineLoading = true;
+    });
+    b.addCase(fetchTradelineProducts.fulfilled, (s, a) => {
+      s.tradelineLoading = false;
+      s.tradelineProducts = a.payload.products;
+    });
+    b.addCase(fetchTradelineProducts.rejected, (s) => {
+      s.tradelineLoading = false;
     });
 
     b.addCase(submitRegistration.pending, (s) => {

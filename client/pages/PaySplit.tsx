@@ -224,7 +224,7 @@ export default function PaySplit() {
   // ── Success screen ────────────────────────────────────────────────────────
   if (success) {
     return (
-      <div className="min-h-screen bg-background flex items-center justify-center p-4">
+      <div className="min-h-[100dvh] bg-background w-full max-w-[100vw] overflow-x-hidden flex items-center justify-center p-4">
         <div className="w-full max-w-md text-center space-y-5">
           <div className="w-20 h-20 rounded-full bg-accent/15 flex items-center justify-center mx-auto">
             <CheckCircle2 className="w-10 h-10 text-accent" />
@@ -263,7 +263,7 @@ export default function PaySplit() {
   // ── Error / expired screen ─────────────────────────────────────────────────
   if (loadError) {
     return (
-      <div className="min-h-screen bg-background flex items-center justify-center p-4">
+      <div className="min-h-[100dvh] bg-background w-full max-w-[100vw] overflow-x-hidden flex items-center justify-center p-4">
         <div className="w-full max-w-md text-center space-y-4">
           <div className="w-16 h-16 rounded-full bg-destructive/10 flex items-center justify-center mx-auto">
             <AlertCircle className="w-8 h-8 text-destructive" />
@@ -280,7 +280,7 @@ export default function PaySplit() {
   // ── Loading ────────────────────────────────────────────────────────────────
   if (!info) {
     return (
-      <div className="min-h-screen bg-background flex items-center justify-center">
+      <div className="min-h-[100dvh] bg-background w-full max-w-[100vw] overflow-x-hidden flex items-center justify-center">
         <Loader2 className="w-8 h-8 animate-spin text-primary" />
       </div>
     );
@@ -290,7 +290,7 @@ export default function PaySplit() {
 
   // ── Payment form ───────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-background flex items-center justify-center p-4">
+    <div className="min-h-[100dvh] bg-background w-full max-w-[100vw] overflow-x-hidden flex items-center justify-center p-4">
       <div className="w-full max-w-md space-y-6">
         {/* Brand header */}
         <div className="text-center space-y-1">

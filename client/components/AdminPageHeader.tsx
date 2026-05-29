@@ -27,14 +27,14 @@ export default function AdminPageHeader({
             {title}
           </h1>
           {description && (
-            <p className="text-sm text-muted-foreground mt-0.5 truncate">
+            <p className="text-sm text-muted-foreground mt-0.5 line-clamp-2 sm:line-clamp-none">
               {description}
             </p>
           )}
         </div>
       </div>
       {(badge || actions) && (
-        <div className="flex items-center gap-2.5 shrink-0 mt-0.5">
+        <div className="flex flex-wrap items-center gap-2.5 w-full sm:w-auto sm:shrink-0 mt-0.5">
           {badge}
           {actions}
         </div>

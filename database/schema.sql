@@ -103,6 +103,9 @@ CREATE TABLE IF NOT EXISTS `packages` (
   `subtitle` VARCHAR(150) DEFAULT NULL,
   `description` TEXT DEFAULT NULL,
   `price_cents` INT UNSIGNED NOT NULL,
+  `compare_price_cents` INT UNSIGNED DEFAULT NULL COMMENT 'Original/list price for display (strikethrough)',
+  `billing_interval` ENUM('one_time','monthly') NOT NULL DEFAULT 'one_time',
+  `checkout_type` ENUM('fixed_price','tradeline_picker','subscription') NOT NULL DEFAULT 'fixed_price',
   `duration_months` TINYINT UNSIGNED NOT NULL DEFAULT 5,
   `features_json` JSON DEFAULT NULL,
   `is_active` TINYINT(1) NOT NULL DEFAULT 1,
@@ -113,14 +116,82 @@ CREATE TABLE IF NOT EXISTS `packages` (
   KEY `idx_packages_active` (`is_active`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-INSERT INTO `packages` (`slug`,`name`,`subtitle`,`description`,`price_cents`,`duration_months`,`features_json`,`sort_order`) VALUES
-  ('standard','Standard Repair','For First-Time Filers','Perfect for those new to credit repair with a few negative items.',59900,5,
-   JSON_ARRAY('Credit report analysis','Up to 10 dispute letters','Monthly progress reports','Email support','Client portal access'),1),
-  ('complex','Complex Repair','Most Popular','Comprehensive repair for multiple negative items and complex situations.',89900,5,
-   JSON_ARRAY('Everything in Standard','Unlimited dispute letters','Bi-weekly progress updates','Phone & email support','Specialized negotiation','Collections handling'),2),
-  ('tradeline','Tradeline','Maximum Results','Premium service with authorized user accounts to boost your score.',129900,5,
-   JSON_ARRAY('Everything in Complex','Authorized user tradelines','Weekly priority calls','Personal credit coach','Hardship negotiations','Bankruptcy assistance'),3)
+INSERT INTO `packages` (`slug`,`name`,`subtitle`,`description`,`price_cents`,`compare_price_cents`,`billing_interval`,`checkout_type`,`duration_months`,`features_json`,`is_active`,`sort_order`) VALUES
+  ('standard','Standard Repair','Standard Credit Files','Best for standard credit files with common negative items. Covers the most common negative credit items and standard dispute needs in one flat payment.',149700,199000,'one_time','fixed_price',5,
+   JSON_ARRAY('Late Payments','Collections','Charge-Offs','Hard Inquiries','Personal Info Errors','Incorrect Balances','Duplicate Accounts'),1,1),
+  ('complex','Complex Repair','Serious Derogatory Items','Best for files with serious derogatory items requiring advanced strategy. Includes everything in Standard Repair plus more complex negative items that require a stronger approach.',249700,299000,'one_time','fixed_price',5,
+   JSON_ARRAY('Everything in Standard Repair','Chapter 7 & 13 Bankruptcies','Student Loans','Tax Liens','Medical Bills','Judgments & Foreclosures','Repossessions'),1,2),
+  ('tradeline','Tradeline','High-Impact Credit Boost','Select authorized-user tradelines below. Total is based on your selections.',0,NULL,'one_time','tradeline_picker',5,
+   JSON_ARRAY('Consultation — review your profile and recommend trade lines','Account Placement — authorized user on a seasoned account','Reporting — updates on your credit report in 30–60 days'),1,3),
+  ('inquiries_removal','Inquiries Removal','Expedited','Get negative inquiries removed from your credit report. We work to remove hard inquiries that negatively impact your credit score.',60000,80000,'one_time','fixed_price',1,
+   JSON_ARRAY('Fast & reliable hard inquiry removal','Increase your credit score','Professional dispute process with bureaus and creditors','Submit your request with credit report details','We handle all disputes with the bureaus','See results in 30–60 days on your updated report'),1,4),
+  ('peace_of_mind','Peace of Mind Plan','Exclusive for Optimum Clients','Unlimited support and priority service for clients who have completed credit repair. Eligibility: available after completing a credit repair service.',4999,8000,'monthly','subscription',1,
+   JSON_ARRAY('Unlimited credit repair support','Priority service and faster response times','Continuous credit monitoring & disputes','Hassle-free assistance — no extra charges'),1,5)
 ON DUPLICATE KEY UPDATE `name`=VALUES(`name`);
+
+CREATE TABLE IF NOT EXISTS `tradeline_products` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `slug` VARCHAR(80) NOT NULL UNIQUE,
+  `name` VARCHAR(120) NOT NULL,
+  `details` TEXT NOT NULL,
+  `price_cents` INT UNSIGNED NOT NULL,
+  `compare_price_cents` INT UNSIGNED DEFAULT NULL,
+  `is_active` TINYINT(1) NOT NULL DEFAULT 1,
+  `sort_order` INT NOT NULL DEFAULT 0,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_tradeline_products_active` (`is_active`, `sort_order`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT INTO `tradeline_products` (`slug`, `name`, `details`, `price_cents`, `compare_price_cents`, `sort_order`) VALUES
+  ('capital_one', 'CapitalOne', '$3000 credit limit, 4 years', 105000, 150000, 1),
+  ('barclays_aviator', 'Barclays Aviator', 'Limit $21200, Age: 3 Yrs, Statement Date: 16TH, Post Date: 19TH', 125000, 160000, 2),
+  ('pnc_bank', 'PNC Bank', 'Limit $17500, Age: 3 Yrs, Statement Date: 1ST, Post Date: 10TH', 125000, 160000, 3),
+  ('us_bank_2020_20k', '2020 US Bank 20K', 'Limit $20000, Age: 5 Yrs, Statement/Closing Date: 3rd', 192500, 240000, 4),
+  ('chase_2022_18k', '2022 Chase 18K', 'Limit $18000, Almost 3 years, Statement/Closing Date: 18th', 175000, 220000, 5),
+  ('capital_one_2022_13_5k', '2022 CapitalOne 13.5K', '$13,500 credit limit, 3 years History, Closing 2nd', 165000, 220000, 6),
+  ('us_bank_2015_20k', '2015 US BANK 20k', 'Limit $20000, Age: 10.5 Yrs, Statement/Closing Date: 1ST', 207500, 250000, 7),
+  ('us_bank_2019_16_2k', '2019 US Bank 16.2K', 'Limit $16200, Age: 6.5 Yrs, Statement/Closing Date: 2nd', 189500, 220000, 8)
+ON DUPLICATE KEY UPDATE `name`=VALUES(`name`);
+
+CREATE TABLE IF NOT EXISTS `client_tradeline_selections` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `client_id` INT UNSIGNED NOT NULL,
+  `payment_id` INT UNSIGNED NOT NULL,
+  `tradeline_product_id` INT UNSIGNED NOT NULL,
+  `product_name` VARCHAR(120) NOT NULL,
+  `product_details` TEXT NOT NULL,
+  `price_cents` INT UNSIGNED NOT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_tradeline_sel_client` (`client_id`),
+  KEY `idx_tradeline_sel_payment` (`payment_id`),
+  CONSTRAINT `fk_tradeline_sel_client` FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_tradeline_sel_payment` FOREIGN KEY (`payment_id`) REFERENCES `payments`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_tradeline_sel_product` FOREIGN KEY (`tradeline_product_id`) REFERENCES `tradeline_products`(`id`) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `client_subscriptions` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `client_id` INT UNSIGNED NOT NULL,
+  `package_id` INT UNSIGNED NOT NULL,
+  `anet_subscription_id` VARCHAR(64) NOT NULL,
+  `status` ENUM('active','cancelled','suspended','expired') NOT NULL DEFAULT 'active',
+  `amount_cents` INT UNSIGNED NOT NULL,
+  `billing_interval` ENUM('monthly') NOT NULL DEFAULT 'monthly',
+  `started_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `cancelled_at` DATETIME DEFAULT NULL,
+  `next_billing_at` DATE DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_client_sub_anet` (`anet_subscription_id`),
+  KEY `idx_client_sub_client` (`client_id`),
+  KEY `idx_client_sub_status` (`status`),
+  CONSTRAINT `fk_client_sub_client` FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_client_sub_package` FOREIGN KEY (`package_id`) REFERENCES `packages`(`id`) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================================
 -- CLIENTS (replaces placeholder `users`)

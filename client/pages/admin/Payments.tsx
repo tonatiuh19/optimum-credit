@@ -444,7 +444,7 @@ function TransactionsTab() {
           </div>
           <div className="flex gap-2 shrink-0">
             <Select value={statusFilter} onValueChange={setStatusFilter}>
-              <SelectTrigger className="w-[150px]">
+              <SelectTrigger className="w-full sm:w-[150px]">
                 <Filter className="w-3.5 h-3.5 mr-1.5 text-muted-foreground" />
                 <SelectValue placeholder="Status" />
               </SelectTrigger>
@@ -458,7 +458,7 @@ function TransactionsTab() {
               </SelectContent>
             </Select>
             <Select value={providerFilter} onValueChange={setProviderFilter}>
-              <SelectTrigger className="w-[160px]">
+              <SelectTrigger className="w-full sm:w-[160px]">
                 <Wallet className="w-3.5 h-3.5 mr-1.5 text-muted-foreground" />
                 <SelectValue placeholder="Provider" />
               </SelectTrigger>
@@ -1623,7 +1623,7 @@ function CouponsTab() {
               value={statusFilter}
               onValueChange={(v) => setStatusFilter(v as typeof statusFilter)}
             >
-              <SelectTrigger className="w-[140px]">
+              <SelectTrigger className="w-full sm:w-[140px]">
                 <Filter className="w-3.5 h-3.5 mr-1.5 text-muted-foreground" />
                 <SelectValue />
               </SelectTrigger>

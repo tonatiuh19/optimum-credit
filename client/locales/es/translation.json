@@ -56,7 +56,9 @@
     "subheading": "Elige el paquete que se adapte a tus necesidades. Sin cargos ocultos, sin sorpresas.",
     "unavailable": "Paquetes no disponibles. Por favor intenta más tarde.",
     "popular": "Más Popular",
-    "perService": "por servicio • {{months}} meses",
+    "onePayment": "un solo pago",
+    "perMonth": "/mes",
+    "perService": "un solo pago",
     "selectPlan": "Seleccionar Plan"
   },
   "testimonials": {
@@ -68,12 +70,18 @@
     "stepChoosePlan": "Elige tu plan",
     "stepYourInfo": "Tus datos y pago",
     "planHeading": "Elige el plan que mejor se adapte a tus metas",
-    "planSubheading": "Todos los planes incluyen disputas ilimitadas, acceso 24/7 al portal y cancelación gratuita.",
+    "planSubheading": "Un solo pago por plan de reparación. Pago seguro y acceso 24/7 al portal incluidos.",
     "popular": "Más Popular",
-    "oneTime": "único pago",
+    "expedited": "Expedito",
+    "oneTime": "un solo pago",
     "selected": "Seleccionado",
     "select": "Seleccionar",
     "continue": "Continuar →",
+    "tradelineCustomPricing": "Elige tus tradelines abajo",
+    "tradelineBadge": "A la carta",
+    "tradelinePickerTitle": "Selecciona tradelines",
+    "tradelinePickerHint": "Elige una o más tradelines. El total se actualiza al seleccionar.",
+    "tradelineSelectedTotal": "{{count}} seleccionadas · ${{total}} total",
     "infoHeading": "Cuéntanos sobre ti",
     "firstName": "Nombre",
     "lastName": "Apellido",
@@ -297,7 +305,9 @@
     "payments": "Mis Pagos",
     "welcomeBack": "Bienvenido",
     "portal": "Portal",
-    "signOut": "Cerrar sesión"
+    "signOut": "Cerrar sesión",
+    "themeLight": "Modo claro",
+    "themeDark": "Modo oscuro"
   },
   "payments": {
     "pageTitle": "Mis Pagos",
@@ -312,6 +322,21 @@
     "noScheduledPayments": "Sin pagos programados.",
     "payNow": "Pagar Ahora",
     "dueDate": "Vence {{date}}"
+  },
+  "peaceOfMind": {
+    "notEligible": "Este plan está disponible después de completar tu programa de reparación de crédito.",
+    "active": "Tu suscripción Peace of Mind está activa",
+    "activeSince": "Desde {{date}}",
+    "cancel": "Cancelar suscripción",
+    "cardHeading": "Método de pago",
+    "cardName": "Nombre en la tarjeta",
+    "subscribe": "Suscribirme ahora",
+    "subscribeFailed": "No se pudo iniciar la suscripción. Intenta de nuevo.",
+    "cancelFailed": "No se pudo cancelar la suscripción.",
+    "cardError": "Ingresa datos de tarjeta válidos.",
+    "paymentLibraryError": "No se cargó la pasarela de pago. Actualiza la página.",
+    "subscribeWithCardOnFile": "Suscribirme con la tarjeta guardada",
+    "orEnterNewCard": "O ingresa una tarjeta nueva abajo"
   },
   "tasks": {
     "pageTitle": "Mis Tareas",

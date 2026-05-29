@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import ClientPageHeader from "@/components/ClientPageHeader";
+import PeaceOfMindSubscribe from "@/components/PeaceOfMindSubscribe";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
   fetchClientPayments,
@@ -150,6 +151,25 @@ function PaymentCard({ payment }: { payment: ClientPayment }) {
           </span>
         </div>
       </div>
+
+      {payment.tradeline_items && payment.tradeline_items.length > 0 && (
+        <div className="mt-3 pt-3 border-t border-border/60 space-y-1.5">
+          <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+            Tradelines
+          </p>
+          {payment.tradeline_items.map((item) => (
+            <div
+              key={item.id}
+              className="flex items-start justify-between gap-2 text-xs"
+            >
+              <span className="text-foreground">{item.product_name}</span>
+              <span className="text-muted-foreground shrink-0">
+                {fmt(item.price_cents)}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Coupon badge */}
       {payment.coupon_code && (
@@ -322,6 +342,8 @@ export default function ClientPayments() {
         title={t("payments.pageTitle")}
         description={t("payments.pageDesc")}
       />
+
+      <PeaceOfMindSubscribe />
 
       {/* Summary strip */}
       {!paymentsLoading && (payments.length > 0 || splits.length > 0) && (

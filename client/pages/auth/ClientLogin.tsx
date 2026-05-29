@@ -20,6 +20,7 @@ import { useTranslation } from "react-i18next";
 import PageMeta from "@/components/PageMeta";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import OtpInput from "@/components/OtpInput";
+import ThemeToggle from "@/components/ThemeToggle";
 import {
   requestClientOtp,
   verifyClientOtp,
@@ -81,7 +82,7 @@ export default function ClientLogin() {
   });
 
   return (
-    <div className="h-screen overflow-hidden flex">
+    <div className="h-[100dvh] overflow-hidden flex w-full max-w-[100vw]">
       <PageMeta
         title="Client Portal Login"
         description="Log in to your Optimum Credit client portal to track your credit repair progress, view documents, and message your team."
@@ -98,18 +99,27 @@ export default function ClientLogin() {
               className="flex items-center transition-opacity hover:opacity-80"
             >
               <img
-                src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white_blue_colored.png"
+                src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_dark.png"
                 alt="Optimum Credit"
-                className="h-8 w-auto"
+                className="h-8 w-auto dark:hidden"
+              />
+              <img
+                src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white.png"
+                alt=""
+                aria-hidden
+                className="h-8 w-auto hidden dark:block"
               />
             </Link>
-            <Link
-              to="/"
-              className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
-            >
-              <ArrowLeft className="w-3.5 h-3.5" />
-              Back
-            </Link>
+            <div className="flex items-center gap-2">
+              <ThemeToggle zone="portal" compact />
+              <Link
+                to="/"
+                className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                Back
+              </Link>
+            </div>
           </div>
         </header>
 

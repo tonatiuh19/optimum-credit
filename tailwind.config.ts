@@ -165,6 +165,14 @@ export default {
           "0%": { transform: "translateX(0)" },
           "100%": { transform: "translateX(-50%)" },
         },
+        "card-shimmer": {
+          "0%": { transform: "translateX(-100%) skewX(-12deg)" },
+          "100%": { transform: "translateX(100%) skewX(-12deg)" },
+        },
+        "card-glow": {
+          "0%, 100%": { opacity: "0.35" },
+          "50%": { opacity: "0.65" },
+        },
       },
       animation: {
         "accordion-down": "accordion-down 0.2s ease-out",
@@ -177,6 +185,8 @@ export default {
         "pulse-glow": "pulse-glow 2s ease-in-out infinite",
         "gradient-shift": "gradient-shift 3s ease infinite",
         ticker: "ticker 28s linear infinite",
+        "card-shimmer": "card-shimmer 1.1s ease-in-out",
+        "card-glow": "card-glow 3s ease-in-out infinite",
       },
     },
   },

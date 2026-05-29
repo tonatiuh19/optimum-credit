@@ -17,6 +17,7 @@ import PageMeta from "@/components/PageMeta";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { requestAdminOtp, verifyAdminOtp } from "@/store/slices/adminAuthSlice";
 import OtpInput from "@/components/OtpInput";
+import AdminThemeToggle from "@/components/AdminThemeToggle";
 
 const VIDEO_URL =
   "https://disruptinglabs.com/data/optimum/assets/videos/12894328-sd_540_960_24fps.mp4";
@@ -65,7 +66,7 @@ export default function AdminLogin() {
   });
 
   return (
-    <div className="h-screen overflow-hidden flex">
+    <div className="h-[100dvh] overflow-hidden flex w-full max-w-[100vw]">
       <PageMeta
         title="Staff Console"
         description="Secure admin login for Optimum Credit staff."
@@ -82,18 +83,27 @@ export default function AdminLogin() {
               className="flex items-center transition-opacity hover:opacity-80"
             >
               <img
-                src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white_blue_colored.png"
+                src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_dark.png"
                 alt="Optimum Credit"
-                className="h-8 w-auto"
+                className="h-8 w-auto dark:hidden"
+              />
+              <img
+                src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white.png"
+                alt=""
+                aria-hidden
+                className="h-8 w-auto hidden dark:block"
               />
             </Link>
-            <Link
-              to="/"
-              className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
-            >
-              <ArrowLeft className="w-3.5 h-3.5" />
-              Back
-            </Link>
+            <div className="flex items-center gap-2">
+              <AdminThemeToggle compact className="!text-muted-foreground hover:!text-foreground hover:!bg-muted" />
+              <Link
+                to="/"
+                className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                Back
+              </Link>
+            </div>
           </div>
         </header>
 

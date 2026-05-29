@@ -19,6 +19,7 @@ import PageMeta, {
 import { useTranslation } from "react-i18next";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { fetchPackages } from "@/store/slices/packagesSlice";
+import PackagesPlanGrid from "@/components/PackagesPlanGrid";
 
 export default function Index() {
   const { t } = useTranslation();
@@ -33,7 +34,7 @@ export default function Index() {
   }, [dispatch]);
 
   return (
-    <div className="w-full">
+    <div className="w-full max-w-[100vw] overflow-x-hidden">
       <PageMeta
         title="Professional Credit Repair"
         description="Optimum Credit removes negative items, resolves disputes, and improves your credit score. Trusted by 15,000+ clients with a 98% success rate and average 140-point increase."
@@ -368,89 +369,12 @@ export default function Index() {
             </p>
           </div>
 
-          {/* Packages Grid */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-5xl mx-auto">
-            {packagesLoading ? (
-              <div className="col-span-3 flex justify-center py-16">
-                <Loader2 className="w-8 h-8 animate-spin text-primary" />
-              </div>
-            ) : packages.length === 0 ? (
-              <div className="col-span-3 text-center py-16 text-muted-foreground">
-                {t("packages.unavailable")}
-              </div>
-            ) : (
-              packages.map((pkg, idx) => {
-                const isPopular = idx === 1;
-                const price = `$${(pkg.price_cents / 100).toLocaleString()}`;
-                const features: string[] = Array.isArray(pkg.features_json)
-                  ? pkg.features_json
-                  : typeof pkg.features_json === "string"
-                    ? JSON.parse(pkg.features_json)
-                    : [];
-                return (
-                  <div
-                    key={pkg.slug}
-                    className={`card-base overflow-hidden transition-all duration-300 cursor-pointer ${
-                      isPopular ? "md:scale-105 border-primary shadow-lg" : ""
-                    }`}
-                    onClick={() => navigate(`/register?plan=${pkg.slug}`)}
-                  >
-                    {isPopular && (
-                      <div className="bg-gradient-to-r from-primary to-primary-600 text-primary-foreground py-2 px-4 text-center text-sm font-semibold">
-                        {t("packages.popular")}
-                      </div>
-                    )}
-
-                    <div className="p-6 md:p-8">
-                      <h3 className="text-2xl font-bold mb-1">{pkg.name}</h3>
-                      <p className="text-sm text-muted-foreground mb-4">
-                        {pkg.subtitle}
-                      </p>
-
-                      <div className="mb-6">
-                        <div className="text-4xl font-bold text-foreground mb-1">
-                          {price}
-                        </div>
-                        <p className="text-sm text-muted-foreground">
-                          {t("packages.perService", {
-                            months: pkg.duration_months,
-                          })}
-                        </p>
-                      </div>
-
-                      <p className="text-sm text-muted-foreground mb-6">
-                        {pkg.description}
-                      </p>
-
-                      <button
-                        className={`w-full h-12 rounded-lg font-semibold transition-all duration-200 flex items-center justify-center gap-2 ${
-                          isPopular ? "btn-primary" : "btn-secondary"
-                        }`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          navigate(`/register?plan=${pkg.slug}`);
-                        }}
-                      >
-                        {t("packages.selectPlan")}
-                        <ArrowRight className="w-4 h-4" />
-                      </button>
-
-                      <div className="mt-8 space-y-3">
-                        {features.map((benefit, i) => (
-                          <div key={i} className="flex items-start gap-3">
-                            <CheckCircle className="w-5 h-5 text-accent flex-shrink-0 mt-0.5" />
-                            <span className="text-sm text-muted-foreground">
-                              {benefit}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })
-            )}
-          </div>
+          <PackagesPlanGrid
+            packages={packages}
+            loading={packagesLoading}
+            mode="marketing"
+            onSelectPlan={(slug) => navigate(`/register?plan=${slug}`)}
+          />
         </div>
       </section>
 

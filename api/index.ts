@@ -503,12 +503,12 @@ ${opts.preheader ? `<div style="display:none;max-height:0;overflow:hidden;">${es
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4f5f9;padding:40px 16px;">
   <tr><td align="center">
     <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 8px 24px rgba(15,23,42,0.06);">
-      <tr><td style="background:#11182a;padding:24px 32px;">
+      <tr><td style="background:#121829;padding:24px 32px;">
         <table width="100%"><tr>
           <td>
-            <img src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white_blue_colored.png" alt="Optimum Credit" height="40" style="display:block;height:40px;width:auto;border:0;" />
+            <img src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white.png" alt="Optimum Credit" height="40" style="display:block;height:40px;width:auto;border:0;" />
           </td>
-          <td align="right" style="font-size:12px;color:#0098ff;font-weight:600;letter-spacing:0.03em;">${tagline}</td>
+          <td align="right" style="font-size:12px;color:#C0A06A;font-weight:600;letter-spacing:0.03em;">${tagline}</td>
         </tr></table>
       </td></tr>
       <tr><td style="padding:32px;">${opts.bodyHtml}</td></tr>
@@ -1244,6 +1244,303 @@ async function chargeCard(opts: {
   return { transactionId, customerProfileId, customerPaymentProfileId };
 }
 
+function anetDateYmd(d = new Date()): string {
+  return d.toISOString().slice(0, 10);
+}
+
+async function createARBSubscription(opts: {
+  amountDollars: string;
+  dataDescriptor: string;
+  dataValue: string;
+  clientId: number;
+  email: string;
+  firstName: string;
+  lastName: string;
+  subscriptionName: string;
+  startDate?: string;
+}): Promise<{ subscriptionId: string }> {
+  const payload = {
+    ARBCreateSubscriptionRequest: {
+      merchantAuthentication: {
+        name: process.env.AUTHORIZENET_API_LOGIN_ID,
+        transactionKey: process.env.AUTHORIZENET_TRANSACTION_KEY,
+      },
+      subscription: {
+        name: opts.subscriptionName.slice(0, 50),
+        paymentSchedule: {
+          interval: { length: "1", unit: "months" },
+          startDate: opts.startDate ?? anetDateYmd(),
+          totalOccurrences: "9999",
+        },
+        amount: opts.amountDollars,
+        payment: {
+          opaqueData: {
+            dataDescriptor: opts.dataDescriptor,
+            dataValue: opts.dataValue,
+          },
+        },
+        billTo: {
+          firstName: opts.firstName,
+          lastName: opts.lastName,
+          email: opts.email,
+        },
+        customer: {
+          type: "individual",
+          id: String(opts.clientId),
+          email: opts.email,
+        },
+      },
+    },
+  };
+
+  const resp = await fetch(AUTHORIZENET_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = (await resp.json()) as any;
+
+  console.log(
+    "[anet:arb-create]",
+    JSON.stringify(
+      {
+        resultCode: data?.messages?.resultCode,
+        subscriptionId: data?.subscriptionId,
+        messages: data?.messages?.message,
+      },
+      null,
+      2,
+    ),
+  );
+
+  if (data?.messages?.resultCode !== "Ok" || !data?.subscriptionId) {
+    const errText =
+      data?.messages?.message?.[0]?.text || "Subscription creation failed";
+    throw new Error(errText);
+  }
+
+  return { subscriptionId: String(data.subscriptionId) };
+}
+
+async function cancelARBSubscription(
+  subscriptionId: string,
+): Promise<void> {
+  const payload = {
+    ARBCancelSubscriptionRequest: {
+      merchantAuthentication: {
+        name: process.env.AUTHORIZENET_API_LOGIN_ID,
+        transactionKey: process.env.AUTHORIZENET_TRANSACTION_KEY,
+      },
+      subscriptionId,
+    },
+  };
+
+  const resp = await fetch(AUTHORIZENET_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = (await resp.json()) as any;
+
+  console.log(
+    "[anet:arb-cancel]",
+    JSON.stringify(
+      {
+        resultCode: data?.messages?.resultCode,
+        messages: data?.messages?.message,
+      },
+      null,
+      2,
+    ),
+  );
+
+  if (data?.messages?.resultCode !== "Ok") {
+    const errText =
+      data?.messages?.message?.[0]?.text || "Subscription cancellation failed";
+    throw new Error(errText);
+  }
+}
+
+async function createARBSubscriptionFromProfile(opts: {
+  customerProfileId: string;
+  customerPaymentProfileId: string;
+  amountDollars: string;
+  clientId: number;
+  email: string;
+  subscriptionName: string;
+  startDate?: string;
+}): Promise<{ subscriptionId: string }> {
+  const payload = {
+    ARBCreateSubscriptionRequest: {
+      merchantAuthentication: {
+        name: process.env.AUTHORIZENET_API_LOGIN_ID,
+        transactionKey: process.env.AUTHORIZENET_TRANSACTION_KEY,
+      },
+      subscription: {
+        name: opts.subscriptionName.slice(0, 50),
+        paymentSchedule: {
+          interval: { length: "1", unit: "months" },
+          startDate: opts.startDate ?? anetDateYmd(),
+          totalOccurrences: "9999",
+        },
+        amount: opts.amountDollars,
+        profile: {
+          customerProfileId: opts.customerProfileId,
+          customerPaymentProfileId: opts.customerPaymentProfileId,
+        },
+        customer: {
+          type: "individual",
+          id: String(opts.clientId),
+          email: opts.email,
+        },
+      },
+    },
+  };
+
+  const resp = await fetch(AUTHORIZENET_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = (await resp.json()) as any;
+
+  if (data?.messages?.resultCode !== "Ok" || !data?.subscriptionId) {
+    const errText =
+      data?.messages?.message?.[0]?.text ||
+      "Subscription creation failed (stored card)";
+    throw new Error(errText);
+  }
+
+  return { subscriptionId: String(data.subscriptionId) };
+}
+
+async function sendPeaceOfMindSubscriptionEmail(
+  clientId: number,
+  kind: "started" | "cancelled",
+): Promise<void> {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT first_name, email, preferred_language FROM clients WHERE id = ? LIMIT 1`,
+    [clientId],
+  );
+  if (rows.length === 0 || !rows[0].email) return;
+  const firstName = String(rows[0].first_name || "there");
+  const lang = rows[0].preferred_language === "es" ? "es" : "en";
+  const isEs = lang === "es";
+  const appUrl = process.env.APP_URL || "http://localhost:8080";
+
+  const body =
+    kind === "started"
+      ? isEs
+        ? `<h1 style="margin:0 0 16px;font-size:24px;font-weight:800;color:#0f172a;">Peace of Mind activado</h1>
+           <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">Hola ${escapeHtml(firstName)}, tu suscripción Peace of Mind ($49.99/mes) está activa. Tienes soporte ilimitado y prioridad en el portal.</p>
+           ${emailButton(`${appUrl}/portal/payments`, "Ver mi suscripción")}`
+        : `<h1 style="margin:0 0 16px;font-size:24px;font-weight:800;color:#0f172a;">Peace of Mind activated</h1>
+           <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">Hi ${escapeHtml(firstName)}, your Peace of Mind subscription ($49.99/month) is now active. You have unlimited support and priority service in your portal.</p>
+           ${emailButton(`${appUrl}/portal/payments`, "View subscription")}`
+      : isEs
+        ? `<h1 style="margin:0 0 16px;font-size:24px;font-weight:800;color:#0f172a;">Suscripción cancelada</h1>
+           <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">Hola ${escapeHtml(firstName)}, tu suscripción Peace of Mind ha sido cancelada. No se realizarán más cargos mensuales.</p>`
+        : `<h1 style="margin:0 0 16px;font-size:24px;font-weight:800;color:#0f172a;">Subscription cancelled</h1>
+           <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">Hi ${escapeHtml(firstName)}, your Peace of Mind subscription has been cancelled. No further monthly charges will be made.</p>`;
+
+  const subject = isEs
+    ? kind === "started"
+      ? "Peace of Mind — suscripción activa"
+      : "Peace of Mind — suscripción cancelada"
+    : kind === "started"
+      ? "Peace of Mind — subscription active"
+      : "Peace of Mind — subscription cancelled";
+
+  await sendEmail({
+    to: String(rows[0].email),
+    subject,
+    html: emailLayout({
+      title: subject,
+      bodyHtml: body,
+      lang,
+    }),
+  }).catch((e) =>
+    console.error("[email:peace-of-mind]", kind, e?.message ?? e),
+  );
+}
+
+async function fetchTradelineSelectionsForPayments(
+  paymentIds: number[],
+): Promise<Map<number, RowDataPacket[]>> {
+  const map = new Map<number, RowDataPacket[]>();
+  if (paymentIds.length === 0) return map;
+  const placeholders = paymentIds.map(() => "?").join(",");
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT id, payment_id, tradeline_product_id, product_name, product_details, price_cents, created_at
+     FROM client_tradeline_selections
+     WHERE payment_id IN (${placeholders})
+     ORDER BY id ASC`,
+    paymentIds,
+  );
+  for (const r of rows) {
+    const pid = Number(r.payment_id);
+    if (!map.has(pid)) map.set(pid, []);
+    map.get(pid)!.push(r);
+  }
+  return map;
+}
+
+async function processMockRegistrationPayment(
+  clientId: number,
+  amountCents: number,
+  packageId: number,
+  metadata: Record<string, unknown> = {},
+): Promise<{ transactionId: string; paymentId: number }> {
+  const txnId = `txn_mock_${Date.now()}_${clientId}`;
+  const [payIns] = await pool.query<ResultSetHeader>(
+    `INSERT INTO payments (client_id, package_id, amount_cents, status, provider, provider_transaction_id, metadata_json)
+     VALUES (?, ?, ?, 'pending', 'authorize_net', ?, ?)`,
+    [clientId, packageId, amountCents, txnId, JSON.stringify(metadata)],
+  );
+  await markPaymentSucceeded(clientId, txnId);
+  return { transactionId: txnId, paymentId: payIns.insertId };
+}
+
+async function loadActiveTradelineProducts(
+  ids: number[],
+): Promise<RowDataPacket[]> {
+  if (ids.length === 0) return [];
+  const placeholders = ids.map(() => "?").join(",");
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT id, slug, name, details, price_cents, compare_price_cents
+     FROM tradeline_products
+     WHERE is_active = 1 AND id IN (${placeholders})
+     ORDER BY sort_order ASC`,
+    ids,
+  );
+  return rows;
+}
+
+async function insertTradelineSelections(
+  clientId: number,
+  paymentId: number,
+  products: RowDataPacket[],
+): Promise<void> {
+  if (products.length === 0) return;
+  const values = products
+    .map(() => "(?, ?, ?, ?, ?, ?)")
+    .join(", ");
+  const params = products.flatMap((p) => [
+    clientId,
+    paymentId,
+    p.id,
+    p.name,
+    p.details,
+    p.price_cents,
+  ]);
+  await pool.query<ResultSetHeader>(
+    `INSERT INTO client_tradeline_selections
+       (client_id, payment_id, tradeline_product_id, product_name, product_details, price_cents)
+     VALUES ${values}`,
+    params,
+  );
+}
+
 // ============================================================================
 // SHARED — payment success processing
 // ============================================================================
@@ -1352,7 +1649,8 @@ async function processAuthorizeNetPayment(
   dataValue: string,
   firstName: string,
   lastName: string,
-): Promise<{ transactionId: string }> {
+  metadata: Record<string, unknown> = {},
+): Promise<{ transactionId: string; paymentId: number }> {
   const result = await chargeCard({
     amountDollars: (amountCents / 100).toFixed(2),
     dataDescriptor,
@@ -1363,7 +1661,7 @@ async function processAuthorizeNetPayment(
     lastName,
   });
 
-  await pool.query<ResultSetHeader>(
+  const [payIns] = await pool.query<ResultSetHeader>(
     `INSERT INTO payments (client_id, package_id, amount_cents, status, provider, provider_transaction_id, metadata_json)
      VALUES (?, ?, ?, 'pending', 'authorize_net', ?, ?)`,
     [
@@ -1371,9 +1669,10 @@ async function processAuthorizeNetPayment(
       packageId,
       amountCents,
       result.transactionId,
-      JSON.stringify({}),
+      JSON.stringify(metadata),
     ],
   );
+  const paymentId = payIns.insertId;
 
   // Store Authorize.net customer/payment profile IDs so future charges can
   // reference the same customer and they appear in Authorize.net Manage Customers.
@@ -1389,7 +1688,7 @@ async function processAuthorizeNetPayment(
   }
 
   await markPaymentSucceeded(clientId, result.transactionId);
-  return result;
+  return { transactionId: result.transactionId, paymentId };
 }
 
 async function triggerReminderFlow(
@@ -2111,7 +2410,11 @@ function buildApp() {
   app.get("/api/packages", async (_req, res) => {
     try {
       const [rows] = await pool.query<RowDataPacket[]>(
-        "SELECT id, slug, name, subtitle, description, price_cents, duration_months, features_json, sort_order FROM packages WHERE is_active = 1 ORDER BY sort_order ASC",
+        `SELECT id, slug, name, subtitle, description, price_cents, compare_price_cents,
+                billing_interval, checkout_type, duration_months, features_json, sort_order
+         FROM packages
+         WHERE is_active = 1 AND checkout_type IN ('fixed_price', 'tradeline_picker')
+         ORDER BY sort_order ASC`,
       );
       res.json({ packages: rows });
     } catch (err: any) {
@@ -2119,6 +2422,87 @@ function buildApp() {
       res.status(503).json({
         error: "Service temporarily unavailable. Please try again shortly.",
       });
+    }
+  });
+
+  app.get("/api/tradeline-products", async (_req, res) => {
+    try {
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, slug, name, details, price_cents, compare_price_cents, sort_order
+         FROM tradeline_products
+         WHERE is_active = 1
+         ORDER BY sort_order ASC`,
+      );
+      res.json({ products: rows });
+    } catch (err: any) {
+      console.error("[/api/tradeline-products] DB error:", err?.message ?? err);
+      res.status(503).json({
+        error: "Service temporarily unavailable. Please try again shortly.",
+      });
+    }
+  });
+
+  // Authorize.net webhooks (ARB status, optional signature verification)
+  app.post("/api/webhooks/authorize-net", async (req, res) => {
+    try {
+      const rawBody =
+        (req as any).rawBody?.toString?.() ||
+        JSON.stringify(req.body ?? {});
+      const sigKey = process.env.ANET_WEBHOOK_SIGNATURE_KEY;
+      if (sigKey) {
+        const headerSig = String(
+          req.headers["x-anet-signature"] || "",
+        ).replace(/^sha512=/i, "");
+        const expected = crypto
+          .createHmac("sha512", sigKey)
+          .update(rawBody)
+          .digest("hex")
+          .toUpperCase();
+        if (headerSig && headerSig.toUpperCase() !== expected) {
+          console.warn("[anet:webhook] Invalid signature");
+          return res.status(401).json({ error: "Invalid signature" });
+        }
+      }
+
+      const payload = req.body ?? {};
+      const eventType = String(
+        payload.eventType || payload.event_type || "",
+      ).toLowerCase();
+      const subscriptionId = String(
+        payload.payload?.id ||
+          payload.payload?.subscriptionId ||
+          payload.subscriptionId ||
+          "",
+      );
+
+      if (subscriptionId && eventType.includes("subscription")) {
+        let newStatus: string | null = null;
+        if (
+          eventType.includes("cancel") ||
+          eventType.includes("terminat")
+        ) {
+          newStatus = "cancelled";
+        } else if (
+          eventType.includes("suspend") ||
+          eventType.includes("fail")
+        ) {
+          newStatus = "suspended";
+        }
+
+        if (newStatus) {
+          await pool.query<ResultSetHeader>(
+            `UPDATE client_subscriptions
+             SET status = ?, cancelled_at = IF(? = 'cancelled', NOW(), cancelled_at), updated_at = NOW()
+             WHERE anet_subscription_id = ? AND status = 'active'`,
+            [newStatus, newStatus, subscriptionId],
+          );
+        }
+      }
+
+      res.json({ ok: true });
+    } catch (err: any) {
+      console.error("[anet:webhook] error:", err?.message ?? err);
+      res.status(500).json({ error: "Webhook processing failed" });
     }
   });
 
@@ -2132,9 +2516,10 @@ function buildApp() {
       "email",
       "phone",
       "packageSlug",
-      "dataDescriptor",
-      "dataValue",
     ];
+    if (authorizeNetConfigured) {
+      required.push("dataDescriptor", "dataValue");
+    }
     for (const f of required) {
       if (!b[f] || String(b[f]).trim().length === 0) {
         return res.status(400).json({ error: `Missing field: ${f}` });
@@ -2153,12 +2538,40 @@ function buildApp() {
     }
 
     const [pkgs] = await pool.query<RowDataPacket[]>(
-      "SELECT id, name, price_cents FROM packages WHERE slug = ? AND is_active = 1 LIMIT 1",
+      `SELECT id, name, slug, price_cents, checkout_type
+       FROM packages WHERE slug = ? AND is_active = 1 LIMIT 1`,
       [b.packageSlug],
     );
     if (pkgs.length === 0)
       return res.status(400).json({ error: "Invalid package" });
     const pkg = pkgs[0];
+    const checkoutType = (pkg.checkout_type as string) || "fixed_price";
+
+    let tradelineProducts: RowDataPacket[] = [];
+    let chargeAmountCents = Number(pkg.price_cents);
+
+    if (checkoutType === "tradeline_picker") {
+      const rawIds = b.tradelineProductIds;
+      const ids = Array.isArray(rawIds)
+        ? [...new Set(rawIds.map((x: unknown) => Number(x)).filter((n) => n > 0))]
+        : [];
+      if (ids.length === 0) {
+        return res
+          .status(400)
+          .json({ error: "Select at least one tradeline to continue" });
+      }
+      tradelineProducts = await loadActiveTradelineProducts(ids);
+      if (tradelineProducts.length !== ids.length) {
+        return res.status(400).json({ error: "Invalid tradeline selection" });
+      }
+      chargeAmountCents = tradelineProducts.reduce(
+        (sum, p) => sum + Number(p.price_cents),
+        0,
+      );
+      if (chargeAmountCents <= 0) {
+        return res.status(400).json({ error: "Invalid tradeline total" });
+      }
+    }
 
     let affiliateId: number | null = null;
     if (b.affiliateCode) {
@@ -2173,7 +2586,6 @@ function buildApp() {
     let couponId: number | null = null;
     let discountCents = 0;
     let originalAmountCents: number | null = null;
-    let chargeAmountCents: number = pkg.price_cents as number;
 
     if (b.coupon_code) {
       const upperCode = String(b.coupon_code).toUpperCase().trim();
@@ -2188,7 +2600,7 @@ function buildApp() {
           (!c.valid_from || new Date(c.valid_from) <= now) &&
           (!c.expires_at || new Date(c.expires_at) >= now) &&
           (c.max_uses == null || Number(c.uses_count) < Number(c.max_uses)) &&
-          Number(pkg.price_cents) >= Number(c.min_amount_cents);
+          chargeAmountCents >= Number(c.min_amount_cents);
 
         if (isValid) {
           // Check package applicability
@@ -2208,16 +2620,16 @@ function buildApp() {
 
           if (pkgAllowed) {
             couponId = c.id as number;
-            originalAmountCents = pkg.price_cents as number;
+            originalAmountCents = chargeAmountCents;
             if (c.discount_type === "percentage") {
               discountCents = Math.round(
-                (Number(pkg.price_cents) * Number(c.discount_value)) / 100,
+                (chargeAmountCents * Number(c.discount_value)) / 100,
               );
             } else {
               discountCents = Number(c.discount_value);
             }
-            discountCents = Math.min(discountCents, Number(pkg.price_cents));
-            chargeAmountCents = Number(pkg.price_cents) - discountCents;
+            discountCents = Math.min(discountCents, chargeAmountCents);
+            chargeAmountCents = chargeAmountCents - discountCents;
           }
         }
       }
@@ -2227,13 +2639,10 @@ function buildApp() {
     // For re-attempts on pending_payment accounts, reuse the existing id.
     const tempClientId = existing.length > 0 ? (existing[0].id as number) : 0;
 
-    // 1. Charge card FIRST — no DB record written on failure
+    // 1. Charge card FIRST — no DB record written on failure (mock when ANet off)
     let chargeResult: Awaited<
       ReturnType<typeof processAuthorizeNetPayment>
     > | null = null;
-    if (!authorizeNetConfigured) {
-      return res.status(503).json({ error: "Payment provider not configured" });
-    }
 
     // We need a real clientId for Authorize.net metadata. For new clients we insert
     // with status='pending_payment', charge, then update to 'onboarding' — or rollback.
@@ -2265,17 +2674,36 @@ function buildApp() {
       isNewClient = true;
     }
 
+    const paymentMetadata: Record<string, unknown> =
+      checkoutType === "tradeline_picker"
+        ? {
+            checkout_type: "tradeline_picker",
+            tradeline_product_ids: tradelineProducts.map((p) => p.id),
+            tradeline_names: tradelineProducts.map((p) => p.name),
+          }
+        : {};
+
     try {
-      chargeResult = await processAuthorizeNetPayment(
-        clientId,
-        email,
-        chargeAmountCents,
-        pkg.id as number,
-        String(b.dataDescriptor),
-        String(b.dataValue),
-        String(b.firstName),
-        String(b.lastName),
-      );
+      if (authorizeNetConfigured) {
+        chargeResult = await processAuthorizeNetPayment(
+          clientId,
+          email,
+          chargeAmountCents,
+          pkg.id as number,
+          String(b.dataDescriptor),
+          String(b.dataValue),
+          String(b.firstName),
+          String(b.lastName),
+          paymentMetadata,
+        );
+      } else {
+        chargeResult = await processMockRegistrationPayment(
+          clientId,
+          chargeAmountCents,
+          pkg.id as number,
+          paymentMetadata,
+        );
+      }
     } catch (e: any) {
       // Payment failed — delete the newly inserted client so no ghost records
       if (isNewClient) {
@@ -2285,6 +2713,18 @@ function buildApp() {
         );
       }
       return res.status(402).json({ error: e.message || "Payment failed" });
+    }
+
+    if (
+      checkoutType === "tradeline_picker" &&
+      tradelineProducts.length > 0 &&
+      chargeResult?.paymentId
+    ) {
+      await insertTradelineSelections(
+        clientId,
+        chargeResult.paymentId,
+        tradelineProducts,
+      );
     }
 
     // ── Apply coupon to payment record + increment usage ────────────────────
@@ -2328,17 +2768,15 @@ function buildApp() {
     res.json({ ok: true });
   });
 
-  // Process a real Authorize.net payment via Accept.js nonce.
+  // Process a real Authorize.net payment via Accept.js nonce (legacy two-step flow).
   app.post("/api/registration/process-payment", async (req, res) => {
-    const { clientId, dataDescriptor, dataValue } = req.body || {};
-    if (!clientId || !dataDescriptor || !dataValue)
-      return res.status(400).json({ error: "Missing fields" });
-
-    if (!authorizeNetConfigured)
-      return res.status(503).json({ error: "Payment provider not configured" });
+    const { clientId, dataDescriptor, dataValue, tradelineProductIds } =
+      req.body || {};
+    if (!clientId) return res.status(400).json({ error: "Missing clientId" });
 
     const [rows] = await pool.query<RowDataPacket[]>(
-      `SELECT c.id, c.email, c.first_name, c.last_name, c.package_id, p.price_cents
+      `SELECT c.id, c.email, c.first_name, c.last_name, c.package_id,
+              p.price_cents, p.checkout_type
        FROM clients c LEFT JOIN packages p ON p.id = c.package_id
        WHERE c.id = ? LIMIT 1`,
       [Number(clientId)],
@@ -2346,18 +2784,70 @@ function buildApp() {
     if (rows.length === 0)
       return res.status(404).json({ error: "Client not found" });
     const client = rows[0];
+    const checkoutType = (client.checkout_type as string) || "fixed_price";
+
+    let tradelineProducts: RowDataPacket[] = [];
+    let amountCents = Number(client.price_cents);
+    if (checkoutType === "tradeline_picker") {
+      const ids = Array.isArray(tradelineProductIds)
+        ? [...new Set(tradelineProductIds.map((x: unknown) => Number(x)).filter((n) => n > 0))]
+        : [];
+      if (ids.length === 0) {
+        return res
+          .status(400)
+          .json({ error: "Select at least one tradeline to continue" });
+      }
+      tradelineProducts = await loadActiveTradelineProducts(ids);
+      if (tradelineProducts.length !== ids.length) {
+        return res.status(400).json({ error: "Invalid tradeline selection" });
+      }
+      amountCents = tradelineProducts.reduce(
+        (s, p) => s + Number(p.price_cents),
+        0,
+      );
+    }
+
+    const metadata: Record<string, unknown> =
+      checkoutType === "tradeline_picker"
+        ? {
+            checkout_type: "tradeline_picker",
+            tradeline_product_ids: tradelineProducts.map((p) => p.id),
+          }
+        : {};
 
     try {
-      await processAuthorizeNetPayment(
-        Number(clientId),
-        client.email as string,
-        client.price_cents as number,
-        client.package_id as number | null,
-        String(dataDescriptor),
-        String(dataValue),
-        client.first_name as string,
-        client.last_name as string,
-      );
+      let result: { transactionId: string; paymentId: number };
+      if (authorizeNetConfigured) {
+        if (!dataDescriptor || !dataValue) {
+          return res.status(400).json({ error: "Missing payment token" });
+        }
+        result = await processAuthorizeNetPayment(
+          Number(clientId),
+          client.email as string,
+          amountCents,
+          client.package_id as number | null,
+          String(dataDescriptor),
+          String(dataValue),
+          client.first_name as string,
+          client.last_name as string,
+          metadata,
+        );
+      } else {
+        result = await processMockRegistrationPayment(
+          Number(clientId),
+          amountCents,
+          client.package_id as number,
+          metadata,
+        );
+      }
+
+      if (tradelineProducts.length > 0) {
+        await insertTradelineSelections(
+          Number(clientId),
+          result.paymentId,
+          tradelineProducts,
+        );
+      }
     } catch (e: any) {
       return res.status(402).json({ error: e.message || "Payment failed" });
     }
@@ -2793,6 +3283,7 @@ function buildApp() {
           `SELECT
            p.id,
            pk.name                              AS package_name,
+           pk.slug                              AS package_slug,
            p.amount_cents,
            COALESCE(p.discount_cents, 0)        AS discount_cents,
            p.original_amount_cents,
@@ -2809,10 +3300,231 @@ function buildApp() {
          ORDER BY p.created_at DESC`,
           [clientId],
         );
-        res.json({ payments: rows });
+        const paymentIds = rows.map((r) => Number(r.id));
+        const selMap = await fetchTradelineSelectionsForPayments(paymentIds);
+        const payments = rows.map((r) => ({
+          ...r,
+          tradeline_items: selMap.get(Number(r.id)) ?? [],
+        }));
+        res.json({ payments });
       } catch (err) {
         console.error("GET /api/portal/payments error:", err);
         res.status(500).json({ error: "Failed to fetch payments" });
+      }
+    },
+  );
+
+  app.get(
+    "/api/portal/peace-of-mind",
+    requireClient,
+    async (req: AuthedRequest, res) => {
+      const clientId = req.auth!.id;
+      try {
+        const [clientRows] = await pool.query<RowDataPacket[]>(
+          `SELECT pipeline_stage, anet_customer_profile_id, anet_payment_profile_id
+           FROM clients WHERE id = ? LIMIT 1`,
+          [clientId],
+        );
+        if (clientRows.length === 0) {
+          return res.status(404).json({ error: "Client not found" });
+        }
+        const stage = clientRows[0].pipeline_stage as string;
+        const eligible = stage === "completed";
+        const hasStoredCard = !!(
+          clientRows[0].anet_customer_profile_id &&
+          clientRows[0].anet_payment_profile_id
+        );
+
+        const [pkgRows] = await pool.query<RowDataPacket[]>(
+          `SELECT id, slug, name, subtitle, description, price_cents, compare_price_cents,
+                  billing_interval, checkout_type, duration_months, features_json, sort_order
+           FROM packages
+           WHERE slug = 'peace_of_mind' AND is_active = 1
+           LIMIT 1`,
+        );
+        if (pkgRows.length === 0) {
+          return res.status(404).json({ error: "Plan not available" });
+        }
+
+        const [subRows] = await pool.query<RowDataPacket[]>(
+          `SELECT cs.id, cs.package_id, p.name AS package_name, p.slug AS package_slug,
+                  cs.anet_subscription_id, cs.status, cs.amount_cents, cs.billing_interval,
+                  cs.started_at, cs.cancelled_at, cs.next_billing_at
+           FROM client_subscriptions cs
+           JOIN packages p ON p.id = cs.package_id
+           WHERE cs.client_id = ? AND cs.status = 'active'
+           ORDER BY cs.id DESC
+           LIMIT 1`,
+          [clientId],
+        );
+
+        res.json({
+          package: pkgRows[0],
+          eligible,
+          eligibility_reason: eligible
+            ? undefined
+            : "Available after your credit repair program is completed.",
+          has_stored_card: hasStoredCard,
+          subscription: subRows.length > 0 ? subRows[0] : null,
+        });
+      } catch (err) {
+        console.error("GET /api/portal/peace-of-mind error:", err);
+        res.status(500).json({ error: "Failed to load subscription plan" });
+      }
+    },
+  );
+
+  app.post(
+    "/api/portal/peace-of-mind/subscribe",
+    requireClient,
+    async (req: AuthedRequest, res) => {
+      const clientId = req.auth!.id;
+      const { dataDescriptor, dataValue, use_stored_card } = req.body || {};
+      const useStored = !!use_stored_card;
+      if (
+        !useStored &&
+        (!dataDescriptor || !dataValue)
+      ) {
+        return res.status(400).json({ error: "Missing payment token" });
+      }
+      if (!authorizeNetConfigured) {
+        return res.status(503).json({ error: "Payment provider not configured" });
+      }
+
+      try {
+        const [clientRows] = await pool.query<RowDataPacket[]>(
+          `SELECT id, email, first_name, last_name, pipeline_stage,
+                  anet_customer_profile_id, anet_payment_profile_id
+           FROM clients WHERE id = ? LIMIT 1`,
+          [clientId],
+        );
+        if (clientRows.length === 0) {
+          return res.status(404).json({ error: "Client not found" });
+        }
+        const client = clientRows[0];
+        if (client.pipeline_stage !== "completed") {
+          return res.status(403).json({
+            error:
+              "Peace of Mind is available after you complete your credit repair program.",
+          });
+        }
+
+        const [existingSub] = await pool.query<RowDataPacket[]>(
+          `SELECT id FROM client_subscriptions
+           WHERE client_id = ? AND status = 'active' LIMIT 1`,
+          [clientId],
+        );
+        if (existingSub.length > 0) {
+          return res.status(409).json({ error: "You already have an active subscription." });
+        }
+
+        const [pkgRows] = await pool.query<RowDataPacket[]>(
+          `SELECT id, name, price_cents FROM packages
+           WHERE slug = 'peace_of_mind' AND is_active = 1 AND checkout_type = 'subscription'
+           LIMIT 1`,
+        );
+        if (pkgRows.length === 0) {
+          return res.status(404).json({ error: "Plan not available" });
+        }
+        const pkg = pkgRows[0];
+        const amountCents = Number(pkg.price_cents);
+        const amountDollars = (amountCents / 100).toFixed(2);
+
+        let anetSubId: string;
+        if (
+          useStored &&
+          client.anet_customer_profile_id &&
+          client.anet_payment_profile_id
+        ) {
+          const r = await createARBSubscriptionFromProfile({
+            customerProfileId: String(client.anet_customer_profile_id),
+            customerPaymentProfileId: String(client.anet_payment_profile_id),
+            amountDollars,
+            clientId,
+            email: String(client.email),
+            subscriptionName: String(pkg.name),
+          });
+          anetSubId = r.subscriptionId;
+        } else {
+          const r = await createARBSubscription({
+            amountDollars,
+            dataDescriptor: String(dataDescriptor),
+            dataValue: String(dataValue),
+            clientId,
+            email: String(client.email),
+            firstName: String(client.first_name),
+            lastName: String(client.last_name),
+            subscriptionName: String(pkg.name),
+          });
+          anetSubId = r.subscriptionId;
+        }
+
+        const nextBilling = new Date();
+        nextBilling.setMonth(nextBilling.getMonth() + 1);
+
+        const [ins] = await pool.query<ResultSetHeader>(
+          `INSERT INTO client_subscriptions
+             (client_id, package_id, anet_subscription_id, status, amount_cents, billing_interval, next_billing_at)
+           VALUES (?, ?, ?, 'active', ?, 'monthly', ?)`,
+          [
+            clientId,
+            pkg.id,
+            anetSubId,
+            amountCents,
+            anetDateYmd(nextBilling),
+          ],
+        );
+
+        sendPeaceOfMindSubscriptionEmail(clientId, "started").catch(() => {});
+
+        res.json({
+          ok: true,
+          subscriptionId: ins.insertId,
+          anetSubscriptionId: anetSubId,
+        });
+      } catch (e: any) {
+        console.error("POST /api/portal/peace-of-mind/subscribe error:", e);
+        res.status(402).json({ error: e.message || "Subscription failed" });
+      }
+    },
+  );
+
+  app.post(
+    "/api/portal/peace-of-mind/cancel",
+    requireClient,
+    async (req: AuthedRequest, res) => {
+      const clientId = req.auth!.id;
+      if (!authorizeNetConfigured) {
+        return res.status(503).json({ error: "Payment provider not configured" });
+      }
+
+      try {
+        const [subRows] = await pool.query<RowDataPacket[]>(
+          `SELECT id, anet_subscription_id FROM client_subscriptions
+           WHERE client_id = ? AND status = 'active'
+           ORDER BY id DESC LIMIT 1`,
+          [clientId],
+        );
+        if (subRows.length === 0) {
+          return res.status(404).json({ error: "No active subscription found" });
+        }
+        const sub = subRows[0];
+
+        await cancelARBSubscription(String(sub.anet_subscription_id));
+
+        await pool.query<ResultSetHeader>(
+          `UPDATE client_subscriptions
+           SET status = 'cancelled', cancelled_at = NOW()
+           WHERE id = ?`,
+          [sub.id],
+        );
+
+        sendPeaceOfMindSubscriptionEmail(clientId, "cancelled").catch(() => {});
+
+        res.json({ ok: true });
+      } catch (e: any) {
+        console.error("POST /api/portal/peace-of-mind/cancel error:", e);
+        res.status(400).json({ error: e.message || "Cancellation failed" });
       }
     },
   );
@@ -3285,10 +3997,29 @@ function buildApp() {
     );
     await attachPdfsToReports(Number(id), reports);
     const [payments] = await pool.query<RowDataPacket[]>(
-      `SELECT id, amount_cents, status, paid_at, created_at, provider_transaction_id
-       FROM payments WHERE client_id = ? ORDER BY created_at DESC`,
+      `SELECT p.id, p.amount_cents, p.status, p.paid_at, p.created_at, p.provider_transaction_id,
+              pk.name AS package_name, pk.slug AS package_slug
+       FROM payments p
+       LEFT JOIN packages pk ON pk.id = p.package_id
+       WHERE p.client_id = ? ORDER BY p.created_at DESC`,
       [id],
     );
+    const paymentIds = payments.map((p) => Number(p.id));
+    const selMap = await fetchTradelineSelectionsForPayments(paymentIds);
+    const paymentsWithLines = payments.map((p) => ({
+      ...p,
+      tradeline_items: selMap.get(Number(p.id)) ?? [],
+    }));
+
+    const [subscriptions] = await pool.query<RowDataPacket[]>(
+      `SELECT cs.*, p.name AS package_name, p.slug AS package_slug
+       FROM client_subscriptions cs
+       JOIN packages p ON p.id = cs.package_id
+       WHERE cs.client_id = ?
+       ORDER BY cs.created_at DESC`,
+      [id],
+    );
+
     const [pipeline] = await pool.query<RowDataPacket[]>(
       `SELECT id, from_stage, to_stage, notes, created_at FROM client_pipeline_history WHERE client_id = ? ORDER BY created_at DESC`,
       [id],
@@ -3297,7 +4028,8 @@ function buildApp() {
       client: c[0],
       documents: docs,
       reports,
-      payments,
+      payments: paymentsWithLines,
+      subscriptions,
       pipeline_history: pipeline,
     });
   });
@@ -5718,6 +6450,197 @@ function buildApp() {
       pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
     });
   });
+
+  // ── ADMIN SUBSCRIPTIONS ─────────────────────────────────────────────────────
+  app.get("/api/admin/subscriptions", requireAdmin, async (req, res) => {
+    const status = (req.query.status as string) || "all";
+    const search = ((req.query.search as string) || "").trim();
+    const page = Math.max(1, parseInt((req.query.page as string) || "1", 10));
+    const limit = Math.min(
+      100,
+      Math.max(10, parseInt((req.query.limit as string) || "50", 10)),
+    );
+    const offset = (page - 1) * limit;
+
+    const where: string[] = [];
+    const args: any[] = [];
+
+    if (status && status !== "all") {
+      where.push("cs.status = ?");
+      args.push(status);
+    }
+    if (search) {
+      where.push(
+        "(c.email LIKE ? OR c.first_name LIKE ? OR c.last_name LIKE ? OR cs.anet_subscription_id LIKE ?)",
+      );
+      const like = `%${search}%`;
+      args.push(like, like, like, like);
+    }
+
+    const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+    const [subscriptions] = await pool.query<RowDataPacket[]>(
+      `SELECT cs.id, cs.client_id, cs.package_id, cs.anet_subscription_id,
+              cs.status, cs.amount_cents, cs.billing_interval,
+              cs.started_at, cs.cancelled_at, cs.next_billing_at,
+              cs.created_at, cs.updated_at,
+              c.first_name AS client_first_name, c.last_name AS client_last_name,
+              c.email AS client_email, c.phone AS client_phone,
+              c.pipeline_stage AS client_pipeline_stage, c.status AS client_status,
+              p.name AS package_name, p.slug AS package_slug
+       FROM client_subscriptions cs
+       JOIN clients c ON c.id = cs.client_id
+       JOIN packages p ON p.id = cs.package_id
+       ${whereClause}
+       ORDER BY cs.created_at DESC
+       LIMIT ? OFFSET ?`,
+      [...args, limit, offset],
+    );
+
+    const [countRow] = await pool.query<RowDataPacket[]>(
+      `SELECT COUNT(*) AS total
+       FROM client_subscriptions cs
+       JOIN clients c ON c.id = cs.client_id
+       ${whereClause}`,
+      args,
+    );
+    const total = Number(countRow[0]?.total ?? 0);
+
+    const [summary] = await pool.query<RowDataPacket[]>(
+      `SELECT
+        COUNT(*) AS total_count,
+        SUM(status = 'active') AS active_count,
+        SUM(status = 'cancelled') AS cancelled_count,
+        SUM(status = 'suspended') AS suspended_count,
+        SUM(status = 'expired') AS expired_count,
+        COALESCE(SUM(CASE WHEN status = 'active' THEN amount_cents ELSE 0 END), 0) AS mrr_cents
+       FROM client_subscriptions`,
+    );
+
+    res.json({
+      subscriptions,
+      summary: summary[0] || {},
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    });
+  });
+
+  // ── TRADELINE PRODUCTS (admin CRUD) ───────────────────────────────────────
+  app.get("/api/admin/tradeline-products", requireAdmin, async (_req, res) => {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT * FROM tradeline_products ORDER BY sort_order ASC, id ASC`,
+    );
+    res.json({ products: rows });
+  });
+
+  app.post(
+    "/api/admin/tradeline-products",
+    requireAdmin,
+    async (req: AuthedRequest, res) => {
+      const {
+        slug,
+        name,
+        details,
+        price_cents,
+        compare_price_cents,
+        is_active,
+        sort_order,
+      } = req.body || {};
+      if (!slug || !name || !details || price_cents == null) {
+        return res.status(400).json({
+          error: "slug, name, details, and price_cents are required",
+        });
+      }
+      const cleanSlug = String(slug)
+        .toLowerCase()
+        .replace(/[^a-z0-9_]+/g, "_")
+        .replace(/^_|_$/g, "");
+      const [r] = await pool.query<ResultSetHeader>(
+        `INSERT INTO tradeline_products (slug, name, details, price_cents, compare_price_cents, is_active, sort_order)
+         VALUES (?,?,?,?,?,?,?)`,
+        [
+          cleanSlug,
+          String(name).trim(),
+          String(details).trim(),
+          Number(price_cents),
+          compare_price_cents != null ? Number(compare_price_cents) : null,
+          is_active != null ? Number(is_active) : 1,
+          Number(sort_order) || 0,
+        ],
+      );
+      const [created] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM tradeline_products WHERE id = ? LIMIT 1`,
+        [r.insertId],
+      );
+      res.status(201).json({ product: created[0] });
+    },
+  );
+
+  app.put(
+    "/api/admin/tradeline-products/:id",
+    requireAdmin,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      const {
+        slug,
+        name,
+        details,
+        price_cents,
+        compare_price_cents,
+        is_active,
+        sort_order,
+      } = req.body || {};
+      const [existing] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM tradeline_products WHERE id = ? LIMIT 1`,
+        [id],
+      );
+      if (existing.length === 0)
+        return res.status(404).json({ error: "Not found" });
+
+      await pool.query<ResultSetHeader>(
+        `UPDATE tradeline_products SET
+           slug = COALESCE(?, slug),
+           name = COALESCE(?, name),
+           details = COALESCE(?, details),
+           price_cents = COALESCE(?, price_cents),
+           compare_price_cents = ?,
+           is_active = COALESCE(?, is_active),
+           sort_order = COALESCE(?, sort_order)
+         WHERE id = ?`,
+        [
+          slug
+            ? String(slug)
+                .toLowerCase()
+                .replace(/[^a-z0-9_]+/g, "_")
+            : null,
+          name != null ? String(name).trim() : null,
+          details != null ? String(details).trim() : null,
+          price_cents != null ? Number(price_cents) : null,
+          compare_price_cents != null ? Number(compare_price_cents) : null,
+          is_active != null ? Number(is_active) : null,
+          sort_order != null ? Number(sort_order) : null,
+          id,
+        ],
+      );
+      const [updated] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM tradeline_products WHERE id = ? LIMIT 1`,
+        [id],
+      );
+      res.json({ product: updated[0] });
+    },
+  );
+
+  app.delete(
+    "/api/admin/tradeline-products/:id",
+    requireAdmin,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      await pool.query<ResultSetHeader>(
+        `DELETE FROM tradeline_products WHERE id = ?`,
+        [id],
+      );
+      res.json({ ok: true });
+    },
+  );
 
   // ── COUPONS (admin CRUD) ────────────────────────────────────────────────────
   app.get("/api/admin/coupons", requireAdmin, async (_req, res) => {

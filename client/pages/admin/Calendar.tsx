@@ -132,14 +132,14 @@ export default function AdminCalendar() {
         description="Track scheduled events — payment installments and upcoming milestones"
       />
 
-      <div className="flex items-center gap-4">
+      <div className="flex flex-wrap items-center justify-center sm:justify-start gap-3 sm:gap-4 w-full min-w-0">
         <button
           onClick={prevMonth}
-          className="w-9 h-9 rounded-xl border border-border bg-card flex items-center justify-center hover:bg-muted transition-colors"
+          className="w-9 h-9 rounded-xl border border-border bg-card flex items-center justify-center hover:bg-muted transition-colors shrink-0"
         >
           <ChevronLeft className="w-4 h-4" />
         </button>
-        <h2 className="text-base font-bold text-foreground min-w-[180px] text-center">
+        <h2 className="text-base font-bold text-foreground min-w-0 flex-1 sm:flex-none sm:min-w-[10rem] text-center order-first sm:order-none w-full sm:w-auto basis-full sm:basis-auto">
           {monthLabel}
         </h2>
         <button

@@ -108,7 +108,7 @@ function BillingCell({ c }: { c: AdminClientListItem }) {
     // In progress
     const pct = totalAmt > 0 ? Math.round((paidAmt / totalAmt) * 100) : 0;
     return (
-      <div className="flex items-center gap-1.5 text-primary min-w-[120px]">
+      <div className="flex items-center gap-1.5 text-primary min-w-0">
         <Layers className="w-3.5 h-3.5 shrink-0" />
         <div className="flex-1">
           <p className="text-xs font-semibold leading-tight">
@@ -587,7 +587,7 @@ export default function AdminClients() {
 
       {/* ── Search + filter toggle ─────────────────────────────── */}
       <div className="flex flex-wrap gap-3 items-center">
-        <div className="relative flex-1 min-w-[200px]">
+        <div className="relative flex-1 min-w-0 w-full">
           <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
           <input
             value={search}

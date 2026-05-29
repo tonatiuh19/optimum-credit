@@ -47,6 +47,8 @@ import AdminReminderFlows from "./pages/admin/ReminderFlows";
 import AdminPayments from "./pages/admin/Payments";
 import AdminCalendar from "./pages/admin/Calendar";
 import AdminTasks from "./pages/admin/Tasks";
+import AdminTradelines from "./pages/admin/Tradelines";
+import AdminSubscriptions from "./pages/admin/Subscriptions";
 import {
   RequireAdmin,
   RequireClient,
@@ -54,6 +56,7 @@ import {
   NoAuthClient,
   RequireSuperAdmin,
 } from "./components/guards";
+import AppThemeManager from "./components/AppThemeManager";
 
 const queryClient = new QueryClient();
 
@@ -68,6 +71,7 @@ function AppShell() {
   useLanguageSync();
   return (
     <BrowserRouter>
+      <AppThemeManager />
       <Routes>
         {/* Marketing site */}
         <Route path="/" element={wrap(Layout, Index)} />
@@ -227,6 +231,20 @@ function AppShell() {
           path="/admin/payments"
           element={
             <RequireAdmin>{wrap(AdminLayout, AdminPayments)}</RequireAdmin>
+          }
+        />
+        <Route
+          path="/admin/tradelines"
+          element={
+            <RequireAdmin>{wrap(AdminLayout, AdminTradelines)}</RequireAdmin>
+          }
+        />
+        <Route
+          path="/admin/subscriptions"
+          element={
+            <RequireAdmin>
+              {wrap(AdminLayout, AdminSubscriptions)}
+            </RequireAdmin>
           }
         />
         <Route

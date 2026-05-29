@@ -6,6 +6,7 @@ import type {
   AdminDashboardTicket,
   AdminDashboardPayment,
   AdminPaymentsResponse,
+  AdminSubscriptionsResponse,
   AdminUserListItem,
   CommunicationTemplate,
   Conversation,
@@ -25,6 +26,8 @@ import type {
   PaymentSplit,
   CreateCasePayload,
   CalendarSplit,
+  TradelineProduct,
+  TradelineProductInput,
 } from "@shared/api";
 
 interface AdminState {
@@ -73,6 +76,10 @@ interface AdminState {
   payments: Payment[];
   paymentsSummary: AdminPaymentsResponse["summary"] | null;
   paymentsPagination: AdminPaymentsResponse["pagination"] | null;
+  subscriptions: AdminSubscriptionsResponse["subscriptions"];
+  subscriptionsSummary: AdminSubscriptionsResponse["summary"] | null;
+  subscriptionsPagination: AdminSubscriptionsResponse["pagination"] | null;
+  subscriptionsLoading: boolean;
   coupons: Coupon[];
   couponsSaving: boolean;
   couponPreview: CouponValidateResponse | null;
@@ -96,6 +103,8 @@ interface AdminState {
   calendarLoading: boolean;
   clientSearchResults: AdminClientListItem[];
   clientSearchLoading: boolean;
+  tradelineProducts: TradelineProduct[];
+  tradelineProductsSaving: boolean;
   loading: boolean;
   saving: boolean;
 }
@@ -130,6 +139,10 @@ const initialState: AdminState = {
   payments: [],
   paymentsSummary: null,
   paymentsPagination: null,
+  subscriptions: [],
+  subscriptionsSummary: null,
+  subscriptionsPagination: null,
+  subscriptionsLoading: false,
   coupons: [],
   couponsSaving: false,
   couponPreview: null,
@@ -147,6 +160,8 @@ const initialState: AdminState = {
   calendarLoading: false,
   clientSearchResults: [],
   clientSearchLoading: false,
+  tradelineProducts: [],
+  tradelineProductsSaving: false,
   loading: false,
   saving: false,
 };
@@ -620,6 +635,37 @@ export const deleteAdminCoupon = createAsyncThunk<void, { id: number }>(
   },
 );
 
+export const fetchAdminTradelineProducts = createAsyncThunk<
+  TradelineProduct[],
+  void
+>("admin/tradelineProducts/fetch", async () => {
+  const { data } = await api.get("/admin/tradeline-products");
+  return data.products as TradelineProduct[];
+});
+
+export const createTradelineProduct = createAsyncThunk<
+  TradelineProduct,
+  TradelineProductInput
+>("admin/tradelineProducts/create", async (payload) => {
+  const { data } = await api.post("/admin/tradeline-products", payload);
+  return data.product as TradelineProduct;
+});
+
+export const updateTradelineProduct = createAsyncThunk<
+  TradelineProduct,
+  { id: number } & TradelineProductInput
+>("admin/tradelineProducts/update", async ({ id, ...rest }) => {
+  const { data } = await api.put(`/admin/tradeline-products/${id}`, rest);
+  return data.product as TradelineProduct;
+});
+
+export const deleteTradelineProduct = createAsyncThunk<void, number>(
+  "admin/tradelineProducts/delete",
+  async (id) => {
+    await api.delete(`/admin/tradeline-products/${id}`);
+  },
+);
+
 export const adminValidateCoupon = createAsyncThunk<
   CouponValidateResponse,
   { code: string; package_id?: number; amount_cents?: number }
@@ -650,6 +696,25 @@ export const fetchAdminPayments = createAsyncThunk<
   if (args?.limit) params.limit = args.limit;
   const { data } = await api.get("/admin/payments", { params });
   return data as AdminPaymentsResponse;
+});
+
+export const fetchAdminSubscriptions = createAsyncThunk<
+  AdminSubscriptionsResponse,
+  | {
+      status?: string;
+      search?: string;
+      page?: number;
+      limit?: number;
+    }
+  | undefined
+>("admin/subscriptions", async (args) => {
+  const params: Record<string, string | number> = {};
+  if (args?.status) params.status = args.status;
+  if (args?.search) params.search = args.search;
+  if (args?.page) params.page = args.page;
+  if (args?.limit) params.limit = args.limit;
+  const { data } = await api.get("/admin/subscriptions", { params });
+  return data as AdminSubscriptionsResponse;
 });
 
 // ── Cases ──────────────────────────────────────────────────────────────────
@@ -902,6 +967,18 @@ const slice = createSlice({
       s.paymentsSummary = a.payload.summary;
       s.paymentsPagination = a.payload.pagination;
     });
+    b.addCase(fetchAdminSubscriptions.pending, (s) => {
+      s.subscriptionsLoading = true;
+    });
+    b.addCase(fetchAdminSubscriptions.rejected, (s) => {
+      s.subscriptionsLoading = false;
+    });
+    b.addCase(fetchAdminSubscriptions.fulfilled, (s, a) => {
+      s.subscriptionsLoading = false;
+      s.subscriptions = a.payload.subscriptions;
+      s.subscriptionsSummary = a.payload.summary;
+      s.subscriptionsPagination = a.payload.pagination;
+    });
     b.addCase(fetchAdminCoupons.fulfilled, (s, a) => {
       s.coupons = a.payload;
     });
@@ -1035,6 +1112,35 @@ const slice = createSlice({
     b.addCase(fetchAdminCalendar.fulfilled, (s, a) => {
       s.calendarLoading = false;
       s.calendarSplits = a.payload;
+    });
+    b.addCase(fetchAdminTradelineProducts.fulfilled, (s, a) => {
+      s.tradelineProducts = a.payload;
+    });
+    b.addCase(createTradelineProduct.pending, (s) => {
+      s.tradelineProductsSaving = true;
+    });
+    b.addCase(createTradelineProduct.rejected, (s) => {
+      s.tradelineProductsSaving = false;
+    });
+    b.addCase(createTradelineProduct.fulfilled, (s, a) => {
+      s.tradelineProductsSaving = false;
+      s.tradelineProducts.push(a.payload);
+    });
+    b.addCase(updateTradelineProduct.pending, (s) => {
+      s.tradelineProductsSaving = true;
+    });
+    b.addCase(updateTradelineProduct.rejected, (s) => {
+      s.tradelineProductsSaving = false;
+    });
+    b.addCase(updateTradelineProduct.fulfilled, (s, a) => {
+      s.tradelineProductsSaving = false;
+      const idx = s.tradelineProducts.findIndex((p) => p.id === a.payload.id);
+      if (idx !== -1) s.tradelineProducts[idx] = a.payload;
+    });
+    b.addCase(deleteTradelineProduct.fulfilled, (s, a) => {
+      s.tradelineProducts = s.tradelineProducts.filter(
+        (p) => p.id !== a.meta.arg,
+      );
     });
   },
 });

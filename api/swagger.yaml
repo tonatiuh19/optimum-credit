@@ -131,20 +131,38 @@ paths:
         "409":
           description: Email already has an active account
 
+  /tradeline-products:
+    get:
+      tags: [Registration]
+      summary: List active tradeline products (public catalog)
+      responses:
+        "200":
+          description: Tradeline catalog
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  products:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TradelineProduct"
+
   /registration/process-payment:
     post:
       tags: [Registration]
-      summary: Charge card via Authorize.net Accept.js nonce
+      summary: Charge card via Authorize.net Accept.js nonce (legacy two-step flow)
       description: |
-        Accepts an opaque payment nonce from the client-side Accept.js library,
-        charges the card through Authorize.net, and marks the client as onboarded.
+        Accepts an opaque payment nonce from Accept.js when Authorize.net is configured,
+        or processes a mock payment when it is not. For `tradeline_picker` packages,
+        pass `tradelineProductIds` and the charge amount is the sum of selected lines.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [clientId, dataDescriptor, dataValue]
+              required: [clientId]
               properties:
                 clientId: { type: integer }
                 dataDescriptor:
@@ -153,6 +171,10 @@ paths:
                 dataValue:
                   type: string
                   description: Opaque nonce from Accept.js
+                tradelineProductIds:
+                  type: array
+                  items: { type: integer }
+                  description: Required when package checkout_type is tradeline_picker
       responses:
         "200":
           description: Payment succeeded
@@ -167,7 +189,120 @@ paths:
         "404":
           description: Client not found
         "503":
-          description: Payment provider not configured
+          description: Payment provider not configured (only when nonce required and ANet missing)
+
+  /portal/peace-of-mind:
+    get:
+      tags: [Portal]
+      summary: Peace of Mind subscription eligibility and status
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Plan details, eligibility, optional active subscription
+
+  /portal/peace-of-mind/subscribe:
+    post:
+      tags: [Portal]
+      summary: Start Peace of Mind monthly subscription (ARB)
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                use_stored_card: { type: boolean }
+                dataDescriptor: { type: string }
+                dataValue: { type: string }
+      responses:
+        "200":
+          description: Subscription created
+
+  /portal/peace-of-mind/cancel:
+    post:
+      tags: [Portal]
+      summary: Cancel Peace of Mind subscription
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Subscription cancelled
+
+  /admin/subscriptions:
+    get:
+      tags: [Admin]
+      summary: List client subscriptions (Peace of Mind ARB, etc.)
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [all, active, cancelled, suspended, expired]
+        - in: query
+          name: search
+          schema: { type: string }
+        - in: query
+          name: page
+          schema: { type: integer }
+        - in: query
+          name: limit
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Paginated subscriptions with MRR summary
+
+  /admin/tradeline-products:
+    get:
+      tags: [Admin]
+      summary: List all tradeline products (admin)
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Full catalog including inactive
+    post:
+      tags: [Admin]
+      summary: Create tradeline product
+      security: [{ BearerAuth: [] }]
+      responses:
+        "201":
+          description: Created
+
+  /admin/tradeline-products/{id}:
+    put:
+      tags: [Admin]
+      summary: Update tradeline product
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Updated
+    delete:
+      tags: [Admin]
+      summary: Delete tradeline product
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Deleted
+
+  /webhooks/authorize-net:
+    post:
+      tags: [Registration]
+      summary: Authorize.net webhook (ARB subscription events)
+      description: |
+        Optional signature verification via `ANET_WEBHOOK_SIGNATURE_KEY`.
+        Raw body must be preserved for HMAC validation.
+      responses:
+        "200":
+          description: Processed
 
   /registration/confirm-mock:
     post:
@@ -1940,6 +2075,18 @@ components:
         created_at:
           type: string
           format: date-time
+
+    TradelineProduct:
+      type: object
+      properties:
+        id: { type: integer }
+        slug: { type: string }
+        name: { type: string }
+        details: { type: string }
+        price_cents: { type: integer }
+        compare_price_cents: { type: integer, nullable: true }
+        is_active: { type: boolean }
+        sort_order: { type: integer }
 
     SupportFaqPortal:
       type: object
