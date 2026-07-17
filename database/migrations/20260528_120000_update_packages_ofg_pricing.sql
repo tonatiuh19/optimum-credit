@@ -2,11 +2,11 @@
 -- https://www.optimum-financial-group.com/products-and-services
 
 ALTER TABLE `packages`
-  ADD COLUMN `compare_price_cents` INT UNSIGNED DEFAULT NULL
+  ADD COLUMN IF NOT EXISTS `compare_price_cents` INT UNSIGNED DEFAULT NULL
     COMMENT 'Original/list price for display (strikethrough)' AFTER `price_cents`;
 
 ALTER TABLE `packages`
-  ADD COLUMN `billing_interval` ENUM('one_time','monthly') NOT NULL DEFAULT 'one_time'
+  ADD COLUMN IF NOT EXISTS `billing_interval` ENUM('one_time','monthly') NOT NULL DEFAULT 'one_time'
     AFTER `compare_price_cents`;
 
 -- Standard Repair — $1,497 one payment (was $1,990)
@@ -21,8 +21,8 @@ UPDATE `packages` SET
   `features_json` = JSON_ARRAY(
     'Late Payments',
     'Collections',
-    'Charge-Offs',
     'Hard Inquiries',
+    'Charge-Offs',
     'Personal Info Errors',
     'Incorrect Balances',
     'Duplicate Accounts'
@@ -47,7 +47,11 @@ UPDATE `packages` SET
     'Tax Liens',
     'Medical Bills',
     'Judgments & Foreclosures',
-    'Repossessions'
+    'Foreclosures',
+    'Repossessions',
+    'Bureau Inconsistencies',
+    'Charge-Offs (advanced furnisher disputes)',
+    'Identity & Fraud Items'
   ),
   `sort_order` = 2,
   `is_active` = 1

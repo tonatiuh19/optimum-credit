@@ -150,7 +150,11 @@ export default function AdminDocuments() {
     }
   };
 
-  const sorted = [...docs].sort((a, b) => {
+  const sorted = [...docs]
+    .filter(
+      (doc, idx, arr) => arr.findIndex((d) => d.id === doc.id) === idx,
+    )
+    .sort((a, b) => {
     const av = (a as any)[sortBy] ?? "";
     const bv = (b as any)[sortBy] ?? "";
     const cmp = String(av).localeCompare(String(bv));

@@ -315,7 +315,7 @@ CREATE TABLE IF NOT EXISTS `client_pipeline_history` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================================
--- CONVERSATIONS (Twilio SMS / Calls + Email via Resend)
+-- CONVERSATIONS (Twilio SMS / Calls + Email)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS `conversations` (
   `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,

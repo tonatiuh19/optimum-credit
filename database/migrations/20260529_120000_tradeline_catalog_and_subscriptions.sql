@@ -1,7 +1,7 @@
 -- Tradeline product catalog, client selections, and Peace of Mind subscriptions
 
 ALTER TABLE `packages`
-  ADD COLUMN `checkout_type` ENUM('fixed_price','tradeline_picker','subscription') NOT NULL DEFAULT 'fixed_price'
+  ADD COLUMN IF NOT EXISTS `checkout_type` ENUM('fixed_price','tradeline_picker','subscription') NOT NULL DEFAULT 'fixed_price'
     AFTER `billing_interval`;
 
 UPDATE `packages` SET `checkout_type` = 'fixed_price'

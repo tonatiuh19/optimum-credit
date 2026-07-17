@@ -23,6 +23,8 @@ tags:
     description: System health checks
   - name: Auth
     description: Authentication (client & admin)
+  - name: Legal
+    description: Public legal documents (DB-backed markdown)
   - name: Registration
     description: Public registration & Authorize.net payment flow
   - name: Portal
@@ -33,6 +35,104 @@ tags:
     description: Credit Repair Cloud integration — sync & webhooks
 
 paths:
+  /legal:
+    get:
+      tags: [Legal]
+      summary: List legal document summaries
+      responses:
+        "200":
+          description: Document list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  documents:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        slug: { type: string }
+                        title: { type: string }
+                        updated_at: { type: string, format: date-time }
+        "503":
+          description: Database unavailable
+
+  /legal/{slug}:
+    get:
+      tags: [Legal]
+      summary: Get a legal document by slug
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [terms, privacy]
+      responses:
+        "200":
+          description: Full markdown document
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  document:
+                    type: object
+                    properties:
+                      slug: { type: string }
+                      title: { type: string }
+                      content_md: { type: string }
+                      source_url: { type: string, nullable: true }
+                      updated_at: { type: string, format: date-time }
+        "404":
+          description: Not found
+        "503":
+          description: Database unavailable
+
+  /admin/legal:
+    get:
+      tags: [Admin, Legal]
+      summary: List legal documents (super admin)
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Full documents for editing
+        "401":
+          description: Unauthorized
+
+  /admin/legal/{slug}:
+    put:
+      tags: [Admin, Legal]
+      summary: Update a legal document (super admin)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, content_md]
+              properties:
+                title: { type: string }
+                content_md: { type: string }
+                source_url: { type: string, nullable: true }
+      responses:
+        "200":
+          description: Updated document
+        "400":
+          description: Validation error
+        "404":
+          description: Not found
+
   /health:
     get:
       tags: [Health]
@@ -427,6 +527,153 @@ paths:
                         created_at:
                           type: string
                           format: date-time
+        "401":
+          description: Unauthorized
+
+  /admin/payments:
+    get:
+      tags: [Admin]
+      summary: Get paginated payments with filters and summary metrics
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [all, pending, succeeded, failed, refunded, cancelled]
+        - in: query
+          name: provider
+          schema:
+            type: string
+            enum: [all, authorize_net, stripe, manual]
+        - in: query
+          name: search
+          schema:
+            type: string
+          description: Name, email, or transaction ID search
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 10
+            maximum: 100
+      responses:
+        "200":
+          description: Paginated payment results plus summary metrics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  payments:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        client_id:
+                          type: integer
+                        package_id:
+                          type: integer
+                          nullable: true
+                        package_name:
+                          type: string
+                          nullable: true
+                        package_slug:
+                          type: string
+                          nullable: true
+                        amount_cents:
+                          type: integer
+                        discount_cents:
+                          type: integer
+                        original_amount_cents:
+                          type: integer
+                          nullable: true
+                        currency:
+                          type: string
+                        status:
+                          type: string
+                          enum:
+                            [pending, succeeded, failed, refunded, cancelled]
+                        provider:
+                          type: string
+                        coupon_code:
+                          type: string
+                          nullable: true
+                        provider_transaction_id:
+                          type: string
+                          nullable: true
+                        provider_charge_id:
+                          type: string
+                          nullable: true
+                        failure_reason:
+                          type: string
+                          nullable: true
+                        paid_at:
+                          type: string
+                          format: date-time
+                          nullable: true
+                        created_at:
+                          type: string
+                          format: date-time
+                        updated_at:
+                          type: string
+                          format: date-time
+                        client_first_name:
+                          type: string
+                          nullable: true
+                        client_last_name:
+                          type: string
+                          nullable: true
+                        client_email:
+                          type: string
+                          nullable: true
+                        client_phone:
+                          type: string
+                          nullable: true
+                        client_pipeline_stage:
+                          type: string
+                          nullable: true
+                        client_status:
+                          type: string
+                          nullable: true
+                  summary:
+                    type: object
+                    properties:
+                      total_count:
+                        type: integer
+                      succeeded_count:
+                        type: integer
+                      pending_count:
+                        type: integer
+                      failed_count:
+                        type: integer
+                      refunded_count:
+                        type: integer
+                      total_revenue_cents:
+                        type: integer
+                      revenue_30d_cents:
+                        type: integer
+                      revenue_7d_cents:
+                        type: integer
+                  pagination:
+                    type: object
+                    properties:
+                      page:
+                        type: integer
+                      limit:
+                        type: integer
+                      total:
+                        type: integer
+                      totalPages:
+                        type: integer
         "401":
           description: Unauthorized
 
@@ -1063,11 +1310,11 @@ paths:
   /admin/clients/{clientId}/round-reports/{round}/pdf:
     post:
       tags: [Admin]
-      summary: Upload a PDF report for a specific dispute round
+      summary: "[Deprecated] Manual PDF upload — use OFG Report Wizard instead"
       description: |
-        Accepts a PDF file (multipart/form-data). Encrypts and stores it on the CDN.
-        Upserts the round report row and sends a notification email to the client.
-        Requires `super_admin` role.
+        **Returns 410 Gone.** Manual PDF uploads bypass compliance checks.
+        Use `POST /admin/cases/{caseId}/report-wizard/sessions` to generate OFG progress reports.
+      deprecated: true
       security:
         - BearerAuth: []
       parameters:
@@ -1096,19 +1343,8 @@ paths:
                   format: binary
                   description: The PDF file to upload
       responses:
-        "200":
-          description: Upload successful
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  ok:
-                    type: boolean
-                  report:
-                    $ref: "#/components/schemas/RoundReport"
-        "400":
-          description: Invalid input or not a PDF
+        "410":
+          description: Deprecated — use OFG Report Wizard
         "401":
           description: Unauthorized
 
@@ -1231,6 +1467,243 @@ paths:
           description: Forbidden (PDF does not belong to this client)
         "404":
           description: PDF not found
+
+  /admin/cases/{caseId}/report-wizard/sessions:
+    get:
+      tags: [Admin]
+      summary: List draft OFG report wizard sessions for a case
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: caseId
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Non-published wizard sessions (newest first)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ReportWizardDraftSummary"
+        "400":
+          description: Invalid case id
+    post:
+      tags: [Admin]
+      summary: Create OFG report wizard session (upload before/after PDFs + extract)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: caseId
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [before_pdf, after_pdf]
+              properties:
+                before_pdf:
+                  type: string
+                  format: binary
+                after_pdf:
+                  type: string
+                  format: binary
+                round_number:
+                  type: integer
+                  minimum: 1
+                  maximum: 5
+                highlight_win:
+                  type: string
+                tradeline_rec:
+                  type: string
+                funding_note:
+                  type: string
+                spanish:
+                  type: string
+      responses:
+        "201":
+          description: Session created and extraction complete
+        "400":
+          description: Invalid input
+        "404":
+          description: Case not found
+
+  /admin/report-wizard/sessions/{id}:
+    get:
+      tags: [Admin]
+      summary: Get report wizard session (status + extracted/reviewed JSON)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Session payload
+        "404":
+          description: Session not found
+    delete:
+      tags: [Admin]
+      summary: Cancel/delete draft wizard session
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Deleted
+        "400":
+          description: Cannot delete published session
+
+  /admin/report-wizard/sessions/{id}/extract:
+    post:
+      tags: [Admin]
+      summary: Re-run PDF extraction for an existing wizard session
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Re-extraction complete
+        "400":
+          description: Session published or invalid
+        "500":
+          description: Extraction failed
+
+  /admin/report-wizard/sessions/{id}/preview:
+    post:
+      tags: [Admin]
+      summary: Generate a non-persisted PDF preview from reviewed data
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reviewed_json:
+                  type: object
+      responses:
+        "200":
+          description: PDF binary stream
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        "422":
+          description: Compliance validation failed
+
+  /admin/report-wizard/sessions/{id}/review:
+    patch:
+      tags: [Admin]
+      summary: Save admin-edited reviewed_json for a wizard session
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reviewed_json]
+              properties:
+                reviewed_json:
+                  type: object
+      responses:
+        "200":
+          description: Review saved
+
+  /admin/report-wizard/sessions/{id}/finalize:
+    post:
+      tags: [Admin]
+      summary: Publish OFG report (generate PDF, advance pipeline, notify client)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [compliance_acknowledged]
+              properties:
+                compliance_acknowledged:
+                  type: boolean
+      responses:
+        "200":
+          description: Published
+        "422":
+          description: Compliance validation failed
+
+  /admin/report-wizard/sessions/{id}/source/{role}:
+    get:
+      tags: [Admin]
+      summary: Stream decrypted source PDF (before or after)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+        - in: path
+          name: role
+          required: true
+          schema:
+            type: string
+            enum: [before, after]
+      responses:
+        "200":
+          description: PDF binary stream
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
 
   /admin/clients/{id}/crc-sync:
     post:
@@ -2120,6 +2593,32 @@ components:
         is_active:
           type: integer
           enum: [0, 1]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    # ─── OFG Report Wizard ────────────────────────────────────────────────────────
+
+    ReportWizardDraftSummary:
+      type: object
+      properties:
+        id:
+          type: integer
+        case_id:
+          type: integer
+        client_id:
+          type: integer
+        round_number:
+          type: integer
+        status:
+          type: string
+          enum: [draft, extracting, review, generating, published, failed]
+        error_message:
+          type: string
+          nullable: true
         created_at:
           type: string
           format: date-time

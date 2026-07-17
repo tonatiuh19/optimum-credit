@@ -4,6 +4,9 @@ import { Menu, X } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import LanguageSwitcher from "@/components/LanguageSwitcher";
+import ThemeToggle from "@/components/ThemeToggle";
+import { LEGAL_PATHS } from "@/lib/legal";
+import LegalLinks from "@/components/LegalLinks";
 
 interface LayoutProps {
   children: ReactNode;
@@ -25,9 +28,15 @@ export default function Layout({ children }: LayoutProps) {
               className="flex items-center transition-opacity hover:opacity-80"
             >
               <img
-                src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white.png"
+                src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_dark.png"
                 alt="Optimum Credit"
-                className="h-8 md:h-9 w-auto"
+                className="h-8 md:h-9 w-auto dark:hidden"
+              />
+              <img
+                src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white.png"
+                alt=""
+                aria-hidden
+                className="h-8 md:h-9 w-auto hidden dark:block"
               />
             </Link>
 
@@ -149,9 +158,15 @@ export default function Layout({ children }: LayoutProps) {
             <div>
               <div className="mb-4">
                 <img
-                  src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white.png"
+                  src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_dark.png"
                   alt="Optimum Credit"
-                  className="h-8 w-auto"
+                  className="h-8 w-auto dark:hidden"
+                />
+                <img
+                  src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white.png"
+                  alt=""
+                  aria-hidden
+                  className="h-8 w-auto hidden dark:block"
                 />
               </div>
               <p className="text-sm text-muted-foreground">
@@ -227,31 +242,33 @@ export default function Layout({ children }: LayoutProps) {
 
             {/* Legal */}
             <div>
-              <h4 className="font-semibold mb-4 text-sm">Legal</h4>
+              <h4 className="font-semibold mb-4 text-sm">
+                {t("footer.legal")}
+              </h4>
               <ul className="space-y-2 text-sm text-muted-foreground">
                 <li>
-                  <a
-                    href="#"
+                  <Link
+                    to={LEGAL_PATHS.privacy}
                     className="hover:text-foreground transition-colors"
                   >
-                    Privacy Policy
-                  </a>
+                    {t("legal.privacyPolicy")}
+                  </Link>
                 </li>
                 <li>
-                  <a
-                    href="#"
+                  <Link
+                    to={LEGAL_PATHS.terms}
                     className="hover:text-foreground transition-colors"
                   >
-                    Terms of Service
-                  </a>
+                    {t("legal.termsOfService")}
+                  </Link>
                 </li>
                 <li>
-                  <a
-                    href="#"
+                  <Link
+                    to={LEGAL_PATHS.smsTerms}
                     className="hover:text-foreground transition-colors"
                   >
-                    Security
-                  </a>
+                    {t("legal.smsTerms")}
+                  </Link>
                 </li>
                 <li>
                   <Link
@@ -268,25 +285,14 @@ export default function Layout({ children }: LayoutProps) {
           {/* Footer Bottom */}
           <div className="border-t border-border/40 pt-8 flex flex-col md:flex-row items-center justify-between gap-4">
             <p className="text-sm text-muted-foreground text-center md:text-left">
-              © 2024 Optimum Credit Repair. All rights reserved.
+              {t("footer.allRightsReserved", {
+                year: new Date().getFullYear(),
+              })}
             </p>
             <div className="flex items-center gap-4">
+              <ThemeToggle zone="portal" compact />
               <LanguageSwitcher variant="compact" />
-              <a
-                href="#"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-muted-foreground hover:text-foreground transition-colors"
-              >
-                <span className="sr-only">Instagram</span>
-                <svg
-                  className="w-5 h-5"
-                  fill="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zm0-2.163c-3.259 0-3.667.014-4.947.072-4.358.2-6.78 2.618-6.98 6.98-.059 1.281-.073 1.689-.073 4.948 0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98 1.281.058 1.689.072 4.948.072 3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98-1.281-.059-1.69-.073-4.949-.073zm0 5.838a6.162 6.162 0 100 12.324 6.162 6.162 0 000-12.324zM12 16a4 4 0 110-8 4 4 0 010 8zm6.406-11.845a1.44 1.44 0 100 2.881 1.44 1.44 0 000-2.881z" />
-                </svg>
-              </a>
+              <LegalLinks className="text-sm text-muted-foreground hidden sm:inline-flex" />
             </div>
           </div>
         </div>

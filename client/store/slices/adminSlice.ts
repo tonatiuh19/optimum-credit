@@ -54,6 +54,12 @@ interface AdminState {
     reports: any[];
     payments: any[];
     pipeline_history: any[];
+    sibling_cases?: Array<{
+      id: number;
+      case_number: string;
+      pipeline_stage: string;
+      status: string;
+    }>;
   } | null;
   panelLoading: boolean;
   pendingDocuments: any[];
@@ -280,35 +286,6 @@ export const fetchAllDocuments = createAsyncThunk(
     return data.documents;
   },
 );
-
-export const createRoundReport = createAsyncThunk<
-  void,
-  {
-    clientId: number;
-    round_number: number;
-    score_before?: number;
-    score_after?: number;
-    items_removed?: number;
-    items_disputed?: number;
-    summary_md?: string;
-  }
->("admin/createRoundReport", async ({ clientId, ...rest }) => {
-  await api.post(`/admin/clients/${clientId}/round-reports`, rest);
-});
-
-export const uploadRoundReportPdf = createAsyncThunk<
-  { pdf: any; report: any },
-  { clientId: number; roundNumber: number; file: File }
->("admin/uploadRoundReportPdf", async ({ clientId, roundNumber, file }) => {
-  const fd = new FormData();
-  fd.append("pdf", file);
-  const { data } = await api.post(
-    `/admin/clients/${clientId}/round-reports/${roundNumber}/pdf`,
-    fd,
-    { headers: { "Content-Type": "multipart/form-data" } },
-  );
-  return data; // { ok, pdf, report }
-});
 
 export const deleteRoundReportPdf = createAsyncThunk<
   { pdfId: number; roundNumber: number },
@@ -1041,19 +1018,6 @@ const slice = createSlice({
       );
       if (idx !== -1) s.sectionLocks[idx] = a.payload;
       else s.sectionLocks.push(a.payload);
-    });
-    b.addCase(uploadRoundReportPdf.fulfilled, (s, a) => {
-      if (s.panelClient && a.payload.report) {
-        const updated = a.payload.report;
-        const idx = s.panelClient.reports.findIndex(
-          (r: any) => r.round_number === updated.round_number,
-        );
-        if (idx !== -1) {
-          s.panelClient.reports[idx] = updated;
-        } else {
-          s.panelClient.reports.push(updated);
-        }
-      }
     });
     b.addCase(deleteRoundReportPdf.fulfilled, (s, a) => {
       if (!s.panelClient) return;

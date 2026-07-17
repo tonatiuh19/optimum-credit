@@ -117,7 +117,7 @@ export default function PlanOptionCard({
         </div>
 
         <ul className="mt-5 flex-1 space-y-2.5 text-sm border-t border-border/60 pt-5 min-h-[140px]">
-          {features.slice(0, 6).map((f, i) => (
+          {features.map((f, i) => (
             <li key={i} className="flex items-start gap-2.5 leading-snug">
               <span
                 className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full ${

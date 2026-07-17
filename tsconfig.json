@@ -33,6 +33,7 @@
     }
   },
   "include": [
+    "api/**/*",
     "client/**/*",
     "server/**/*",
     "shared/**/*",

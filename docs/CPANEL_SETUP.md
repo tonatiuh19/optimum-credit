@@ -40,7 +40,7 @@ nano .env   # fill in real values
 | `DB_PASSWORD`                    | Database password                                               |
 | `DB_NAME`                        | Database name                                                   |
 | `DB_SSL`                         | `true` for TiDB Cloud                                           |
-| `RESEND_API_KEY`                 | Resend.com API key for outgoing email                           |
+| `RESEND_API_KEY`                 | API key for outgoing email                                      |
 | `SMTP_FROM`                      | Sender address, e.g. `Optimum Credit <no-reply@yourdomain.com>` |
 | `AUTHORIZENET_API_LOGIN_ID`      | Authorize.net API Login ID                                      |
 | `AUTHORIZENET_TRANSACTION_KEY`   | Authorize.net Transaction Key                                   |

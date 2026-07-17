@@ -1,9 +1,11 @@
-/** Per-area color scheme (admin, portal) vs public site (always dark). */
+/** Per-area color scheme: admin (light default) vs client-facing (light default). */
 
 export type ColorScheme = "light" | "dark";
 
 export const ADMIN_THEME_STORAGE_KEY = "optimum-admin-color-scheme";
 export const PORTAL_THEME_STORAGE_KEY = "optimum-portal-color-scheme";
+/** @deprecated alias — client-facing routes share portal storage */
+export const CLIENT_THEME_STORAGE_KEY = PORTAL_THEME_STORAGE_KEY;
 
 export const ADMIN_THEME_CHANGE_EVENT = "optimum-admin-theme-change";
 export const PORTAL_THEME_CHANGE_EVENT = "optimum-portal-theme-change";
@@ -26,10 +28,10 @@ export function getStoredAdminScheme(): ColorScheme {
 }
 
 export function getStoredPortalScheme(): ColorScheme {
-  if (typeof window === "undefined") return "dark";
-  return localStorage.getItem(PORTAL_THEME_STORAGE_KEY) === "light"
-    ? "light"
-    : "dark";
+  if (typeof window === "undefined") return "light";
+  return localStorage.getItem(PORTAL_THEME_STORAGE_KEY) === "dark"
+    ? "dark"
+    : "light";
 }
 
 export function getStoredScheme(zone: ThemeZone): ColorScheme {
@@ -49,10 +51,6 @@ export function applyDocumentScheme(scheme: ColorScheme): void {
   document.documentElement.classList.toggle("dark", scheme === "dark");
 }
 
-export function applyPublicDarkTheme(): void {
-  document.documentElement.classList.add("dark");
-}
-
 export function applyAdminTheme(scheme: ColorScheme = getStoredAdminScheme()): void {
   applyDocumentScheme(scheme);
 }
@@ -66,10 +64,8 @@ export function applyPortalTheme(
 export function applyThemeForPath(pathname: string): void {
   if (isAdminRoute(pathname)) {
     applyAdminTheme(getStoredAdminScheme());
-  } else if (isPortalRoute(pathname)) {
-    applyPortalTheme(getStoredPortalScheme());
   } else {
-    applyPublicDarkTheme();
+    applyPortalTheme(getStoredPortalScheme());
   }
 }
 

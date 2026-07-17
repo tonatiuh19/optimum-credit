@@ -14,16 +14,16 @@ import {
   Building,
 } from "lucide-react";
 import axios from "axios";
+import LegalLinks from "@/components/LegalLinks";
 
 const AUTHORIZENET_API_LOGIN_ID = import.meta.env
   .VITE_AUTHORIZENET_API_LOGIN_ID;
 const AUTHORIZENET_CLIENT_KEY = import.meta.env.VITE_AUTHORIZENET_CLIENT_KEY;
-const ANET_ENV =
-  import.meta.env.VITE_ANET_ENV === "production" ? "production" : "sandbox";
-const ACCEPT_JS_URL =
-  ANET_ENV === "production"
-    ? "https://js.authorize.net/v1/Accept.js"
-    : "https://jstest.authorize.net/v1/Accept.js";
+const AUTHORIZENET_SANDBOX =
+  import.meta.env.VITE_AUTHORIZENET_SANDBOX !== "false";
+const ACCEPT_JS_URL = AUTHORIZENET_SANDBOX
+  ? "https://jstest.authorize.net/v1/Accept.js"
+  : "https://js.authorize.net/v1/Accept.js";
 
 function useAcceptJs() {
   const [loaded, setLoaded] = useState(false);
@@ -475,9 +475,12 @@ export default function PaySplit() {
         )}
 
         {/* Security footer */}
-        <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
-          <Lock className="w-3 h-3" />
-          <span>Secured by Authorize.net — 256-bit TLS encryption</span>
+        <div className="flex flex-col items-center gap-2 text-xs text-muted-foreground">
+          <div className="flex items-center justify-center gap-2">
+            <Lock className="w-3 h-3" />
+            <span>Secured by Authorize.net — 256-bit TLS encryption</span>
+          </div>
+          <LegalLinks className="text-xs text-muted-foreground" />
         </div>
       </div>
     </div>

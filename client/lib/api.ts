@@ -58,3 +58,45 @@ api.interceptors.response.use(
 );
 
 export default api;
+
+/** Normalize API/axios errors to a user-visible string (never render raw objects). */
+export function formatApiError(err: unknown, fallback = "Something went wrong"): string {
+  if (err == null) return fallback;
+  if (typeof err === "string") return err || fallback;
+
+  if (typeof err === "object") {
+    const o = err as Record<string, unknown>;
+    if (typeof o.error === "string") return o.error;
+    if (o.error && typeof o.error === "object") {
+      const nested = o.error as Record<string, unknown>;
+      if (typeof nested.message === "string") return nested.message;
+    }
+    if (typeof o.message === "string" && o.message.trim()) return o.message;
+  }
+
+  return fallback;
+}
+
+/** Extract a display message from an axios catch block. */
+export function formatAxiosError(e: unknown, fallback: string): string {
+  const ax = e as { response?: { data?: unknown }; message?: string };
+  const data = ax?.response?.data;
+
+  if (typeof data === "string" && data.trim()) {
+    const firstLine = data.split("\n")[0]?.trim();
+    if (firstLine && !firstLine.startsWith("FUNCTION_INVOCATION")) {
+      return firstLine;
+    }
+  }
+
+  if (data && typeof data === "object") {
+    const msg = formatApiError(data, "");
+    if (msg) return msg;
+  }
+
+  if (typeof ax?.message === "string" && ax.message !== "Network Error") {
+    return ax.message;
+  }
+
+  return fallback;
+}

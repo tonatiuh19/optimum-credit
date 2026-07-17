@@ -20,6 +20,7 @@ import PaySplit from "./pages/PaySplit";
 
 import ClientLogin from "./pages/auth/ClientLogin";
 import AdminLogin from "./pages/auth/AdminLogin";
+import LegalDocumentPage from "./pages/LegalDocumentPage";
 
 import Dashboard from "./pages/client/Dashboard";
 import Documents from "./pages/client/Documents";
@@ -78,6 +79,9 @@ function AppShell() {
         <Route path="/register" element={<Register />} />
         {/* Public payment page — no auth */}
         <Route path="/pay/:token" element={<PaySplit />} />
+
+        {/* Legal (DB-backed markdown) */}
+        <Route path="/legal/:slug" element={<LegalDocumentPage />} />
 
         {/* Auth */}
         <Route

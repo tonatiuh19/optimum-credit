@@ -6,6 +6,8 @@ import portal from "./slices/portalSlice";
 import admin from "./slices/adminSlice";
 import reminderFlows from "./slices/reminderFlowsSlice";
 import adminTasks from "./slices/adminTasksSlice";
+import reportWizard from "./slices/reportWizardSlice";
+import legal from "./slices/legalSlice";
 
 export const store = configureStore({
   reducer: {
@@ -16,6 +18,8 @@ export const store = configureStore({
     admin,
     reminderFlows,
     adminTasks,
+    reportWizard,
+    legal,
   },
   middleware: (getDefault) => getDefault({ serializableCheck: false }),
 });

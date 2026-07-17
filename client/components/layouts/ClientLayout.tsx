@@ -25,6 +25,7 @@ import { clientLogout, fetchClientMe } from "@/store/slices/clientAuthSlice";
 import { fetchPortalSectionLocks } from "@/store/slices/portalSlice";
 import LanguageSwitcher from "@/components/LanguageSwitcher";
 import ThemeToggle from "@/components/ThemeToggle";
+import LegalLinks from "@/components/LegalLinks";
 
 interface Props {
   children: ReactNode;
@@ -130,7 +131,7 @@ export default function ClientLayout({ children }: Props) {
   };
 
   return (
-    <div className="min-h-[100dvh] bg-background w-full max-w-[100vw] overflow-x-hidden">
+    <div className="min-h-[100dvh] bg-background flex flex-col w-full max-w-[100vw] overflow-x-hidden">
       {/* Mobile overlay — closes sidebar on tap outside */}
       {mobileOpen && (
         <div
@@ -176,9 +177,15 @@ export default function ClientLayout({ children }: Props) {
               className="flex items-center transition-opacity hover:opacity-80"
             >
               <img
-                src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white.png"
+                src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_dark.png"
                 alt="Optimum Credit"
-                className="h-8 w-auto"
+                className="h-8 w-auto dark:hidden"
+              />
+              <img
+                src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white.png"
+                alt=""
+                aria-hidden
+                className="h-8 w-auto hidden dark:block"
               />
             </Link>
           </div>
@@ -282,6 +289,19 @@ export default function ClientLayout({ children }: Props) {
           )}
         </main>
       </div>
+
+      <footer className="border-t border-border bg-card/80 shrink-0">
+        <div className="container max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex flex-col sm:flex-row items-center justify-between gap-3">
+          <p className="text-xs text-muted-foreground text-center sm:text-left">
+            © {new Date().getFullYear()} Optimum Credit
+          </p>
+          <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-2">
+            <LegalLinks className="text-xs text-muted-foreground" />
+            <ThemeToggle zone="portal" compact />
+            <LanguageSwitcher variant="compact" />
+          </div>
+        </div>
+      </footer>
     </div>
   );
 }

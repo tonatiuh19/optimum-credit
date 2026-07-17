@@ -10,6 +10,7 @@ import express, {
 import cors from "cors";
 import multer from "multer";
 import mysql, {
+  type Pool,
   type ResultSetHeader,
   type RowDataPacket,
 } from "mysql2/promise";
@@ -17,6 +18,8 @@ import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import { Resend } from "resend";
 import twilio from "twilio";
+import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import type { OfGReportData, OfGReportWizardOptions } from "../shared/api";
 
 // ============================================================================
 // ENV VALIDATION
@@ -90,6 +93,1200 @@ const pool = mysql.createPool({
   connectTimeout: 60000, // 60s connect timeout
 });
 
+
+// ============================================================================
+// PIPELINE ADVANCE (inline — AGENTS.md)
+// ============================================================================
+
+export const PIPELINE_STAGES = [
+  "new_client",
+  "docs_ready",
+  "round_1",
+  "round_2",
+  "round_3",
+  "round_4",
+  "round_5",
+  "completed",
+  "cancelled",
+] as const;
+
+
+function pipelineStageAfterRoundReport(roundNumber: number): string {
+  if (roundNumber >= 5) return "completed";
+  if (roundNumber < 1) return "docs_ready";
+  return `round_${roundNumber + 1}`;
+}
+
+/** @deprecated use pipelineStageAfterRoundReport */
+export const roundNumberToPipelineStage = pipelineStageAfterRoundReport;
+
+async function resolveActiveCaseId(
+  pool: Pool,
+  clientId: number,
+  caseId?: number | null,
+): Promise<number | null> {
+  if (caseId) return caseId;
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT id FROM credit_repair_cases
+     WHERE client_id = ? AND status = 'active'
+     ORDER BY id DESC LIMIT 1`,
+    [clientId],
+  );
+  return rows.length > 0 ? (rows[0].id as number) : null;
+}
+
+/** Atomically sync pipeline stage on case + client + history. */
+async function advanceCasePipeline(
+  db: Pick<Pool, "query">,
+  opts: {
+    clientId: number;
+    stage: string;
+    caseId?: number | null;
+    adminId?: number | null;
+    notes?: string | null;
+  },
+): Promise<{ fromStage: string; caseId: number | null; unchanged: boolean }> {
+  const resolvedCaseId = await resolveActiveCaseId(
+    db as Pool,
+    opts.clientId,
+    opts.caseId,
+  );
+
+  const [clientRows] = await db.query<RowDataPacket[]>(
+    `SELECT pipeline_stage FROM clients WHERE id = ? LIMIT 1`,
+    [opts.clientId],
+  );
+  if (clientRows.length === 0) {
+    throw new Error("Client not found");
+  }
+
+  let fromStage = clientRows[0].pipeline_stage as string;
+  if (resolvedCaseId) {
+    const [caseRows] = await db.query<RowDataPacket[]>(
+      `SELECT pipeline_stage FROM credit_repair_cases WHERE id = ? LIMIT 1`,
+      [resolvedCaseId],
+    );
+    if (caseRows.length > 0) {
+      fromStage = caseRows[0].pipeline_stage as string;
+    }
+  }
+
+  if (fromStage === opts.stage) {
+    return { fromStage, caseId: resolvedCaseId, unchanged: true };
+  }
+
+  if (resolvedCaseId) {
+    await db.query<ResultSetHeader>(
+      `UPDATE credit_repair_cases
+       SET pipeline_stage = ?, pipeline_stage_changed_at = NOW()
+       WHERE id = ?`,
+      [opts.stage, resolvedCaseId],
+    );
+  }
+
+  await db.query<ResultSetHeader>(
+    `UPDATE clients
+     SET pipeline_stage = ?, pipeline_stage_changed_at = NOW()
+     WHERE id = ?`,
+    [opts.stage, opts.clientId],
+  );
+
+  await db.query<ResultSetHeader>(
+    `INSERT INTO client_pipeline_history
+       (client_id, from_stage, to_stage, changed_by_admin_id, notes)
+     VALUES (?, ?, ?, ?, ?)`,
+    [
+      opts.clientId,
+      fromStage,
+      opts.stage,
+      opts.adminId ?? null,
+      opts.notes ?? null,
+    ],
+  );
+
+  return { fromStage, caseId: resolvedCaseId, unchanged: false };
+}
+
+// ============================================================================
+// REPORT WIZARD VALIDATION (inline)
+// ============================================================================
+
+const PDF_MAGIC = "%PDF";
+
+function isPdfBuffer(buf: Buffer): boolean {
+  if (!buf || buf.length < 5) return false;
+  return buf.subarray(0, 4).toString("ascii") === PDF_MAGIC;
+}
+
+function validatePdfUploadPair(
+  before: Buffer,
+  after: Buffer,
+  maxBytes = 15 * 1024 * 1024,
+): string | null {
+  if (!before?.length || !after?.length) {
+    return "Both PDF files are required";
+  }
+  if (before.length > maxBytes || after.length > maxBytes) {
+    const mb = Math.round(maxBytes / (1024 * 1024));
+    return `Each PDF must be ${mb} MB or smaller`;
+  }
+  if (!isPdfBuffer(before) || !isPdfBuffer(after)) {
+    return "Invalid PDF file — files must start with %PDF header";
+  }
+  return null;
+}
+
+/** Pipeline stage → which round report the client should publish next. */
+function expectedReportRoundForStage(pipelineStage: string): number | null {
+  if (pipelineStage === "docs_ready") return 1;
+  const match = pipelineStage.match(/^round_(\d)$/);
+  if (match) return Number(match[1]);
+  if (pipelineStage === "completed") return 5;
+  return null;
+}
+
+function validatePublishRound(params: {
+  roundNumber: number;
+  pipelineStage: string;
+  allowRepublish?: boolean;
+  hasExistingReport?: boolean;
+}): string | null {
+  const { roundNumber, pipelineStage, allowRepublish, hasExistingReport } =
+    params;
+
+  if (roundNumber < 1 || roundNumber > 5) {
+    return "round_number must be 1–5";
+  }
+
+  const expected = expectedReportRoundForStage(pipelineStage);
+  if (expected == null) {
+    return `Reports cannot be published while client is in stage "${pipelineStage}"`;
+  }
+
+  if (roundNumber > expected) {
+    return `Round ${roundNumber} is not available yet — client is at ${pipelineStage.replace("_", " ")}`;
+  }
+
+  if (pipelineStage === "docs_ready" && roundNumber !== 1) {
+    return "First report must be Round 1 while client is at Docs Verified";
+  }
+
+  if (hasExistingReport && !allowRepublish) {
+    return `Round ${roundNumber} already has a published report — contact super admin to replace`;
+  }
+
+  return null;
+}
+
+function canReviewSession(status: string): boolean {
+  return ["review", "draft", "failed"].includes(status);
+}
+
+function canExtractSession(status: string): boolean {
+  return status !== "published" && status !== "extracting";
+}
+
+function canFinalizeSession(status: string): boolean {
+  return status === "review";
+}
+
+function canPreviewSession(status: string): boolean {
+  return ["review", "draft", "failed", "generating"].includes(status);
+}
+
+/** Median of three bureau scores (0 treated as missing). */
+function calcMiddleScore(
+  before: number,
+  middle: number,
+  after: number,
+): number {
+  const vals = [before, middle, after].filter((n) => n > 0);
+  if (vals.length === 0) return 0;
+  vals.sort((a, b) => a - b);
+  return vals[Math.floor(vals.length / 2)];
+}
+
+function scoresRoughlyMatchMiddle(data: {
+  middleScore: { before: number; after: number };
+  bureauScores: {
+    transunion: { before: number; after: number };
+    experian: { before: number; after: number };
+    equifax: { before: number; after: number };
+  };
+}): string[] {
+  const warnings: string[] = [];
+  const expectedBefore = calcMiddleScore(
+    data.bureauScores.transunion.before,
+    data.bureauScores.experian.before,
+    data.bureauScores.equifax.before,
+  );
+  const expectedAfter = calcMiddleScore(
+    data.bureauScores.transunion.after,
+    data.bureauScores.experian.after,
+    data.bureauScores.equifax.after,
+  );
+
+  if (
+    expectedBefore > 0 &&
+    data.middleScore.before > 0 &&
+    Math.abs(expectedBefore - data.middleScore.before) > 5
+  ) {
+    warnings.push(
+      `Middle score before (${data.middleScore.before}) differs from bureau median (${expectedBefore})`,
+    );
+  }
+  if (
+    expectedAfter > 0 &&
+    data.middleScore.after > 0 &&
+    Math.abs(expectedAfter - data.middleScore.after) > 5
+  ) {
+    warnings.push(
+      `Middle score after (${data.middleScore.after}) differs from bureau median (${expectedAfter})`,
+    );
+  }
+  return warnings;
+}
+
+// ============================================================================
+// REPORT EXTRACTION CORE (inline)
+// ============================================================================
+
+type ReportProvider =
+  | "identityiq"
+  | "smartcredit"
+  | "myscoreiq"
+  | "generic";
+
+type BureauScores = {
+  transunion: number | null;
+  experian: number | null;
+  equifax: number | null;
+};
+
+function detectProvider(text: string): ReportProvider {
+  const t = text.toLowerCase();
+  if (t.includes("identityiq") || t.includes("identity iq")) return "identityiq";
+  if (t.includes("smartcredit") || t.includes("smart credit"))
+    return "smartcredit";
+  if (t.includes("myscoreiq") || t.includes("my score iq")) return "myscoreiq";
+  return "generic";
+}
+
+function extractBureauScoreGeneric(text: string, bureau: string): number | null {
+  const patterns = [
+    new RegExp(`${bureau}[^\\d]{0,60}(\\d{3})`, "i"),
+    new RegExp(`${bureau.slice(0, 3)}[^\\d]{0,30}(\\d{3})`, "i"),
+    new RegExp(`(${bureau.slice(0, 2)})\\s*[:\\-]?\\s*(\\d{3})`, "i"),
+  ];
+  for (const re of patterns) {
+    const m = text.match(re);
+    const score = m ? Number(m[m.length - 1]) : NaN;
+    if (score >= 300 && score <= 850) return score;
+  }
+  return null;
+}
+
+function extractBureauScoreProvider(
+  text: string,
+  bureau: "transunion" | "experian" | "equifax",
+  provider: ReportProvider,
+): number | null {
+  const labels: Record<typeof bureau, string[]> = {
+    transunion: ["transunion", "trans union", "tu"],
+    experian: ["experian", "exp", "ex"],
+    equifax: ["equifax", "eq"],
+  };
+
+  const providerPatterns: RegExp[] = [];
+  const abbrev =
+    bureau === "transunion" ? "TU" : bureau === "experian" ? "EX" : "EQ";
+  providerPatterns.push(
+    new RegExp(`\\b${abbrev}\\b[^\\d]{0,20}(\\d{3})`, "i"),
+  );
+
+  if (
+    provider === "identityiq" ||
+    provider === "smartcredit" ||
+    provider === "myscoreiq"
+  ) {
+    for (const label of labels[bureau]) {
+      providerPatterns.push(
+        new RegExp(`${label}[^\\d]{0,40}(?:score|vantage|fico)?[^\\d]{0,10}(\\d{3})`, "i"),
+      );
+      providerPatterns.push(
+        new RegExp(`(?:score|vantage|fico)[^\\d]{0,20}${label}[^\\d]{0,20}(\\d{3})`, "i"),
+      );
+    }
+  }
+
+  for (const re of providerPatterns) {
+    const m = text.match(re);
+    const score = m ? Number(m[1]) : NaN;
+    if (score >= 300 && score <= 850) return score;
+  }
+
+  const genericName =
+    bureau === "transunion"
+      ? "TransUnion"
+      : bureau === "experian"
+        ? "Experian"
+        : "Equifax";
+  return extractBureauScoreGeneric(text, genericName);
+}
+
+function extractAllScores(
+  text: string,
+  provider: ReportProvider = detectProvider(text),
+): BureauScores {
+  return {
+    transunion: extractBureauScoreProvider(text, "transunion", provider),
+    experian: extractBureauScoreProvider(text, "experian", provider),
+    equifax: extractBureauScoreProvider(text, "equifax", provider),
+  };
+}
+
+function middleScore(scores: BureauScores): number | null {
+  const vals = [scores.transunion, scores.experian, scores.equifax].filter(
+    (n): n is number => n != null,
+  );
+  if (vals.length === 0) return null;
+  vals.sort((a, b) => a - b);
+  return vals[Math.floor(vals.length / 2)];
+}
+
+function detectNegativeLines(text: string): string[] {
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 8 && l.length < 140);
+  const keywords =
+    /collection|charge.?off|late payment|inquiry|repossession|foreclosure|bankruptcy|lien|judgment|delinquent|past due|derogatory|charged off/i;
+  const accountPrefix =
+    /^([A-Z0-9*\/\s&.'-]{4,60}?)\s+(?:-\s+)?(?:collection|charge|late|inquiry|repossession|foreclosure|bankruptcy|lien|judgment|delinquent|past due|derogatory)/i;
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const line of lines) {
+    if (!keywords.test(line)) continue;
+    const prefixMatch = line.match(accountPrefix);
+    const normalized = (prefixMatch?.[1] ?? line).trim().slice(0, 100);
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(normalized);
+  }
+  return out.slice(0, 25);
+}
+
+function extractUtilization(text: string): OfGReportData["utilization"] {
+  const results: OfGReportData["utilization"] = [];
+  const lines = text.split(/\r?\n/);
+  for (const line of lines) {
+    const m = line.match(
+      /([A-Za-z0-9*\/\s]{4,40}?)\s+[\$]?([\d,]+)\s+[\$]?([\d,]+)\s+(\d{1,3})%/,
+    );
+    if (!m) continue;
+    const limit = Number(m[2].replace(/,/g, ""));
+    const balance = Number(m[3].replace(/,/g, ""));
+    const pctUsed = Number(m[4]);
+    if (limit <= 0 || pctUsed > 100) continue;
+    const payTo30 = Math.max(0, Math.ceil(balance - limit * 0.3));
+    const payTo10 = Math.max(0, Math.ceil(balance - limit * 0.1));
+    results.push({
+      account: m[1].trim().slice(0, 40),
+      limit,
+      balance,
+      pctUsed,
+      payTo30,
+      payTo10,
+    });
+  }
+  return results.slice(0, 12);
+}
+
+function extractPositiveAccounts(text: string): string[] {
+  const out: string[] = [];
+  const re =
+    /(paid as agreed|current|never late|positive|good standing)[^\n]{0,60}/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) && out.length < 8) {
+    const line = m[0].trim().slice(0, 80);
+    if (!out.includes(line)) out.push(line);
+  }
+  return out;
+}
+
+function diffItems(before: string[], after: string[]): string[] {
+  const afterSet = new Set(after.map((s) => s.toLowerCase().trim()));
+  return before.filter((b) => !afterSet.has(b.toLowerCase().trim()));
+}
+
+function buildConfidence(
+  beforeScores: BureauScores,
+  afterScores: BureauScores,
+): Record<string, number> {
+  return {
+    transunion:
+      beforeScores.transunion && afterScores.transunion ? 0.9 : 0.4,
+    experian: beforeScores.experian && afterScores.experian ? 0.9 : 0.4,
+    equifax: beforeScores.equifax && afterScores.equifax ? 0.9 : 0.4,
+  };
+}
+
+function computeFileStrengthScore(
+  afterMiddle: number | null,
+  winsCount: number,
+  targetsCount: number,
+): number {
+  return Math.min(
+    100,
+    Math.max(0, (afterMiddle ?? 500) - 400 + winsCount * 5 - targetsCount * 2),
+  );
+}
+
+// ============================================================================
+// REPORT EXTRACTION (inline)
+// ============================================================================
+
+type PdfParseFn = (buf: Buffer) => Promise<{ text: string }>;
+let pdfParseLoader: Promise<PdfParseFn> | null = null;
+
+/**
+ * Lazy-load pdf-parse (v2+ exports `PDFParse` class, not a default function).
+ * Keep load deferred so Vercel cold start does not fail on module init.
+ */
+function loadPdfParse(): Promise<PdfParseFn> {
+  if (!pdfParseLoader) {
+    pdfParseLoader = import("pdf-parse").then((mod) => {
+      const PDFParseCtor = (mod as { PDFParse?: new (opts: { data: Buffer | Uint8Array }) => {
+        getText: () => Promise<{ text: string }>;
+        destroy: () => Promise<void>;
+      } }).PDFParse;
+
+      // Legacy v1 default-export fallback (if ever downgraded)
+      const maybeDefault = (mod as { default?: unknown }).default;
+      const legacyFn: PdfParseFn | null =
+        typeof maybeDefault === "function"
+          ? (maybeDefault as PdfParseFn)
+          : typeof (mod as unknown) === "function"
+            ? (mod as unknown as PdfParseFn)
+            : null;
+
+      if (PDFParseCtor) {
+        const parseWithClass: PdfParseFn = async (buf) => {
+          const parser = new PDFParseCtor({ data: buf });
+          try {
+            const result = await parser.getText();
+            return { text: result?.text ?? "" };
+          } finally {
+            await parser.destroy().catch(() => undefined);
+          }
+        };
+        return parseWithClass;
+      }
+
+      if (legacyFn) return legacyFn;
+
+      throw new Error(
+        "pdf-parse module did not export PDFParse class or a parse function",
+      );
+    });
+  }
+  return pdfParseLoader;
+}
+
+const CROA_DISCLOSURE_EN =
+  "Optimum Financial Group provides credit repair services in compliance with the Credit Repair Organizations Act (CROA), 15 U.S.C. §1679 et seq. We do not guarantee specific score improvements. Results vary by individual.";
+
+const CROA_DISCLOSURE_ES =
+  "Optimum Financial Group proporciona servicios de reparación de crédito en cumplimiento con la Ley de Organizaciones de Reparación de Crédito (CROA), 15 U.S.C. §1679 et seq. No garantizamos mejoras específicas en el puntaje. Los resultados varían según el individuo.";
+
+function buildActionPlan(spanish: boolean): OfGReportData["actionPlan"] {
+  if (spanish) {
+    return [
+      {
+        step: 1,
+        description: "Continúe realizando pagos puntuales en todas sus cuentas",
+        owner: "client",
+      },
+      {
+        step: 2,
+        description: "Mantenga los saldos de tarjetas por debajo del 30%",
+        owner: "client",
+      },
+      {
+        step: 3,
+        description: "OFG presentará disputas dirigidas para los ítems restantes",
+        owner: "ofg",
+      },
+    ];
+  }
+  return [
+    {
+      step: 1,
+      description: "Continue making on-time payments on all open accounts",
+      owner: "client",
+    },
+    {
+      step: 2,
+      description: "Keep credit card balances below 30% utilization",
+      owner: "client",
+    },
+    {
+      step: 3,
+      description: "OFG will submit targeted disputes for remaining items",
+      owner: "ofg",
+    },
+  ];
+}
+
+async function extractFromCreditReportPdfs(
+  beforeBuffer: Buffer,
+  afterBuffer: Buffer,
+  clientFirstName: string,
+  roundNumber: number,
+  options: {
+    highlightWin?: string;
+    spanish?: boolean;
+    tradelineRec?: boolean;
+    fundingNote?: boolean;
+  } = {},
+): Promise<{ data: OfGReportData; meta: Record<string, unknown> }> {
+  const t0 = Date.now();
+  const pdfParse = await loadPdfParse();
+  const [beforeParsed, afterParsed] = await Promise.all([
+    pdfParse(beforeBuffer),
+    pdfParse(afterBuffer),
+  ]);
+
+  if (!beforeParsed.text?.trim() || !afterParsed.text?.trim()) {
+    throw new Error(
+      "Could not extract text from one or both PDFs — file may be scanned/image-only",
+    );
+  }
+
+  const combinedText = beforeParsed.text + afterParsed.text;
+  const provider = detectProvider(combinedText);
+  const beforeScores = extractAllScores(beforeParsed.text, provider);
+  const afterScores = extractAllScores(afterParsed.text, provider);
+  const beforeMiddle = middleScore(beforeScores);
+  const afterMiddle = middleScore(afterScores);
+
+  const beforeNeg = detectNegativeLines(beforeParsed.text);
+  const afterNeg = detectNegativeLines(afterParsed.text);
+  const removed = diffItems(beforeNeg, afterNeg);
+
+  const wins = removed.map((item) => ({
+    itemRemoved: item,
+    bureaus: ["TU", "EX", "EQ"] as ("TU" | "EX" | "EQ")[],
+    impact: options.spanish ? "Eliminado del informe" : "Removed from report",
+    status: options.spanish ? "Eliminado" : "Removed",
+    highlighted:
+      !!options.highlightWin &&
+      item.toLowerCase().includes(options.highlightWin.toLowerCase()),
+  }));
+
+  if (options.highlightWin && wins.length === 0) {
+    wins.push({
+      itemRemoved: options.highlightWin,
+      bureaus: ["TU", "EX", "EQ"],
+      impact: options.spanish ? "Eliminado del informe" : "Removed from report",
+      status: options.spanish ? "Eliminado" : "Removed",
+      highlighted: true,
+    });
+  }
+
+  const targets = afterNeg.slice(0, 8).map((item, i) => ({
+    item,
+    bureaus: ["TU", "EX", "EQ"] as ("TU" | "EX" | "EQ")[],
+    detail: options.spanish
+      ? "Aún reportando — objetivo próxima ronda"
+      : "Still reporting — next round target",
+    priority: (i < 3 ? "high" : "medium") as "high" | "medium" | "low",
+  }));
+
+  const utilization = extractUtilization(afterParsed.text);
+  const positiveAccounts = extractPositiveAccounts(afterParsed.text);
+  const actionNeeded = utilization
+    .filter((u) => u.pctUsed > 30)
+    .map(
+      (u) =>
+        `${u.account}: ${u.pctUsed}% utilized — pay down $${u.payTo30} to reach 30%`,
+    );
+
+  const scoreGoal =
+    afterMiddle != null ? Math.min(850, afterMiddle + 40) : 700;
+  const gapRemaining =
+    afterMiddle != null ? Math.max(0, scoreGoal - afterMiddle) : 0;
+
+  const spanish = !!options.spanish;
+
+  const data: OfGReportData = {
+    client: { firstName: clientFirstName },
+    reportDate: {
+      before: new Date().toISOString().slice(0, 10),
+      after: new Date().toISOString().slice(0, 10),
+    },
+    bureauScores: {
+      transunion: {
+        before: beforeScores.transunion ?? 0,
+        after: afterScores.transunion ?? 0,
+      },
+      experian: {
+        before: beforeScores.experian ?? 0,
+        after: afterScores.experian ?? 0,
+      },
+      equifax: {
+        before: beforeScores.equifax ?? 0,
+        after: afterScores.equifax ?? 0,
+      },
+    },
+    middleScore: {
+      before: beforeMiddle ?? 0,
+      after: afterMiddle ?? 0,
+    },
+    wins,
+    targets,
+    utilization,
+    positiveAccounts,
+    actionNeeded,
+    roadmap: {
+      currentRound: roundNumber,
+      nextRound: Math.min(5, roundNumber + 1),
+      scoreGoal,
+      gapRemaining,
+      milestones: spanish
+        ? [
+            `Ronda ${roundNumber} documentada`,
+            `Ronda ${Math.min(5, roundNumber + 1)} en progreso`,
+            "Meta de puntaje en camino",
+          ]
+        : [
+            `Round ${roundNumber} progress documented`,
+            `Round ${Math.min(5, roundNumber + 1)} disputes in progress`,
+            "Score goal on track",
+          ],
+    },
+    actionPlan: buildActionPlan(spanish),
+    fileStrengthScore: computeFileStrengthScore(
+      afterMiddle,
+      wins.length,
+      targets.length,
+    ),
+    tradelineRecommendation: options.tradelineRec
+      ? {
+          code: "IH-1",
+          projectedImpact: spanish
+            ? "Proyección +15–25 puntos cuando se actualice el informe"
+            : "Projected +15–25 points when reporting updates",
+        }
+      : undefined,
+    fundingReadinessNote: options.fundingNote
+      ? spanish
+        ? "En camino hacia mejor preparación para financiamiento conforme se eliminan ítems negativos."
+        : "On track for improved funding readiness as negative items are removed and utilization is optimized."
+      : undefined,
+    croaDisclosure: spanish ? CROA_DISCLOSURE_ES : CROA_DISCLOSURE_EN,
+    locale: spanish ? "es" : "en",
+  };
+
+  const confidence = buildConfidence(beforeScores, afterScores);
+
+  return {
+    data,
+    meta: {
+      duration_ms: Date.now() - t0,
+      provider,
+      extraction_method: "heuristic",
+      before_text_length: beforeParsed.text.length,
+      after_text_length: afterParsed.text.length,
+      confidence,
+      wins_detected: data.wins.length,
+      targets_detected: data.targets.length,
+      utilization_detected: data.utilization.length,
+    },
+  };
+}
+
+// ============================================================================
+// REPORT COMPLIANCE (inline)
+// ============================================================================
+
+const BLOCKED_PHRASES = [
+  /guarantee/i,
+  /guaranteed/i,
+  /goodwill letter/i,
+  /pay off your/i,
+  /negotiate.*debt/i,
+  /will increase.*\d+ points/i,
+];
+
+export type ReportComplianceResult = {
+  /** Hard blockers — always reject preview/publish. */
+  errors: string[];
+  /** Soft checks — preview allowed; publish needs acknowledge_score_anomalies. */
+  warnings: string[];
+};
+
+function validateReportCompliance(data: OfGReportData): ReportComplianceResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (!data.croaDisclosure?.includes("CROA")) {
+    errors.push("CROA disclosure is missing");
+  }
+
+  if (!data.client?.firstName?.trim()) {
+    errors.push("Client first name is required");
+  }
+
+  if (data.roadmap.currentRound < 1 || data.roadmap.currentRound > 5) {
+    errors.push("Invalid round number in report data");
+  }
+
+  const hasAnyAfterScore =
+    data.middleScore.after > 0 ||
+    data.bureauScores.transunion.after > 0 ||
+    data.bureauScores.experian.after > 0 ||
+    data.bureauScores.equifax.after > 0;
+
+  if (!hasAnyAfterScore) {
+    errors.push(
+      "At least one after score is required — verify bureau scores before publishing",
+    );
+  }
+
+  for (const bureau of ["transunion", "experian", "equifax"] as const) {
+    const s = data.bureauScores[bureau];
+    for (const [label, val] of [
+      ["before", s.before],
+      ["after", s.after],
+    ] as const) {
+      if (val !== 0 && (val < 300 || val > 850)) {
+        errors.push(`${bureau} ${label} score out of range: ${val}`);
+      }
+    }
+    if (s.before > 0 && s.after > 0 && s.after < s.before - 150) {
+      warnings.push(
+        `${bureau} after score dropped more than 150 points — verify accuracy against the source PDFs, or correct the score in review`,
+      );
+    }
+  }
+
+  warnings.push(...scoresRoughlyMatchMiddle(data));
+
+  const textFields = [
+    data.fundingReadinessNote,
+    data.tradelineRecommendation?.projectedImpact,
+    ...data.actionPlan.map((a) => a.description),
+    ...data.wins.map((w) => w.itemRemoved),
+    ...data.targets.map((t) => t.item),
+  ].filter(Boolean) as string[];
+
+  for (const text of textFields) {
+    for (const re of BLOCKED_PHRASES) {
+      if (re.test(text)) {
+        errors.push(
+          `Compliance issue: prohibited phrase in "${text.slice(0, 40)}..."`,
+        );
+      }
+    }
+  }
+
+  if (
+    data.tradelineRecommendation?.code &&
+    !/^IH-\d+$/i.test(data.tradelineRecommendation.code)
+  ) {
+    errors.push("Tradeline code must use IH-N format only");
+  }
+
+  return { errors, warnings };
+}
+
+// ============================================================================
+// OFG PROGRESS REPORT PDF (inline)
+// ============================================================================
+
+const NAVY = rgb(0.051, 0.122, 0.235);
+const GOLD = rgb(0.788, 0.659, 0.298);
+const GRAY = rgb(0.35, 0.35, 0.38);
+
+type PdfLabels = {
+  progressReport: (name: string) => string;
+  scoreOverview: (name: string) => string;
+  middleScore: (before: number, after: number) => string;
+  winsTitle: string;
+  noWins: string;
+  targetsTitle: string;
+  noTargets: string;
+  utilTitle: string;
+  utilEmpty: string;
+  utilLine: (account: string, pct: number, pay: number) => string;
+  positiveTitle: string;
+  positiveDefault: string;
+  roadmapTitle: (round: number) => string;
+  scoreGoal: (goal: number, gap: number) => string;
+  fileStrength: (score: number) => string;
+  actionPlanTitle: string;
+  croaTitle: string;
+  footer: string;
+  page2Header: string;
+  page3Header: string;
+};
+
+const LABELS: Record<"en" | "es", PdfLabels> = {
+  en: {
+    progressReport: (name) => `Progress Report - ${name}`,
+    scoreOverview: (name) => `${name} - Score Overview`,
+    middleScore: (b, a) => `Middle Score: ${b} -> ${a}`,
+    winsTitle: "What came off your report (Wins)",
+    noWins: "No wins detected - verify against source PDFs.",
+    targetsTitle: "Still on report (Round targets)",
+    noTargets: "None detected",
+    utilTitle: "Credit Utilization",
+    utilEmpty: "Utilization details to be added as account data is available.",
+    utilLine: (account, pct, pay) =>
+      `${account}: ${pct}% used - pay to 30%: $${pay}`,
+    positiveTitle: "Positive accounts working in your favor",
+    positiveDefault: "On-time payment history on open accounts",
+    roadmapTitle: (round) => `Round ${round} Milestone`,
+    scoreGoal: (goal, gap) => `Score goal: ${goal} (gap: ${gap} pts)`,
+    fileStrength: (score) => `File Strength Score: ${score}/100`,
+    actionPlanTitle: "Your action plan",
+    croaTitle: "CROA Disclosure",
+    footer: "optimum-financial-group.com | (949) 736-5644",
+    page2Header: "Utilization & What's Working",
+    page3Header: "Roadmap & Action Plan",
+  },
+  es: {
+    progressReport: (name) => `Informe de Progreso - ${name}`,
+    scoreOverview: (name) => `${name} - Resumen de Puntajes`,
+    middleScore: (b, a) => `Puntaje Medio: ${b} -> ${a}`,
+    winsTitle: "Lo que salio de su reporte (Victorias)",
+    noWins: "No se detectaron victorias - verifique los PDFs fuente.",
+    targetsTitle: "Aun en el reporte (Objetivos de la ronda)",
+    noTargets: "Ninguno detectado",
+    utilTitle: "Utilizacion de Credito",
+    utilEmpty:
+      "Los detalles de utilizacion se agregaran cuando haya datos de cuentas.",
+    utilLine: (account, pct, pay) =>
+      `${account}: ${pct}% usado - pagar al 30%: $${pay}`,
+    positiveTitle: "Cuentas positivas a su favor",
+    positiveDefault: "Historial de pagos puntuales en cuentas abiertas",
+    roadmapTitle: (round) => `Hito de la Ronda ${round}`,
+    scoreGoal: (goal, gap) => `Meta de puntaje: ${goal} (brecha: ${gap} pts)`,
+    fileStrength: (score) => `Puntaje de Fortaleza: ${score}/100`,
+    actionPlanTitle: "Su plan de accion",
+    croaTitle: "Divulgacion CROA",
+    footer: "optimum-financial-group.com | (949) 736-5644",
+    page2Header: "Utilizacion y Lo Que Funciona",
+    page3Header: "Hoja de Ruta y Plan de Accion",
+  },
+};
+
+function resolveLocale(data: OfGReportData): "en" | "es" {
+  return data.locale === "es" ? "es" : "en";
+}
+
+/**
+ * StandardFonts (Helvetica) use WinAnsi — Unicode arrows/dashes/bullets crash drawText.
+ * Normalize common glyphs + strip any remaining non-WinAnsi code points.
+ */
+function toPdfSafeText(input: string): string {
+  return String(input ?? "")
+    .replace(/\u2192|\u21D2|\u2794|\u27A1/g, "->") // → ⇒ ➔ ➡
+    .replace(/\u2190|\u21D0/g, "<-") // ← ⇐
+    .replace(/[\u2013\u2014\u2015]/g, "-") // – — ―
+    .replace(/\u2022|\u00B7|\u25CF|\u25E6/g, "*") // • · ● ○
+    .replace(/\u2026/g, "...") // …
+    .replace(/[\u2018\u2019\u2032]/g, "'") // ‘ ’ ′
+    .replace(/[\u201C\u201D\u2033]/g, '"') // “ ” ″
+    .replace(/\u00A0/g, " ") // nbsp
+    .replace(/[^\x09\x0A\x0D\x20-\x7E\xA0-\xFF]/g, "?"); // remaining non-WinAnsi
+}
+
+function scoreBar(before: number, after: number, width = 28): string {
+  const max = 850;
+  const min = 300;
+  const pct = Math.min(1, Math.max(0, (after - min) / (max - min)));
+  const filled = Math.round(pct * width);
+  const delta = after - before;
+  const sign = delta >= 0 ? "+" : "";
+  return `[${"=".repeat(filled)}${" ".repeat(Math.max(0, width - filled))}] ${before} -> ${after} (${sign}${delta} pts)`;
+}
+
+async function generateOfgProgressReportPdf(
+  data: OfGReportData,
+  fileNameHint: string,
+): Promise<{ buffer: Buffer; fileName: string }> {
+  const locale = resolveLocale(data);
+  const L = LABELS[locale];
+  const pdf = await PDFDocument.create();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const fontBold = await pdf.embedFont(StandardFonts.HelveticaBold);
+
+  const dateLocale = locale === "es" ? "es-US" : "en-US";
+  const monthYear = new Date()
+    .toLocaleDateString(dateLocale, { month: "short", year: "numeric" })
+    .replace(" ", "");
+  const fileName =
+    fileNameHint ||
+    `${data.client.firstName}_OFG_Progress_Report_${monthYear}.pdf`;
+
+  const drawHeader = (
+    page: ReturnType<PDFDocument["addPage"]>,
+    title: string,
+  ) => {
+    const { width, height } = page.getSize();
+    page.drawRectangle({
+      x: 0,
+      y: height - 56,
+      width,
+      height: 56,
+      color: NAVY,
+    });
+    page.drawText("Optimum Financial Group", {
+      x: 40,
+      y: height - 32,
+      size: 14,
+      font: fontBold,
+      color: GOLD,
+    });
+    page.drawText(toPdfSafeText(title), {
+      x: 40,
+      y: height - 48,
+      size: 9,
+      font,
+      color: rgb(1, 1, 1),
+    });
+  };
+
+  const writeLines = (
+    page: ReturnType<PDFDocument["addPage"]>,
+    lines: string[],
+    startY: number,
+    size = 10,
+  ) => {
+    let y = startY;
+    for (const line of lines) {
+      if (y < 60) break;
+      page.drawText(toPdfSafeText(line).slice(0, 95), {
+        x: 40,
+        y,
+        size,
+        font,
+        color: GRAY,
+      });
+      y -= size + 6;
+    }
+    return y;
+  };
+
+  const drawSafe = (
+    page: ReturnType<PDFDocument["addPage"]>,
+    text: string,
+    opts: {
+      x: number;
+      y: number;
+      size: number;
+      font: typeof font;
+      color: ReturnType<typeof rgb>;
+    },
+  ) => {
+    page.drawText(toPdfSafeText(text), opts);
+  };
+
+  const p1 = pdf.addPage([612, 792]);
+  drawHeader(p1, L.progressReport(data.client.firstName));
+  let y = 700;
+  drawSafe(p1, L.scoreOverview(data.client.firstName), {
+    x: 40,
+    y,
+    size: 16,
+    font: fontBold,
+    color: NAVY,
+  });
+  y -= 28;
+  drawSafe(
+    p1,
+    L.middleScore(data.middleScore.before, data.middleScore.after),
+    { x: 40, y, size: 11, font: fontBold, color: NAVY },
+  );
+  y -= 22;
+  const bars = [
+    `TransUnion: ${scoreBar(data.bureauScores.transunion.before, data.bureauScores.transunion.after)}`,
+    `Experian:   ${scoreBar(data.bureauScores.experian.before, data.bureauScores.experian.after)}`,
+    `Equifax:    ${scoreBar(data.bureauScores.equifax.before, data.bureauScores.equifax.after)}`,
+  ];
+  y = writeLines(p1, bars, y, 9);
+  y -= 10;
+  drawSafe(p1, L.winsTitle, {
+    x: 40,
+    y,
+    size: 12,
+    font: fontBold,
+    color: NAVY,
+  });
+  y -= 18;
+  if (data.wins.length === 0) {
+    y = writeLines(p1, [L.noWins], y);
+  } else {
+    y = writeLines(
+      p1,
+      data.wins.map(
+        (w, i) =>
+          `${i + 1}. ${w.itemRemoved} - ${w.bureaus.join("/")} - ${w.status}`,
+      ),
+      y,
+      9,
+    );
+  }
+  y -= 8;
+  drawSafe(p1, L.targetsTitle, {
+    x: 40,
+    y,
+    size: 12,
+    font: fontBold,
+    color: NAVY,
+  });
+  y -= 18;
+  y = writeLines(
+    p1,
+    data.targets.length
+      ? data.targets.map((t, i) => `${i + 1}. ${t.item}`)
+      : [L.noTargets],
+    y,
+    9,
+  );
+
+  const p2 = pdf.addPage([612, 792]);
+  drawHeader(p2, L.page2Header);
+  y = 700;
+  drawSafe(p2, L.utilTitle, {
+    x: 40,
+    y,
+    size: 14,
+    font: fontBold,
+    color: NAVY,
+  });
+  y -= 22;
+  y = writeLines(
+    p2,
+    data.utilization.length
+      ? data.utilization.map((u) =>
+          L.utilLine(u.account, u.pctUsed, u.payTo30),
+        )
+      : [L.utilEmpty],
+    y,
+    9,
+  );
+  y -= 12;
+  drawSafe(p2, L.positiveTitle, {
+    x: 40,
+    y,
+    size: 12,
+    font: fontBold,
+    color: NAVY,
+  });
+  y -= 18;
+  y = writeLines(
+    p2,
+    data.positiveAccounts.length
+      ? data.positiveAccounts
+      : [L.positiveDefault],
+    y,
+    9,
+  );
+
+  const p3 = pdf.addPage([612, 792]);
+  drawHeader(p3, L.page3Header);
+  y = 700;
+  drawSafe(p3, L.roadmapTitle(data.roadmap.currentRound), {
+    x: 40,
+    y,
+    size: 14,
+    font: fontBold,
+    color: NAVY,
+  });
+  y -= 22;
+  y = writeLines(
+    p3,
+    [
+      L.scoreGoal(data.roadmap.scoreGoal, data.roadmap.gapRemaining),
+      L.fileStrength(data.fileStrengthScore),
+      ...data.roadmap.milestones.map((m) => `* ${m}`),
+    ],
+    y,
+    10,
+  );
+  y -= 10;
+  drawSafe(p3, L.actionPlanTitle, {
+    x: 40,
+    y,
+    size: 12,
+    font: fontBold,
+    color: NAVY,
+  });
+  y -= 18;
+  y = writeLines(
+    p3,
+    data.actionPlan.map(
+      (a) => `${a.step}. [${a.owner.toUpperCase()}] ${a.description}`,
+    ),
+    y,
+    9,
+  );
+  if (data.tradelineRecommendation) {
+    y -= 8;
+    y = writeLines(
+      p3,
+      [
+        `Tradeline (${data.tradelineRecommendation.code}): ${data.tradelineRecommendation.projectedImpact}`,
+      ],
+      y,
+      9,
+    );
+  }
+  if (data.fundingReadinessNote) {
+    y -= 8;
+    y = writeLines(p3, [data.fundingReadinessNote], y, 9);
+  }
+  y -= 16;
+  drawSafe(p3, L.croaTitle, {
+    x: 40,
+    y,
+    size: 10,
+    font: fontBold,
+    color: NAVY,
+  });
+  y -= 14;
+  writeLines(p3, [data.croaDisclosure], y, 8);
+  drawSafe(p3, L.footer, {
+    x: 40,
+    y: 40,
+    size: 8,
+    font,
+    color: GRAY,
+  });
+
+  const bytes = await pdf.save();
+  return { buffer: Buffer.from(bytes), fileName };
+}
+
+function reportDataToSummaryMd(data: OfGReportData): string {
+  const lines = [
+    `## Round ${data.roadmap.currentRound} Progress`,
+    "",
+    `Middle score: **${data.middleScore.before}** → **${data.middleScore.after}**`,
+    "",
+    "### Wins",
+    ...data.wins.map((w) => `- ${w.itemRemoved}`),
+    "",
+    "### Next targets",
+    ...data.targets.map((t) => `- ${t.item}`),
+  ];
+  return lines.join("\n");
+}
+
 // Silently swallow connection-level errors so a dead pooled connection doesn't
 // crash the process — mysql2 will discard it and open a fresh one on the next query.
 const TRANSIENT_DB_CODES = [
@@ -111,15 +1308,15 @@ pool.on("connection", (conn) => {
 });
 
 // ============================================================================
-// EXTERNAL CLIENTS (Resend / Twilio / Authorize.net) — all with graceful fallback
+// EXTERNAL CLIENTS (Email / Twilio / Authorize.net) — all with graceful fallback
 // ============================================================================
 
 const FROM_EMAIL =
   process.env.SMTP_FROM || "Optimum <no-reply@disruptinglabs.com>";
-let resendClient: Resend | null = null;
+let emailClient: Resend | null = null;
 if (process.env.RESEND_API_KEY) {
-  resendClient = new Resend(process.env.RESEND_API_KEY);
-  console.log("✅ Resend initialized");
+  emailClient = new Resend(process.env.RESEND_API_KEY);
+  console.log("✅ Email provider initialized");
 } else {
   console.warn("⚠️  RESEND_API_KEY not set — emails will be logged, not sent");
 }
@@ -158,6 +1355,13 @@ if (authorizeNetConfigured) {
   console.warn(
     "⚠️  AUTHORIZENET_API_LOGIN_ID / AUTHORIZENET_TRANSACTION_KEY not set — payments will use mock mode",
   );
+}
+
+function mockPaymentsAllowed(): boolean {
+  if (authorizeNetConfigured) return false;
+  if (process.env.NODE_ENV === "production") return false;
+  if (process.env.AUTHORIZENET_SANDBOX === "false") return false;
+  return true;
 }
 
 // ============================================================================
@@ -253,6 +1457,25 @@ async function uploadToCDN(
       "CDN upload returned no URL: " + (data?.error ?? "unknown"),
     );
   return uploaded.url as string;
+}
+
+/** Best-effort CDN cleanup when DB writes fail after upload (requires CDN_DELETE_URL). */
+async function deleteFromCDN(storageUrl: string): Promise<void> {
+  const deleteUrl = process.env.CDN_DELETE_URL;
+  if (!deleteUrl || !CDN_UPLOAD_SECRET || !storageUrl) return;
+  const res = await fetch(deleteUrl, {
+    method: "POST",
+    headers: {
+      "X-Api-Key": CDN_UPLOAD_SECRET,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ url: storageUrl }),
+  });
+  if (!res.ok) {
+    console.warn(
+      `[cdn:delete] Failed (${res.status}) for ${storageUrl.slice(0, 80)}…`,
+    );
+  }
 }
 
 // ============================================================================
@@ -459,11 +1682,11 @@ interface SendEmailOptions {
 }
 
 async function sendEmail(opts: SendEmailOptions) {
-  if (!resendClient) {
+  if (!emailClient) {
     console.log("[email:dry-run]", opts.to, opts.subject);
     return { id: "dry-run" };
   }
-  const { data, error } = await resendClient.emails.send({
+  const { data, error } = await emailClient.emails.send({
     from: FROM_EMAIL,
     to: opts.to,
     subject: opts.subject,
@@ -809,6 +2032,116 @@ async function attachPdfsToReports(
     r.pdfs = byRound[r.round_number as number] ?? [];
   }
 }
+
+// ============================================================================
+// OFG REPORT WIZARD HELPERS
+// ============================================================================
+
+async function loadWizardSession(
+  pool: Pool,
+  sessionId: number,
+): Promise<RowDataPacket | null> {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT rws.*, c.first_name, c.last_name, c.email, c.phone, c.preferred_language
+     FROM report_wizard_sessions rws
+     JOIN clients c ON c.id = rws.client_id
+     WHERE rws.id = ? LIMIT 1`,
+    [sessionId],
+  );
+  return rows[0] ?? null;
+}
+
+async function loadWizardSourcePdfBuffer(
+  pool: Pool,
+  pdfId: number,
+  decrypt: (encrypted: Buffer, ivHex: string, tagHex: string) => Buffer,
+): Promise<Buffer> {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT storage_key, enc_iv, enc_tag FROM round_report_source_pdfs WHERE id = ? LIMIT 1`,
+    [pdfId],
+  );
+  if (rows.length === 0) throw new Error("Source PDF not found");
+  const row = rows[0];
+  const resp = await fetch(row.storage_key as string);
+  if (!resp.ok) throw new Error("Failed to fetch source PDF from CDN");
+  const encBuf = Buffer.from(await resp.arrayBuffer());
+  return decrypt(encBuf, row.enc_iv as string, row.enc_tag as string);
+}
+
+function parseWizardJsonField<T>(val: unknown): T | null {
+  if (val == null) return null;
+  if (typeof val === "object") return val as T;
+  try {
+    return JSON.parse(String(val)) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function runWizardSessionExtraction(
+  pool: Pool,
+  session: RowDataPacket,
+  decrypt: (encrypted: Buffer, ivHex: string, tagHex: string) => Buffer,
+): Promise<{ data: OfGReportData; meta: Record<string, unknown> }> {
+  const beforePdfId = session.before_pdf_id as number | null;
+  const afterPdfId = session.after_pdf_id as number | null;
+  if (!beforePdfId || !afterPdfId) {
+    throw new Error("Source PDFs missing for this session");
+  }
+
+  const options =
+    parseWizardJsonField<OfGReportWizardOptions>(session.options_json) ?? {};
+  const firstName = String(session.first_name || "Client");
+  const roundNumber = session.round_number as number;
+
+  const beforeBuf = await loadWizardSourcePdfBuffer(pool, beforePdfId, decrypt);
+  const afterBuf = await loadWizardSourcePdfBuffer(pool, afterPdfId, decrypt);
+
+  const { data, meta } = await extractFromCreditReportPdfs(
+    beforeBuf,
+    afterBuf,
+    firstName,
+    roundNumber,
+    {
+      highlightWin: options.highlight_win,
+      spanish: options.spanish,
+      tradelineRec: options.tradeline_rec,
+      fundingNote: options.funding_note,
+    },
+  );
+
+  return { data, meta };
+}
+
+async function hasPublishedWizardRound(
+  pool: Pool,
+  clientId: number,
+  roundNumber: number,
+  excludeSessionId?: number,
+): Promise<boolean> {
+  const params: number[] = [clientId, roundNumber];
+  let sql = `SELECT id FROM report_wizard_sessions
+             WHERE client_id = ? AND round_number = ? AND status = 'published'`;
+  if (excludeSessionId) {
+    sql += ` AND id != ?`;
+    params.push(excludeSessionId);
+  }
+  sql += ` LIMIT 1`;
+  const [rows] = await pool.query<RowDataPacket[]>(sql, params);
+  return rows.length > 0;
+}
+
+function formatWizardSessionResponse(session: RowDataPacket) {
+  return {
+    ...session,
+    options_json: parseWizardJsonField(session.options_json),
+    extracted_json: parseWizardJsonField(session.extracted_json),
+    reviewed_json: parseWizardJsonField(session.reviewed_json),
+    extraction_meta: parseWizardJsonField(session.extraction_meta),
+  };
+}
+
+
 
 function tplRoundPdfReady(opts: {
   firstName: string;
@@ -1322,9 +2655,7 @@ async function createARBSubscription(opts: {
   return { subscriptionId: String(data.subscriptionId) };
 }
 
-async function cancelARBSubscription(
-  subscriptionId: string,
-): Promise<void> {
+async function cancelARBSubscription(subscriptionId: string): Promise<void> {
   const payload = {
     ARBCancelSubscriptionRequest: {
       merchantAuthentication: {
@@ -1426,7 +2757,7 @@ async function sendPeaceOfMindSubscriptionEmail(
   const firstName = String(rows[0].first_name || "there");
   const lang = rows[0].preferred_language === "es" ? "es" : "en";
   const isEs = lang === "es";
-  const appUrl = process.env.APP_URL || "http://localhost:8080";
+  const appUrl = APP_URL;
 
   const body =
     kind === "started"
@@ -1522,9 +2853,7 @@ async function insertTradelineSelections(
   products: RowDataPacket[],
 ): Promise<void> {
   if (products.length === 0) return;
-  const values = products
-    .map(() => "(?, ?, ?, ?, ?, ?)")
-    .join(", ");
+  const values = products.map(() => "(?, ?, ?, ?, ?, ?)").join(", ");
   const params = products.flatMap((p) => [
     clientId,
     paymentId,
@@ -1546,10 +2875,30 @@ async function insertTradelineSelections(
 // ============================================================================
 
 /**
- * Creates client_task_completions rows for all active, auto_assign=1 templates
- * that the client doesn't already have. Safe to call multiple times (INSERT IGNORE).
+ * Resolves the primary active case for a client (package preferred, then newest).
  */
-async function autoAssignTasksForClient(clientId: number): Promise<void> {
+async function resolvePrimaryActiveCaseId(
+  db: Pick<Pool, "query">,
+  clientId: number,
+): Promise<number | null> {
+  const [rows] = await db.query<RowDataPacket[]>(
+    `SELECT id FROM credit_repair_cases
+     WHERE client_id = ? AND status = 'active'
+     ORDER BY (package_id IS NOT NULL) DESC, id DESC
+     LIMIT 1`,
+    [clientId],
+  );
+  return (rows[0]?.id as number) ?? null;
+}
+
+/**
+ * Creates client_task_completions rows for all active, auto_assign=1 templates
+ * for a specific case. Safe to call multiple times (INSERT IGNORE).
+ */
+async function autoAssignTasksForCase(
+  clientId: number,
+  caseId: number,
+): Promise<void> {
   const [templates] = await pool.query<RowDataPacket[]>(
     `SELECT id FROM onboarding_task_templates
      WHERE is_active = 1 AND auto_assign = 1
@@ -1557,14 +2906,24 @@ async function autoAssignTasksForClient(clientId: number): Promise<void> {
   );
   if (templates.length === 0) return;
 
-  const values = templates.map(() => "(?, ?, 'pending')").join(", ");
-  const params = templates.flatMap((t) => [clientId, t.id]);
+  const values = templates.map(() => "(?, ?, ?, 'pending')").join(", ");
+  const params = templates.flatMap((t) => [clientId, caseId, t.id]);
 
   await pool.query<ResultSetHeader>(
-    `INSERT IGNORE INTO client_task_completions (client_id, task_template_id, status)
+    `INSERT IGNORE INTO client_task_completions (client_id, case_id, task_template_id, status)
      VALUES ${values}`,
     params,
   );
+}
+
+async function autoAssignTasksForClient(
+  clientId: number,
+  caseId?: number,
+): Promise<void> {
+  const resolved =
+    caseId ?? (await resolvePrimaryActiveCaseId(pool, clientId));
+  if (!resolved) return;
+  await autoAssignTasksForCase(clientId, resolved);
 }
 
 async function markPaymentSucceeded(clientId: number, transactionId: string) {
@@ -1619,16 +2978,17 @@ async function markPaymentSucceeded(clientId: number, transactionId: string) {
       `UPDATE credit_repair_cases SET case_number = ? WHERE id = ?`,
       [`CR-${String(newCaseId).padStart(5, "0")}`, newCaseId],
     );
+    autoAssignTasksForCase(clientId, newCaseId).catch((e) =>
+      console.error("[tasks:auto-assign]", e?.message),
+    );
+  } else {
+    autoAssignTasksForClient(clientId).catch((e) =>
+      console.error("[tasks:auto-assign]", e?.message),
+    );
   }
 
-  // Trigger the "payment_confirmed" reminder flow (Day 1/2/3 email sequence)
   triggerReminderFlow("payment_confirmed", clientId).catch((e) =>
     console.error("[flow:payment_confirmed]", e?.message),
-  );
-
-  // Auto-assign onboarding tasks to this client
-  autoAssignTasksForClient(clientId).catch((e) =>
-    console.error("[tasks:auto-assign]", e?.message),
   );
 
   // Push new client to Credit Repair Cloud (async — don't block payment confirmation)
@@ -1992,6 +3352,9 @@ async function crcSyncClient(clientId: number): Promise<void> {
   const c = rows[0];
 
   const isUpdate = !!c.crc_client_id;
+  if (isUpdate && process.env.CRC_SYNC_STAGES === "false") {
+    return;
+  }
   const crcType = mapStageToCrcType(c.pipeline_stage as string);
 
   const xmlData = buildCrcClientXml({
@@ -2254,32 +3617,39 @@ function buildApp() {
   });
 
   app.post("/api/auth/admin/request-otp", async (req, res) => {
-    const email = String(req.body?.email || "")
-      .trim()
-      .toLowerCase();
-    if (!email) return res.status(400).json({ error: "Email required" });
-    const [rows] = await pool.query<RowDataPacket[]>(
-      "SELECT id, first_name FROM admins WHERE email = ? AND status = 'active' LIMIT 1",
-      [email],
-    );
-    if (rows.length === 0)
-      return res.status(404).json({
-        error:
-          "No staff account found for that email. Double-check for typos or contact your super admin.",
+    try {
+      const email = String(req.body?.email || "")
+        .trim()
+        .toLowerCase();
+      if (!email) return res.status(400).json({ error: "Email required" });
+      const [rows] = await pool.query<RowDataPacket[]>(
+        "SELECT id, first_name FROM admins WHERE email = ? AND status = 'active' LIMIT 1",
+        [email],
+      );
+      if (rows.length === 0)
+        return res.status(404).json({
+          error:
+            "No staff account found for that email. Double-check for typos or contact your super admin.",
+        });
+      const code = await createOtp(
+        "admin",
+        rows[0].id as number,
+        "login",
+        req.ip,
+      );
+      const tpl = tplOtpLogin({
+        firstName: rows[0].first_name,
+        code,
+        isAdmin: true,
       });
-    const code = await createOtp(
-      "admin",
-      rows[0].id as number,
-      "login",
-      req.ip,
-    );
-    const tpl = tplOtpLogin({
-      firstName: rows[0].first_name,
-      code,
-      isAdmin: true,
-    });
-    await sendEmail({ to: email, subject: tpl.subject, html: tpl.html });
-    res.json({ ok: true });
+      await sendEmail({ to: email, subject: tpl.subject, html: tpl.html });
+      res.json({ ok: true });
+    } catch (err: any) {
+      console.error("[/api/auth/admin/request-otp]", err?.message ?? err);
+      res.status(503).json({
+        error: "Service temporarily unavailable. Please try again shortly.",
+      });
+    }
   });
 
   app.post("/api/auth/admin/verify-otp", async (req, res) => {
@@ -2405,6 +3775,46 @@ function buildApp() {
   });
 
   // ============================================================
+  // PUBLIC — legal documents (DB-backed markdown)
+  // ============================================================
+  app.get("/api/legal", async (_req, res) => {
+    try {
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT slug, title, updated_at FROM legal_documents ORDER BY slug ASC`,
+      );
+      res.json({ documents: rows });
+    } catch (err: any) {
+      console.error("[/api/legal]", err?.message ?? err);
+      res.status(503).json({
+        error: "Service temporarily unavailable. Please try again shortly.",
+      });
+    }
+  });
+
+  app.get("/api/legal/:slug", async (req, res) => {
+    try {
+      const slug = String(req.params.slug || "")
+        .trim()
+        .toLowerCase();
+      if (!slug) return res.status(400).json({ error: "slug required" });
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT slug, title, content_md, source_url, updated_at
+         FROM legal_documents WHERE slug = ? LIMIT 1`,
+        [slug],
+      );
+      if (rows.length === 0) {
+        return res.status(404).json({ error: "Document not found" });
+      }
+      res.json({ document: rows[0] });
+    } catch (err: any) {
+      console.error("[/api/legal/:slug]", err?.message ?? err);
+      res.status(503).json({
+        error: "Service temporarily unavailable. Please try again shortly.",
+      });
+    }
+  });
+
+  // ============================================================
   // PUBLIC — packages + registration + Authorize.net
   // ============================================================
   app.get("/api/packages", async (_req, res) => {
@@ -2446,13 +3856,13 @@ function buildApp() {
   app.post("/api/webhooks/authorize-net", async (req, res) => {
     try {
       const rawBody =
-        (req as any).rawBody?.toString?.() ||
-        JSON.stringify(req.body ?? {});
+        (req as any).rawBody?.toString?.() || JSON.stringify(req.body ?? {});
       const sigKey = process.env.ANET_WEBHOOK_SIGNATURE_KEY;
       if (sigKey) {
-        const headerSig = String(
-          req.headers["x-anet-signature"] || "",
-        ).replace(/^sha512=/i, "");
+        const headerSig = String(req.headers["x-anet-signature"] || "").replace(
+          /^sha512=/i,
+          "",
+        );
         const expected = crypto
           .createHmac("sha512", sigKey)
           .update(rawBody)
@@ -2477,10 +3887,7 @@ function buildApp() {
 
       if (subscriptionId && eventType.includes("subscription")) {
         let newStatus: string | null = null;
-        if (
-          eventType.includes("cancel") ||
-          eventType.includes("terminat")
-        ) {
+        if (eventType.includes("cancel") || eventType.includes("terminat")) {
           newStatus = "cancelled";
         } else if (
           eventType.includes("suspend") ||
@@ -2510,15 +3917,13 @@ function buildApp() {
   // Accepts all form fields + Accept.js nonce (dataDescriptor + dataValue).
   app.post("/api/registration", async (req, res) => {
     const b = req.body || {};
-    const required = [
-      "firstName",
-      "lastName",
-      "email",
-      "phone",
-      "packageSlug",
-    ];
+    const required = ["firstName", "lastName", "email", "phone", "packageSlug"];
     if (authorizeNetConfigured) {
       required.push("dataDescriptor", "dataValue");
+    } else if (!mockPaymentsAllowed()) {
+      return res
+        .status(503)
+        .json({ error: "Payment provider not configured" });
     }
     for (const f of required) {
       if (!b[f] || String(b[f]).trim().length === 0) {
@@ -2553,7 +3958,11 @@ function buildApp() {
     if (checkoutType === "tradeline_picker") {
       const rawIds = b.tradelineProductIds;
       const ids = Array.isArray(rawIds)
-        ? [...new Set(rawIds.map((x: unknown) => Number(x)).filter((n) => n > 0))]
+        ? [
+            ...new Set(
+              rawIds.map((x: unknown) => Number(x)).filter((n) => n > 0),
+            ),
+          ]
         : [];
       if (ids.length === 0) {
         return res
@@ -2586,6 +3995,7 @@ function buildApp() {
     let couponId: number | null = null;
     let discountCents = 0;
     let originalAmountCents: number | null = null;
+    let couponReserved = false;
 
     if (b.coupon_code) {
       const upperCode = String(b.coupon_code).toUpperCase().trim();
@@ -2593,46 +4003,69 @@ function buildApp() {
         `SELECT * FROM coupons WHERE code = ? AND is_active = 1 LIMIT 1`,
         [upperCode],
       );
-      if (couponRows.length > 0) {
-        const c = couponRows[0];
-        const now = new Date();
-        const isValid =
-          (!c.valid_from || new Date(c.valid_from) <= now) &&
-          (!c.expires_at || new Date(c.expires_at) >= now) &&
-          (c.max_uses == null || Number(c.uses_count) < Number(c.max_uses)) &&
-          chargeAmountCents >= Number(c.min_amount_cents);
+      if (couponRows.length === 0) {
+        return res
+          .status(400)
+          .json({ error: "Invalid or inactive coupon code" });
+      }
 
-        if (isValid) {
-          // Check package applicability
-          let pkgAllowed = true;
-          if (c.applicable_packages) {
-            let pkgs: number[] = [];
-            try {
-              pkgs =
-                typeof c.applicable_packages === "string"
-                  ? JSON.parse(c.applicable_packages)
-                  : c.applicable_packages;
-            } catch {}
-            if (pkgs.length > 0 && !pkgs.includes(Number(pkg.id))) {
-              pkgAllowed = false;
-            }
-          }
+      const c = couponRows[0];
+      const now = new Date();
+      if (c.valid_from && new Date(c.valid_from) > now) {
+        return res.status(400).json({ error: "Coupon is not yet valid" });
+      }
+      if (c.expires_at && new Date(c.expires_at) < now) {
+        return res.status(400).json({ error: "Coupon has expired" });
+      }
+      if (chargeAmountCents < Number(c.min_amount_cents)) {
+        return res.status(400).json({
+          error: `Minimum order of $${(Number(c.min_amount_cents) / 100).toFixed(2)} required`,
+        });
+      }
 
-          if (pkgAllowed) {
-            couponId = c.id as number;
-            originalAmountCents = chargeAmountCents;
-            if (c.discount_type === "percentage") {
-              discountCents = Math.round(
-                (chargeAmountCents * Number(c.discount_value)) / 100,
-              );
-            } else {
-              discountCents = Number(c.discount_value);
-            }
-            discountCents = Math.min(discountCents, chargeAmountCents);
-            chargeAmountCents = chargeAmountCents - discountCents;
-          }
+      // Check package applicability
+      let pkgAllowed = true;
+      if (c.applicable_packages) {
+        let pkgs: number[] = [];
+        try {
+          pkgs =
+            typeof c.applicable_packages === "string"
+              ? JSON.parse(c.applicable_packages)
+              : c.applicable_packages;
+        } catch {}
+        if (pkgs.length > 0 && !pkgs.includes(Number(pkg.id))) {
+          pkgAllowed = false;
         }
       }
+      if (!pkgAllowed) {
+        return res
+          .status(400)
+          .json({ error: "Coupon not valid for selected package" });
+      }
+
+      // Reserve one usage atomically to prevent over-redemption on concurrent checkouts.
+      const [reserveUsage] = await pool.query<ResultSetHeader>(
+        `UPDATE coupons
+         SET uses_count = uses_count + 1
+         WHERE id = ? AND (max_uses IS NULL OR uses_count < max_uses)`,
+        [c.id],
+      );
+      if (reserveUsage.affectedRows === 0) {
+        return res.status(400).json({ error: "Coupon usage limit reached" });
+      }
+
+      couponReserved = true;
+      couponId = c.id as number;
+      originalAmountCents = chargeAmountCents;
+      if (c.discount_type === "percentage") {
+        discountCents = Math.round(
+          (chargeAmountCents * Number(c.discount_value)) / 100,
+        );
+      } else {
+        discountCents = Number(c.discount_value);
+      }
+      discountCents = Math.min(discountCents, chargeAmountCents);
+      chargeAmountCents = chargeAmountCents - discountCents;
     }
 
     // Use a temporary clientId placeholder for the charge (real ID assigned after insert).
@@ -2697,6 +4130,11 @@ function buildApp() {
           paymentMetadata,
         );
       } else {
+        if (!mockPaymentsAllowed()) {
+          return res
+            .status(503)
+            .json({ error: "Payment provider not configured" });
+        }
         chargeResult = await processMockRegistrationPayment(
           clientId,
           chargeAmountCents,
@@ -2705,6 +4143,12 @@ function buildApp() {
         );
       }
     } catch (e: any) {
+      if (couponReserved && couponId !== null) {
+        await pool.query<ResultSetHeader>(
+          `UPDATE coupons SET uses_count = GREATEST(uses_count - 1, 0) WHERE id = ?`,
+          [couponId],
+        );
+      }
       // Payment failed — delete the newly inserted client so no ghost records
       if (isNewClient) {
         await pool.query(
@@ -2727,10 +4171,10 @@ function buildApp() {
       );
     }
 
-    // ── Apply coupon to payment record + increment usage ────────────────────
-    if (couponId !== null && discountCents > 0 && chargeResult?.transactionId) {
-      await Promise.all([
-        pool.query(
+    // ── Apply coupon details to payment record (usage already reserved above) ─
+    if (couponId !== null && chargeResult?.transactionId) {
+      try {
+        await pool.query(
           `UPDATE payments SET coupon_id=?, discount_cents=?, original_amount_cents=?
            WHERE provider_transaction_id=? LIMIT 1`,
           [
@@ -2739,12 +4183,10 @@ function buildApp() {
             originalAmountCents,
             chargeResult.transactionId,
           ],
-        ),
-        pool.query(
-          `UPDATE coupons SET uses_count = uses_count + 1 WHERE id = ?`,
-          [couponId],
-        ),
-      ]);
+        );
+      } catch (couponAttachErr) {
+        console.error("[coupon:attach-payment]", couponAttachErr);
+      }
     }
 
     res.json({
@@ -2757,6 +4199,9 @@ function buildApp() {
 
   // Sandbox-only: confirm a mock payment (no real card charge).
   app.post("/api/registration/confirm-mock", async (req, res) => {
+    if (!mockPaymentsAllowed()) {
+      return res.status(403).json({ error: "Mock payments are disabled" });
+    }
     const { clientId, transactionId } = req.body || {};
     if (!clientId || !transactionId) {
       return res.status(400).json({ error: "Missing fields" });
@@ -2790,7 +4235,13 @@ function buildApp() {
     let amountCents = Number(client.price_cents);
     if (checkoutType === "tradeline_picker") {
       const ids = Array.isArray(tradelineProductIds)
-        ? [...new Set(tradelineProductIds.map((x: unknown) => Number(x)).filter((n) => n > 0))]
+        ? [
+            ...new Set(
+              tradelineProductIds
+                .map((x: unknown) => Number(x))
+                .filter((n) => n > 0),
+            ),
+          ]
         : [];
       if (ids.length === 0) {
         return res
@@ -2833,6 +4284,11 @@ function buildApp() {
           metadata,
         );
       } else {
+        if (!mockPaymentsAllowed()) {
+          return res
+            .status(503)
+            .json({ error: "Payment provider not configured" });
+        }
         result = await processMockRegistrationPayment(
           Number(clientId),
           amountCents,
@@ -2882,6 +4338,7 @@ function buildApp() {
       );
       const [reportRows] = await pool.query<RowDataPacket[]>(
         `SELECT id, round_number, score_before, score_after, items_removed, items_disputed, summary_md,
+              bureau_scores_json, wins_json, targets_json, file_strength_score,
               pdf_file_name, (pdf_storage_key IS NOT NULL) AS has_pdf, pdf_uploaded_at, created_at
        FROM client_round_reports WHERE client_id = ? ORDER BY round_number DESC`,
         [clientId],
@@ -3381,14 +4838,13 @@ function buildApp() {
       const clientId = req.auth!.id;
       const { dataDescriptor, dataValue, use_stored_card } = req.body || {};
       const useStored = !!use_stored_card;
-      if (
-        !useStored &&
-        (!dataDescriptor || !dataValue)
-      ) {
+      if (!useStored && (!dataDescriptor || !dataValue)) {
         return res.status(400).json({ error: "Missing payment token" });
       }
       if (!authorizeNetConfigured) {
-        return res.status(503).json({ error: "Payment provider not configured" });
+        return res
+          .status(503)
+          .json({ error: "Payment provider not configured" });
       }
 
       try {
@@ -3415,7 +4871,9 @@ function buildApp() {
           [clientId],
         );
         if (existingSub.length > 0) {
-          return res.status(409).json({ error: "You already have an active subscription." });
+          return res
+            .status(409)
+            .json({ error: "You already have an active subscription." });
         }
 
         const [pkgRows] = await pool.query<RowDataPacket[]>(
@@ -3466,13 +4924,7 @@ function buildApp() {
           `INSERT INTO client_subscriptions
              (client_id, package_id, anet_subscription_id, status, amount_cents, billing_interval, next_billing_at)
            VALUES (?, ?, ?, 'active', ?, 'monthly', ?)`,
-          [
-            clientId,
-            pkg.id,
-            anetSubId,
-            amountCents,
-            anetDateYmd(nextBilling),
-          ],
+          [clientId, pkg.id, anetSubId, amountCents, anetDateYmd(nextBilling)],
         );
 
         sendPeaceOfMindSubscriptionEmail(clientId, "started").catch(() => {});
@@ -3495,7 +4947,9 @@ function buildApp() {
     async (req: AuthedRequest, res) => {
       const clientId = req.auth!.id;
       if (!authorizeNetConfigured) {
-        return res.status(503).json({ error: "Payment provider not configured" });
+        return res
+          .status(503)
+          .json({ error: "Payment provider not configured" });
       }
 
       try {
@@ -3506,7 +4960,9 @@ function buildApp() {
           [clientId],
         );
         if (subRows.length === 0) {
-          return res.status(404).json({ error: "No active subscription found" });
+          return res
+            .status(404)
+            .json({ error: "No active subscription found" });
         }
         const sub = subRows[0];
 
@@ -3638,6 +5094,11 @@ function buildApp() {
       return res.status(400).json({
         error: "data_descriptor and data_value required for new_card",
       });
+    if (!authorizeNetConfigured) {
+      return res
+        .status(503)
+        .json({ error: "Payment provider not configured" });
+    }
 
     // Load token
     const [rows] = await pool.query<RowDataPacket[]>(
@@ -3681,16 +5142,11 @@ function buildApp() {
           .json({ error: "No stored card on file. Please use a new card." });
 
       // Charge via Authorize.net CIM
-      const anetApiUrl =
-        process.env.ANET_ENV === "production"
-          ? "https://api.authorize.net/xml/v1/request.api"
-          : "https://apitest.authorize.net/xml/v1/request.api";
-
       const payload = {
         createCustomerProfileTransactionRequest: {
           merchantAuthentication: {
-            name: process.env.ANET_API_LOGIN_ID,
-            transactionKey: process.env.ANET_TRANSACTION_KEY,
+            name: process.env.AUTHORIZENET_API_LOGIN_ID,
+            transactionKey: process.env.AUTHORIZENET_TRANSACTION_KEY,
           },
           transaction: {
             profileTransAuthCapture: {
@@ -3705,7 +5161,7 @@ function buildApp() {
         },
       };
 
-      const anetResp = await fetch(anetApiUrl, {
+      const anetResp = await fetch(AUTHORIZENET_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -3991,6 +5447,7 @@ function buildApp() {
     );
     const [reports] = await pool.query<RowDataPacket[]>(
       `SELECT id, round_number, score_before, score_after, items_removed, items_disputed, summary_md,
+              bureau_scores_json, wins_json, targets_json, file_strength_score,
               pdf_file_name, (pdf_storage_key IS NOT NULL) AS has_pdf, pdf_uploaded_at, created_at
        FROM client_round_reports WHERE client_id = ? ORDER BY round_number DESC`,
       [id],
@@ -4048,20 +5505,27 @@ function buildApp() {
                WHERE is_active = 1 AND is_required = 1) AS tasks_required_total,
               COALESCE(ts.tasks_approved,      0) AS tasks_approved,
               COALESCE(ts.tasks_pending_review,0) AS tasks_pending_review,
-              COALESCE(ts.tasks_rejected,      0) AS tasks_rejected
+              COALESCE(ts.tasks_rejected,      0) AS tasks_rejected,
+              GREATEST(
+                (SELECT COUNT(*) FROM credit_repair_cases cr2
+                 WHERE cr2.client_id = cr.client_id
+                   AND cr2.status = 'active'
+                   AND cr2.id != cr.id),
+                0
+              ) AS sibling_active_cases
        FROM credit_repair_cases cr
        JOIN clients c ON c.id = cr.client_id
        LEFT JOIN packages p ON p.id = cr.package_id
        LEFT JOIN (
-         SELECT ctc.client_id,
+         SELECT ctc.case_id,
            SUM(CASE WHEN ctc.admin_review_status = 'approved'  THEN 1 ELSE 0 END) AS tasks_approved,
            SUM(CASE WHEN ctc.status = 'completed'
                      AND ctc.admin_review_status = 'pending'  THEN 1 ELSE 0 END) AS tasks_pending_review,
            SUM(CASE WHEN ctc.admin_review_status = 'rejected'  THEN 1 ELSE 0 END) AS tasks_rejected
          FROM client_task_completions ctc
          JOIN onboarding_task_templates ott ON ott.id = ctc.task_template_id AND ott.is_active = 1
-         GROUP BY ctc.client_id
-       ) ts ON ts.client_id = c.id
+         GROUP BY ctc.case_id
+       ) ts ON ts.case_id = cr.id
        WHERE cr.status NOT IN ('cancelled')
        ORDER BY cr.pipeline_stage_changed_at DESC, cr.created_at DESC`,
     );
@@ -4093,6 +5557,20 @@ function buildApp() {
     if (clientRows.length === 0)
       return res.status(404).json({ error: "Client not found" });
     const client = clientRows[0];
+
+    const [activeCases] = await pool.query<RowDataPacket[]>(
+      `SELECT id, case_number, pipeline_stage
+       FROM credit_repair_cases
+       WHERE client_id = ? AND status = 'active'
+       ORDER BY id DESC`,
+      [cId],
+    );
+    if (activeCases.length > 0 && !req.body?.allow_duplicate) {
+      return res.status(409).json({
+        error: `Client already has an active case (${activeCases[0].case_number}). Cancel or complete it before creating another, or pass allow_duplicate: true.`,
+        existing_cases: activeCases,
+      });
+    }
 
     const conn = await pool.getConnection();
     try {
@@ -4174,7 +5652,7 @@ function buildApp() {
 
       // Post-commit: emails + reminders (best effort)
       const lang = (client.preferred_language as string) || "en";
-      const appUrl = process.env.APP_URL || "https://optimumcredit.com";
+      const appUrl = APP_URL;
 
       if (send_case_email) {
         try {
@@ -4203,7 +5681,7 @@ function buildApp() {
 
       // Auto-assign tasks
       try {
-        await autoAssignTasksForClient(cId);
+        await autoAssignTasksForCase(cId, caseId);
       } catch (e) {
         console.error("[admin/cases] autoAssignTasks failed:", e);
       }
@@ -4273,7 +5751,7 @@ function buildApp() {
        ORDER BY ps.due_date ASC`,
       [caseId],
     );
-    const appUrl = process.env.APP_URL || "https://optimumcredit.com";
+    const appUrl = APP_URL;
     const result = splits.map((s) => ({
       ...s,
       payment_link: s.payment_token ? `${appUrl}/pay/${s.payment_token}` : null,
@@ -4349,7 +5827,7 @@ function buildApp() {
       // Schedule reminders
       if (reminder_flow_id && tokenStr) {
         try {
-          const appUrl = process.env.APP_URL || "https://optimumcredit.com";
+          const appUrl = APP_URL;
           const dueDate = new Date(due_date);
           const amountFormatted = `$${(Number(amount_cents) / 100).toFixed(2)}`;
           const dueDateFormatted = dueDate.toLocaleDateString("en-US", {
@@ -4487,7 +5965,7 @@ function buildApp() {
           const flowId = reminder_flow_id
             ? Number(reminder_flow_id)
             : (current.reminder_flow_id as number);
-          const appUrl = process.env.APP_URL || "https://optimumcredit.com";
+          const appUrl = APP_URL;
           const amountCents = amount_cents ?? (current.amount_cents as number);
           await scheduleSplitReminders({
             splitId,
@@ -4588,7 +6066,7 @@ function buildApp() {
        LIMIT ? OFFSET ?`,
       [...args, limit, offset],
     );
-    const appUrl = process.env.APP_URL || "https://optimumcredit.com";
+    const appUrl = APP_URL;
     const result = splits.map((s) => ({
       ...s,
       payment_link: s.payment_token ? `${appUrl}/pay/${s.payment_token}` : null,
@@ -4657,13 +6135,14 @@ function buildApp() {
               ott.description_en, ott.description_es, ott.sort_order, ott.is_required
        FROM client_task_completions ctc
        JOIN onboarding_task_templates ott ON ott.id = ctc.task_template_id
-       WHERE ctc.client_id = ?
+       WHERE ctc.case_id = ?
        ORDER BY ott.sort_order ASC`,
-      [clientId],
+      [caseId],
     );
     const [reports] = await pool.query<RowDataPacket[]>(
       `SELECT id, round_number, score_before, score_after, items_removed,
-              items_disputed, summary_md,
+              items_disputed, summary_md, bureau_scores_json, wins_json, targets_json,
+              file_strength_score,
               pdf_file_name, (pdf_storage_key IS NOT NULL) AS has_pdf, pdf_uploaded_at, created_at
        FROM client_round_reports WHERE client_id = ? ORDER BY round_number DESC`,
       [clientId],
@@ -4680,6 +6159,14 @@ function buildApp() {
       `SELECT id, from_stage, to_stage, notes, created_at
        FROM client_pipeline_history WHERE client_id = ? ORDER BY created_at DESC`,
       [clientId],
+    );
+
+    const [siblingCases] = await pool.query<RowDataPacket[]>(
+      `SELECT id, case_number, pipeline_stage, status, created_at
+       FROM credit_repair_cases
+       WHERE client_id = ? AND status = 'active' AND id != ?
+       ORDER BY id DESC`,
+      [clientId, caseId],
     );
 
     res.json({
@@ -4710,6 +6197,7 @@ function buildApp() {
       reports,
       payments,
       pipeline_history: pipeline,
+      sibling_cases: siblingCases,
     });
   });
 
@@ -4760,9 +6248,9 @@ function buildApp() {
           `SELECT COUNT(*) AS approved_count
            FROM client_task_completions ctc
            JOIN onboarding_task_templates ott ON ott.id = ctc.task_template_id
-           WHERE ctc.client_id = ? AND ctc.admin_review_status = 'approved'
+           WHERE ctc.case_id = ? AND ctc.admin_review_status = 'approved'
              AND ott.is_required = 1 AND ott.is_active = 1`,
-          [clientId],
+          [caseId],
         );
         const approvedCount = Number(approvedRow.approved_count);
 
@@ -4774,20 +6262,14 @@ function buildApp() {
       }
 
       // Update the case stage
-      await pool.query<ResultSetHeader>(
-        `UPDATE credit_repair_cases SET pipeline_stage = ?, pipeline_stage_changed_at = NOW() WHERE id = ?`,
-        [stage, caseId],
-      );
-      // Keep clients.pipeline_stage in sync for client portal backward compat
-      await pool.query<ResultSetHeader>(
-        `UPDATE clients SET pipeline_stage = ?, pipeline_stage_changed_at = NOW() WHERE id = ?`,
-        [stage, clientId],
-      );
-      await pool.query<ResultSetHeader>(
-        `INSERT INTO client_pipeline_history (client_id, from_stage, to_stage, changed_by_admin_id, notes)
-         VALUES (?,?,?,?,?)`,
-        [clientId, fromStage, stage, req.auth!.id, notes || null],
-      );
+      const { unchanged } = await advanceCasePipeline(pool, {
+        clientId,
+        caseId,
+        stage,
+        adminId: req.auth!.id,
+        notes: notes || null,
+      });
+      if (unchanged) return res.json({ ok: true, unchanged: true });
 
       if (stage === "completed") {
         triggerReminderFlow("completed", clientId).catch((e) =>
@@ -4859,7 +6341,7 @@ function buildApp() {
       if (send_welcome_email) {
         try {
           const token = await createOnboardingToken(clientId, 72);
-          const portalUrl = `${process.env.APP_URL || "https://optimumcredit.com"}/onboarding?token=${token}`;
+          const portalUrl = `${APP_URL}/onboarding?token=${token}`;
           const tpl = tplClientWelcome({
             firstName: String(first_name).trim(),
             portalUrl,
@@ -5033,14 +6515,14 @@ function buildApp() {
           });
         }
       }
-      await pool.query<ResultSetHeader>(
-        `UPDATE clients SET pipeline_stage = ?, pipeline_stage_changed_at = NOW() WHERE id = ?`,
-        [stage, id],
-      );
-      await pool.query<ResultSetHeader>(
-        `INSERT INTO client_pipeline_history (client_id, from_stage, to_stage, changed_by_admin_id, notes) VALUES (?,?,?,?,?)`,
-        [id, fromStage, stage, req.auth!.id, notes || null],
-      );
+      const { unchanged } = await advanceCasePipeline(pool, {
+        clientId: id,
+        stage,
+        adminId: req.auth!.id,
+        notes: notes || null,
+      });
+      if (unchanged) return res.json({ ok: true, unchanged: true });
+
       // Trigger reminder flow for completed stage
       if (stage === "completed") {
         triggerReminderFlow("completed", id).catch((e) =>
@@ -5234,6 +6716,14 @@ function buildApp() {
     if (!email && !crc_client_id)
       return res.status(400).json({ error: "Missing email or crc_client_id" });
 
+    if (process.env.CRC_SYNC_STAGES === "false") {
+      return res.json({
+        ok: true,
+        ignored: true,
+        reason: "inbound_stage_sync_disabled",
+      });
+    }
+
     // Map CRC stage name → our enum
     const mapped = CRC_STAGE_MAP[String(stage).toLowerCase().trim()];
     if (!mapped) {
@@ -5279,15 +6769,21 @@ function buildApp() {
       return res.json({ ok: true, unchanged: true });
     }
 
-    await pool.query<ResultSetHeader>(
-      `UPDATE clients SET pipeline_stage = ?, pipeline_stage_changed_at = NOW() WHERE id = ?`,
-      [mapped, clientId],
+    const [activeCases] = await pool.query<RowDataPacket[]>(
+      `SELECT id FROM credit_repair_cases
+       WHERE client_id = ? AND status = 'active'
+       ORDER BY id DESC LIMIT 1`,
+      [clientId],
     );
-    await pool.query<ResultSetHeader>(
-      `INSERT INTO client_pipeline_history (client_id, from_stage, to_stage, notes)
-       VALUES (?, ?, ?, 'Automated: CRC webhook')`,
-      [clientId, fromStage, mapped],
-    );
+    const activeCaseId =
+      activeCases.length > 0 ? (activeCases[0].id as number) : null;
+
+    await advanceCasePipeline(pool, {
+      clientId,
+      caseId: activeCaseId,
+      stage: mapped,
+      notes: "Automated: CRC webhook",
+    });
 
     // Log the webhook sync
     await pool.query<ResultSetHeader>(
@@ -5350,7 +6846,7 @@ function buildApp() {
        FROM client_task_completions ctc
        JOIN onboarding_task_templates t ON t.id = ctc.task_template_id
        JOIN clients cl ON cl.id = ctc.client_id
-       LEFT JOIN credit_repair_cases crc ON crc.client_id = ctc.client_id
+       LEFT JOIN credit_repair_cases crc ON crc.id = ctc.case_id
        ${where}
        ORDER BY ctc.completed_at DESC LIMIT 500`,
       params,
@@ -5539,205 +7035,22 @@ function buildApp() {
   app.post(
     "/api/admin/clients/:id/round-reports",
     requireSuperAdmin,
-    async (req: AuthedRequest, res) => {
-      const clientId = Number(req.params.id);
-      const {
-        round_number,
-        score_before,
-        score_after,
-        items_removed,
-        items_disputed,
-        summary_md,
-      } = req.body || {};
-      if (!round_number)
-        return res.status(400).json({ error: "round_number required" });
-
-      await pool.query<ResultSetHeader>(
-        `INSERT INTO client_round_reports
-          (client_id, round_number, score_before, score_after, items_removed, items_disputed, summary_md, created_by_admin_id, delivered_via_email, delivered_via_sms)
-         VALUES (?,?,?,?,?,?,?,?, 1, 1)
-         ON DUPLICATE KEY UPDATE score_before=VALUES(score_before), score_after=VALUES(score_after),
-            items_removed=VALUES(items_removed), items_disputed=VALUES(items_disputed), summary_md=VALUES(summary_md)`,
-        [
-          clientId,
-          round_number,
-          score_before || null,
-          score_after || null,
-          items_removed || 0,
-          items_disputed || 0,
-          summary_md || null,
-          req.auth!.id,
-        ],
-      );
-
-      const stageMap: Record<number, string> = {
-        1: "round_1",
-        2: "round_2",
-        3: "round_3",
-        4: "round_4",
-        5: "round_5",
-      };
-      if (stageMap[round_number]) {
-        await pool.query<ResultSetHeader>(
-          `UPDATE clients SET pipeline_stage = ?, pipeline_stage_changed_at = NOW() WHERE id = ?`,
-          [round_number === 5 ? "completed" : stageMap[round_number], clientId],
-        );
-      }
-
-      const [crows] = await pool.query<RowDataPacket[]>(
-        `SELECT first_name, email, phone, preferred_language FROM clients WHERE id = ? LIMIT 1`,
-        [clientId],
-      );
-      const c = crows[0];
-      if (c) {
-        const tpl = tplRoundComplete({
-          firstName: c.first_name,
-          roundNumber: round_number,
-          scoreBefore: score_before,
-          scoreAfter: score_after,
-          itemsRemoved: items_removed || 0,
-          portalUrl: `${APP_URL}/portal/reports`,
-          lang: c.preferred_language || "en",
-        });
-        await sendEmail({
-          to: c.email,
-          subject: tpl.subject,
-          html: tpl.html,
-        }).catch(() => null);
-        if (c.phone) {
-          await sendSms({
-            to: c.phone,
-            body: `${c.first_name}, your Round ${round_number} report is ready! View progress: ${APP_URL}/portal/reports`,
-          }).catch(() => null);
-        }
-        // Trigger reminder flow for round completion
-        const roundTrigger = `round_${round_number}_complete`;
-        const scoreChange =
-          score_before != null && score_after != null
-            ? String(score_after - score_before)
-            : undefined;
-        await triggerReminderFlow(roundTrigger, clientId, {
-          items_removed: String(items_removed || 0),
-          ...(scoreChange !== undefined ? { score_change: scoreChange } : {}),
-        }).catch(() => null);
-      }
-      res.json({ ok: true });
+    (_req, res) => {
+      res.status(410).json({
+        error:
+          "Manual round reports are deprecated. Use the OFG Report Wizard (POST /admin/cases/{caseId}/report-wizard/sessions).",
+      });
     },
   );
 
-  // ── Upload PDF for a round report (multiple PDFs per round supported) ────
   app.post(
     "/api/admin/clients/:clientId/round-reports/:round/pdf",
     requireSuperAdmin,
-    upload.single("pdf"),
-    async (req: AuthedRequest, res) => {
-      const clientId = Number(req.params.clientId);
-      const roundNumber = Number(req.params.round);
-      if (
-        !clientId ||
-        isNaN(clientId) ||
-        isNaN(roundNumber) ||
-        roundNumber < 1 ||
-        roundNumber > 5
-      ) {
-        return res
-          .status(400)
-          .json({ error: "Invalid clientId or round number" });
-      }
-      const file = req.file;
-      if (!file) return res.status(400).json({ error: "PDF file required" });
-      if (file.mimetype !== "application/pdf") {
-        return res.status(400).json({ error: "Only PDF files are accepted" });
-      }
-
-      // Encrypt the PDF
-      const { encrypted, iv, tag } = encryptFile(file.buffer);
-      const safeOrigName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
-      const cdnUrl = await uploadToCDN(
-        encrypted,
-        `round${roundNumber}_${Date.now()}_${safeOrigName}.enc`,
-        "application/octet-stream",
-        clientId,
-      );
-
-      // Ensure the round_report row exists (upsert without touching pdf_ columns)
-      await pool.query<ResultSetHeader>(
-        `INSERT INTO client_round_reports (client_id, round_number, created_by_admin_id)
-         VALUES (?, ?, ?)
-         ON DUPLICATE KEY UPDATE created_by_admin_id = created_by_admin_id`,
-        [clientId, roundNumber, req.auth!.id],
-      );
-      const [[roundReportRow]] = await pool.query<RowDataPacket[]>(
-        `SELECT id FROM client_round_reports WHERE client_id = ? AND round_number = ? LIMIT 1`,
-        [clientId, roundNumber],
-      );
-      const roundReportId = roundReportRow?.id ?? null;
-
-      // Check if this is the first PDF for this round (for email notification)
-      const [[{ pdfCount }]] = await pool.query<RowDataPacket[]>(
-        `SELECT COUNT(*) AS pdfCount FROM round_report_pdfs WHERE client_id = ? AND round_number = ?`,
-        [clientId, roundNumber],
-      );
-      const isFirstPdf = Number(pdfCount) === 0;
-
-      // Insert into round_report_pdfs
-      const [insertResult] = await pool.query<ResultSetHeader>(
-        `INSERT INTO round_report_pdfs
-           (client_id, round_number, round_report_id, file_name, storage_key, storage_provider, encrypted, enc_iv, enc_tag, uploaded_by_admin_id)
-         VALUES (?, ?, ?, ?, ?, 'cdn', 1, ?, ?, ?)`,
-        [
-          clientId,
-          roundNumber,
-          roundReportId,
-          file.originalname,
-          cdnUrl,
-          iv,
-          tag,
-          req.auth!.id,
-        ],
-      );
-      const newPdfId = insertResult.insertId;
-
-      // Fetch the new pdf row to return
-      const [[newPdf]] = await pool.query<RowDataPacket[]>(
-        `SELECT id, client_id, round_number, round_report_id, file_name, uploaded_at
-         FROM round_report_pdfs WHERE id = ?`,
-        [newPdfId],
-      );
-
-      // Fetch the parent report row
-      const [reportRows] = await pool.query<RowDataPacket[]>(
-        `SELECT id, round_number, score_before, score_after, items_removed, items_disputed, summary_md,
-                pdf_file_name, (pdf_storage_key IS NOT NULL) AS has_pdf, pdf_uploaded_at, created_at
-         FROM client_round_reports WHERE client_id = ? AND round_number = ? LIMIT 1`,
-        [clientId, roundNumber],
-      );
-      await attachPdfsToReports(clientId, reportRows);
-      const report = reportRows[0] ?? null;
-
-      // Notify client via email on first PDF upload for this round
-      if (isFirstPdf) {
-        const [crows] = await pool.query<RowDataPacket[]>(
-          `SELECT first_name, email, preferred_language FROM clients WHERE id = ? LIMIT 1`,
-          [clientId],
-        );
-        const c = crows[0];
-        if (c) {
-          const tpl = tplRoundPdfReady({
-            firstName: c.first_name as string,
-            roundNumber,
-            portalUrl: `${APP_URL}/portal/reports`,
-            lang: c.preferred_language as string,
-          });
-          await sendEmail({
-            to: c.email as string,
-            subject: tpl.subject,
-            html: tpl.html,
-          }).catch(() => null);
-        }
-      }
-
-      res.json({ ok: true, pdf: newPdf, report });
+    (_req, res) => {
+      res.status(410).json({
+        error:
+          "Manual PDF upload is deprecated. Use the OFG Report Wizard to generate compliant progress reports.",
+      });
     },
   );
 
@@ -6408,15 +7721,19 @@ function buildApp() {
 
     const [payments] = await pool.query<RowDataPacket[]>(
       `SELECT pay.id, pay.client_id, pay.package_id, pay.amount_cents, pay.currency,
+              COALESCE(pay.discount_cents, 0) AS discount_cents,
+              pay.original_amount_cents,
               pay.status, pay.provider, pay.provider_transaction_id, pay.provider_charge_id,
               pay.failure_reason, pay.paid_at, pay.created_at, pay.updated_at,
               c.first_name AS client_first_name, c.last_name AS client_last_name,
               c.email AS client_email, c.phone AS client_phone,
               c.pipeline_stage AS client_pipeline_stage, c.status AS client_status,
-              p.name AS package_name, p.slug AS package_slug
+              p.name AS package_name, p.slug AS package_slug,
+              cp.code AS coupon_code
        FROM payments pay
        LEFT JOIN clients c ON c.id = pay.client_id
        LEFT JOIN packages p ON p.id = pay.package_id
+       LEFT JOIN coupons cp ON cp.id = pay.coupon_id
        ${whereClause}
        ORDER BY pay.created_at DESC
        LIMIT ? OFFSET ?`,
@@ -6963,6 +8280,74 @@ function buildApp() {
       [setting_key, setting_value || null],
     );
     res.json({ ok: true });
+  });
+
+  // ── Legal documents (super admin editable) ─────────────────────────────────
+  app.get("/api/admin/legal", requireSuperAdmin, async (_req, res) => {
+    try {
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT slug, title, content_md, source_url, updated_at
+         FROM legal_documents ORDER BY slug ASC`,
+      );
+      res.json({ documents: rows });
+    } catch (err: any) {
+      console.error("[/api/admin/legal]", err?.message ?? err);
+      res.status(503).json({ error: "Failed to load legal documents" });
+    }
+  });
+
+  app.put("/api/admin/legal/:slug", requireSuperAdmin, async (req, res) => {
+    try {
+      const slug = String(req.params.slug || "")
+        .trim()
+        .toLowerCase();
+      const title = String(req.body?.title || "").trim();
+      const content_md = String(req.body?.content_md ?? "");
+      const source_url =
+        req.body?.source_url != null
+          ? String(req.body.source_url).trim() || null
+          : undefined;
+      if (!slug) return res.status(400).json({ error: "slug required" });
+      if (!title) return res.status(400).json({ error: "title required" });
+      if (!content_md.trim()) {
+        return res.status(400).json({ error: "content_md required" });
+      }
+
+      const adminId = (req as AuthedRequest).auth!.id;
+      const [existing] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM legal_documents WHERE slug = ? LIMIT 1`,
+        [slug],
+      );
+      if (existing.length === 0) {
+        return res.status(404).json({ error: "Document not found" });
+      }
+
+      if (source_url === undefined) {
+        await pool.query<ResultSetHeader>(
+          `UPDATE legal_documents
+           SET title = ?, content_md = ?, updated_by_admin_id = ?
+           WHERE slug = ?`,
+          [title, content_md, adminId, slug],
+        );
+      } else {
+        await pool.query<ResultSetHeader>(
+          `UPDATE legal_documents
+           SET title = ?, content_md = ?, source_url = ?, updated_by_admin_id = ?
+           WHERE slug = ?`,
+          [title, content_md, source_url, adminId, slug],
+        );
+      }
+
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT slug, title, content_md, source_url, updated_at
+         FROM legal_documents WHERE slug = ? LIMIT 1`,
+        [slug],
+      );
+      res.json({ document: rows[0] });
+    } catch (err: any) {
+      console.error("[/api/admin/legal/:slug]", err?.message ?? err);
+      res.status(503).json({ error: "Failed to save legal document" });
+    }
   });
 
   // ── Section locks ───────────────────────────────────────────────────────────
@@ -7849,14 +9234,23 @@ function buildApp() {
     },
   );
 
-  // GET /api/admin/clients/:id/task-completions — view a client's task progress
+  // GET /api/admin/cases/:caseId/task-completions — task progress for a case
   app.get(
-    "/api/admin/clients/:id/task-completions",
+    "/api/admin/cases/:caseId/task-completions",
     requireAdmin,
     async (req, res) => {
-      const clientId = Number(req.params.id);
-      if (!clientId)
-        return res.status(400).json({ error: "Invalid client id" });
+      const caseId = Number(req.params.caseId);
+      if (!caseId || isNaN(caseId)) {
+        return res.status(400).json({ error: "Invalid case id" });
+      }
+
+      const [caseRows] = await pool.query<RowDataPacket[]>(
+        `SELECT client_id FROM credit_repair_cases WHERE id = ? LIMIT 1`,
+        [caseId],
+      );
+      if (caseRows.length === 0) {
+        return res.status(404).json({ error: "Case not found" });
+      }
 
       const [rows] = await pool.query<RowDataPacket[]>(
         `SELECT t.id AS template_id, t.slug, t.task_type,
@@ -7868,10 +9262,67 @@ function buildApp() {
                 c.admin_reviewed_at
          FROM onboarding_task_templates t
          LEFT JOIN client_task_completions c
-           ON c.task_template_id = t.id AND c.client_id = ?
+           ON c.task_template_id = t.id AND c.case_id = ?
          WHERE t.is_active = 1
          ORDER BY t.sort_order ASC, t.id ASC`,
-        [clientId],
+        [caseId],
+      );
+
+      const tasks = (rows as any[]).map((r) => ({
+        id: r.completion_id ?? null,
+        template_id: r.template_id,
+        slug: r.slug,
+        task_type: r.task_type,
+        title_en: r.title_en,
+        title_es: r.title_es,
+        description_en: r.description_en,
+        description_es: r.description_es,
+        is_required: r.is_required,
+        is_system: r.is_system,
+        sort_order: r.sort_order,
+        is_active: r.is_active,
+        completion_status: r.completion_status ?? null,
+        signature_name: r.signature_name ?? null,
+        file_name: r.file_name ?? null,
+        file_mime: r.file_mime ?? null,
+        completed_at: r.completed_at ?? null,
+        admin_review_status: r.admin_review_status ?? null,
+        admin_notes: r.admin_notes ?? null,
+        admin_reviewed_at: r.admin_reviewed_at ?? null,
+      }));
+
+      res.json({ tasks });
+    },
+  );
+
+  // GET /api/admin/clients/:id/task-completions — legacy; resolves active case
+  app.get(
+    "/api/admin/clients/:id/task-completions",
+    requireAdmin,
+    async (req, res) => {
+      const clientId = Number(req.params.id);
+      if (!clientId)
+        return res.status(400).json({ error: "Invalid client id" });
+
+      const caseId = await resolvePrimaryActiveCaseId(pool, clientId);
+      if (!caseId) {
+        return res.json({ tasks: [] });
+      }
+
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT t.id AS template_id, t.slug, t.task_type,
+                t.title_en, t.title_es, t.description_en, t.description_es,
+                t.is_required, t.is_system, t.sort_order, t.is_active,
+                c.id AS completion_id, c.status AS completion_status,
+                c.signature_name, c.file_name, c.file_mime,
+                c.completed_at, c.admin_review_status, c.admin_notes,
+                c.admin_reviewed_at
+         FROM onboarding_task_templates t
+         LEFT JOIN client_task_completions c
+           ON c.task_template_id = t.id AND c.case_id = ?
+         WHERE t.is_active = 1
+         ORDER BY t.sort_order ASC, t.id ASC`,
+        [caseId],
       );
 
       // Normalize: `id` = completion row id (used for approve/reject/preview actions)
@@ -7909,6 +9360,11 @@ function buildApp() {
     requireClient,
     async (req: AuthedRequest, res) => {
       const clientId = req.auth!.id;
+      const activeCaseId = await resolvePrimaryActiveCaseId(pool, clientId);
+      if (!activeCaseId) {
+        return res.json({ tasks: [] });
+      }
+
       const [rows] = await pool.query<RowDataPacket[]>(
         `SELECT t.id, t.slug, t.task_type, t.title_en, t.title_es,
               t.description_en, t.description_es,
@@ -7920,10 +9376,10 @@ function buildApp() {
               c.admin_review_status, c.admin_notes, c.admin_reviewed_at
        FROM onboarding_task_templates t
        LEFT JOIN client_task_completions c
-         ON c.task_template_id = t.id AND c.client_id = ?
+         ON c.task_template_id = t.id AND c.case_id = ?
        WHERE t.is_active = 1
        ORDER BY t.sort_order ASC, t.id ASC`,
-        [clientId],
+        [activeCaseId],
       );
       const tasks = (rows as any[]).map((r) => ({
         id: r.id,
@@ -7975,6 +9431,13 @@ function buildApp() {
       if (!tRows[0]) return res.status(404).json({ error: "Task not found" });
       const taskType: string = tRows[0].task_type;
 
+      const activeCaseId = await resolvePrimaryActiveCaseId(pool, clientId);
+      if (!activeCaseId) {
+        return res.status(422).json({
+          error: "No active credit repair case — contact support",
+        });
+      }
+
       let fileStorageKey: string | null = null;
       let fileName: string | null = null;
       let fileMime: string | null = null;
@@ -8017,10 +9480,10 @@ function buildApp() {
 
       await pool.query<ResultSetHeader>(
         `INSERT INTO client_task_completions
-          (client_id, task_template_id, status, form_data_json,
+          (client_id, case_id, task_template_id, status, form_data_json,
            file_storage_key, file_name, file_mime,
            signature_name, signature_ip, completed_at)
-         VALUES (?,?, 'completed', ?, ?, ?, ?, ?, ?, NOW())
+         VALUES (?,?,?, 'completed', ?, ?, ?, ?, ?, ?, NOW())
          ON DUPLICATE KEY UPDATE
            status = 'completed',
            form_data_json = VALUES(form_data_json),
@@ -8035,6 +9498,7 @@ function buildApp() {
            admin_reviewed_at = NULL`,
         [
           clientId,
+          activeCaseId,
           templateId,
           formData ? JSON.stringify(formData) : null,
           fileStorageKey,
@@ -8056,11 +9520,15 @@ function buildApp() {
     async (req: AuthedRequest, res) => {
       const clientId = req.auth!.id;
       const templateId = Number(req.params.id);
+      const activeCaseId = await resolvePrimaryActiveCaseId(pool, clientId);
+      if (!activeCaseId) {
+        return res.status(404).json({ error: "File not found" });
+      }
       const [rows] = await pool.query<RowDataPacket[]>(
         `SELECT file_storage_key, file_name, file_mime
          FROM client_task_completions
-         WHERE task_template_id = ? AND client_id = ? LIMIT 1`,
-        [templateId, clientId],
+         WHERE task_template_id = ? AND case_id = ? LIMIT 1`,
+        [templateId, activeCaseId],
       );
       if (rows.length === 0 || !rows[0].file_storage_key)
         return res.status(404).json({ error: "File not found" });
@@ -8101,21 +9569,22 @@ function buildApp() {
       if (!completionId || isNaN(completionId))
         return res.status(400).json({ error: "Invalid completion id" });
 
-      const { admin_review_status, admin_notes } = req.body || {};
+      const { admin_review_status, admin_notes, case_id: bodyCaseId } =
+        req.body || {};
       if (!["approved", "rejected"].includes(admin_review_status))
         return res
           .status(400)
           .json({ error: "admin_review_status must be approved or rejected" });
 
       const [rows] = await pool.query<RowDataPacket[]>(
-        `SELECT ctc.id, ctc.client_id, ctc.status, ctc.task_template_id,
+        `SELECT ctc.id, ctc.client_id, ctc.case_id, ctc.status, ctc.task_template_id,
                 ott.title_en, ott.is_required, ott.is_active,
                 c.first_name, c.email, c.phone, c.preferred_language,
-                cr.id AS case_id, cr.pipeline_stage
+                cr.pipeline_stage
          FROM client_task_completions ctc
          JOIN clients c ON c.id = ctc.client_id
+         JOIN credit_repair_cases cr ON cr.id = ctc.case_id
          JOIN onboarding_task_templates ott ON ott.id = ctc.task_template_id
-         LEFT JOIN credit_repair_cases cr ON cr.client_id = ctc.client_id AND cr.status NOT IN ('cancelled')
          WHERE ctc.id = ? LIMIT 1`,
         [completionId],
       );
@@ -8124,7 +9593,14 @@ function buildApp() {
 
       const row = rows[0];
       const clientId = row.client_id as number;
-      const caseId = row.case_id as number | null;
+      const completionCaseId = row.case_id as number;
+
+      if (bodyCaseId && Number(bodyCaseId) !== completionCaseId) {
+        return res.status(400).json({
+          error: "case_id does not match this task completion",
+        });
+      }
+      const caseId = completionCaseId;
 
       await pool.query<ResultSetHeader>(
         `UPDATE client_task_completions
@@ -8161,7 +9637,7 @@ function buildApp() {
       }
 
       // Auto-advance to docs_ready when all required tasks are approved
-      if (admin_review_status === "approved" && caseId) {
+      if (admin_review_status === "approved") {
         const [[reqRow]] = await pool.query<RowDataPacket[]>(
           `SELECT COUNT(*) AS required_total FROM onboarding_task_templates
            WHERE is_active = 1 AND is_required = 1`,
@@ -8170,9 +9646,9 @@ function buildApp() {
           `SELECT COUNT(*) AS approved_count
            FROM client_task_completions ctc
            JOIN onboarding_task_templates ott ON ott.id = ctc.task_template_id
-           WHERE ctc.client_id = ? AND ctc.admin_review_status = 'approved'
+           WHERE ctc.case_id = ? AND ctc.admin_review_status = 'approved'
              AND ott.is_required = 1 AND ott.is_active = 1`,
-          [clientId],
+          [caseId],
         );
         const requiredTotal = Number(reqRow.required_total);
         const approvedCount = Number(approvedRow.approved_count);
@@ -8182,7 +9658,9 @@ function buildApp() {
           row.pipeline_stage === "new_client"
         ) {
           await pool.query<ResultSetHeader>(
-            `UPDATE credit_repair_cases SET pipeline_stage = 'docs_ready', pipeline_stage_changed_at = NOW() WHERE id = ?`,
+            `UPDATE credit_repair_cases
+             SET pipeline_stage = 'docs_ready', pipeline_stage_changed_at = NOW()
+             WHERE id = ? AND pipeline_stage = 'new_client'`,
             [caseId],
           );
           await pool.query<ResultSetHeader>(
@@ -8261,7 +9739,678 @@ function buildApp() {
     },
   );
 
-  // ── Global JSON error handler (must be last use()) ───────────────────────
+  // ── OFG Report Wizard (inline — Vercel serverless) ─────────────────────────
+  app.get(
+    "/api/admin/cases/:caseId/report-wizard/sessions",
+    requireAdmin,
+    async (req, res) => {
+      const caseId = Number(req.params.caseId);
+      if (!caseId || isNaN(caseId)) {
+        return res.status(400).json({ error: "Invalid case id" });
+      }
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, case_id, client_id, round_number, status, error_message, created_at, updated_at
+         FROM report_wizard_sessions
+         WHERE case_id = ? AND status != 'published'
+         ORDER BY updated_at DESC`,
+        [caseId],
+      );
+      res.json({ sessions: rows });
+    },
+  );
+
+  app.post(
+    "/api/admin/cases/:caseId/report-wizard/sessions",
+    requireAdmin,
+    upload.fields([
+      { name: "before_pdf", maxCount: 1 },
+      { name: "after_pdf", maxCount: 1 },
+    ]),
+    async (req: AuthedRequest, res) => {
+      const caseId = Number(req.params.caseId);
+      if (!caseId || isNaN(caseId)) {
+        return res.status(400).json({ error: "Invalid case id" });
+      }
+
+      const files = req.files as
+        | Record<string, Express.Multer.File[]>
+        | undefined;
+      const beforeFile = files?.before_pdf?.[0];
+      const afterFile = files?.after_pdf?.[0];
+      if (!beforeFile || !afterFile) {
+        return res
+          .status(400)
+          .json({ error: "before_pdf and after_pdf are required" });
+      }
+      if (
+        beforeFile.mimetype !== "application/pdf" ||
+        afterFile.mimetype !== "application/pdf"
+      ) {
+        return res.status(400).json({ error: "Only PDF files are accepted" });
+      }
+
+      const pdfErr = validatePdfUploadPair(beforeFile.buffer, afterFile.buffer);
+      if (pdfErr) return res.status(400).json({ error: pdfErr });
+
+      const roundNumber = Number(req.body?.round_number) || 1;
+      if (roundNumber < 1 || roundNumber > 5) {
+        return res.status(400).json({ error: "round_number must be 1–5" });
+      }
+
+      const options: OfGReportWizardOptions = {
+        highlight_win: req.body?.highlight_win || undefined,
+        tradeline_rec: req.body?.tradeline_rec === "true",
+        funding_note: req.body?.funding_note === "true",
+        spanish: req.body?.spanish === "true",
+      };
+
+      const [caseRows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, client_id, pipeline_stage FROM credit_repair_cases WHERE id = ? LIMIT 1`,
+        [caseId],
+      );
+      if (caseRows.length === 0) {
+        return res.status(404).json({ error: "Case not found" });
+      }
+      const clientId = caseRows[0].client_id as number;
+      const pipelineStage = caseRows[0].pipeline_stage as string;
+
+      const alreadyPublished = await hasPublishedWizardRound(
+        pool,
+        clientId,
+        roundNumber,
+      );
+      const roundErr = validatePublishRound({
+        roundNumber,
+        pipelineStage,
+        hasExistingReport: alreadyPublished,
+      });
+      if (roundErr) return res.status(422).json({ error: roundErr });
+
+      const [ins] = await pool.query<ResultSetHeader>(
+        `INSERT INTO report_wizard_sessions
+           (case_id, client_id, round_number, status, options_json, created_by_admin_id)
+         VALUES (?, ?, ?, 'extracting', ?, ?)`,
+        [
+          caseId,
+          clientId,
+          roundNumber,
+          JSON.stringify(options),
+          req.auth!.id,
+        ],
+      );
+      const sessionId = ins.insertId;
+
+      const storeSource = async (
+        role: "before" | "after",
+        file: Express.Multer.File,
+      ) => {
+        const { encrypted, iv, tag } = encryptFile(file.buffer);
+        const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
+        const cdnUrl = await uploadToCDN(
+          encrypted,
+          `${role}_${Date.now()}_${safeName}.enc`,
+          "application/octet-stream",
+          clientId,
+        );
+        const [pdfIns] = await pool.query<ResultSetHeader>(
+          `INSERT INTO round_report_source_pdfs
+             (session_id, role, file_name, storage_key, encrypted, enc_iv, enc_tag, uploaded_by_admin_id)
+           VALUES (?, ?, ?, ?, 1, ?, ?, ?)`,
+          [
+            sessionId,
+            role,
+            file.originalname,
+            cdnUrl,
+            iv,
+            tag,
+            req.auth!.id,
+          ],
+        );
+        return pdfIns.insertId;
+      };
+
+      try {
+        const beforePdfId = await storeSource("before", beforeFile);
+        const afterPdfId = await storeSource("after", afterFile);
+
+        await pool.query(
+          `UPDATE report_wizard_sessions SET before_pdf_id = ?, after_pdf_id = ? WHERE id = ?`,
+          [beforePdfId, afterPdfId, sessionId],
+        );
+
+        const [clientRows] = await pool.query<RowDataPacket[]>(
+          `SELECT first_name FROM clients WHERE id = ? LIMIT 1`,
+          [clientId],
+        );
+        const firstName = String(clientRows[0]?.first_name || "Client");
+
+        const { data, meta } = await extractFromCreditReportPdfs(
+          beforeFile.buffer,
+          afterFile.buffer,
+          firstName,
+          roundNumber,
+          {
+            highlightWin: options.highlight_win,
+            spanish: options.spanish,
+            tradelineRec: options.tradeline_rec,
+            fundingNote: options.funding_note,
+          },
+        );
+
+        await pool.query(
+          `UPDATE report_wizard_sessions
+           SET status = 'review', extracted_json = ?, extraction_meta = ?, updated_at = NOW()
+           WHERE id = ?`,
+          [JSON.stringify(data), JSON.stringify(meta), sessionId],
+        );
+
+        const session = await loadWizardSession(pool, sessionId);
+        res.status(201).json({
+          session: session ? formatWizardSessionResponse(session) : null,
+        });
+      } catch (e: any) {
+        await pool.query(
+          `UPDATE report_wizard_sessions SET status = 'failed', error_message = ?, updated_at = NOW() WHERE id = ?`,
+          [String(e?.message || e).slice(0, 500), sessionId],
+        );
+        console.error("[report-wizard:create]", e);
+        res.status(500).json({
+          error: e?.message || "Extraction failed",
+          session_id: sessionId,
+        });
+      }
+    },
+  );
+
+  app.get(
+    "/api/admin/report-wizard/sessions/:id",
+    requireAdmin,
+    async (req, res) => {
+      const sessionId = Number(req.params.id);
+      const session = await loadWizardSession(pool, sessionId);
+      if (!session) return res.status(404).json({ error: "Session not found" });
+      res.json({ session: formatWizardSessionResponse(session) });
+    },
+  );
+
+  app.post(
+    "/api/admin/report-wizard/sessions/:id/extract",
+    requireAdmin,
+    async (req, res) => {
+      const sessionId = Number(req.params.id);
+      const session = await loadWizardSession(pool, sessionId);
+      if (!session) return res.status(404).json({ error: "Session not found" });
+      if (session.status === "published") {
+        return res.status(400).json({ error: "Cannot re-extract published session" });
+      }
+      if (!canExtractSession(session.status as string)) {
+        return res.status(409).json({ error: "Extraction already in progress" });
+      }
+
+      await pool.query(
+        `UPDATE report_wizard_sessions SET status = 'extracting', error_message = NULL, updated_at = NOW() WHERE id = ?`,
+        [sessionId],
+      );
+
+      try {
+        const { data, meta } = await runWizardSessionExtraction(
+          pool,
+          session,
+          decryptFile,
+        );
+        await pool.query(
+          `UPDATE report_wizard_sessions
+           SET status = 'review', extracted_json = ?, reviewed_json = NULL,
+               extraction_meta = ?, updated_at = NOW()
+           WHERE id = ?`,
+          [JSON.stringify(data), JSON.stringify(meta), sessionId],
+        );
+        const updated = await loadWizardSession(pool, sessionId);
+        res.json({
+          session: {
+            ...updated,
+            options_json: parseWizardJsonField(updated?.options_json),
+            extracted_json: data,
+            reviewed_json: null,
+            extraction_meta: meta,
+          },
+        });
+      } catch (e: any) {
+        await pool.query(
+          `UPDATE report_wizard_sessions SET status = 'failed', error_message = ?, updated_at = NOW() WHERE id = ?`,
+          [String(e?.message || e).slice(0, 500), sessionId],
+        );
+        console.error("[report-wizard:extract]", e);
+        res.status(500).json({ error: e?.message || "Re-extraction failed" });
+      }
+    },
+  );
+
+  app.post(
+    "/api/admin/report-wizard/sessions/:id/preview",
+    requireAdmin,
+    async (req, res) => {
+      const sessionId = Number(req.params.id);
+      const session = await loadWizardSession(pool, sessionId);
+      if (!session) return res.status(404).json({ error: "Session not found" });
+      if (!canPreviewSession(session.status as string)) {
+        return res.status(400).json({ error: "Session cannot be previewed in current state" });
+      }
+
+      const data =
+        (req.body?.reviewed_json as OfGReportData | undefined) ??
+        parseWizardJsonField<OfGReportData>(session.reviewed_json) ??
+        parseWizardJsonField<OfGReportData>(session.extracted_json);
+      if (!data) {
+        return res.status(400).json({ error: "No report data to preview" });
+      }
+
+      const { errors: complianceErrors, warnings: complianceWarnings } =
+        validateReportCompliance(data);
+      if (complianceErrors.length > 0) {
+        return res.status(422).json({
+          error: "Compliance validation failed",
+          issues: complianceErrors,
+          warnings: complianceWarnings,
+        });
+      }
+
+      // Soft warnings (e.g. large score drops) do not block preview —
+      // admin is verifying the PDF. Surface them in a response header.
+      if (complianceWarnings.length > 0) {
+        res.set(
+          "X-Compliance-Warnings",
+          encodeURIComponent(JSON.stringify(complianceWarnings)),
+        );
+      }
+
+      try {
+        const { buffer, fileName } = await generateOfgProgressReportPdf(
+          data,
+          `${data.client.firstName}_OFG_Preview.pdf`,
+        );
+        res.set("Content-Type", "application/pdf");
+        res.set("Content-Disposition", `inline; filename="${fileName}"`);
+        res.set("Cache-Control", "no-store");
+        res.send(buffer);
+      } catch (e: any) {
+        console.error("[report-wizard:preview]", e);
+        res.status(500).json({ error: e?.message || "Preview generation failed" });
+      }
+    },
+  );
+
+  app.patch(
+    "/api/admin/report-wizard/sessions/:id/review",
+    requireAdmin,
+    async (req: AuthedRequest, res) => {
+      const sessionId = Number(req.params.id);
+      const session = await loadWizardSession(pool, sessionId);
+      if (!session) return res.status(404).json({ error: "Session not found" });
+      if (!canReviewSession(session.status as string)) {
+        return res.status(400).json({ error: "Session is not in review state" });
+      }
+
+      const reviewed = req.body?.reviewed_json as OfGReportData | undefined;
+      if (!reviewed?.middleScore) {
+        return res.status(400).json({ error: "reviewed_json required" });
+      }
+
+      await pool.query(
+        `UPDATE report_wizard_sessions
+         SET reviewed_json = ?, status = 'review', updated_at = NOW()
+         WHERE id = ?`,
+        [JSON.stringify(reviewed), sessionId],
+      );
+
+      const updated = await loadWizardSession(pool, sessionId);
+      res.json({
+        session: {
+          ...updated,
+          reviewed_json: reviewed,
+          extracted_json: parseWizardJsonField(updated?.extracted_json),
+        },
+      });
+    },
+  );
+
+  app.post(
+    "/api/admin/report-wizard/sessions/:id/finalize",
+    requireAdmin,
+    async (req: AuthedRequest, res) => {
+      const sessionId = Number(req.params.id);
+      const session = await loadWizardSession(pool, sessionId);
+      if (!session) return res.status(404).json({ error: "Session not found" });
+
+      if (session.status === "published") {
+        return res.json({ ok: true, already_published: true });
+      }
+      if (!canFinalizeSession(session.status as string)) {
+        return res.status(400).json({
+          error:
+            session.status === "failed"
+              ? "Session failed — re-extract or start a new session"
+              : "Session is not ready to publish",
+        });
+      }
+
+      const duplicatePublished = await hasPublishedWizardRound(
+        pool,
+        session.client_id as number,
+        session.round_number as number,
+        sessionId,
+      );
+      if (duplicatePublished) {
+        return res.status(409).json({
+          error: `Round ${session.round_number} already has a published wizard report`,
+        });
+      }
+
+      const [caseRows] = await pool.query<RowDataPacket[]>(
+        `SELECT pipeline_stage FROM credit_repair_cases WHERE id = ? LIMIT 1`,
+        [session.case_id],
+      );
+      const roundErr = validatePublishRound({
+        roundNumber: session.round_number as number,
+        pipelineStage: (caseRows[0]?.pipeline_stage as string) || "new_client",
+        hasExistingReport: false,
+      });
+      if (roundErr) return res.status(422).json({ error: roundErr });
+
+      const data =
+        parseWizardJsonField<OfGReportData>(session.reviewed_json) ??
+        parseWizardJsonField<OfGReportData>(session.extracted_json);
+      if (!data) {
+        return res.status(400).json({ error: "No report data to publish" });
+      }
+
+      if (!req.body?.compliance_acknowledged) {
+        return res
+          .status(400)
+          .json({ error: "Compliance attestation required" });
+      }
+
+      const { errors: complianceErrors, warnings: complianceWarnings } =
+        validateReportCompliance(data);
+      if (complianceErrors.length > 0) {
+        return res.status(422).json({
+          error: "Compliance validation failed",
+          issues: complianceErrors,
+          warnings: complianceWarnings,
+        });
+      }
+      if (
+        complianceWarnings.length > 0 &&
+        !req.body?.acknowledge_score_anomalies
+      ) {
+        return res.status(422).json({
+          error:
+            "Score anomalies detected — correct scores in review, or acknowledge them before publishing",
+          issues: complianceWarnings,
+          warnings: complianceWarnings,
+        });
+      }
+
+      const clientId = session.client_id as number;
+      const caseId = session.case_id as number;
+      const roundNumber = session.round_number as number;
+      const adminId = req.auth!.id;
+
+      const [lockResult] = await pool.query<ResultSetHeader>(
+        `UPDATE report_wizard_sessions
+         SET status = 'generating', updated_at = NOW()
+         WHERE id = ? AND status = 'review'`,
+        [sessionId],
+      );
+      if (lockResult.affectedRows === 0) {
+        return res.status(409).json({ error: "Session is already being published" });
+      }
+
+      let cdnUrl = "";
+      let iv = "";
+      let tag = "";
+      let fileName = "";
+      let outputPdfId = 0;
+      let roundReportId = 0;
+      let newStage = "";
+
+      try {
+        const pdfResult = await generateOfgProgressReportPdf(
+          data,
+          `${data.client.firstName}_OFG_Progress_Report_${new Date().toISOString().slice(0, 7)}.pdf`,
+        );
+        fileName = pdfResult.fileName;
+        const { encrypted, iv: encIv, tag: encTag } = encryptFile(pdfResult.buffer);
+        iv = encIv;
+        tag = encTag;
+        cdnUrl = await uploadToCDN(
+          encrypted,
+          `ofg_report_r${roundNumber}_${Date.now()}.enc`,
+          "application/octet-stream",
+          clientId,
+        );
+
+        const summaryMd = reportDataToSummaryMd(data);
+        const locale = data.locale === "es" ? "es" : "en";
+        newStage = pipelineStageAfterRoundReport(roundNumber);
+
+        const conn = await pool.getConnection();
+        try {
+          await conn.beginTransaction();
+
+          await conn.query<ResultSetHeader>(
+            `INSERT INTO client_round_reports
+               (client_id, case_id, round_number, score_before, score_after,
+                items_removed, items_disputed, summary_md,
+                bureau_scores_json, wins_json, targets_json, utilization_json,
+                action_plan_json, file_strength_score, wizard_session_id, report_locale,
+                created_by_admin_id, delivered_via_email, delivered_via_sms)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)
+             ON DUPLICATE KEY UPDATE
+               case_id = VALUES(case_id),
+               score_before = VALUES(score_before),
+               score_after = VALUES(score_after),
+               items_removed = VALUES(items_removed),
+               items_disputed = VALUES(items_disputed),
+               summary_md = VALUES(summary_md),
+               bureau_scores_json = VALUES(bureau_scores_json),
+               wins_json = VALUES(wins_json),
+               targets_json = VALUES(targets_json),
+               utilization_json = VALUES(utilization_json),
+               action_plan_json = VALUES(action_plan_json),
+               file_strength_score = VALUES(file_strength_score),
+               wizard_session_id = VALUES(wizard_session_id),
+               report_locale = VALUES(report_locale),
+               created_by_admin_id = VALUES(created_by_admin_id)`,
+            [
+              clientId,
+              caseId,
+              roundNumber,
+              data.middleScore.before || null,
+              data.middleScore.after || null,
+              data.wins.length,
+              data.targets.length,
+              summaryMd,
+              JSON.stringify(data.bureauScores),
+              JSON.stringify(data.wins),
+              JSON.stringify(data.targets),
+              JSON.stringify(data.utilization),
+              JSON.stringify(data.actionPlan),
+              data.fileStrengthScore,
+              sessionId,
+              locale,
+              adminId,
+            ],
+          );
+
+          const [[roundReportRow]] = await conn.query<RowDataPacket[]>(
+            `SELECT id FROM client_round_reports WHERE client_id = ? AND round_number = ? LIMIT 1`,
+            [clientId, roundNumber],
+          );
+          roundReportId = roundReportRow?.id as number;
+
+          const [pdfIns] = await conn.query<ResultSetHeader>(
+            `INSERT INTO round_report_pdfs
+               (client_id, round_number, round_report_id, file_name, storage_key, storage_provider, encrypted, enc_iv, enc_tag, uploaded_by_admin_id)
+             VALUES (?, ?, ?, ?, ?, 'cdn', 1, ?, ?, ?)`,
+            [
+              clientId,
+              roundNumber,
+              roundReportId,
+              fileName,
+              cdnUrl,
+              iv,
+              tag,
+              adminId,
+            ],
+          );
+          outputPdfId = pdfIns.insertId;
+
+          await advanceCasePipeline(conn, {
+            clientId,
+            caseId,
+            stage: newStage,
+            adminId,
+            notes: `OFG Progress Report published — Round ${roundNumber}`,
+          });
+
+          await conn.query(
+            `UPDATE report_wizard_sessions
+             SET status = 'published', output_pdf_id = ?, round_report_id = ?,
+                 compliance_acknowledged_at = NOW(), published_at = NOW(), updated_at = NOW()
+             WHERE id = ?`,
+            [outputPdfId, roundReportId, sessionId],
+          );
+
+          await conn.query(
+            `INSERT INTO audit_logs
+               (actor_type, actor_id, action, entity_type, entity_id, changes_json, status)
+             VALUES ('admin', ?, 'report_wizard.published', 'client_round_report', ?, ?, 'success')`,
+            [
+              adminId,
+              roundReportId,
+              JSON.stringify({
+                session_id: sessionId,
+                round_number: roundNumber,
+                pipeline_stage: newStage,
+                wins: data.wins.length,
+                targets_remaining: data.targets.length,
+              }),
+            ],
+          );
+
+          await conn.commit();
+        } catch (dbErr) {
+          await conn.rollback();
+          throw dbErr;
+        } finally {
+          conn.release();
+        }
+
+        const tpl = tplRoundComplete({
+          firstName: session.first_name as string,
+          roundNumber,
+          scoreBefore: data.middleScore.before,
+          scoreAfter: data.middleScore.after,
+          itemsRemoved: data.wins.length,
+          portalUrl: `${APP_URL}/portal/reports`,
+          lang: (session.preferred_language as string) || "en",
+        });
+        await sendEmail({
+          to: session.email as string,
+          subject: tpl.subject,
+          html: tpl.html,
+        }).catch(() => null);
+        if (session.phone) {
+          await sendSms({
+            to: session.phone as string,
+            body: `${session.first_name}, your Round ${roundNumber} OFG Progress Report is ready! ${APP_URL}/portal/reports`,
+          }).catch(() => null);
+        }
+        const scoreChange = String(
+          data.middleScore.after - data.middleScore.before,
+        );
+        await triggerReminderFlow(`round_${roundNumber}_complete`, clientId, {
+          items_removed: String(data.wins.length),
+          score_change: scoreChange,
+        }).catch(() => null);
+
+        if (process.env.CRC_SYNC_STAGES !== "false") {
+          crcSyncClient(clientId).catch((e) =>
+            console.error("[crc:wizard-publish]", e?.message),
+          );
+        }
+
+        res.json({
+          ok: true,
+          session_id: sessionId,
+          round_report_id: roundReportId,
+          output_pdf_id: outputPdfId,
+          pipeline_stage: newStage,
+        });
+      } catch (e: any) {
+        if (cdnUrl) {
+          await deleteFromCDN(cdnUrl).catch(() => null);
+        }
+        await pool.query(
+          `UPDATE report_wizard_sessions SET status = 'failed', error_message = ?, updated_at = NOW() WHERE id = ?`,
+          [String(e?.message || e).slice(0, 500), sessionId],
+        );
+        console.error("[report-wizard:finalize]", e);
+        res.status(500).json({ error: e?.message || "Publish failed" });
+      }
+    },
+  );
+
+  app.get(
+    "/api/admin/report-wizard/sessions/:id/source/:role",
+    requireAdmin,
+    async (req, res) => {
+      const sessionId = Number(req.params.id);
+      const role = req.params.role;
+      if (role !== "before" && role !== "after") {
+        return res.status(400).json({ error: "role must be before or after" });
+      }
+      const session = await loadWizardSession(pool, sessionId);
+      if (!session) return res.status(404).json({ error: "Session not found" });
+      const pdfId =
+        role === "before" ? session.before_pdf_id : session.after_pdf_id;
+      if (!pdfId) return res.status(404).json({ error: "PDF not found" });
+      try {
+        const buf = await loadWizardSourcePdfBuffer(pool, pdfId as number, decryptFile);
+        res.set("Content-Type", "application/pdf");
+        res.set("Cache-Control", "no-store");
+        res.send(buf);
+      } catch {
+        res.status(404).json({ error: "Could not load PDF" });
+      }
+    },
+  );
+
+  app.delete(
+    "/api/admin/report-wizard/sessions/:id",
+    requireAdmin,
+    async (req, res) => {
+      const sessionId = Number(req.params.id);
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT status FROM report_wizard_sessions WHERE id = ? LIMIT 1`,
+        [sessionId],
+      );
+      if (rows.length === 0) {
+        return res.status(404).json({ error: "Session not found" });
+      }
+      if (rows[0].status === "published") {
+        return res.status(400).json({ error: "Cannot delete published session" });
+      }
+      await pool.query(`DELETE FROM report_wizard_sessions WHERE id = ?`, [
+        sessionId,
+      ]);
+      res.json({ ok: true });
+    },
+  );
+
+
+
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = typeof err?.status === "number" ? err.status : 500;
@@ -8276,12 +10425,44 @@ function buildApp() {
   return app;
 }
 
+
+// ============================================================================
+// TEST EXPORTS (vitest)
+// ============================================================================
+
+export {
+  pipelineStageAfterRoundReport,
+  validatePdfUploadPair,
+  validatePublishRound,
+  canExtractSession,
+  canReviewSession,
+  canPreviewSession,
+  canFinalizeSession,
+  calcMiddleScore,
+  expectedReportRoundForStage,
+  isPdfBuffer,
+  scoresRoughlyMatchMiddle,
+  detectProvider,
+  extractAllScores,
+  middleScore,
+  diffItems,
+  buildConfidence,
+  computeFileStrengthScore,
+  validateReportCompliance,
+  detectNegativeLines,
+  extractUtilization,
+  extractPositiveAccounts,
+  toPdfSafeText,
+};
+
 // ============================================================================
 // EXPORTS — Vercel serverless + dev server
 // ============================================================================
 
 let app: ReturnType<typeof buildApp>;
-try {
+if (process.env.VITEST === "true") {
+  app = express() as ReturnType<typeof buildApp>;
+} else try {
   app = buildApp();
 } catch (initErr: any) {
   console.error(
@@ -8299,7 +10480,14 @@ try {
 }
 
 export default function handler(req: VercelRequest, res: VercelResponse) {
-  return app(req as any, res as any);
+  try {
+    return app(req as any, res as any);
+  } catch (err: any) {
+    console.error("[API handler]", err?.message ?? err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Internal server error" });
+    }
+  }
 }
 
 export function createServer() {

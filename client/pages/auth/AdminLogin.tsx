@@ -16,8 +16,10 @@ import {
 import PageMeta from "@/components/PageMeta";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { requestAdminOtp, verifyAdminOtp } from "@/store/slices/adminAuthSlice";
+import { formatApiError } from "@/lib/api";
 import OtpInput from "@/components/OtpInput";
 import AdminThemeToggle from "@/components/AdminThemeToggle";
+import LegalLinks from "@/components/LegalLinks";
 
 const VIDEO_URL =
   "https://disruptinglabs.com/data/optimum/assets/videos/12894328-sd_540_960_24fps.mp4";
@@ -34,6 +36,7 @@ export default function AdminLogin() {
   const { requestingOtp, verifyingOtp, error, otpSentTo } = useAppSelector(
     (s) => s.adminAuth,
   );
+  const displayError = error ? formatApiError(error, "Something went wrong") : null;
   const [step, setStep] = useState<"email" | "code">("email");
 
   const emailForm = useFormik({
@@ -155,9 +158,9 @@ export default function AdminLogin() {
                   )}
                 </div>
 
-                {error && (
+                {displayError && (
                   <div className="text-sm text-destructive bg-destructive/10 border border-destructive/20 px-4 py-3 rounded-xl">
-                    {error}
+                    {displayError}
                   </div>
                 )}
 
@@ -194,9 +197,9 @@ export default function AdminLogin() {
                   )}
                 </div>
 
-                {error && (
+                {displayError && (
                   <div className="text-sm text-destructive bg-destructive/10 border border-destructive/20 px-4 py-3 rounded-xl">
-                    {error}
+                    {displayError}
                   </div>
                 )}
 
@@ -238,10 +241,13 @@ export default function AdminLogin() {
               <span>Staff access only</span>
             </div>
           </div>
-          <p className="text-center text-[11px] text-muted-foreground/50">
+          <p className="text-center text-[11px] text-muted-foreground/50 mb-2">
             © {new Date().getFullYear()} Optimum Credit Repair · Internal use
             only
           </p>
+          <div className="flex justify-center">
+            <LegalLinks className="text-[11px] text-muted-foreground/60" />
+          </div>
         </div>
       </div>
 

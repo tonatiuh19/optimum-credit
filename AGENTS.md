@@ -16,6 +16,8 @@
 - **if there is an opportunity to add reusable components or utilities, do it immediately to avoid technical debt**
 - **Avoid any breaking changes**
 - **i18n: When making any UI change that introduces new user-visible strings, ALWAYS add the corresponding key to BOTH `client/locales/en/translation.json` AND `client/locales/es/translation.json`, and use `t('key')` via `useTranslation()` — NEVER hardcode user-facing strings in components**
+- **Always review the chat history before making changes to understand what has already been fixed or implemented, and avoid reintroducing previously resolved issues**
+- **All required API logic should remain inline within api/index.ts, as the application is deployed on Vercel using a serverless architecture**
 - **NO EXCEPTIONS to these rules**
 
 ### Package Manager

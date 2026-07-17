@@ -39,6 +39,15 @@ async function runCommand(command: string, args: string[]) {
   });
 }
 
+/** Typecheck + vitest — must pass before production deploy. */
+async function runPreDeployChecks() {
+  console.log("\n🧪 Pre-deploy checks: typecheck + tests...\n");
+  await runCommand("npm", ["run", "typecheck"]);
+  console.log("\n✅ Typecheck passed.\n");
+  await runCommand("npm", ["test"]);
+  console.log("\n✅ Tests passed. Continuing to deploy...\n");
+}
+
 async function promptForVersion(
   currentVersion: string | null,
 ): Promise<string> {
@@ -84,10 +93,26 @@ async function main() {
   const dbName = requireEnv("DB_NAME");
 
   const cliArgs = process.argv.slice(2);
-  const explicitVersion = cliArgs.find((arg) => !arg.startsWith("-")) ?? "";
+  const skipChecks =
+    cliArgs.includes("--skip-checks") ||
+    process.env.SKIP_DEPLOY_CHECKS === "1" ||
+    process.env.SKIP_DEPLOY_CHECKS === "true";
+  const filteredArgs = cliArgs.filter((arg) => arg !== "--skip-checks");
+  const explicitVersion =
+    filteredArgs.find((arg) => !arg.startsWith("-")) ?? "";
   const vercelArgs = explicitVersion
-    ? cliArgs.filter((arg, index) => index !== cliArgs.indexOf(explicitVersion))
-    : cliArgs;
+    ? filteredArgs.filter(
+        (arg, index) => index !== filteredArgs.indexOf(explicitVersion),
+      )
+    : filteredArgs;
+
+  if (!skipChecks) {
+    await runPreDeployChecks();
+  } else {
+    console.log(
+      "\n⚠️  Skipping pre-deploy checks (--skip-checks / SKIP_DEPLOY_CHECKS).\n",
+    );
+  }
 
   const conn = await mysql.createConnection({
     host: dbHost,

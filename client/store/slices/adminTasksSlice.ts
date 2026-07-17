@@ -10,7 +10,10 @@ interface AdminTasksState {
   loading: boolean;
   saving: boolean;
   error: string | null;
-  // per-client task completions (keyed by clientId)
+  // per-case task completions (keyed by caseId)
+  caseCompletions: Record<number, any[]>;
+  caseCompletionsLoading: boolean;
+  /** @deprecated use caseCompletions */
   clientCompletions: Record<number, any[]>;
   clientCompletionsLoading: boolean;
 }
@@ -20,6 +23,8 @@ const initialState: AdminTasksState = {
   loading: false,
   saving: false,
   error: null,
+  caseCompletions: {},
+  caseCompletionsLoading: false,
   clientCompletions: {},
   clientCompletionsLoading: false,
 };
@@ -88,6 +93,14 @@ export const deleteTaskTemplate = createAsyncThunk(
   },
 );
 
+export const fetchCaseTaskCompletions = createAsyncThunk(
+  "adminTasks/fetchCaseCompletions",
+  async (caseId: number) => {
+    const { data } = await api.get(`/admin/cases/${caseId}/task-completions`);
+    return { caseId, tasks: data.tasks };
+  },
+);
+
 export const fetchClientTaskCompletions = createAsyncThunk(
   "adminTasks/fetchClientCompletions",
   async (clientId: number) => {
@@ -106,11 +119,13 @@ export const reviewTaskCompletion = createAsyncThunk(
       admin_review_status,
       admin_notes,
       clientId,
+      caseId,
     }: {
       completionId: number;
       admin_review_status: "approved" | "rejected";
       admin_notes?: string;
       clientId: number;
+      caseId: number;
     },
     { rejectWithValue, dispatch },
   ) => {
@@ -118,9 +133,9 @@ export const reviewTaskCompletion = createAsyncThunk(
       await api.put(`/admin/task-completions/${completionId}/review`, {
         admin_review_status,
         admin_notes: admin_notes ?? null,
+        case_id: caseId,
       });
-      // Refresh completions for this client after review
-      dispatch(fetchClientTaskCompletions(clientId));
+      dispatch(fetchCaseTaskCompletions(caseId));
       return { completionId, admin_review_status };
     } catch (err: any) {
       return rejectWithValue(
@@ -181,7 +196,19 @@ const adminTasksSlice = createSlice({
       s.templates = s.templates.filter((t) => t.id !== a.payload);
     });
 
-    // client completions
+    // case completions
+    builder.addCase(fetchCaseTaskCompletions.pending, (s) => {
+      s.caseCompletionsLoading = true;
+    });
+    builder.addCase(fetchCaseTaskCompletions.fulfilled, (s, a) => {
+      s.caseCompletionsLoading = false;
+      s.caseCompletions[a.payload.caseId] = a.payload.tasks;
+    });
+    builder.addCase(fetchCaseTaskCompletions.rejected, (s) => {
+      s.caseCompletionsLoading = false;
+    });
+
+    // client completions (legacy)
     builder.addCase(fetchClientTaskCompletions.pending, (s) => {
       s.clientCompletionsLoading = true;
     });

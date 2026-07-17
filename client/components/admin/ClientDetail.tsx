@@ -19,12 +19,9 @@ import {
 } from "lucide-react";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
-  createRoundReport,
   fetchAdminClient,
   updateClientStage,
 } from "@/store/slices/adminSlice";
-import { useFormik } from "formik";
-import * as Yup from "yup";
 import type { PipelineStage } from "@shared/api";
 import { LangBadge } from "@/components/ui/lang-badge";
 
@@ -505,116 +502,6 @@ function Mini({ label, v }: { label: string; v: any }) {
     <div>
       <div className="text-xs text-muted-foreground">{label}</div>
       <div className="font-bold text-foreground">{v ?? "—"}</div>
-    </div>
-  );
-}
-
-function RoundReportForm({
-  clientId,
-  onDone,
-}: {
-  clientId: number;
-  onDone: () => void;
-}) {
-  const dispatch = useAppDispatch();
-  const form = useFormik({
-    initialValues: {
-      round_number: 1,
-      score_before: "",
-      score_after: "",
-      items_removed: 0,
-      items_disputed: 0,
-      summary_md: "",
-    },
-    validationSchema: Yup.object({
-      round_number: Yup.number().min(1).max(5).required(),
-    }),
-    onSubmit: async (v) => {
-      await dispatch(
-        createRoundReport({
-          clientId,
-          round_number: Number(v.round_number),
-          score_before: v.score_before ? Number(v.score_before) : undefined,
-          score_after: v.score_after ? Number(v.score_after) : undefined,
-          items_removed: Number(v.items_removed),
-          items_disputed: Number(v.items_disputed),
-          summary_md: v.summary_md,
-        }),
-      );
-      onDone();
-      dispatch(fetchAdminClient({ id: clientId }));
-    },
-  });
-  return (
-    <form
-      onSubmit={form.handleSubmit}
-      className="grid sm:grid-cols-2 gap-3 p-4 mb-4 bg-muted/50 rounded-lg border border-border"
-    >
-      <Field f={form} name="round_number" label="Round #" type="number" />
-      <Field f={form} name="score_before" label="Score Before" type="number" />
-      <Field f={form} name="score_after" label="Score After" type="number" />
-      <Field
-        f={form}
-        name="items_removed"
-        label="Items Removed"
-        type="number"
-      />
-      <Field
-        f={form}
-        name="items_disputed"
-        label="Items Disputed"
-        type="number"
-      />
-      <div className="sm:col-span-2">
-        <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground block mb-1">
-          Summary
-        </label>
-        <textarea
-          rows={3}
-          {...form.getFieldProps("summary_md")}
-          className="w-full p-2 rounded-lg border border-input bg-background text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
-        />
-      </div>
-      <div className="sm:col-span-2 flex gap-2 justify-end">
-        <button
-          type="button"
-          onClick={onDone}
-          className="h-9 px-4 rounded-lg border border-input bg-background text-sm font-medium text-foreground hover:bg-muted transition-colors"
-        >
-          Cancel
-        </button>
-        <button
-          type="submit"
-          className="h-9 px-4 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors"
-        >
-          Save &amp; notify
-        </button>
-      </div>
-    </form>
-  );
-}
-
-function Field({
-  f,
-  name,
-  label,
-  type = "text",
-}: {
-  f: any;
-  name: string;
-  label: string;
-  type?: string;
-}) {
-  return (
-    <div>
-      <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground block mb-1">
-        {label}
-      </label>
-      <input
-        type={type}
-        {...f.getFieldProps(name)}
-        className="w-full h-10 px-3 rounded-lg border border-input bg-background text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
-      />
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback } from "react";
 import {
   CheckCircle2,
   X,
@@ -16,7 +16,6 @@ import {
   Clock,
   ArrowRight,
   FileText,
-  Upload,
   Info,
   Hash,
 } from "lucide-react";
@@ -24,12 +23,12 @@ import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
   fetchPanelCase,
   clearPanelClient,
-  uploadRoundReportPdf,
   deleteRoundReportPdf,
   fetchCaseSplits,
   markSplitPaid,
 } from "@/store/slices/adminSlice";
 import {
+  fetchCaseTaskCompletions,
   fetchClientTaskCompletions,
   reviewTaskCompletion,
 } from "@/store/slices/adminTasksSlice";
@@ -47,6 +46,9 @@ import { Badge } from "@/components/ui/badge";
 import api from "@/lib/api";
 import { LangBadge } from "@/components/ui/lang-badge";
 import { useToast } from "@/hooks/use-toast";
+import OfGReportWizard, {
+  suggestReportRound,
+} from "@/components/admin/OfgReportWizard";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -310,67 +312,30 @@ function RoundPdfRow({
 function ReportsTab({
   reports,
   pipelineStage,
-  clientId,
+  caseId,
+  clientFirstName,
   onPdfUploaded,
 }: {
   reports: any[];
   pipelineStage: string;
-  clientId: number;
+  caseId: number;
+  clientFirstName: string;
   onPdfUploaded: (roundNumber: number) => void;
 }) {
   const dispatch = useAppDispatch();
-  const fileInputRefs = useRef<(HTMLInputElement | null)[]>([]);
-  const [uploading, setUploading] = useState<Record<number, boolean>>({});
-  const [uploadError, setUploadError] = useState<Record<number, string>>({});
+  const [wizardOpen, setWizardOpen] = useState(false);
   const [deleting, setDeleting] = useState<Record<number, boolean>>({});
-  const [drag, setDrag] = useState<Record<number, boolean>>({});
-  const [pendingFile, setPendingFile] = useState<Record<number, File | null>>(
-    {},
-  );
   const [previewPdf, setPreviewPdf] = useState<any | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
 
   const inRounds = ROUND_STAGES.includes(pipelineStage);
+  const suggestedRound = suggestReportRound(pipelineStage, reports);
 
   const getReport = (round: number) =>
     reports.find((r: any) => r.round_number === round);
 
   const getPdfs = (round: number): any[] => getReport(round)?.pdfs ?? [];
-
-  const handleFilePick = (round: number, file: File | null) => {
-    if (!file) return;
-    if (file.type !== "application/pdf") {
-      setUploadError((p) => ({
-        ...p,
-        [round]: "Only PDF files are accepted.",
-      }));
-      return;
-    }
-    setUploadError((p) => ({ ...p, [round]: "" }));
-    setPendingFile((p) => ({ ...p, [round]: file }));
-  };
-
-  const handleConfirmUpload = async (round: number) => {
-    const file = pendingFile[round];
-    if (!file) return;
-    setUploading((p) => ({ ...p, [round]: true }));
-    setUploadError((p) => ({ ...p, [round]: "" }));
-    try {
-      await dispatch(
-        uploadRoundReportPdf({ clientId, roundNumber: round, file }),
-      ).unwrap();
-      setPendingFile((p) => ({ ...p, [round]: null }));
-      onPdfUploaded(round);
-    } catch {
-      setUploadError((p) => ({
-        ...p,
-        [round]: "Upload failed. Please try again.",
-      }));
-    } finally {
-      setUploading((p) => ({ ...p, [round]: false }));
-    }
-  };
 
   const handleDelete = async (pdf: any) => {
     const round = pdf.round_number as number;
@@ -410,7 +375,36 @@ function ReportsTab({
 
   return (
     <div className="space-y-3">
-      {!inRounds && (
+      <div className="flex items-center justify-between gap-2 rounded-xl border border-primary/20 bg-primary/[0.04] p-3">
+        <div>
+          <p className="text-sm font-semibold">OFG Progress Report Wizard</p>
+          <p className="text-[11px] text-muted-foreground mt-0.5">
+            Upload before & after PDFs to generate a branded 3-page report.
+          </p>
+        </div>
+        <Button
+          size="sm"
+          className="shrink-0"
+          onClick={() => setWizardOpen(true)}
+          disabled={!inRounds && pipelineStage !== "docs_ready"}
+        >
+          Generate
+        </Button>
+      </div>
+
+      <OfGReportWizard
+        open={wizardOpen}
+        onOpenChange={setWizardOpen}
+        caseId={caseId}
+        clientFirstName={clientFirstName}
+        suggestedRound={suggestedRound}
+        onPublished={() => {
+          onPdfUploaded(suggestedRound);
+          setWizardOpen(false);
+        }}
+      />
+
+      {!inRounds && pipelineStage !== "docs_ready" && (
         <div className="flex items-start gap-2.5 rounded-xl bg-primary/[0.06] border border-primary/15 p-3">
           <Info className="w-4 h-4 text-primary/60 shrink-0 mt-0.5" />
           <p className="text-[11px] text-muted-foreground leading-relaxed">
@@ -425,10 +419,6 @@ function ReportsTab({
         const active = isRoundActive(round, pipelineStage);
         const report = getReport(round);
         const pdfs = getPdfs(round);
-        const isUploading = uploading[round];
-        const isDragging = drag[round];
-        const pending = pendingFile[round];
-        const error = uploadError[round];
 
         return (
           <div
@@ -488,8 +478,7 @@ function ReportsTab({
 
             {active && (
               <div className="space-y-2">
-                {/* PDF list */}
-                {pdfs.length > 0 && (
+                {pdfs.length > 0 ? (
                   <div className="space-y-1.5">
                     {pdfs.map((pdf: any) => (
                       <RoundPdfRow
@@ -501,107 +490,11 @@ function ReportsTab({
                       />
                     ))}
                   </div>
-                )}
-
-                {/* Pending file preview (confirm before upload) */}
-                {pending && (
-                  <div className="flex items-center gap-2.5 px-3 py-2.5 rounded-lg border border-primary/30 bg-primary/[0.05] animate-in fade-in slide-in-from-bottom-1 duration-200">
-                    <div className="w-7 h-7 rounded-lg bg-destructive/10 border border-destructive/15 flex items-center justify-center shrink-0">
-                      <FileText className="w-3.5 h-3.5 text-destructive" />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-[11px] font-medium truncate">
-                        {pending.name}
-                      </p>
-                      <p className="text-[10px] text-muted-foreground">
-                        {pending.size < 1024 * 1024
-                          ? `${(pending.size / 1024).toFixed(1)} KB`
-                          : `${(pending.size / (1024 * 1024)).toFixed(1)} MB`}{" "}
-                        · PDF
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <button
-                        onClick={() =>
-                          setPendingFile((p) => ({ ...p, [round]: null }))
-                        }
-                        className="inline-flex items-center justify-center w-6 h-6 rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
-                      <button
-                        onClick={() => handleConfirmUpload(round)}
-                        disabled={isUploading}
-                        className="inline-flex items-center gap-1 text-[11px] font-semibold bg-accent hover:bg-accent/90 text-white px-2.5 py-1 rounded-md transition-colors disabled:opacity-60"
-                      >
-                        {isUploading ? (
-                          <Loader2 className="w-3 h-3 animate-spin" />
-                        ) : (
-                          <Upload className="w-3 h-3" />
-                        )}
-                        Upload
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {/* Drag-drop zone */}
-                {!pending && (
-                  <div
-                    onDragEnter={(e) => {
-                      e.preventDefault();
-                      setDrag((p) => ({ ...p, [round]: true }));
-                    }}
-                    onDragOver={(e) => {
-                      e.preventDefault();
-                      setDrag((p) => ({ ...p, [round]: true }));
-                    }}
-                    onDragLeave={() =>
-                      setDrag((p) => ({ ...p, [round]: false }))
-                    }
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      setDrag((p) => ({ ...p, [round]: false }));
-                      handleFilePick(round, e.dataTransfer.files[0] ?? null);
-                    }}
-                    onClick={() => fileInputRefs.current[round]?.click()}
-                    className={[
-                      "flex flex-col items-center justify-center gap-1.5 rounded-xl border-2 border-dashed py-4 cursor-pointer transition-all",
-                      isDragging
-                        ? "border-primary/50 bg-primary/[0.06]"
-                        : "border-border/50 bg-muted/20 hover:border-primary/30 hover:bg-primary/[0.04]",
-                    ].join(" ")}
-                  >
-                    <Upload
-                      className={`w-4 h-4 ${
-                        isDragging ? "text-primary" : "text-muted-foreground/60"
-                      } transition-colors`}
-                    />
-                    <p className="text-[11px] text-muted-foreground text-center">
-                      {pdfs.length > 0
-                        ? "Add another PDF"
-                        : "Drop PDF here or click to upload"}
-                    </p>
-                  </div>
-                )}
-
-                <input
-                  ref={(el) => {
-                    fileInputRefs.current[round] = el;
-                  }}
-                  type="file"
-                  accept="application/pdf"
-                  className="hidden"
-                  onChange={(e) => {
-                    handleFilePick(round, e.target.files?.[0] ?? null);
-                    e.target.value = "";
-                  }}
-                />
-
-                {error && (
-                  <p className="text-[11px] text-destructive flex items-center gap-1">
-                    <AlertCircle className="w-3 h-3 shrink-0" />
-                    {error}
+                ) : (
+                  <p className="text-[11px] text-muted-foreground rounded-lg border border-dashed border-border/60 px-3 py-2">
+                    No report yet — use{" "}
+                    <span className="font-semibold text-primary">Generate</span>{" "}
+                    above to create the OFG progress report for this round.
                   </p>
                 )}
               </div>
@@ -931,6 +824,8 @@ export function ClientPanelSheet({
   const { panelClient: pd, panelLoading } = useAppSelector((s) => s.admin);
   const {
     clientCompletions,
+    caseCompletions,
+    caseCompletionsLoading,
     clientCompletionsLoading,
     saving: taskSaving,
   } = useAppSelector((s) => s.adminTasks);
@@ -949,7 +844,8 @@ export function ClientPanelSheet({
   useEffect(() => {
     if (!open) return;
     if (caseId) dispatch(fetchPanelCase(caseId));
-    if (clientId) dispatch(fetchClientTaskCompletions(clientId));
+    if (caseId) dispatch(fetchCaseTaskCompletions(caseId));
+    else if (clientId) dispatch(fetchClientTaskCompletions(clientId));
     setPanelTab("tasks");
   }, [open, caseId, clientId, dispatch]);
 
@@ -970,9 +866,11 @@ export function ClientPanelSheet({
   }, [open, closePreview, dispatch]);
 
   // Derived panel data
-  const panelCompletions: any[] = clientId
-    ? (clientCompletions[clientId] ?? pd?.documents ?? [])
-    : (pd?.documents ?? []);
+  const panelCompletions: any[] = caseId
+    ? (caseCompletions[caseId] ?? pd?.documents ?? [])
+    : clientId
+      ? (clientCompletions[clientId] ?? pd?.documents ?? [])
+      : (pd?.documents ?? []);
   const panelPayments: any[] = pd?.payments ?? [];
   const panelHistory: any[] = pd?.pipeline_history ?? [];
   const panelReports: any[] = pd?.reports ?? [];
@@ -985,13 +883,14 @@ export function ClientPanelSheet({
 
   // Task review handlers
   const handleApproveTask = async (completionId: number) => {
-    if (!clientId) return;
+    if (!clientId || !caseId) return;
     setActionLoadingId(completionId);
     await dispatch(
       reviewTaskCompletion({
         completionId,
         admin_review_status: "approved",
         clientId,
+        caseId,
       }),
     );
     setActionLoadingId(null);
@@ -1003,7 +902,7 @@ export function ClientPanelSheet({
   };
 
   const handleRejectTask = async (completionId: number) => {
-    if (!clientId || !rejectReason.trim()) return;
+    if (!clientId || !caseId || !rejectReason.trim()) return;
     setActionLoadingId(completionId);
     await dispatch(
       reviewTaskCompletion({
@@ -1011,6 +910,7 @@ export function ClientPanelSheet({
         admin_review_status: "rejected",
         admin_notes: rejectReason,
         clientId,
+        caseId,
       }),
     );
     setActionLoadingId(null);
@@ -1096,6 +996,26 @@ export function ClientPanelSheet({
                 </div>
               </div>
 
+              {(pd.sibling_cases?.length ?? 0) > 0 && (
+                <div className="mx-5 mt-4 rounded-lg border border-destructive/25 bg-destructive/5 px-3 py-2.5 text-xs text-destructive">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                    <div>
+                      <p className="font-semibold">Duplicate active case detected</p>
+                      <p className="mt-1 text-destructive/90 leading-relaxed">
+                        This client has other active cases (
+                        {pd.sibling_cases
+                          ?.map((s: { case_number: string }) => s.case_number)
+                          .join(", ")}
+                        ). Onboarding tasks are scoped to{" "}
+                        {pd.case_info?.case_number}. Cancel extra cases to avoid
+                        pipeline confusion.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Tabs */}
               <div className="flex border-b border-border shrink-0 bg-muted/30">
                 {(
@@ -1136,13 +1056,13 @@ export function ClientPanelSheet({
                   <div className="space-y-3">
                     <div className="flex items-center justify-between pb-1">
                       <span className="text-[11px] text-muted-foreground font-medium">
-                        Client tasks
+                        Case onboarding tasks
                       </span>
                       <span className="font-mono text-[10px] font-bold text-primary/70 bg-primary/8 border border-primary/15 px-1.5 py-0.5 rounded">
                         {pd.case_info?.case_number ?? ""}
                       </span>
                     </div>
-                    {clientCompletionsLoading &&
+                    {(caseCompletionsLoading || clientCompletionsLoading) &&
                     panelCompletions.length === 0 ? (
                       <div className="flex items-center justify-center py-8">
                         <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
@@ -1206,7 +1126,7 @@ export function ClientPanelSheet({
                   <PaymentScheduleTab caseId={caseId} />
                 )}
 
-                {panelTab === "reports" && clientId && (
+                {panelTab === "reports" && clientId && caseId && (
                   <ReportsTab
                     reports={panelReports}
                     pipelineStage={
@@ -1214,7 +1134,8 @@ export function ClientPanelSheet({
                       pd?.client?.pipeline_stage ??
                       ""
                     }
-                    clientId={clientId}
+                    caseId={caseId}
+                    clientFirstName={String(pd.client.first_name || "Client")}
                     onPdfUploaded={() => {
                       if (caseId) dispatch(fetchPanelCase(caseId));
                     }}

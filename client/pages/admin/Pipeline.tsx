@@ -149,6 +149,7 @@ function KanbanCard({
   const tasksRejected = client.tasks_rejected ?? 0;
   const tasksRequired = client.tasks_required_total ?? 0;
   const tasksTotal = client.tasks_total ?? 0;
+  const siblingCases = client.sibling_active_cases ?? 0;
   const days = daysSince(client.created_at);
   const initials =
     `${client.first_name?.[0] ?? ""}${client.last_name?.[0] ?? ""}`.toUpperCase();
@@ -198,8 +199,18 @@ function KanbanCard({
               </span>
               <LangBadge lang={client.preferred_language} />
             </div>
-            <div className="text-[11px] text-muted-foreground truncate mt-0.5">
-              {client.package_name || "No package"}
+            <div className="text-[11px] text-muted-foreground truncate mt-0.5 flex items-center gap-1.5">
+              <span className="truncate">
+                {client.package_name || "No package"}
+              </span>
+              {siblingCases > 0 && (
+                <span
+                  className="inline-flex items-center gap-0.5 shrink-0 text-[9px] font-semibold text-destructive"
+                  title="Onboarding tasks are shared per client — duplicate active cases"
+                >
+                  <AlertCircle className="w-2.5 h-2.5" />+{siblingCases}
+                </span>
+              )}
             </div>
           </div>
           {isPaid ? (
@@ -227,7 +238,14 @@ function KanbanCard({
                   </span>
                 )}
                 {tasksRejected > 0 && (
-                  <span className="text-destructive font-medium">
+                  <span
+                    className="text-destructive font-medium"
+                    title={
+                      siblingCases > 0
+                        ? "Task status is shared across all cases for this client"
+                        : undefined
+                    }
+                  >
                     {tasksRejected} rejected
                   </span>
                 )}

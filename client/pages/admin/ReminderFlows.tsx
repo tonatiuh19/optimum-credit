@@ -1547,7 +1547,7 @@ export default function AdminReminderFlows() {
         <div className="text-sm text-foreground/80">
           <strong className="text-foreground">Email-first automation.</strong>{" "}
           All steps currently send via{" "}
-          <strong className="text-foreground">email (Resend)</strong>. SMS
+          <strong className="text-foreground">email</strong>. SMS
           support can be added to each step when Twilio is configured. Day-0
           emails are sent immediately; future days are queued in the
           notification queue.

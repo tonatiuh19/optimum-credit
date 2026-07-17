@@ -1,5 +1,5 @@
 import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
-import api, { getAdminToken, setAdminToken } from "@/lib/api";
+import api, { getAdminToken, setAdminToken, formatAxiosError } from "@/lib/api";
 import type { AdminUser } from "@shared/api";
 
 interface AdminAuthState {
@@ -32,8 +32,10 @@ export const requestAdminOtp = createAsyncThunk<
     return { email };
   } catch (e: any) {
     return rejectWithValue(
-      e?.response?.data?.error ||
+      formatAxiosError(
+        e,
         "Something went wrong sending your code. Check your connection and try again.",
+      ),
     );
   }
 });
@@ -48,7 +50,7 @@ export const verifyAdminOtp = createAsyncThunk<
     setAdminToken(data.token);
     return data;
   } catch (e: any) {
-    return rejectWithValue(e?.response?.data?.error || "Invalid code");
+    return rejectWithValue(formatAxiosError(e, "Invalid code"));
   }
 });
 

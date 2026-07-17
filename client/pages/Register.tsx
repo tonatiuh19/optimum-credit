@@ -26,6 +26,9 @@ import {
 } from "react-icons/si";
 import { useTranslation } from "react-i18next";
 import PageMeta from "@/components/PageMeta";
+import ThemeToggle from "@/components/ThemeToggle";
+import LegalLinks from "@/components/LegalLinks";
+import LegalConsent from "@/components/LegalConsent";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import TradelinePicker from "@/components/TradelinePicker";
 import PackagesPlanGrid from "@/components/PackagesPlanGrid";
@@ -84,6 +87,11 @@ export default function Register() {
   // Coupon fields
   const [couponInput, setCouponInput] = useState("");
   const tradelinePickerRef = useRef<HTMLDivElement>(null);
+
+  // Legal consent (required at checkout)
+  const [agreedTerms, setAgreedTerms] = useState(false);
+  const [agreedSms, setAgreedSms] = useState(false);
+  const [consentError, setConsentError] = useState<string | null>(null);
 
   useEffect(() => {
     dispatch(fetchPackages());
@@ -185,10 +193,17 @@ export default function Register() {
     );
     if (Object.keys(errors).length > 0) return;
 
+    if (!agreedTerms || !agreedSms) {
+      setConsentError(t("legal.consentRequired"));
+      return;
+    }
+    setConsentError(null);
+
     // Validate card fields
     const rawCardCheck = cardNumber.replace(/\s/g, "");
     const partsCheck = expiry.split("/");
     if (
+      !cardName.trim() ||
       rawCardCheck.length < 13 ||
       !partsCheck[0]?.trim() ||
       !partsCheck[1]?.trim() ||
@@ -285,6 +300,31 @@ export default function Register() {
     : 0;
   const finalPriceCents = Math.max(0, basePriceCents - appliedDiscount);
 
+  const infoReady =
+    !!form.values.firstName.trim() &&
+    !!form.values.lastName.trim() &&
+    !!form.values.email.trim() &&
+    /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.values.email.trim()) &&
+    !!form.values.phone.trim();
+
+  const expiryParts = expiry.split("/");
+  const cardReady =
+    !!cardName.trim() &&
+    cardNumber.replace(/\s/g, "").length >= 13 &&
+    !!expiryParts[0]?.trim() &&
+    !!expiryParts[1]?.trim() &&
+    cvv.length >= 3;
+
+  const canSubmitPayment =
+    infoReady &&
+    cardReady &&
+    agreedTerms &&
+    agreedSms &&
+    scriptLoaded &&
+    !isBusy &&
+    finalPriceCents >= 0 &&
+    (!isTradelineCheckout || selectedTradelineIds.length > 0);
+
   const canContinueStep1 =
     !!selectedSlug &&
     (!isTradelineCheckout || selectedTradelineIds.length > 0);
@@ -321,9 +361,15 @@ export default function Register() {
             className="flex items-center transition-opacity hover:opacity-80"
           >
             <img
-              src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white.png"
+              src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_dark.png"
               alt="Optimum Credit"
-              className="h-8 w-auto"
+              className="h-8 w-auto dark:hidden"
+            />
+            <img
+              src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white.png"
+              alt=""
+              aria-hidden
+              className="h-8 w-auto hidden dark:block"
             />
           </Link>
 
@@ -707,7 +753,22 @@ export default function Register() {
                 </div>
               )}
 
-              <div className="flex justify-between mt-8">
+              <LegalConsent
+                className="mt-6 pt-6 border-t border-border"
+                agreedTerms={agreedTerms}
+                agreedSms={agreedSms}
+                onAgreedTermsChange={(v) => {
+                  setAgreedTerms(v);
+                  if (v && agreedSms) setConsentError(null);
+                }}
+                onAgreedSmsChange={(v) => {
+                  setAgreedSms(v);
+                  if (v && agreedTerms) setConsentError(null);
+                }}
+                error={consentError}
+              />
+
+              <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 mt-8">
                 <button
                   type="button"
                   onClick={() => goTo(1)}
@@ -715,23 +776,30 @@ export default function Register() {
                 >
                   Back
                 </button>
-                <button
-                  type="submit"
-                  disabled={isBusy || !scriptLoaded}
-                  className="btn-primary gap-2"
-                >
-                  {isBusy ? (
-                    <>
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                      Processing…
-                    </>
-                  ) : (
-                    <>
-                      Pay ${(finalPriceCents / 100).toFixed(2)}
-                      <ArrowRight className="w-4 h-4" />
-                    </>
+                <div className="flex flex-col items-stretch sm:items-end gap-1.5">
+                  <button
+                    type="submit"
+                    disabled={!canSubmitPayment}
+                    className="btn-primary gap-2 disabled:opacity-40 disabled:pointer-events-none"
+                  >
+                    {isBusy ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Processing…
+                      </>
+                    ) : (
+                      <>
+                        Pay ${(finalPriceCents / 100).toFixed(2)}
+                        <ArrowRight className="w-4 h-4" />
+                      </>
+                    )}
+                  </button>
+                  {!canSubmitPayment && !isBusy && (
+                    <p className="text-[11px] text-muted-foreground text-center sm:text-right max-w-xs">
+                      {t("register.payIncompleteHint")}
+                    </p>
                   )}
-                </button>
+                </div>
               </div>
 
               <p className="text-xs text-center text-muted-foreground mt-5 flex items-center gap-1.5 justify-center">
@@ -815,26 +883,16 @@ export default function Register() {
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground/70">
+          <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 text-[11px] text-muted-foreground/70">
+            <ThemeToggle zone="portal" compact className="!text-muted-foreground hover:!text-foreground" />
+            <span className="text-border hidden sm:inline">·</span>
             <span>
               © {new Date().getFullYear()} Optimum Credit. All rights reserved.
             </span>
             <span className="hidden sm:inline text-border">·</span>
-            <a href="#" className="hover:text-foreground transition-colors">
-              Privacy Policy
-            </a>
-            <span className="text-border">·</span>
-            <a href="#" className="hover:text-foreground transition-colors">
-              Terms of Service
-            </a>
-            <span className="text-border">·</span>
-            <a href="#" className="hover:text-foreground transition-colors">
-              Dispute Resolution
-            </a>
+            <LegalLinks className="text-[11px] text-muted-foreground/70" />
             <span className="hidden sm:inline text-border">·</span>
-            <span className="hidden sm:inline">
-              Your information is never sold to third parties.
-            </span>
+            <span className="hidden sm:inline">{t("footer.neverSold")}</span>
           </div>
         </div>
       </footer>

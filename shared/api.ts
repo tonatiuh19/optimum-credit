@@ -358,6 +358,9 @@ export interface CreditRepairCase {
   tasks_approved?: number;
   tasks_pending_review?: number;
   tasks_rejected?: number;
+  /** Other active cases for the same client (duplicate case rows) */
+  sibling_active_cases?: number;
+  sibling_case_numbers?: string[];
 }
 
 // ============================================================
@@ -569,6 +572,9 @@ export interface Payment {
   package_name?: string | null;
   package_slug?: string | null;
   amount_cents: number;
+  discount_cents?: number;
+  original_amount_cents?: number | null;
+  coupon_code?: string | null;
   currency: string;
   status: PaymentStatus;
   provider: PaymentProvider;
@@ -885,4 +891,121 @@ export interface CreateTaskTemplatePayload {
   sort_order?: number;
   is_active?: boolean;
   auto_assign?: boolean;
+}
+
+// ============================================================
+// OFG PROGRESS REPORT WIZARD
+// ============================================================
+
+export type ReportWizardSessionStatus =
+  | "draft"
+  | "extracting"
+  | "review"
+  | "generating"
+  | "published"
+  | "failed";
+
+export interface OfGReportWizardOptions {
+  highlight_win?: string;
+  tradeline_rec?: boolean;
+  funding_note?: boolean;
+  spanish?: boolean;
+}
+
+export interface OfGReportData {
+  client: { firstName: string; lastName?: string };
+  reportDate: { before: string; after: string };
+  bureauScores: {
+    transunion: { before: number; after: number };
+    experian: { before: number; after: number };
+    equifax: { before: number; after: number };
+  };
+  middleScore: { before: number; after: number };
+  wins: Array<{
+    itemRemoved: string;
+    bureaus: ("TU" | "EX" | "EQ")[];
+    impact: string;
+    status: string;
+    highlighted?: boolean;
+  }>;
+  targets: Array<{
+    item: string;
+    bureaus: ("TU" | "EX" | "EQ")[];
+    detail: string;
+    priority: "high" | "medium" | "low";
+  }>;
+  utilization: Array<{
+    account: string;
+    limit: number;
+    balance: number;
+    pctUsed: number;
+    payTo30: number;
+    payTo10: number;
+  }>;
+  positiveAccounts: string[];
+  actionNeeded: string[];
+  roadmap: {
+    currentRound: number;
+    nextRound: number;
+    scoreGoal: number;
+    gapRemaining: number;
+    milestones: string[];
+  };
+  actionPlan: Array<{
+    step: number;
+    description: string;
+    owner: "ofg" | "client";
+  }>;
+  fileStrengthScore: number;
+  tradelineRecommendation?: { code: string; projectedImpact: string };
+  fundingReadinessNote?: string;
+  croaDisclosure: string;
+  locale?: "en" | "es";
+}
+
+export interface ReportWizardDraftSummary {
+  id: number;
+  case_id: number;
+  client_id: number;
+  round_number: number;
+  status: ReportWizardSessionStatus;
+  error_message?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReportWizardSession {
+  id: number;
+  case_id: number;
+  client_id: number;
+  round_number: number;
+  status: ReportWizardSessionStatus;
+  options_json?: OfGReportWizardOptions | null;
+  extracted_json?: OfGReportData | null;
+  reviewed_json?: OfGReportData | null;
+  extraction_meta?: Record<string, unknown> | null;
+  output_pdf_id?: number | null;
+  round_report_id?: number | null;
+  error_message?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// ============================================================
+// LEGAL DOCUMENTS (DB-backed markdown)
+// ============================================================
+export type LegalDocumentSlug = "terms" | "privacy";
+
+export interface LegalDocument {
+  slug: LegalDocumentSlug | string;
+  title: string;
+  content_md: string;
+  source_url?: string | null;
+  updated_at: string;
+}
+
+export interface LegalDocumentSummary {
+  slug: string;
+  title: string;
+  updated_at: string;
 }

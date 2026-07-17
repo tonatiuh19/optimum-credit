@@ -21,6 +21,7 @@ import PageMeta from "@/components/PageMeta";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import OtpInput from "@/components/OtpInput";
 import ThemeToggle from "@/components/ThemeToggle";
+import LegalLinks from "@/components/LegalLinks";
 import {
   requestClientOtp,
   verifyClientOtp,
@@ -319,9 +320,12 @@ export default function ClientLogin() {
               <span>Avg +87 pts boost</span>
             </div>
           </div>
-          <p className="text-center text-[11px] text-muted-foreground/50">
+          <p className="text-center text-[11px] text-muted-foreground/50 mb-2">
             © {new Date().getFullYear()} Optimum Credit Repair
           </p>
+          <div className="flex justify-center">
+            <LegalLinks className="text-[11px] text-muted-foreground/60" />
+          </div>
         </div>
       </div>
 

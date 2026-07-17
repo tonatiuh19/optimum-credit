@@ -118,9 +118,9 @@ CREATE TABLE IF NOT EXISTS `packages` (
 
 INSERT INTO `packages` (`slug`,`name`,`subtitle`,`description`,`price_cents`,`compare_price_cents`,`billing_interval`,`checkout_type`,`duration_months`,`features_json`,`is_active`,`sort_order`) VALUES
   ('standard','Standard Repair','Standard Credit Files','Best for standard credit files with common negative items. Covers the most common negative credit items and standard dispute needs in one flat payment.',149700,199000,'one_time','fixed_price',5,
-   JSON_ARRAY('Late Payments','Collections','Charge-Offs','Hard Inquiries','Personal Info Errors','Incorrect Balances','Duplicate Accounts'),1,1),
+   JSON_ARRAY('Late Payments','Collections','Hard Inquiries','Charge-Offs','Personal Info Errors','Incorrect Balances','Duplicate Accounts'),1,1),
   ('complex','Complex Repair','Serious Derogatory Items','Best for files with serious derogatory items requiring advanced strategy. Includes everything in Standard Repair plus more complex negative items that require a stronger approach.',249700,299000,'one_time','fixed_price',5,
-   JSON_ARRAY('Everything in Standard Repair','Chapter 7 & 13 Bankruptcies','Student Loans','Tax Liens','Medical Bills','Judgments & Foreclosures','Repossessions'),1,2),
+   JSON_ARRAY('Everything in Standard Repair','Chapter 7 & 13 Bankruptcies','Student Loans','Tax Liens','Medical Bills','Judgments & Foreclosures','Foreclosures','Repossessions','Bureau Inconsistencies','Charge-Offs (advanced furnisher disputes)','Identity & Fraud Items'),1,2),
   ('tradeline','Tradeline','High-Impact Credit Boost','Select authorized-user tradelines below. Total is based on your selections.',0,NULL,'one_time','tradeline_picker',5,
    JSON_ARRAY('Consultation — review your profile and recommend trade lines','Account Placement — authorized user on a seasoned account','Reporting — updates on your credit report in 30–60 days'),1,3),
   ('inquiries_removal','Inquiries Removal','Expedited','Get negative inquiries removed from your credit report. We work to remove hard inquiries that negatively impact your credit score.',60000,80000,'one_time','fixed_price',1,
@@ -417,6 +417,14 @@ CREATE TABLE IF NOT EXISTS `client_round_reports` (
   `items_removed` INT UNSIGNED NOT NULL DEFAULT 0,
   `items_disputed` INT UNSIGNED NOT NULL DEFAULT 0,
   `summary_md` MEDIUMTEXT DEFAULT NULL,
+  `bureau_scores_json` JSON DEFAULT NULL,
+  `wins_json` JSON DEFAULT NULL COMMENT 'removed items table rows',
+  `targets_json` JSON DEFAULT NULL COMMENT 'round targets still on report',
+  `utilization_json` JSON DEFAULT NULL,
+  `action_plan_json` JSON DEFAULT NULL,
+  `file_strength_score` TINYINT UNSIGNED DEFAULT NULL,
+  `wizard_session_id` INT UNSIGNED DEFAULT NULL,
+  `report_locale` ENUM('en','es') NOT NULL DEFAULT 'en',
   `pdf_storage_key` VARCHAR(500) DEFAULT NULL,
   `pdf_file_name` VARCHAR(255) DEFAULT NULL,
   `pdf_storage_provider` ENUM('local','cdn') DEFAULT 'cdn',
@@ -460,6 +468,55 @@ CREATE TABLE IF NOT EXISTS `round_report_pdfs` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ============================================================================
+-- OFG PROGRESS REPORT WIZARD
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `report_wizard_sessions` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `case_id` INT UNSIGNED NOT NULL,
+  `client_id` INT UNSIGNED NOT NULL,
+  `round_number` TINYINT UNSIGNED NOT NULL,
+  `status` ENUM('draft','extracting','review','generating','published','failed') NOT NULL DEFAULT 'draft',
+  `before_pdf_id` INT UNSIGNED DEFAULT NULL,
+  `after_pdf_id` INT UNSIGNED DEFAULT NULL,
+  `options_json` JSON DEFAULT NULL,
+  `extracted_json` JSON DEFAULT NULL,
+  `reviewed_json` JSON DEFAULT NULL,
+  `extraction_meta` JSON DEFAULT NULL,
+  `output_pdf_id` INT UNSIGNED DEFAULT NULL,
+  `round_report_id` INT UNSIGNED DEFAULT NULL,
+  `created_by_admin_id` INT UNSIGNED NOT NULL,
+  `compliance_acknowledged_at` DATETIME DEFAULT NULL,
+  `published_at` DATETIME DEFAULT NULL,
+  `error_message` TEXT DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_rws_case` (`case_id`),
+  KEY `idx_rws_client` (`client_id`),
+  KEY `idx_rws_status` (`status`),
+  CONSTRAINT `fk_rws_case` FOREIGN KEY (`case_id`) REFERENCES `credit_repair_cases`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_rws_client` FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_rws_admin` FOREIGN KEY (`created_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `round_report_source_pdfs` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `session_id` INT UNSIGNED NOT NULL,
+  `role` ENUM('before','after') NOT NULL,
+  `file_name` VARCHAR(255) NOT NULL,
+  `storage_key` VARCHAR(500) NOT NULL,
+  `storage_provider` ENUM('local','cdn') NOT NULL DEFAULT 'cdn',
+  `encrypted` TINYINT(1) NOT NULL DEFAULT 1,
+  `enc_iv` CHAR(32) NOT NULL,
+  `enc_tag` CHAR(32) NOT NULL,
+  `uploaded_by_admin_id` INT UNSIGNED NOT NULL,
+  `uploaded_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_rrsp_session` (`session_id`),
+  CONSTRAINT `fk_rrsp_session` FOREIGN KEY (`session_id`) REFERENCES `report_wizard_sessions`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================================
 -- PIPELINE STAGE HISTORY (audit)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS `client_pipeline_history` (
@@ -498,7 +555,7 @@ CREATE TABLE IF NOT EXISTS `crc_sync_log` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================================
--- CONVERSATIONS (Twilio SMS / Calls + Email via Resend)
+-- CONVERSATIONS (Twilio SMS / Calls + Email)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS `conversations` (
   `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -955,11 +1012,12 @@ CREATE TABLE IF NOT EXISTS `onboarding_task_templates` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================================
--- CLIENT TASK COMPLETIONS (per-client task progress)
+-- CLIENT TASK COMPLETIONS (per-case onboarding task progress)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS `client_task_completions` (
   `id`               INT UNSIGNED  NOT NULL AUTO_INCREMENT,
   `client_id`        INT UNSIGNED  NOT NULL,
+  `case_id`          INT UNSIGNED  NOT NULL,
   `task_template_id` INT UNSIGNED  NOT NULL,
   `status`           ENUM('pending','completed','skipped') NOT NULL DEFAULT 'pending',
   `form_data_json`   JSON          DEFAULT NULL,
@@ -975,12 +1033,15 @@ CREATE TABLE IF NOT EXISTS `client_task_completions` (
   `created_at`       DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at`       DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uq_client_task` (`client_id`, `task_template_id`),
+  UNIQUE KEY `uq_case_task` (`case_id`, `task_template_id`),
   KEY `idx_ctc_client`        (`client_id`),
+  KEY `idx_ctc_case`          (`case_id`),
   KEY `idx_ctc_template`      (`task_template_id`),
   KEY `idx_ctc_admin_review`  (`admin_review_status`),
   CONSTRAINT `fk_ctc_client`
     FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_ctc_case`
+    FOREIGN KEY (`case_id`) REFERENCES `credit_repair_cases`(`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_ctc_template`
     FOREIGN KEY (`task_template_id`) REFERENCES `onboarding_task_templates`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -998,3 +1059,22 @@ VALUES
   (664269, 'proof_of_address', 'upload',        'Proof of Address',      'Comprobante de Domicilio',  'Utility bill, lease, or bank statement.',      'Recibo de servicios, contrato o estado de cuenta.',       '{"accept":"image/*,application/pdf","max_mb":10}', 1, 1, 40, 1, 1),
   (1,      'service_agreement','sign_document', 'Service Agreement',     'Contrato de Servicios',     'Read and e-sign your service agreement.',      'Lee y firma electrónicamente tu contrato de servicios.',  NULL,                                              1, 1, 50, 1, 1)
 ON DUPLICATE KEY UPDATE `sort_order` = VALUES(`sort_order`), `auto_assign` = VALUES(`auto_assign`);
+
+-- ============================================================================
+-- LEGAL DOCUMENTS (markdown bodies editable via admin Settings)
+-- Applied by: 20260717_120000_legal_documents.sql
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `legal_documents` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `slug` VARCHAR(64) NOT NULL,
+  `title` VARCHAR(255) NOT NULL,
+  `content_md` MEDIUMTEXT NOT NULL,
+  `source_url` VARCHAR(500) DEFAULT NULL,
+  `updated_by_admin_id` INT UNSIGNED DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_legal_documents_slug` (`slug`),
+  CONSTRAINT `fk_legal_documents_admin`
+    FOREIGN KEY (`updated_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

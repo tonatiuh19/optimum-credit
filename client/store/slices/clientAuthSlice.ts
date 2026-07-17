@@ -3,7 +3,7 @@ import {
   createSlice,
   type PayloadAction,
 } from "@reduxjs/toolkit";
-import api, { getClientToken, setClientToken } from "@/lib/api";
+import api, { getClientToken, setClientToken, formatAxiosError } from "@/lib/api";
 import type { ClientUser } from "@shared/api";
 
 interface ClientAuthState {
@@ -36,8 +36,10 @@ export const requestClientOtp = createAsyncThunk<
     return { email };
   } catch (e: any) {
     return rejectWithValue(
-      e?.response?.data?.error ||
+      formatAxiosError(
+        e,
         "Something went wrong sending your code. Check your connection and try again.",
+      ),
     );
   }
 });
@@ -52,7 +54,7 @@ export const verifyClientOtp = createAsyncThunk<
     setClientToken(data.token);
     return data;
   } catch (e: any) {
-    return rejectWithValue(e?.response?.data?.error || "Invalid code");
+    return rejectWithValue(formatAxiosError(e, "Invalid code"));
   }
 });
 

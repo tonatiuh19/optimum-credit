@@ -212,4 +212,41 @@
   .toolbar-row > * {
     @apply min-w-0 w-full sm:w-auto sm:flex-1;
   }
+
+  /* Legal / policy markdown pages */
+  .legal-md .legal-md-h2:first-child {
+    @apply mt-0 border-t-0 pt-0;
+  }
+
+  .legal-md .legal-md-h2::before {
+    content: "";
+    @apply absolute left-0 top-8 -ml-[1.15rem] hidden h-5 w-1 rounded-full bg-primary/80 sm:block;
+  }
+
+  .legal-md .legal-md-h2:first-child::before {
+    @apply top-1;
+  }
+
+  .legal-md .legal-md-ul {
+    list-style: none;
+  }
+
+  .legal-md .legal-md-ul > .legal-md-li::before {
+    content: "";
+    @apply absolute left-1.5 top-[0.7em] h-1.5 w-1.5 rounded-full bg-primary/55;
+  }
+
+  .legal-md .legal-md-ol {
+    list-style: none;
+    counter-reset: legal-item;
+  }
+
+  .legal-md .legal-md-ol > .legal-md-li {
+    counter-increment: legal-item;
+  }
+
+  .legal-md .legal-md-ol > .legal-md-li::before {
+    content: counter(legal-item);
+    @apply absolute left-0 top-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-primary/10 text-[11px] font-semibold text-primary;
+  }
 }

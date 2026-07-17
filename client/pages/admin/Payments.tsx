@@ -218,6 +218,8 @@ function PaymentRow({ payment }: { payment: Payment }) {
   const statusCfg = STATUS_CONFIG[payment.status] ?? STATUS_CONFIG.pending;
   const StatusIcon = statusCfg.icon;
   const stage = payment.client_pipeline_stage;
+  const hasDiscount =
+    (payment.discount_cents ?? 0) > 0 && payment.original_amount_cents != null;
 
   return (
     <tr className="border-b border-border/60 hover:bg-muted/30 transition-colors group">
@@ -247,9 +249,19 @@ function PaymentRow({ payment }: { payment: Payment }) {
             <div className="font-semibold text-foreground text-sm">
               {fmt(payment.amount_cents)}
             </div>
+            {hasDiscount && (
+              <div className="text-[11px] text-muted-foreground/70 line-through">
+                {fmt(payment.original_amount_cents ?? 0)}
+              </div>
+            )}
             <div className="text-[11px] text-muted-foreground">
               {payment.currency}
             </div>
+            {payment.coupon_code && (
+              <div className="mt-1 inline-flex items-center rounded bg-primary/5 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-primary border border-primary/20">
+                {payment.coupon_code}
+              </div>
+            )}
           </div>
         </div>
       </td>

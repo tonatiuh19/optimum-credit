@@ -1,12 +1,29 @@
 import { useEffect, useState } from "react";
-import { Save, Settings, Tag } from "lucide-react";
+import { Save, Settings, Tag, Scale, Loader2, ExternalLink } from "lucide-react";
+import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import AdminPageHeader from "@/components/AdminPageHeader";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { fetchSettings, saveSetting } from "@/store/slices/adminSlice";
+import {
+  fetchAdminLegalDocuments,
+  saveLegalDocument,
+} from "@/store/slices/legalSlice";
+import { LEGAL_PATHS } from "@/lib/legal";
 
 export default function AdminSettings() {
+  const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const { settings } = useAppSelector((s) => s.admin);
+  const {
+    bySlug,
+    list,
+    listLoading,
+    savingSlug,
+    error: legalError,
+  } = useAppSelector((s) => s.legal);
+
   const appVersion =
     settings.find((s) => s.setting_key === "app_version")?.setting_value ??
     null;
@@ -17,10 +34,32 @@ export default function AdminSettings() {
   );
 
   const [edits, setEdits] = useState<Record<string, string>>({});
+  const [legalEdits, setLegalEdits] = useState<
+    Record<string, { title: string; content_md: string; source_url: string }>
+  >({});
 
   useEffect(() => {
     dispatch(fetchSettings());
+    dispatch(fetchAdminLegalDocuments());
   }, [dispatch]);
+
+  useEffect(() => {
+    const next: typeof legalEdits = {};
+    for (const summary of list) {
+      const doc = bySlug[summary.slug];
+      if (!doc) continue;
+      if (legalEdits[summary.slug]) continue;
+      next[summary.slug] = {
+        title: doc.title,
+        content_md: doc.content_md,
+        source_url: doc.source_url || "",
+      };
+    }
+    if (Object.keys(next).length) {
+      setLegalEdits((p) => ({ ...p, ...next }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- hydrate once per loaded doc
+  }, [list, bySlug]);
 
   const save = async (k: string) => {
     const v = edits[k];
@@ -33,6 +72,32 @@ export default function AdminSettings() {
     });
     dispatch(fetchSettings());
   };
+
+  const saveLegal = async (slug: string) => {
+    const draft = legalEdits[slug];
+    if (!draft) return;
+    const result = await dispatch(
+      saveLegalDocument({
+        slug,
+        title: draft.title,
+        content_md: draft.content_md,
+        source_url: draft.source_url || null,
+      }),
+    );
+    if (saveLegalDocument.fulfilled.match(result)) {
+      setLegalEdits((p) => ({
+        ...p,
+        [slug]: {
+          title: result.payload.title,
+          content_md: result.payload.content_md,
+          source_url: result.payload.source_url || "",
+        },
+      }));
+    }
+  };
+
+  const previewPath = (slug: string) =>
+    slug === "terms" ? LEGAL_PATHS.terms : LEGAL_PATHS.privacy;
 
   return (
     <div className="space-y-6">
@@ -72,6 +137,140 @@ export default function AdminSettings() {
             )}
           </div>
         </div>
+      </div>
+
+      {/* ── Legal Documents ───────────────────────────────────── */}
+      <div className="space-y-3">
+        <div className="px-1">
+          <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
+            <Scale className="w-4 h-4" />
+            {t("legal.adminSection")}
+          </h2>
+          <p className="text-xs text-muted-foreground mt-1">
+            {t("legal.adminSectionHint")}
+          </p>
+        </div>
+
+        {legalError && (
+          <p className="text-sm text-destructive px-1">{legalError}</p>
+        )}
+
+        {listLoading && list.length === 0 ? (
+          <div className="space-y-3">
+            {[0, 1].map((i) => (
+              <div
+                key={i}
+                className="bg-card rounded-2xl border border-border p-4 space-y-3"
+              >
+                <Skeleton className="h-5 w-40" />
+                <Skeleton className="h-10 w-full" />
+                <Skeleton className="h-40 w-full" />
+              </div>
+            ))}
+          </div>
+        ) : (
+          list.map((summary) => {
+            const draft = legalEdits[summary.slug];
+            const saving = savingSlug === summary.slug;
+            return (
+              <div
+                key={summary.slug}
+                className="bg-card rounded-2xl border border-border p-4 space-y-3"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="font-mono text-sm text-foreground">
+                      {summary.slug}
+                    </div>
+                    <Link
+                      to={previewPath(summary.slug)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 text-xs text-primary hover:underline mt-0.5"
+                    >
+                      Preview <ExternalLink className="w-3 h-3" />
+                    </Link>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => saveLegal(summary.slug)}
+                    disabled={!draft || saving}
+                    className="btn-primary text-sm inline-flex items-center gap-1.5 disabled:opacity-40 shrink-0"
+                  >
+                    {saving ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Save className="w-4 h-4" />
+                    )}
+                    {t("legal.adminSave")}
+                  </button>
+                </div>
+
+                {draft ? (
+                  <>
+                    <div>
+                      <label className="text-xs font-medium text-muted-foreground mb-1 block">
+                        {t("legal.adminTitle")}
+                      </label>
+                      <input
+                        value={draft.title}
+                        onChange={(e) =>
+                          setLegalEdits((p) => ({
+                            ...p,
+                            [summary.slug]: {
+                              ...draft,
+                              title: e.target.value,
+                            },
+                          }))
+                        }
+                        className="w-full h-10 px-3 rounded-lg border border-input bg-background text-sm text-foreground"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium text-muted-foreground mb-1 block">
+                        {t("legal.adminSourceUrl")}
+                      </label>
+                      <input
+                        value={draft.source_url}
+                        onChange={(e) =>
+                          setLegalEdits((p) => ({
+                            ...p,
+                            [summary.slug]: {
+                              ...draft,
+                              source_url: e.target.value,
+                            },
+                          }))
+                        }
+                        className="w-full h-10 px-3 rounded-lg border border-input bg-background text-sm text-foreground font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium text-muted-foreground mb-1 block">
+                        {t("legal.adminContent")}
+                      </label>
+                      <textarea
+                        rows={14}
+                        value={draft.content_md}
+                        onChange={(e) =>
+                          setLegalEdits((p) => ({
+                            ...p,
+                            [summary.slug]: {
+                              ...draft,
+                              content_md: e.target.value,
+                            },
+                          }))
+                        }
+                        className="w-full p-3 rounded-lg border border-input bg-background text-sm text-foreground font-mono leading-relaxed"
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <Skeleton className="h-40 w-full" />
+                )}
+              </div>
+            );
+          })
+        )}
       </div>
 
       {/* ── System Settings ───────────────────────────────────── */}

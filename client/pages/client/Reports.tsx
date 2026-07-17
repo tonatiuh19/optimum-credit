@@ -243,6 +243,77 @@ export default function Reports() {
                     )}
                   </div>
 
+                  {parseBureauScores(r.bureau_scores_json) && (
+                    <div className="grid grid-cols-3 gap-2 mb-4 text-xs">
+                      {(
+                        [
+                          ["TU", "transunion"],
+                          ["EX", "experian"],
+                          ["EQ", "equifax"],
+                        ] as const
+                      ).map(([label, key]) => {
+                        const b = parseBureauScores(r.bureau_scores_json)![key];
+                        return (
+                          <div
+                            key={key}
+                            className="rounded-lg border border-border bg-muted/20 px-2 py-1.5"
+                          >
+                            <div className="font-semibold text-muted-foreground">
+                              {label}
+                            </div>
+                            <div>
+                              {b.before || "—"} →{" "}
+                              <span className="text-accent font-medium">
+                                {b.after || "—"}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {r.file_strength_score != null && (
+                    <p className="text-xs text-muted-foreground mb-3">
+                      File strength:{" "}
+                      <span className="font-semibold text-foreground">
+                        {r.file_strength_score}/100
+                      </span>
+                    </p>
+                  )}
+
+                  {parseJsonList(r.wins_json)?.length ? (
+                    <div className="mb-4">
+                      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                        Wins
+                      </p>
+                      <ul className="text-sm space-y-1">
+                        {parseJsonList(r.wins_json)!.map(
+                          (w: { itemRemoved?: string }, i: number) => (
+                            <li key={i} className="text-accent">
+                              ✓ {w.itemRemoved || "Item removed"}
+                            </li>
+                          ),
+                        )}
+                      </ul>
+                    </div>
+                  ) : null}
+
+                  {parseJsonList(r.targets_json)?.length ? (
+                    <div className="mb-4">
+                      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                        Still working on
+                      </p>
+                      <ul className="text-sm space-y-1 text-muted-foreground">
+                        {parseJsonList(r.targets_json)!.map(
+                          (t: { item?: string }, i: number) => (
+                            <li key={i}>• {t.item || "Target item"}</li>
+                          ),
+                        )}
+                      </ul>
+                    </div>
+                  ) : null}
+
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-4">
                     <RoundStat
                       label="Items Removed"
@@ -319,6 +390,31 @@ export default function Reports() {
       )}
     </div>
   );
+}
+
+function parseBureauScores(raw: unknown) {
+  if (!raw) return null;
+  try {
+    const data = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (!data?.transunion) return null;
+    return data as {
+      transunion: { before: number; after: number };
+      experian: { before: number; after: number };
+      equifax: { before: number; after: number };
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseJsonList(raw: unknown): unknown[] | null {
+  if (!raw) return null;
+  try {
+    const data = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return Array.isArray(data) && data.length > 0 ? data : null;
+  } catch {
+    return null;
+  }
 }
 
 function RoundStat({
