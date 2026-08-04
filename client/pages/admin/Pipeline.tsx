@@ -13,7 +13,8 @@ import {
   ArrowDown,
   RefreshCw,
   Plus,
-  Trash2,
+  UserPlus,
+  Sparkles,
 } from "lucide-react";
 import AdminPageHeader from "@/components/AdminPageHeader";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
@@ -22,14 +23,17 @@ import {
   updateCaseStage,
   createAdminCase,
 } from "@/store/slices/adminSlice";
+import { convertProspect } from "@/store/slices/prospectsSlice";
 import type {
   CreditRepairCase,
   PipelineStage,
   AdminClientListItem,
+  Prospect,
 } from "@shared/api";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -39,8 +43,28 @@ import {
 } from "@/components/ui/select";
 import { ClientSearchPicker } from "@/components/ui/client-search-picker";
 import { LangBadge } from "@/components/ui/lang-badge";
+import { LabelChips } from "@/components/admin/LabelChips";
+import FieldHint from "@/components/admin/FieldHint";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import InstallmentDraftFields, {
+  emptyInstallmentDraft,
+  draftToCreateSplitPayload,
+  type InstallmentDraft,
+} from "@/components/admin/InstallmentDraftFields";
 import { useToast } from "@/hooks/use-toast";
+import { useTranslation } from "react-i18next";
 import { ClientPanelSheet } from "@/components/admin/ClientPanelSheet";
+import { buildStageChangeConfirmMessage } from "@/lib/pipelineStage";
+import { fetchPackages } from "@/store/slices/packagesSlice";
 
 // ─── Column definitions ───────────────────────────────────────────────────────
 
@@ -123,10 +147,19 @@ function canMoveToDocsReady(c: CreditRepairCase) {
   const required = c.tasks_required_total ?? 0;
   return required > 0 && (c.tasks_approved ?? 0) >= required;
 }
-function isDragAllowed(targetStage: string, client: CreditRepairCase | null) {
+/** Case cards can move to any real stage (subject to docs_ready gating) but never back onto the Prospect column. */
+function isCaseDragAllowed(
+  targetStage: string,
+  client: CreditRepairCase | null,
+) {
   if (!client) return false;
+  if (targetStage === "prospect") return false;
   if (targetStage === "docs_ready") return canMoveToDocsReady(client);
   return true;
+}
+/** Prospect cards are only droppable on New Client — that's what converts them into a real case. */
+function isProspectDragAllowed(targetStage: string) {
+  return targetStage === "new_client";
 }
 
 // ─── KanbanCard ───────────────────────────────────────────────────────────────
@@ -150,6 +183,8 @@ function KanbanCard({
   const tasksRequired = client.tasks_required_total ?? 0;
   const tasksTotal = client.tasks_total ?? 0;
   const siblingCases = client.sibling_active_cases ?? 0;
+  const infoOpen = client.info_requests_open ?? 0;
+  const infoPending = client.info_requests_pending_review ?? 0;
   const days = daysSince(client.created_at);
   const initials =
     `${client.first_name?.[0] ?? ""}${client.last_name?.[0] ?? ""}`.toUpperCase();
@@ -162,7 +197,7 @@ function KanbanCard({
     <div
       draggable
       onDragStart={(e) => {
-        e.dataTransfer.setData("text/plain", String(client.id));
+        e.dataTransfer.setData("text/plain", `case:${client.id}`);
         onDragStart();
       }}
       onDragEnd={onDragEnd}
@@ -199,7 +234,7 @@ function KanbanCard({
               </span>
               <LangBadge lang={client.preferred_language} />
             </div>
-            <div className="text-[11px] text-muted-foreground truncate mt-0.5 flex items-center gap-1.5">
+            <div className="text-[11px] text-muted-foreground truncate mt-0.5 flex items-center gap-1.5 flex-wrap">
               <span className="truncate">
                 {client.package_name || "No package"}
               </span>
@@ -209,6 +244,16 @@ function KanbanCard({
                   title="Onboarding tasks are shared per client — duplicate active cases"
                 >
                   <AlertCircle className="w-2.5 h-2.5" />+{siblingCases}
+                </span>
+              )}
+              {(infoOpen > 0 || infoPending > 0) && (
+                <span
+                  className="inline-flex items-center gap-0.5 shrink-0 text-[9px] font-semibold text-primary bg-primary/10 border border-primary/20 px-1.5 py-0.5 rounded-full"
+                  title="Open or pending info requests"
+                >
+                  {infoPending > 0
+                    ? `${infoPending} review`
+                    : `${infoOpen} info`}
                 </span>
               )}
             </div>
@@ -271,6 +316,9 @@ function KanbanCard({
           </div>
         )}
 
+        {/* Labels */}
+        <LabelChips labels={client.labels} max={3} className="mb-2" />
+
         {/* Footer row */}
         <div className="flex items-center justify-between text-[10px] text-muted-foreground">
           <span className="font-mono font-semibold text-primary/70">
@@ -285,13 +333,197 @@ function KanbanCard({
   );
 }
 
-// ─── NewCaseModal ──────────────────────────────────────────────────────────────
+// ─── ProspectKanbanCard ───────────────────────────────────────────────────────
 
-interface SplitRow {
-  label: string;
-  amount: string;
-  due_date: string;
+function ProspectKanbanCard({
+  prospect,
+  onDragStart,
+  onDragEnd,
+  onClick,
+}: {
+  prospect: Prospect;
+  onDragStart: () => void;
+  onDragEnd: () => void;
+  onClick: () => void;
+}) {
+  const initials =
+    `${prospect.first_name?.[0] ?? ""}${prospect.last_name?.[0] ?? ""}`.toUpperCase();
+
+  return (
+    <div
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData("text/plain", `prospect:${prospect.id}`);
+        onDragStart();
+      }}
+      onDragEnd={onDragEnd}
+      onClick={onClick}
+      className="group select-none rounded-xl bg-card border border-dashed border-accent/40
+                 hover:border-accent hover:shadow-md hover:shadow-accent/10
+                 cursor-grab active:cursor-grabbing active:opacity-60
+                 transition-all duration-150 shadow-sm overflow-hidden"
+    >
+      <div className="h-[3px] bg-accent/40" />
+      <div className="p-3.5">
+        <div className="flex items-start gap-2.5 mb-2.5">
+          <div className="w-8 h-8 rounded-full bg-accent/10 border border-accent/25 flex items-center justify-center text-[11px] font-bold text-accent shrink-0">
+            {initials}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1 leading-tight">
+              <span className="font-semibold text-[13px] text-foreground truncate">
+                {prospect.first_name} {prospect.last_name}
+              </span>
+              <LangBadge lang={prospect.preferred_language} />
+            </div>
+            <div className="text-[11px] text-muted-foreground truncate mt-0.5">
+              {prospect.email}
+            </div>
+          </div>
+        </div>
+
+        {prospect.client_goal && (
+          <p className="text-[11px] text-muted-foreground line-clamp-2 mb-2.5">
+            {prospect.client_goal}
+          </p>
+        )}
+
+        <LabelChips labels={prospect.labels} max={3} className="mb-2" />
+
+        <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+          <span className="uppercase tracking-wide font-semibold text-accent/80">
+            {(prospect.source_label ?? "prospect").replace(/_/g, " ")}
+          </span>
+          <span className="opacity-0 group-hover:opacity-100 transition-opacity text-accent font-semibold flex items-center gap-0.5">
+            Drag to convert <ArrowRight className="w-2.5 h-2.5" />
+          </span>
+        </div>
+      </div>
+    </div>
+  );
 }
+
+// ─── ConvertProspectDialog ────────────────────────────────────────────────────
+
+function ConvertProspectDialog({
+  prospect,
+  onClose,
+  onConverted,
+}: {
+  prospect: Prospect | null;
+  onClose: () => void;
+  onConverted: () => void;
+}) {
+  const dispatch = useAppDispatch();
+  const { toast } = useToast();
+  const { packages } = useAppSelector((s) => s.packages);
+  const [packageId, setPackageId] = useState<string>("__none__");
+  const [notes, setNotes] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (prospect) {
+      setPackageId("__none__");
+      setNotes("");
+    }
+  }, [prospect]);
+
+  if (!prospect) return null;
+
+  const handleConfirm = async () => {
+    setLoading(true);
+    try {
+      await dispatch(
+        convertProspect({
+          id: prospect.id,
+          package_id: packageId === "__none__" ? null : Number(packageId),
+          notes: notes.trim() || undefined,
+        }),
+      ).unwrap();
+      toast({
+        title: "Prospect converted!",
+        description: `${prospect.first_name} ${prospect.last_name} is now a client case. Tasks assigned and welcome email sent.`,
+      });
+      onConverted();
+    } catch (e: any) {
+      toast({
+        title: "Error",
+        description: e?.message ?? e ?? "Could not convert prospect",
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Dialog open={!!prospect} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-md w-full bg-card border-border p-0 gap-0 overflow-hidden [&>button:last-child]:hidden">
+        <DialogTitle className="px-6 pt-6 pb-4 text-base font-bold text-foreground border-b border-border flex items-center gap-2">
+          <UserPlus className="w-4 h-4 text-accent" /> Convert Prospect
+        </DialogTitle>
+        <div className="p-6 space-y-4">
+          <p className="text-sm text-muted-foreground">
+            Convert{" "}
+            <strong className="text-foreground">
+              {prospect.first_name} {prospect.last_name}
+            </strong>{" "}
+            into a full client case in <strong>New Client</strong>? This will
+            create their case, assign Get Started tasks, and email a portal
+            invite.
+          </p>
+
+          <div className="space-y-1.5">
+            <label className="text-xs font-semibold text-muted-foreground">
+              Package (optional)
+            </label>
+            <Select value={packageId} onValueChange={setPackageId}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">— No package yet —</SelectItem>
+                {packages.map((p) => (
+                  <SelectItem key={p.id} value={String(p.id)}>
+                    {p.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-xs font-semibold text-muted-foreground">
+              Notes (optional)
+            </label>
+            <Textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              rows={2}
+              placeholder="Internal note about this conversion…"
+              className="resize-none text-sm"
+            />
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 px-6 py-4 border-t border-border">
+          <Button variant="outline" onClick={onClose} disabled={loading}>
+            Cancel
+          </Button>
+          <Button onClick={handleConfirm} disabled={loading}>
+            {loading ? (
+              <Loader2 className="w-4 h-4 animate-spin mr-2" />
+            ) : (
+              <Sparkles className="w-4 h-4 mr-2" />
+            )}
+            Convert to Client
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ─── NewCaseModal ──────────────────────────────────────────────────────────────
 
 function NewCaseModal({
   open,
@@ -302,27 +534,24 @@ function NewCaseModal({
 }) {
   const dispatch = useAppDispatch();
   const { toast } = useToast();
+  const { t } = useTranslation();
 
   const [selectedClient, setSelectedClient] =
     useState<AdminClientListItem | null>(null);
   const [packageName, setPackageName] = useState("");
   const [stage, setStage] = useState<PipelineStage>("new_client");
-  const [splits, setSplits] = useState<SplitRow[]>([]);
+  const [splits, setSplits] = useState<InstallmentDraft[]>([]);
   const [loading, setLoading] = useState(false);
 
   const addSplit = () =>
-    setSplits((prev) => [
-      ...prev,
-      { label: `Installment ${prev.length + 1}`, amount: "", due_date: "" },
-    ]);
+    setSplits((prev) => [...prev, emptyInstallmentDraft(prev.length + 1)]);
 
   const removeSplit = (i: number) =>
     setSplits((prev) => prev.filter((_, idx) => idx !== i));
 
-  const updateSplit = (i: number, field: keyof SplitRow, val: string) =>
-    setSplits((prev) =>
-      prev.map((s, idx) => (idx === i ? { ...s, [field]: val } : s)),
-    );
+  const hasIncompleteSplit = splits.some(
+    (s) => (!!s.amount.trim()) !== (!!s.due_date.trim()),
+  );
 
   const handleSubmit = async () => {
     if (!selectedClient) {
@@ -338,13 +567,7 @@ function NewCaseModal({
           pipeline_stage: stage,
           splits: splits
             .filter((s) => s.amount && s.due_date)
-            .map((s) => ({
-              label: s.label,
-              amount_cents: Math.round(parseFloat(s.amount) * 100),
-              due_date: s.due_date,
-              send_payment_link: false,
-              reminder_flow_id: null,
-            })),
+            .map((s) => draftToCreateSplitPayload(s)),
         }),
       ).unwrap();
       toast({ title: "Case created!" });
@@ -403,6 +626,7 @@ function NewCaseModal({
               value={packageName}
               onChange={(e) => setPackageName(e.target.value)}
             />
+            <FieldHint>{t("adminPipeline.newCasePackageNote")}</FieldHint>
           </div>
 
           {/* Stage */}
@@ -427,6 +651,11 @@ function NewCaseModal({
                 ))}
               </SelectContent>
             </Select>
+            {stage !== "new_client" && (
+              <FieldHint tone="warning">
+                {t("adminPipeline.newCaseStageWarn")}
+              </FieldHint>
+            )}
           </div>
 
           {/* Splits */}
@@ -436,42 +665,33 @@ function NewCaseModal({
                 Payment Schedule (optional)
               </label>
               <button
+                type="button"
                 onClick={addSplit}
                 className="text-xs text-primary hover:underline flex items-center gap-1"
               >
-                <Plus className="w-3 h-3" /> Add installment
+                <Plus className="w-3 h-3" /> {t("adminPipeline.addInstallment")}
               </button>
             </div>
             {splits.map((s, i) => (
-              <div key={i} className="flex gap-2 items-start">
-                <Input
-                  placeholder="Label"
-                  value={s.label}
-                  onChange={(e) => updateSplit(i, "label", e.target.value)}
-                  className="flex-1 text-xs h-8"
-                />
-                <Input
-                  placeholder="$"
-                  type="number"
-                  value={s.amount}
-                  onChange={(e) => updateSplit(i, "amount", e.target.value)}
-                  className="w-20 text-xs h-8"
-                />
-                <Input
-                  type="date"
-                  value={s.due_date}
-                  onChange={(e) => updateSplit(i, "due_date", e.target.value)}
-                  className="w-36 text-xs h-8"
-                />
-                <button
-                  onClick={() => removeSplit(i)}
-                  className="text-muted-foreground hover:text-destructive mt-1.5"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              </div>
+              <InstallmentDraftFields
+                key={i}
+                draft={s}
+                onChange={(next) =>
+                  setSplits((prev) =>
+                    prev.map((row, idx) => (idx === i ? next : row)),
+                  )
+                }
+                onRemove={() => removeSplit(i)}
+              />
             ))}
+            {hasIncompleteSplit && (
+              <FieldHint tone="warning">
+                {t("adminPipeline.splitIncomplete")}
+              </FieldHint>
+            )}
           </div>
+
+          <FieldHint>{t("adminPipeline.newCaseNoEmail")}</FieldHint>
         </div>
         <div className="flex justify-end gap-2 px-6 py-4 border-t border-border">
           <Button variant="outline" onClick={onClose}>
@@ -490,7 +710,10 @@ function NewCaseModal({
 
 export default function AdminPipeline() {
   const dispatch = useAppDispatch();
+  const { t } = useTranslation();
   const { pipelineCases } = useAppSelector((s) => s.admin);
+  const { prospects } = useAppSelector((s) => s.prospects);
+  const { packages } = useAppSelector((s) => s.packages);
   const [searchParams, setSearchParams] = useSearchParams();
 
   const [panelOpen, setPanelOpen] = useState(false);
@@ -498,13 +721,26 @@ export default function AdminPipeline() {
   const [panelClientId, setPanelClientId] = useState<number | null>(null);
 
   const [showNewCase, setShowNewCase] = useState(false);
+  const [convertingProspect, setConvertingProspect] = useState<Prospect | null>(
+    null,
+  );
 
-  const [draggingId, setDraggingId] = useState<number | null>(null);
+  const [dragging, setDragging] = useState<
+    { type: "case"; id: number } | { type: "prospect"; id: number } | null
+  >(null);
   const [dragOverStage, setDragOverStage] = useState<string | null>(null);
   const [stageError, setStageError] = useState<string | null>(null);
+  const [pendingDrop, setPendingDrop] = useState<{
+    caseId: number;
+    from: PipelineStage;
+    to: PipelineStage;
+    clientName: string;
+    openInfoRequests: number;
+  } | null>(null);
 
   useEffect(() => {
     dispatch(fetchPipeline());
+    if (packages.length === 0) dispatch(fetchPackages());
   }, [dispatch]);
 
   // Auto-open panel when navigated from another page with ?client=ID
@@ -537,35 +773,79 @@ export default function AdminPipeline() {
   };
 
   // Drag
-  const draggingCase = pipelineCases.find((c) => c.id === draggingId) ?? null;
-  const onDragStart = (caseId: number) => setDraggingId(caseId);
+  const draggingCase =
+    dragging?.type === "case"
+      ? (pipelineCases.find((c) => c.id === dragging.id) ?? null)
+      : null;
+  const draggingProspect =
+    dragging?.type === "prospect"
+      ? (prospects.find((p) => p.id === dragging.id) ?? null)
+      : null;
+
+  const canDropOnStage = (stage: string): boolean => {
+    if (!dragging) return false;
+    if (dragging.type === "case") return isCaseDragAllowed(stage, draggingCase);
+    return isProspectDragAllowed(stage);
+  };
+
+  const onCaseDragStart = (caseId: number) =>
+    setDragging({ type: "case", id: caseId });
+  const onProspectDragStart = (id: number) =>
+    setDragging({ type: "prospect", id });
   const onDragEnd = () => {
-    setDraggingId(null);
+    setDragging(null);
     setDragOverStage(null);
   };
   const onDragOver = (e: React.DragEvent, stage: string) => {
     e.preventDefault();
     setDragOverStage(stage);
-    e.dataTransfer.dropEffect = isDragAllowed(stage, draggingCase)
-      ? "move"
-      : "none";
+    e.dataTransfer.dropEffect = canDropOnStage(stage) ? "move" : "none";
   };
   const onDrop = async (e: React.DragEvent, stage: PipelineStage) => {
     e.preventDefault();
-    const id = Number(e.dataTransfer.getData("text/plain"));
-    const kase = pipelineCases.find((c) => c.id === id);
-    setDraggingId(null);
+    const raw = e.dataTransfer.getData("text/plain");
+    const [dragType, rawId] = raw.split(":");
+    const id = Number(rawId);
+    setDragging(null);
     setDragOverStage(null);
-    if (!kase || !isDragAllowed(stage, kase)) {
+
+    // ── Prospect card → only droppable on New Client (converts the prospect) ──
+    if (dragType === "prospect") {
+      if (!isProspectDragAllowed(stage)) return;
+      const prospect = prospects.find((p) => p.id === id);
+      if (prospect) setConvertingProspect(prospect);
+      return;
+    }
+
+    // ── Case card → any real stage change ──
+    const kase = pipelineCases.find((c) => c.id === id);
+    if (!kase || !isCaseDragAllowed(stage, kase)) {
       if (stage === "docs_ready")
         setStageError(
           "Cannot move to Docs Verified — all required tasks must be approved first.",
         );
       return;
     }
+    const openInfo =
+      (kase.info_requests_open ?? 0) +
+      (kase.info_requests_pending_review ?? 0);
     setStageError(null);
-    await dispatch(updateCaseStage({ caseId: id, stage }));
+    setPendingDrop({
+      caseId: id,
+      from: kase.pipeline_stage,
+      to: stage,
+      clientName: `${kase.first_name} ${kase.last_name}`,
+      openInfoRequests: openInfo,
+    });
+  };
+
+  const confirmPendingDrop = async () => {
+    if (!pendingDrop) return;
+    await dispatch(
+      updateCaseStage({ caseId: pendingDrop.caseId, stage: pendingDrop.to }),
+    );
     dispatch(fetchPipeline());
+    setPendingDrop(null);
   };
 
   // Grouped
@@ -624,10 +904,79 @@ export default function AdminPipeline() {
       {/* Kanban */}
       <div className="table-scroll pb-4 -mx-1 px-1 max-w-full">
         <div className="flex gap-3 w-max min-w-full pr-2">
+          {/* ── Prospect column (virtual — pre-conversion leads) ── */}
+          {(() => {
+            const isDragTarget = dragOverStage === "prospect";
+            const canDrop = dragging ? canDropOnStage("prospect") : false;
+            return (
+              <div
+                onDragOver={(e) => onDragOver(e, "prospect")}
+                onDragLeave={() => setDragOverStage(null)}
+                onDrop={(e) => onDrop(e, "prospect" as PipelineStage)}
+                className={[
+                  "w-[min(280px,calc(100vw-2.5rem))] sm:w-[270px] shrink-0 flex flex-col rounded-2xl border-t-[3px] border-t-accent overflow-hidden transition-all duration-200",
+                  isDragTarget && canDrop
+                    ? "shadow-xl shadow-accent/15 md:scale-[1.015] ring-1 ring-accent/30"
+                    : isDragTarget && !canDrop
+                      ? "ring-1 ring-destructive/40 shadow-lg shadow-destructive/10"
+                      : "shadow-sm",
+                  "bg-card border border-border",
+                ].join(" ")}
+              >
+                <div className="px-3.5 py-2.5 border-b border-border">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5">
+                      <UserPlus className="w-3 h-3 text-accent" />
+                      <h3 className="font-bold text-[11px] uppercase tracking-[0.1em] text-accent">
+                        Prospect
+                      </h3>
+                    </div>
+                    <span
+                      className={`min-w-[20px] h-5 flex items-center justify-center text-[10px] font-bold px-1.5 rounded-md ${
+                        prospects.length > 0
+                          ? "bg-accent/10 text-accent"
+                          : "text-muted-foreground/40 bg-muted"
+                      }`}
+                    >
+                      {prospects.length}
+                    </span>
+                  </div>
+                </div>
+                <div className="flex-1 p-2 space-y-2 overflow-y-auto max-h-[calc(100vh-230px)] min-h-[120px] bg-muted/30">
+                  {prospects.map((p) => (
+                    <ProspectKanbanCard
+                      key={p.id}
+                      prospect={p}
+                      onDragStart={() => onProspectDragStart(p.id)}
+                      onDragEnd={onDragEnd}
+                      onClick={() => setConvertingProspect(p)}
+                    />
+                  ))}
+                  {prospects.length === 0 && (
+                    <div className="h-20 flex flex-col items-center justify-center gap-1.5 rounded-xl border-2 border-dashed border-border/40">
+                      {isDragTarget && canDrop ? (
+                        <>
+                          <ArrowDown className="w-3.5 h-3.5 text-accent/50" />
+                          <span className="text-[10px] text-accent/50 font-medium">
+                            Drop here
+                          </span>
+                        </>
+                      ) : (
+                        <span className="text-[10px] text-muted-foreground/40 font-medium">
+                          No prospects
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+
           {COLUMNS.map((col) => {
             const colCases = grouped[col.stage] ?? [];
             const isDragTarget = dragOverStage === col.stage;
-            const canDrop = isDragAllowed(col.stage, draggingCase);
+            const canDrop = canDropOnStage(col.stage);
             return (
               <div
                 key={col.stage}
@@ -678,7 +1027,7 @@ export default function AdminPipeline() {
                     <KanbanCard
                       key={c.id}
                       client={c}
-                      onDragStart={() => onDragStart(c.id)}
+                      onDragStart={() => onCaseDragStart(c.id)}
                       onDragEnd={onDragEnd}
                       onClick={() => openPanel(c.id, c.client_id)}
                     />
@@ -716,6 +1065,47 @@ export default function AdminPipeline() {
 
       {/* New Case Modal */}
       <NewCaseModal open={showNewCase} onClose={() => setShowNewCase(false)} />
+
+      {/* Convert Prospect Modal */}
+      <ConvertProspectDialog
+        prospect={convertingProspect}
+        onClose={() => setConvertingProspect(null)}
+        onConverted={() => {
+          setConvertingProspect(null);
+          dispatch(fetchPipeline());
+        }}
+      />
+
+      {/* Stage change confirm (drag & drop) */}
+      <AlertDialog
+        open={!!pendingDrop}
+        onOpenChange={(o) => !o && setPendingDrop(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {t("adminPipeline.stageConfirmTitle")}
+            </AlertDialogTitle>
+            <AlertDialogDescription className="whitespace-pre-line">
+              {pendingDrop &&
+                buildStageChangeConfirmMessage({
+                  from: pendingDrop.from,
+                  to: pendingDrop.to,
+                  clientName: pendingDrop.clientName,
+                  openInfoRequests: pendingDrop.openInfoRequests,
+                })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => setPendingDrop(null)}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction onClick={confirmPendingDrop}>
+              Confirm
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

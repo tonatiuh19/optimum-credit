@@ -1,0 +1,26 @@
+---
+description: Database schema, migrations, and TiDB SQL conventions
+globs: database/**/*,api/index.ts
+alwaysApply: false
+---
+
+# Database & Migrations
+
+- Source of truth for structure while coding: **`database/schema.sql`**
+- Schema changes: create `database/migrations/YYYYMMDD_HHMMSS_description.sql` (TiDB Cloud Serverless / MySQL 8.0 compatible)
+- After apply: update `database/schema.sql` to match
+- Credentials: `.env` (`DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`)
+- Always connect with `--ssl-mode=REQUIRED --protocol=TCP`
+
+```bash
+DB_PASS=$(grep "^DB_PASSWORD" .env | cut -d'=' -f2-) && \
+DB_HOST=$(grep "^DB_HOST" .env | cut -d'=' -f2-) && \
+DB_PORT=$(grep "^DB_PORT" .env | cut -d'=' -f2-) && \
+DB_USER=$(grep "^DB_USER" .env | cut -d'=' -f2-) && \
+DB_NAME=$(grep "^DB_NAME" .env | cut -d'=' -f2-) && \
+mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" \
+  --ssl-mode=REQUIRED --protocol=TCP \
+  < database/migrations/YOUR_MIGRATION_FILE.sql
+```
+
+- Map DB errors to friendly API responses (409 duplicate, 400 FK) — never leak raw MySQL/TiDB messages like `Duplicate entry '?'`

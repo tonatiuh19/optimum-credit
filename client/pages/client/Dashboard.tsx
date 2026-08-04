@@ -51,26 +51,29 @@ export default function Dashboard() {
     dispatch(fetchPortalTasks());
   }, [dispatch]);
 
-  const pendingTasks = tasks.filter(
-    (t) => (t as any).completion_status !== "completed",
+  // Completions are nested under `completion` (portal tasks API), not top-level.
+  const completedTasks = tasks.filter(
+    (t) => t.completion?.status === "completed",
   ).length;
   const totalTasks = tasks.length;
+  const pendingTasks = Math.max(0, totalTasks - completedTasks);
   const taskProgressPct =
-    totalTasks > 0
-      ? Math.round(((totalTasks - pendingTasks) / totalTasks) * 100)
-      : 0;
+    totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
 
   const stage =
     dashboard?.client?.pipeline_stage || user?.pipeline_stage || "new_client";
   const stageIdx = STAGE_ORDER.indexOf(stage);
   const reports = dashboard?.reports || [];
   const latest = reports[0];
-  const docsApproved = (dashboard?.documents || []).filter(
-    (d: any) => d.review_status === "approved",
+
+  // Documents page uses task completions, not legacy client_documents.
+  const requiredDocTasks = tasks.filter((t) => Number(t.is_required) === 1);
+  const docsRequired = requiredDocTasks.length;
+  const docsApproved = requiredDocTasks.filter(
+    (t) => t.completion?.admin_review_status === "approved",
   ).length;
-  const smartCreditConnected =
-    !!user?.smart_credit_connected_at ||
-    !!dashboard?.client?.smart_credit_connected_at;
+  const docsDone =
+    (docsRequired > 0 && docsApproved === docsRequired) || stageIdx >= 1;
 
   return (
     <div className="space-y-8">
@@ -150,7 +153,7 @@ export default function Dashboard() {
             <StatCard
               icon={FileText}
               label={t("dashboard.docsApproved")}
-              value={`${docsApproved}/4`}
+              value={`${docsApproved}/${docsRequired || 4}`}
               tint="from-primary/10 to-transparent"
               color="text-primary"
             />
@@ -158,8 +161,8 @@ export default function Dashboard() {
               icon={Sparkles}
               label={t("dashboard.latestScore")}
               value={latest?.score_after ? String(latest.score_after) : "—"}
-              tint="from-yellow-500/10 to-transparent"
-              color="text-yellow-600"
+              tint="from-accent/10 to-transparent"
+              color="text-accent"
             />
           </div>
 
@@ -180,7 +183,7 @@ export default function Dashboard() {
                 <div className="flex items-center justify-between text-sm">
                   <span className="text-muted-foreground">
                     {t("tasks.progress", {
-                      completed: totalTasks - pendingTasks,
+                      completed: completedTasks,
                       total: totalTasks,
                     })}
                   </span>
@@ -217,51 +220,39 @@ export default function Dashboard() {
             </Link>
           )}
 
-          {/* Onboarding checklist */}
-          <div className="bg-card rounded-2xl border border-border p-6 shadow-sm">
-            <h2 className="text-lg font-semibold mb-4">
-              {t("dashboard.getStarted")}
-            </h2>
-            <ul className="space-y-2">
-              {[
-                {
-                  label: t("dashboard.uploadDocuments"),
-                  done: docsApproved >= 4,
-                  to: "/portal/documents",
-                },
-                {
-                  label: t("dashboard.connectSmartCredit"),
-                  done: smartCreditConnected,
-                  to: "/portal/profile",
-                },
-              ].map((item) => (
-                <li key={item.label}>
+          {/* Onboarding checklist — hide once docs are approved (Smart Credit is coming soon) */}
+          {!docsDone && (
+            <div className="bg-card rounded-2xl border border-border p-6 shadow-sm">
+              <h2 className="text-lg font-semibold mb-4">
+                {t("dashboard.getStarted")}
+              </h2>
+              <ul className="space-y-2">
+                <li>
                   <Link
-                    to={item.to}
+                    to="/portal/documents"
                     className="flex items-center gap-3 p-3 -mx-3 rounded-xl hover:bg-secondary/60 transition-colors"
                   >
-                    {item.done ? (
-                      <CheckCircle2 className="w-5 h-5 text-accent shrink-0" />
-                    ) : (
-                      <Circle className="w-5 h-5 text-muted-foreground shrink-0" />
-                    )}
-                    <span
-                      className={`flex-1 text-sm ${
-                        item.done
-                          ? "line-through text-muted-foreground"
-                          : "font-medium"
-                      }`}
-                    >
-                      {item.label}
+                    <Circle className="w-5 h-5 text-muted-foreground shrink-0" />
+                    <span className="flex-1 text-sm font-medium">
+                      {t("dashboard.uploadDocuments")}
                     </span>
-                    {!item.done && (
-                      <ArrowRight className="w-4 h-4 text-muted-foreground" />
-                    )}
+                    <ArrowRight className="w-4 h-4 text-muted-foreground" />
                   </Link>
                 </li>
-              ))}
-            </ul>
-          </div>
+                <li>
+                  <div className="flex items-center gap-3 p-3 -mx-3 rounded-xl">
+                    <Circle className="w-5 h-5 text-muted-foreground shrink-0" />
+                    <span className="flex-1 text-sm font-medium text-muted-foreground">
+                      {t("dashboard.connectSmartCredit")}
+                    </span>
+                    <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground bg-secondary px-2 py-0.5 rounded-md">
+                      {t("dashboard.comingSoon")}
+                    </span>
+                  </div>
+                </li>
+              </ul>
+            </div>
+          )}
 
           {/* Latest report */}
           {latest && (

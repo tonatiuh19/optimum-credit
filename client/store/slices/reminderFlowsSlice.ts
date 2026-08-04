@@ -1,5 +1,5 @@
 import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
-import api from "@/lib/api";
+import api, { formatAxiosError } from "@/lib/api";
 import type {
   ReminderFlow,
   ReminderFlowStep,
@@ -75,6 +75,7 @@ export const updateReminderFlow = createAsyncThunk(
     name?: string;
     description?: string;
     is_active?: boolean;
+    required_label_slugs?: string[] | null;
   }) => {
     const { data } = await api.put(`/admin/reminder-flows/${id}`, rest);
     return data.flow as ReminderFlow;
@@ -153,9 +154,18 @@ export const deleteFlowStep = createAsyncThunk(
 
 export const triggerFlowForClient = createAsyncThunk(
   "reminderFlows/triggerForClient",
-  async ({ flowId, clientId }: { flowId: number; clientId: number }) => {
+  async ({
+    flowId,
+    clientId,
+    deliverToAdmin,
+  }: {
+    flowId: number;
+    clientId: number;
+    deliverToAdmin?: boolean;
+  }) => {
     const { data } = await api.post(`/admin/reminder-flows/${flowId}/trigger`, {
       client_id: clientId,
+      ...(deliverToAdmin ? { deliver_to_admin: true } : {}),
     });
     return data;
   },
@@ -170,6 +180,7 @@ export const saveFlowCanvas = createAsyncThunk(
       name: string;
       description: string;
       is_active: boolean;
+      required_label_slugs?: string[] | null;
       // ordered list of step nodes (already sorted by Y position or edge traversal)
       steps: Array<{
         step_id?: number; // undefined = new
@@ -185,14 +196,22 @@ export const saveFlowCanvas = createAsyncThunk(
     { rejectWithValue },
   ) => {
     try {
-      const { flowId, name, description, is_active, steps, existingStepIds } =
-        payload;
+      const {
+        flowId,
+        name,
+        description,
+        is_active,
+        required_label_slugs,
+        steps,
+        existingStepIds,
+      } = payload;
 
       // 1. Update flow metadata
       await api.put(`/admin/reminder-flows/${flowId}`, {
         name,
         description,
         is_active,
+        required_label_slugs,
       });
 
       // 2. Delete steps removed from canvas
@@ -232,8 +251,8 @@ export const saveFlowCanvas = createAsyncThunk(
         flow: ReminderFlow & { steps: ReminderFlowStep[] };
         executions: ReminderFlowExecution[];
       };
-    } catch (err: any) {
-      return rejectWithValue(err?.response?.data?.error ?? "Save failed");
+    } catch (err: unknown) {
+      return rejectWithValue(formatAxiosError(err, "Save failed"));
     }
   },
 );

@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import {
   CreditCard,
   TrendingUp,
@@ -45,7 +46,6 @@ import {
   adminValidateCoupon,
   clearCouponPreview,
   fetchAdminPaymentSplits,
-  markSplitPaid,
 } from "@/store/slices/adminSlice";
 import type {
   Coupon,
@@ -57,6 +57,8 @@ import type {
   PaymentSplitStatus,
 } from "@shared/api";
 import { Button } from "@/components/ui/button";
+import FieldHint from "@/components/admin/FieldHint";
+import AdminSplitActions from "@/components/admin/AdminSplitActions";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -143,6 +145,7 @@ const STATUS_CONFIG: Record<
 };
 
 const PIPELINE_LABELS: Record<PipelineStage, string> = {
+  prospect: "Prospect",
   new_client: "New Client",
   docs_ready: "Docs Verified",
   round_1: "Round 1",
@@ -155,6 +158,7 @@ const PIPELINE_LABELS: Record<PipelineStage, string> = {
 };
 
 const PIPELINE_COLORS: Record<PipelineStage, string> = {
+  prospect: "bg-muted text-muted-foreground",
   new_client: "bg-primary/10 text-primary",
   docs_ready: "bg-accent/10 text-accent",
   round_1: "bg-blue-500/10 text-blue-500",
@@ -821,6 +825,7 @@ function CouponModal({
   onClose: () => void;
   onSubmit: (form: CouponFormState) => void;
 }) {
+  const { t } = useTranslation();
   const [form, setForm] = useState<CouponFormState>(EMPTY_FORM);
   const [errors, setErrors] = useState<
     Partial<Record<keyof CouponFormState, string>>
@@ -884,6 +889,7 @@ function CouponModal({
             {errors.code && (
               <p className="text-xs text-destructive">{errors.code}</p>
             )}
+            <FieldHint>{t("adminHelpers.couponCodeHint")}</FieldHint>
           </div>
 
           {/* Description */}
@@ -971,6 +977,7 @@ function CouponModal({
                 onChange={(e) => set("min_amount_cents", e.target.value)}
                 className={errors.min_amount_cents ? "border-destructive" : ""}
               />
+              <FieldHint>{t("adminHelpers.couponMinOrder")}</FieldHint>
             </div>
             <div className="space-y-1">
               <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
@@ -1010,6 +1017,7 @@ function CouponModal({
               />
             </div>
           </div>
+          <FieldHint>{t("adminHelpers.couponTimezone")}</FieldHint>
 
           {/* Active toggle */}
           <div className="flex items-center justify-between bg-muted/40 rounded-xl px-4 py-3">
@@ -1060,11 +1068,13 @@ function CouponRow({
   onEdit,
   onToggle,
   onDelete,
+  onTest,
 }: {
   coupon: Coupon;
   onEdit: (c: Coupon) => void;
   onToggle: (c: Coupon) => void;
   onDelete: (c: Coupon) => void;
+  onTest?: (code: string) => void;
 }) {
   const { toast } = useToast();
 
@@ -1225,6 +1235,17 @@ function CouponRow({
       {/* Actions */}
       <td className="px-4 py-3.5 text-right">
         <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          {onTest && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={() => onTest(coupon.code)}
+              title="Load in validator"
+            >
+              <ShieldAlert className="w-3.5 h-3.5" />
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="icon"
@@ -1262,16 +1283,33 @@ function CouponRow({
 
 // ─── Coupon validator panel ───────────────────────────────────────────────────
 
-function CouponValidator() {
+function CouponValidator({
+  prefillCode,
+  prefillKey,
+}: {
+  prefillCode?: string | null;
+  /** Bumps when parent wants to re-apply the same code after create */
+  prefillKey?: number;
+}) {
+  const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const { couponPreview, couponPreviewing } = useAppSelector((s) => s.admin);
 
   const [code, setCode] = useState("");
   const [amountInput, setAmountInput] = useState("");
+  const [showPrefillHint, setShowPrefillHint] = useState(false);
+
+  useEffect(() => {
+    if (!prefillCode) return;
+    setCode(prefillCode.toUpperCase());
+    setShowPrefillHint(true);
+    dispatch(clearCouponPreview());
+  }, [prefillCode, prefillKey, dispatch]);
 
   const handleValidate = (e: React.FormEvent) => {
     e.preventDefault();
     if (!code.trim()) return;
+    setShowPrefillHint(false);
     dispatch(clearCouponPreview());
     dispatch(
       adminValidateCoupon({
@@ -1287,6 +1325,7 @@ function CouponValidator() {
     dispatch(clearCouponPreview());
     setCode("");
     setAmountInput("");
+    setShowPrefillHint(false);
   };
 
   const isValid = couponPreview?.valid === true;
@@ -1301,6 +1340,12 @@ function CouponValidator() {
           Test Tool
         </span>
       </div>
+
+      {showPrefillHint && (
+        <FieldHint tone="accent" className="mb-3 mt-0">
+          {t("adminHelpers.couponPrefillValidator")}
+        </FieldHint>
+      )}
 
       <form
         onSubmit={handleValidate}
@@ -1472,10 +1517,17 @@ function CouponsTab() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<Coupon | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Coupon | null>(null);
+  const [validatorPrefill, setValidatorPrefill] = useState<string | null>(null);
+  const [validatorPrefillKey, setValidatorPrefillKey] = useState(0);
 
   useEffect(() => {
     dispatch(fetchAdminCoupons());
   }, [dispatch]);
+
+  const loadIntoValidator = (code: string) => {
+    setValidatorPrefill(code.toUpperCase());
+    setValidatorPrefillKey((k) => k + 1);
+  };
 
   const openCreate = () => {
     setEditing(null);
@@ -1518,9 +1570,10 @@ function CouponsTab() {
         await dispatch(
           createAdminCoupon(payload as Parameters<typeof createAdminCoupon>[0]),
         ).unwrap();
+        loadIntoValidator(payload.code);
         toast({
           title: "Coupon created",
-          description: `${payload.code} is now active.`,
+          description: `${payload.code} is now active — loaded in the validator above.`,
         });
       }
       setModalOpen(false);
@@ -1591,7 +1644,10 @@ function CouponsTab() {
   return (
     <div className="space-y-5">
       {/* Validator */}
-      <CouponValidator />
+      <CouponValidator
+        prefillCode={validatorPrefill}
+        prefillKey={validatorPrefillKey}
+      />
 
       {/* Stats */}
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
@@ -1709,6 +1765,7 @@ function CouponsTab() {
                     onEdit={openEdit}
                     onToggle={handleToggle}
                     onDelete={setDeleteTarget}
+                    onTest={loadIntoValidator}
                   />
                 ))
               )}
@@ -1783,7 +1840,6 @@ function effectiveStatus(s: PaymentSplit): PaymentSplitStatus | "overdue" {
 
 function PaymentSplitsTab() {
   const dispatch = useAppDispatch();
-  const { toast } = useToast();
   const { paymentSplits, paymentSplitsLoading, paymentSplitsPagination } =
     useAppSelector((s) => s.admin);
   const [statusFilter, setStatusFilter] = useState<string>("all");
@@ -1798,25 +1854,13 @@ function PaymentSplitsTab() {
     );
   }, [statusFilter, page, dispatch]);
 
-  const handleMarkPaid = async (split: PaymentSplit) => {
-    try {
-      await dispatch(
-        markSplitPaid({ caseId: split.case_id, splitId: split.id }),
-      ).unwrap();
-      toast({ title: "Split marked as paid" });
-      dispatch(
-        fetchAdminPaymentSplits({
-          status: statusFilter === "all" ? undefined : statusFilter,
-          page,
-        }),
-      );
-    } catch {
-      toast({
-        title: "Error",
-        description: "Could not mark split as paid",
-        variant: "destructive",
-      });
-    }
+  const refreshSplits = () => {
+    dispatch(
+      fetchAdminPaymentSplits({
+        status: statusFilter === "all" ? undefined : statusFilter,
+        page,
+      }),
+    );
   };
 
   const statusPills: Array<{ value: string; label: string }> = [
@@ -1869,6 +1913,7 @@ function PaymentSplitsTab() {
                     "Description",
                     "Amount",
                     "Due Date",
+                    "Collection",
                     "Status",
                     "",
                   ].map((h) => (
@@ -1910,6 +1955,15 @@ function PaymentSplitsTab() {
                         })}
                       </td>
                       <td className="px-4 py-3">
+                        <span className="text-[11px] font-semibold text-muted-foreground">
+                          {s.status === "paid"
+                            ? "Paid"
+                            : s.payment_token || s.payment_link || s.send_payment_link
+                              ? "Pay link"
+                              : "Manual"}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
                         <div className="flex items-center gap-1.5">
                           <span
                             className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold border ${ss.badge}`}
@@ -1930,16 +1984,7 @@ function PaymentSplitsTab() {
                         </div>
                       </td>
                       <td className="px-4 py-3">
-                        {(eff === "pending" || eff === "overdue") && (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className="h-7 text-xs"
-                            onClick={() => handleMarkPaid(s)}
-                          >
-                            Mark Paid
-                          </Button>
-                        )}
+                        <AdminSplitActions split={s} onDone={refreshSplits} />
                       </td>
                     </tr>
                   );

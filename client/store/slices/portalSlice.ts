@@ -1,5 +1,5 @@
 import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
-import api from "@/lib/api";
+import api, { formatAxiosError } from "@/lib/api";
 import type {
   ClientDocument,
   ClientPayment,
@@ -215,9 +215,9 @@ export const completePortalTask = createAsyncThunk(
       });
       dispatch(fetchPortalTasks());
       return { taskId, completed_at: data.completed_at };
-    } catch (err: any) {
+    } catch (err: unknown) {
       return rejectWithValue(
-        err?.response?.data?.error ?? "Failed to submit task",
+        formatAxiosError(err, "Failed to submit task"),
       );
     }
   },
@@ -380,9 +380,9 @@ export const subscribePeaceOfMind = createAsyncThunk<
   try {
     await api.post("/portal/peace-of-mind/subscribe", payload);
     await dispatch(fetchPeaceOfMind());
-  } catch (e: any) {
+  } catch (e: unknown) {
     return rejectWithValue(
-      e?.response?.data?.error || "Subscription failed",
+      formatAxiosError(e, "Subscription failed"),
     );
   }
 });
@@ -395,9 +395,9 @@ export const cancelPeaceOfMind = createAsyncThunk<
   try {
     await api.post("/portal/peace-of-mind/cancel");
     await dispatch(fetchPeaceOfMind());
-  } catch (e: any) {
+  } catch (e: unknown) {
     return rejectWithValue(
-      e?.response?.data?.error || "Cancellation failed",
+      formatAxiosError(e, "Cancellation failed"),
     );
   }
 });

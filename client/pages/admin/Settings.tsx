@@ -11,6 +11,7 @@ import {
   saveLegalDocument,
 } from "@/store/slices/legalSlice";
 import { LEGAL_PATHS } from "@/lib/legal";
+import FieldHint from "@/components/admin/FieldHint";
 
 export default function AdminSettings() {
   const { t } = useTranslation();
@@ -262,6 +263,7 @@ export default function AdminSettings() {
                         }
                         className="w-full p-3 rounded-lg border border-input bg-background text-sm text-foreground font-mono leading-relaxed"
                       />
+                      <FieldHint>{t("adminHelpers.markdownHint")}</FieldHint>
                     </div>
                   </>
                 ) : (
@@ -278,6 +280,9 @@ export default function AdminSettings() {
         <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider px-1">
           System Settings
         </h2>
+        <FieldHint className="mt-0 mx-1">
+          {t("adminHelpers.settingsSaveWarn")}
+        </FieldHint>
         {visibleSettings.map((s) => {
           const val = edits[s.setting_key] ?? s.setting_value ?? "";
           const long = (s.setting_value || "").length > 80;
@@ -291,10 +296,14 @@ export default function AdminSettings() {
                   <div className="font-mono text-sm break-all">
                     {s.setting_key}
                   </div>
-                  {s.description && (
+                  {s.description ? (
                     <div className="text-xs text-muted-foreground">
                       {s.description}
                     </div>
+                  ) : (
+                    <FieldHint tone="warning">
+                      {t("adminHelpers.settingsNoDescription")}
+                    </FieldHint>
                   )}
                 </div>
                 <button

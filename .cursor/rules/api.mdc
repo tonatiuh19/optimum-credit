@@ -1,0 +1,17 @@
+---
+description: API serverless rules — keep logic inline in api/index.ts
+globs: api/**/*
+alwaysApply: false
+---
+
+# API (Vercel Serverless)
+
+- All routes and helpers needed at runtime live **inline** in `api/index.ts`
+- Shared types: `import type { ... } from "../shared/api"` only
+- Do **not** `import` runtime modules from `../shared/` (breaks Vercel)
+- Update `api/swagger.yaml` when endpoints change
+- Dev: single port **8080** for frontend + backend
+- Only add endpoints when needed (secrets, DB, server-only logic)
+- Keep TypeScript types consistent across `client/`, `api/index.ts`, and `shared/`
+- Return `{ error: string }` with correct status (400/402/403/404/409) — use friendly messages, not driver errors
+- Use `formatAxiosError` patterns on the client; on the server use `mapFriendlyError` / `sendFriendlyError` for DUP/FK

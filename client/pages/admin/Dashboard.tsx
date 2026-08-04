@@ -33,7 +33,7 @@ export default function AdminDashboard() {
 
   const priorityColor: Record<string, string> = {
     urgent: "text-destructive bg-destructive/10",
-    high: "text-orange-400 bg-orange-400/10",
+    high: "text-primary bg-primary/10",
     normal: "text-muted-foreground bg-muted",
     low: "text-muted-foreground bg-muted",
   };
@@ -58,7 +58,7 @@ export default function AdminDashboard() {
           icon={Users}
           label="Active clients"
           value={s?.active_clients ?? "—"}
-          tint="from-blue-500/20"
+          tint="from-primary/20"
         />
         <Stat
           icon={TrendingUp}
@@ -70,7 +70,7 @@ export default function AdminDashboard() {
           icon={CheckCircle2}
           label="Completed"
           value={s?.completed_clients ?? "—"}
-          tint="from-emerald-500/20"
+          tint="from-accent/20"
         />
         <Stat
           icon={DollarSign}
@@ -80,7 +80,7 @@ export default function AdminDashboard() {
               ? fmtMoney(Number(s.revenue_cents_30d))
               : "—"
           }
-          tint="from-violet-500/20"
+          tint="from-secondary/40"
         />
       </div>
 

@@ -8,6 +8,7 @@ import express, {
   type NextFunction,
 } from "express";
 import cors from "cors";
+import rateLimit from "express-rate-limit";
 import multer from "multer";
 import mysql, {
   type Pool,
@@ -19,7 +20,2946 @@ import crypto from "crypto";
 import { Resend } from "resend";
 import twilio from "twilio";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
-import type { OfGReportData, OfGReportWizardOptions } from "../shared/api";
+import type {
+  OfGReportData,
+  OfGReportWizardOptions,
+  InfoRequestFieldDef,
+  InfoRequestStatus,
+  PipelineStage,
+  ClientStatus,
+  Label,
+  LabelLayer,
+  CreditAnalysisMode,
+  CreditAnalysisNegativeItem,
+  CreditAnalysisResult,
+} from "../shared/api";
+// ============================================================================
+// AFFILIATE HELPERS (inline — Vercel serverless; keep tests importing from ./index)
+// ============================================================================
+
+export type AffiliatePlan = "standard" | "master" | "sub_affiliate";
+export type AffiliateLanding = "credit_analysis" | "pricing";
+export type AffiliateSubscriptionStatus =
+  | "none"
+  | "pending"
+  | "active"
+  | "past_due"
+  | "cancelled"
+  | "comped";
+export type AffiliateStatus = "invited" | "active" | "inactive" | "suspended";
+
+export const AFFILIATE_ATTRIBUTION_COOKIE = "oc_aff_ref";
+/** First-touch attribution window (days) — locked decision. */
+export const AFFILIATE_ATTRIBUTION_DAYS = 30;
+
+/** Suggested monthly subscription prices (cents). */
+export const AFFILIATE_TIER_PRICES_CENTS: Record<AffiliatePlan, number> = {
+  standard: 20_000, // $200
+  master: 50_000, // $500
+  sub_affiliate: 0,
+};
+
+/**
+ * Suggested commission rates in basis points (1% = 100 bps).
+ * Admins can override per affiliate in the DB row.
+ */
+export const AFFILIATE_COMMISSION_SUGGESTIONS_BPS: Record<
+  AffiliatePlan,
+  { enrollment_bps: number; parent_override_bps: number }
+> = {
+  standard: { enrollment_bps: 1000, parent_override_bps: 0 }, // 10%
+  master: { enrollment_bps: 1500, parent_override_bps: 500 }, // 15% + 5% on subs
+  sub_affiliate: { enrollment_bps: 500, parent_override_bps: 0 }, // 5%
+};
+
+/** Feature flags — everything on for both paid tiers for now, SMS deferred. */
+export const AFFILIATE_FEATURES_ALL_ON = {
+  pipeline: true,
+  lead_create: true,
+  credit_analysis_links: true,
+  sms: false,
+  view_team_pipeline: true,
+  sub_affiliates: true,
+  commission_reports: true,
+} as const;
+
+export function slugifyAffiliateName(
+  firstName: string,
+  lastName: string,
+): string {
+  const base = `${firstName || ""}-${lastName || ""}`
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+  return base || "affiliate";
+}
+
+export function normalizeAffiliateSlug(raw: string): string {
+  return String(raw || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+}
+
+export function isValidAffiliateSlug(slug: string): boolean {
+  return (
+    /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) &&
+    slug.length >= 2 &&
+    slug.length <= 64
+  );
+}
+
+export function suggestedTierDefaults(plan: AffiliatePlan): {
+  monthly_price_cents: number;
+  commission_rate_bps: number;
+  parent_override_rate_bps: number;
+} {
+  const prices = AFFILIATE_TIER_PRICES_CENTS[plan];
+  const rates = AFFILIATE_COMMISSION_SUGGESTIONS_BPS[plan];
+  return {
+    monthly_price_cents: prices,
+    commission_rate_bps: rates.enrollment_bps,
+    parent_override_rate_bps: rates.parent_override_bps,
+  };
+}
+
+export function computeCommissionCents(
+  baseAmountCents: number,
+  rateBps: number,
+): number {
+  if (baseAmountCents <= 0 || rateBps <= 0) return 0;
+  return Math.round((baseAmountCents * rateBps) / 10_000);
+}
+
+export function affiliateHasPortalAccess(opts: {
+  status: string;
+  subscription_status: string;
+}): boolean {
+  if (opts.status === "suspended" || opts.status === "inactive") return false;
+  if (opts.status === "active") {
+    return (
+      opts.subscription_status === "active" ||
+      opts.subscription_status === "comped"
+    );
+  }
+  // invited: only if comped early (admin fast-tracked before payment)
+  return opts.subscription_status === "comped";
+}
+
+/**
+ * Whether a resolved affiliate can still be attributed a click / referral
+ * link. Broader than portal access — an invited-but-unpaid affiliate's link
+ * should still work so early sharing isn't wasted, but inactive/suspended
+ * affiliates should not accumulate new attribution.
+ */
+export function affiliateCanReceiveClicks(opts: { status: string }): boolean {
+  return opts.status !== "inactive" && opts.status !== "suspended";
+}
+
+export function affiliateLandingPath(
+  landing: AffiliateLanding,
+  slug: string,
+): string {
+  if (landing === "pricing") return `/pricing?ref=${encodeURIComponent(slug)}`;
+  return `/credit-analysis?ref=${encodeURIComponent(slug)}`;
+}
+
+export function buildAffiliatePublicLinks(
+  slug: string,
+  appUrl?: string,
+): {
+  short_default: string;
+  short_analysis: string;
+  short_pricing: string;
+  analysis_ref: string;
+  pricing_ref: string;
+} {
+  const base = (appUrl || "").replace(/\/$/, "");
+  const s = encodeURIComponent(slug);
+  const prefix = base ? `${base}` : "";
+  return {
+    short_default: `${prefix}/r/${s}`,
+    short_analysis: `${prefix}/r/${s}?to=analysis`,
+    short_pricing: `${prefix}/r/${s}?to=pricing`,
+    analysis_ref: `${prefix}/credit-analysis?ref=${s}`,
+    pricing_ref: `${prefix}/pricing?ref=${s}`,
+  };
+}
+
+// ============================================================================
+// HUBSPOT HELPERS (inline — Vercel serverless; keep tests importing from ./index)
+// ============================================================================
+
+export type WorkTaskStatus = "backlog" | "doing" | "done";
+export type WorkTaskPriority = "low" | "medium" | "high" | "urgent";
+
+export function hubspotStatusToWork(status: string | null | undefined): WorkTaskStatus {
+  const s = String(status || "").toUpperCase();
+  if (s === "COMPLETED") return "done";
+  if (s === "IN_PROGRESS") return "doing";
+  return "backlog";
+}
+
+export function workStatusToHubspot(status: WorkTaskStatus): string {
+  if (status === "done") return "COMPLETED";
+  if (status === "doing") return "IN_PROGRESS";
+  return "NOT_STARTED";
+}
+
+export function hubspotPriorityToWork(
+  priority: string | null | undefined,
+): WorkTaskPriority {
+  const p = String(priority || "").toUpperCase();
+  if (p === "HIGH" || p === "URGENT") return "high";
+  if (p === "LOW") return "low";
+  return "medium";
+}
+
+export function workPriorityToHubspot(priority: WorkTaskPriority): string {
+  if (priority === "urgent" || priority === "high") return "HIGH";
+  if (priority === "low") return "LOW";
+  return "MEDIUM";
+}
+
+export const HUBSPOT_SCOPES = [
+  "crm.objects.tasks.read",
+  "crm.objects.tasks.write",
+  "oauth",
+].join(" ");
+
+export interface HubspotTokenBundle {
+  access_token: string;
+  refresh_token: string;
+  expires_at: number; // unix ms
+  token_type?: string;
+}
+
+export interface HubspotRemoteTask {
+  id: string;
+  title: string;
+  description: string | null;
+  status: WorkTaskStatus;
+  priority: WorkTaskPriority;
+  due_at: string | null;
+  owner_id: string | null;
+  updated_at: string | null;
+}
+
+function hubspotConfigured(): boolean {
+  return Boolean(
+    process.env.HUBSPOT_CLIENT_ID && process.env.HUBSPOT_CLIENT_SECRET,
+  );
+}
+
+export function isHubspotOAuthConfigured(): boolean {
+  return hubspotConfigured();
+}
+
+export function buildHubspotAuthorizeUrl(opts: {
+  redirectUri: string;
+  state: string;
+}): string | null {
+  if (!hubspotConfigured()) return null;
+  const params = new URLSearchParams({
+    client_id: process.env.HUBSPOT_CLIENT_ID!,
+    redirect_uri: opts.redirectUri,
+    scope: HUBSPOT_SCOPES,
+    state: opts.state,
+  });
+  return `https://app.hubspot.com/oauth/authorize?${params.toString()}`;
+}
+
+export async function exchangeHubspotCode(opts: {
+  code: string;
+  redirectUri: string;
+}): Promise<HubspotTokenBundle> {
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    client_id: process.env.HUBSPOT_CLIENT_ID!,
+    client_secret: process.env.HUBSPOT_CLIENT_SECRET!,
+    redirect_uri: opts.redirectUri,
+    code: opts.code,
+  });
+  const resp = await fetch("https://api.hubapi.com/oauth/v1/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+  const data = (await resp.json()) as any;
+  if (!resp.ok) {
+    throw new Error(
+      data?.message || data?.error_description || "HubSpot token exchange failed",
+    );
+  }
+  return {
+    access_token: data.access_token,
+    refresh_token: data.refresh_token,
+    expires_at: Date.now() + Number(data.expires_in || 1800) * 1000 - 60_000,
+    token_type: data.token_type,
+  };
+}
+
+export async function refreshHubspotToken(
+  refreshToken: string,
+): Promise<HubspotTokenBundle> {
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    client_id: process.env.HUBSPOT_CLIENT_ID!,
+    client_secret: process.env.HUBSPOT_CLIENT_SECRET!,
+    refresh_token: refreshToken,
+  });
+  const resp = await fetch("https://api.hubapi.com/oauth/v1/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+  const data = (await resp.json()) as any;
+  if (!resp.ok) {
+    throw new Error(
+      data?.message || data?.error_description || "HubSpot token refresh failed",
+    );
+  }
+  return {
+    access_token: data.access_token,
+    refresh_token: data.refresh_token || refreshToken,
+    expires_at: Date.now() + Number(data.expires_in || 1800) * 1000 - 60_000,
+    token_type: data.token_type,
+  };
+}
+
+export async function fetchHubspotAccountInfo(
+  accessToken: string,
+): Promise<{ hub_id?: string; hub_domain?: string }> {
+  try {
+    const resp = await fetch(
+      "https://api.hubapi.com/account-info/v3/details",
+      { headers: { Authorization: `Bearer ${accessToken}` } },
+    );
+    if (!resp.ok) return {};
+    const data = (await resp.json()) as any;
+    return {
+      hub_id: data?.portalId != null ? String(data.portalId) : undefined,
+      hub_domain: data?.uiDomain || data?.companyCurrency || undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function mapRemoteTask(raw: any): HubspotRemoteTask {
+  const props = raw.properties || {};
+  const dueRaw = props.hs_timestamp || props.hs_task_reminders || null;
+  let due_at: string | null = null;
+  if (dueRaw) {
+    const n = Number(dueRaw);
+    due_at = Number.isFinite(n)
+      ? new Date(n).toISOString()
+      : String(dueRaw);
+  }
+  return {
+    id: String(raw.id),
+    title: String(props.hs_task_subject || props.hs_task_body || "HubSpot task").slice(
+      0,
+      255,
+    ),
+    description: props.hs_task_body ? String(props.hs_task_body) : null,
+    status: hubspotStatusToWork(props.hs_task_status),
+    priority: hubspotPriorityToWork(props.hs_task_priority),
+    due_at,
+    owner_id: props.hubspot_owner_id
+      ? String(props.hubspot_owner_id)
+      : null,
+    updated_at: props.hs_lastmodifieddate || raw.updatedAt || null,
+  };
+}
+
+export async function listHubspotTasks(
+  accessToken: string,
+  limit = 100,
+): Promise<HubspotRemoteTask[]> {
+  const props = [
+    "hs_task_subject",
+    "hs_task_body",
+    "hs_task_status",
+    "hs_task_priority",
+    "hs_timestamp",
+    "hubspot_owner_id",
+    "hs_lastmodifieddate",
+  ].join(",");
+  const url = new URL("https://api.hubapi.com/crm/v3/objects/tasks");
+  url.searchParams.set("limit", String(Math.min(100, limit)));
+  url.searchParams.set("properties", props);
+  url.searchParams.set("archived", "false");
+
+  const out: HubspotRemoteTask[] = [];
+  let after: string | undefined;
+  do {
+    if (after) url.searchParams.set("after", after);
+    const resp = await fetch(url.toString(), {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    const data = (await resp.json()) as any;
+    if (!resp.ok) {
+      throw new Error(data?.message || "Failed to list HubSpot tasks");
+    }
+    for (const row of data.results || []) {
+      out.push(mapRemoteTask(row));
+    }
+    after = data.paging?.next?.after;
+  } while (after && out.length < limit);
+
+  return out;
+}
+
+export async function updateHubspotTask(
+  accessToken: string,
+  taskId: string,
+  patch: {
+    title?: string;
+    description?: string | null;
+    status?: WorkTaskStatus;
+    priority?: WorkTaskPriority;
+    due_at?: string | null;
+  },
+): Promise<void> {
+  const properties: Record<string, string> = {};
+  if (patch.title != null) properties.hs_task_subject = patch.title;
+  if (patch.description !== undefined) {
+    properties.hs_task_body = patch.description || "";
+  }
+  if (patch.status != null) {
+    properties.hs_task_status = workStatusToHubspot(patch.status);
+  }
+  if (patch.priority != null) {
+    properties.hs_task_priority = workPriorityToHubspot(patch.priority);
+  }
+  if (patch.due_at !== undefined) {
+    properties.hs_timestamp = patch.due_at
+      ? String(new Date(patch.due_at).getTime())
+      : "";
+  }
+  if (Object.keys(properties).length === 0) return;
+
+  const resp = await fetch(
+    `https://api.hubapi.com/crm/v3/objects/tasks/${encodeURIComponent(taskId)}`,
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ properties }),
+    },
+  );
+  if (!resp.ok) {
+    const data = (await resp.json().catch(() => ({}))) as any;
+    throw new Error(data?.message || "Failed to update HubSpot task");
+  }
+}
+
+/** Fuzzy match key when hubspot_task_id is missing. */
+export function workTaskMatchKey(
+  title: string,
+  dueAt: string | null | undefined,
+): string {
+  const t = title.trim().toLowerCase().replace(/\s+/g, " ");
+  const d = dueAt ? new Date(dueAt).toISOString().slice(0, 10) : "";
+  return `${t}|${d}`;
+}
+
+// ============================================================================
+// CREDIT ANALYSIS ALGORITHM (inline — Vercel serverless; keep tests importing from ./index)
+// ============================================================================
+
+// ─── Brand tokens (email-safe hex matching global.css) ─────────────────────
+
+export const OFG_COLORS = {
+  navy: "#121829",
+  gold: "#C0A06A",
+  foreground: "#0f172a",
+  muted: "#64748b",
+  border: "#e2e8f0",
+  cardBg: "#f8fafc",
+  critical: "#dc2626",
+  high: "#ea580c",
+  medium: "#ca8a04",
+  lower: "#2563eb",
+  utilOk: "#16a34a",
+} as const;
+
+export type AnalystLang = "English" | "Spanish";
+export type DisputePriority = "CRITICAL" | "HIGH" | "MEDIUM" | "LOWER";
+export type GoalKind =
+  | "fha"
+  | "conventional"
+  | "jumbo"
+  | "auto"
+  | "business"
+  | "general";
+
+export type AnalystScores = {
+  transunion: number | null;
+  experian: number | null;
+  equifax: number | null;
+};
+
+export type AnalystNegativeInput = {
+  type: string;
+  creditor?: string;
+  bureaus?: string[];
+  detail?: string;
+};
+
+export type AnalystUtilRow = {
+  account: string;
+  limit: number;
+  balance: number;
+  pctUsed: number;
+  payTo30: number;
+  payTo10: number;
+};
+
+/** Flat JSON — ALL VALUES FLAT, NO ARRAYS, NO NESTED OBJECTS */
+export type CreditAnalysisAnalystFlat = {
+  client_name: string;
+  analysis_goal: string;
+  report_date: string;
+  referral_name: string;
+  referral_company: string;
+
+  score_transunion: number | null;
+  score_experian: number | null;
+  score_equifax: number | null;
+  score_tu_label: string;
+  score_ex_label: string;
+  score_eq_label: string;
+  middle_score: number | null;
+  fha_status: string;
+  goal_score: number;
+  goal_description: string;
+  gap_tu: number | null;
+  gap_ex: number | null;
+  gap_eq: number | null;
+
+  neg_1_account: string;
+  neg_1_type: string;
+  neg_1_bureaus: string;
+  neg_1_priority: string;
+  neg_1_dispute_basis: string;
+  neg_2_account: string;
+  neg_2_type: string;
+  neg_2_bureaus: string;
+  neg_2_priority: string;
+  neg_2_dispute_basis: string;
+  neg_3_account: string;
+  neg_3_type: string;
+  neg_3_bureaus: string;
+  neg_3_priority: string;
+  neg_3_dispute_basis: string;
+  neg_4_account: string;
+  neg_4_type: string;
+  neg_4_bureaus: string;
+  neg_4_priority: string;
+  neg_4_dispute_basis: string;
+  neg_5_account: string;
+  neg_5_type: string;
+  neg_5_bureaus: string;
+  neg_5_priority: string;
+  neg_5_dispute_basis: string;
+
+  utilization_critical_note: string;
+  util_1_account: string;
+  util_1_limit: string;
+  util_1_balance: string;
+  util_1_percent: string;
+  util_1_pay30: string;
+  util_1_pay10: string;
+  util_2_account: string;
+  util_2_limit: string;
+  util_2_balance: string;
+  util_2_percent: string;
+  util_2_pay30: string;
+  util_2_pay10: string;
+  util_3_account: string;
+  util_3_limit: string;
+  util_3_balance: string;
+  util_3_percent: string;
+  util_3_pay30: string;
+  util_3_pay10: string;
+  total_revolving_limit: string;
+  total_revolving_balance: string;
+  total_revolving_util: string;
+  paydown_30_instruction: string;
+  paydown_10_instruction: string;
+
+  score_today: number | null;
+  score_30_days: number | null;
+  score_60_days: number | null;
+  score_90_days: number | null;
+  score_target: number | null;
+  target_timeframe: string;
+
+  round_1_actions: string;
+  round_2_actions: string;
+  round_3_actions: string;
+  positive_accounts_protect: string;
+
+  action_1_time: string;
+  action_1_action: string;
+  action_1_reason: string;
+  action_2_time: string;
+  action_2_action: string;
+  action_2_reason: string;
+  action_3_time: string;
+  action_3_action: string;
+  action_3_reason: string;
+  action_4_time: string;
+  action_4_action: string;
+  action_4_reason: string;
+  action_5_time: string;
+  action_5_action: string;
+  action_5_reason: string;
+  action_6_time: string;
+  action_6_action: string;
+  action_6_reason: string;
+
+  file_strength_score: number;
+  file_strength_rating: string;
+  fs_label_1: string;
+  fs_open_revolving: string;
+  fs_label_2: string;
+  fs_installment_mix: string;
+  fs_label_3: string;
+  fs_mortgage: string;
+  fs_label_4: string;
+  fs_account_age: string;
+  fs_label_5: string;
+  fs_post_repair: string;
+  tradeline_recommendation: string;
+
+  negative_items_html: string;
+  negative_count: number;
+  critical_count: number;
+  high_count: number;
+  utilization_html: string;
+  action_plan_html: string;
+  mortgage_tu: number | null;
+  mortgage_ex: number | null;
+  mortgage_eq: number | null;
+  tradeline_needed: string;
+  client_text_message: string;
+  text_language: AnalystLang;
+};
+
+export type CreditAnalysisAlgorithmInput = {
+  clientName: string;
+  firstName: string;
+  lastName: string;
+  repName?: string | null;
+  clientGoal?: string | null;
+  language: "en" | "es";
+  scores: AnalystScores;
+  negatives: AnalystNegativeInput[];
+  reportText: string;
+  utilization?: AnalystUtilRow[];
+  positiveAccounts?: string[];
+  reportDate?: string | null;
+  weakExtraction?: boolean;
+};
+
+type RankedNeg = {
+  account: string;
+  type: string;
+  bureaus: string;
+  priority: DisputePriority;
+  dispute_basis: string;
+};
+
+type TFn = (en: string, es: string) => string;
+
+const PRIORITY_RANK: Record<DisputePriority, number> = {
+  CRITICAL: 0,
+  HIGH: 1,
+  MEDIUM: 2,
+  LOWER: 3,
+};
+
+const HISPANIC_SURNAME_HINT =
+  /\b(garcia|rodriguez|martinez|hernandez|lopez|gonzalez|perez|sanchez|ramirez|torres|flores|rivera|gomez|diaz|reyes|morales|cruz|ortiz|gutierrez|chavez|ramos|ruiz|alvarez|mendoza|castillo|jimenez|moreno|romero|vargas|herrera|medina|aguilar|guerrero|contreras|delgado|vega|campos|soto|guzman|castro|fernandez|munoz|muñoz|silva|rojas|mendez|navarro|dominguez|espinoza|valdez|salazar|guillen|ibarra|carrillo)\b/i;
+
+// escapeHtml is defined once later in this file (shared by email + analyst HTML).
+
+function money(n: number): string {
+  return `$${Math.round(n).toLocaleString("en-US")}`;
+}
+
+function clampScore(n: number): number {
+  return Math.min(850, Math.max(300, Math.round(n)));
+}
+
+function makeT(lang: AnalystLang): TFn {
+  return (en, es) => (lang === "Spanish" ? es : en);
+}
+
+function fsFormat(score: number, max: number, notes: string): string {
+  return `${score}/${max} — ${notes}`;
+}
+
+export function scoreBandLabel(score: number | null | undefined): string {
+  if (score == null || Number.isNaN(score)) return "";
+  if (score < 580) return "POOR";
+  if (score < 670) return "FAIR";
+  if (score < 740) return "GOOD";
+  if (score < 800) return "VERY GOOD";
+  return "EXCELLENT";
+}
+
+/** Median of 3; lower of 2 if one null; single if only one. */
+export function computeMiddleScore(scores: AnalystScores): number | null {
+  const vals = [scores.transunion, scores.experian, scores.equifax].filter(
+    (n): n is number => n != null && !Number.isNaN(n),
+  );
+  if (vals.length === 0) return null;
+  vals.sort((a, b) => a - b);
+  if (vals.length === 2) return vals[0];
+  return vals[Math.floor(vals.length / 2)];
+}
+
+export function classifyGoalKind(goal: string | null | undefined): GoalKind {
+  const g = (goal || "").toLowerCase();
+  if (/fha/.test(g)) return "fha";
+  if (/jumbo/.test(g)) return "jumbo";
+  if (/conventional/.test(g)) return "conventional";
+  if (/auto|car|vehicle/.test(g)) return "auto";
+  if (/business|sba|funding/.test(g)) return "business";
+  if (/general|improv/.test(g)) return "general";
+  if (/mortgage|home|house|purchase/.test(g)) return "conventional";
+  if (!g.trim()) return "general";
+  return "general";
+}
+
+export function resolveTextLanguage(
+  language: "en" | "es",
+  lastName: string,
+): AnalystLang {
+  if (language === "es") return "Spanish";
+  if (HISPANIC_SURNAME_HINT.test(lastName.trim())) return "Spanish";
+  return "English";
+}
+
+export function extractUtilizationFromText(text: string): AnalystUtilRow[] {
+  const results: AnalystUtilRow[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const m = line.match(
+      /([A-Za-z0-9*\/\s]{4,40}?)\s+[\$]?([\d,]+)\s+[\$]?([\d,]+)\s+(\d{1,3})%/,
+    );
+    if (!m) continue;
+    const limit = Number(m[2].replace(/,/g, ""));
+    const balance = Number(m[3].replace(/,/g, ""));
+    const pctUsed = Number(m[4]);
+    if (limit <= 0 || pctUsed > 100) continue;
+    results.push({
+      account: m[1].trim().slice(0, 40),
+      limit,
+      balance,
+      pctUsed,
+      payTo30: Math.max(0, Math.ceil(balance - limit * 0.3)),
+      payTo10: Math.max(0, Math.ceil(balance - limit * 0.1)),
+    });
+  }
+  return results.slice(0, 12);
+}
+
+function utilColor(pct: number): string {
+  if (pct > 80) return OFG_COLORS.critical;
+  if (pct > 50) return OFG_COLORS.high;
+  if (pct > 30) return OFG_COLORS.medium;
+  return OFG_COLORS.utilOk;
+}
+
+function priorityColor(p: DisputePriority): string {
+  if (p === "CRITICAL") return OFG_COLORS.critical;
+  if (p === "HIGH") return OFG_COLORS.high;
+  if (p === "MEDIUM") return OFG_COLORS.medium;
+  return OFG_COLORS.lower;
+}
+
+function extractBalanceHint(detail: string): number | null {
+  const m = detail.match(/\$?\s*([\d,]{2,})/);
+  if (!m) return null;
+  const n = Number(m[1].replace(/,/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+
+function countBureaus(text: string, explicit?: string[]): number {
+  if (explicit?.length) return explicit.length;
+  let n = 0;
+  if (/\b(TU|TransUnion)\b/i.test(text)) n++;
+  if (/\b(EX|Experian)\b/i.test(text)) n++;
+  if (/\b(EQ|Equifax)\b/i.test(text)) n++;
+  return n;
+}
+
+function formatBureaus(hay: string, explicit?: string[]): string {
+  if (explicit?.length) return explicit.join("/");
+  const found: string[] = [];
+  if (/\b(TU|TransUnion)\b/i.test(hay)) found.push("TU");
+  if (/\b(EX|Experian)\b/i.test(hay)) found.push("EX");
+  if (/\b(EQ|Equifax)\b/i.test(hay)) found.push("EQ");
+  return found.length ? found.join("/") : "TU/EX/EQ";
+}
+
+export function rankNegativeItem(n: AnalystNegativeInput): RankedNeg {
+  const hay = `${n.type} ${n.creditor || ""} ${n.detail || ""}`;
+  const type = n.type || "Derogatory Item";
+  const account = (n.creditor || type).slice(0, 60);
+  const bureauCount = countBureaus(hay, n.bureaus);
+  const bureaus = formatBureaus(hay, n.bureaus);
+  const bal = extractBalanceHint(n.detail || "");
+
+  let priority: DisputePriority = "MEDIUM";
+  let basis =
+    "FCRA accuracy review — verify reporting and dispute unsupported items.";
+
+  if (/inqui/i.test(hay)) {
+    priority = "LOWER";
+    basis =
+      "Hard inquiry — verify permissible purpose under FCRA; dispute unauthorized inquiries.";
+  } else if (
+    /personal|address|name|ssn|dob|identity/i.test(hay) &&
+    /error|incorrect|wrong/i.test(hay)
+  ) {
+    priority = "LOWER";
+    basis =
+      "Personal information error — request correction of inaccurate consumer data (FCRA).";
+  } else if (
+    /90\+|90 day|120/i.test(hay) &&
+    /late|delinquen|past due|active/i.test(hay)
+  ) {
+    priority = "CRITICAL";
+    basis =
+      "Active 90+ delinquency — high-impact; dispute inaccurate status/dates with all reporting bureaus.";
+  } else if (/charge.?off|charged off/i.test(hay)) {
+    if (bureauCount > 0 && bureauCount < 3) {
+      priority = "CRITICAL";
+      basis =
+        "Charge-off not consistent across all 3 bureaus — prioritize metro inconsistency dispute (FCRA).";
+    } else {
+      priority = "HIGH";
+      basis =
+        "Charge-off on file — dispute inaccurate balance, status, or dates; request method of verification.";
+    }
+  } else if (/collection/i.test(hay)) {
+    if (bal != null && bal < 500) {
+      priority = "MEDIUM";
+      basis =
+        "Small collection (<$500) — dispute validation under FDCPA/FCRA; verify original creditor & amount.";
+    } else {
+      priority = "HIGH";
+      basis =
+        "Collection account — demand validation (FDCPA) and dispute inaccurate reporting (FCRA).";
+    }
+  } else if (/late|past due|delinquen/i.test(hay)) {
+    priority = "HIGH";
+    basis =
+      "Recent late payment — dispute incorrect late marks; verify payment history dates.";
+  } else if (/bankrupt|foreclos|repossess|judgment|lien/i.test(hay)) {
+    priority = "HIGH";
+    basis =
+      "Public-record / severe derogatory — verify court data accuracy and reporting period (FCRA).";
+  }
+
+  return { account, type, bureaus, priority, dispute_basis: basis };
+}
+
+function adjustmentFactors(
+  util: AnalystUtilRow[],
+  negatives: RankedNeg[],
+  reportText: string,
+): number {
+  const totalLimit = util.reduce((s, u) => s + u.limit, 0);
+  const totalBal = util.reduce((s, u) => s + u.balance, 0);
+  const utilPct = totalLimit > 0 ? (totalBal / totalLimit) * 100 : 0;
+  const highUtil = utilPct > 50;
+  const recentLates = negatives.some((n) => /late|delinquen/i.test(n.type));
+  const collections = negatives.some((n) =>
+    /collection|charge/i.test(n.type),
+  );
+  const accountMentions = (reportText.match(/\baccount\b/gi) || []).length;
+  const thinFile =
+    accountMentions > 0 && accountMentions < 4 && util.length < 2;
+
+  let delta = 25;
+  if (highUtil) delta += utilPct > 80 ? 18 : 12;
+  if (recentLates) delta += 20;
+  if (collections) delta += 28;
+  if (thinFile) delta += 15;
+  if (!highUtil && !recentLates && !collections && !thinFile) delta = 18;
+  return Math.min(55, Math.max(15, delta));
+}
+
+function nextTierGoal(mid: number): number {
+  if (mid < 580) return 580;
+  if (mid < 670) return 670;
+  if (mid < 740) return 740;
+  if (mid < 800) return 800;
+  return Math.min(850, mid + 20);
+}
+
+function autoTier(score: number): { tier: string; label: string } {
+  if (score >= 720) return { tier: "Tier 1", label: "best rates" };
+  if (score >= 680) return { tier: "Tier 2", label: "competitive rates" };
+  if (score >= 620)
+    return { tier: "Tier 3", label: "standard/subprime border" };
+  return { tier: "Subprime", label: "higher-cost financing" };
+}
+
+function estimateAccountAgeYears(text: string): number {
+  const m = text.match(/(\d{1,2})\s*(?:yrs?|years)\s*(?:old|history|age)?/i);
+  if (m) return Number(m[1]);
+  if (/opened\s+\d{2}\/\d{2}\/(19|20)\d{2}/i.test(text)) return 5;
+  return 3;
+}
+
+function countOpenRevolving(util: AnalystUtilRow[], text: string): number {
+  if (util.length > 0) return util.length;
+  const cards = (text.match(/revolving|credit card|bank card/gi) || []).length;
+  return Math.min(5, Math.floor(cards / 2));
+}
+
+function hasInstallment(text: string): boolean {
+  return /installment|auto loan|student|mortgage|personal loan/i.test(text);
+}
+
+function hasAuto(text: string): boolean {
+  return /auto loan|vehicle|car loan|automobile/i.test(text);
+}
+
+function hasMortgage(text: string): boolean {
+  return /mortgage|home equity|heloc/i.test(text);
+}
+
+function hasBusinessLine(text: string): boolean {
+  return /business (credit|line|card)|sba|d&b|dun/i.test(text);
+}
+
+function localizeDisputeBasis(basis: string, lang: AnalystLang): string {
+  if (lang !== "Spanish") return basis;
+  return basis
+    .replace(
+      "FCRA accuracy review — verify reporting and dispute unsupported items.",
+      "Revisión de exactitud FCRA — verificar el reporte y disputar ítems no respaldados.",
+    )
+    .replace(
+      "Hard inquiry — verify permissible purpose under FCRA; dispute unauthorized inquiries.",
+      "Consulta dura — verificar propósito permisible bajo FCRA; disputar consultas no autorizadas.",
+    )
+    .replace(
+      "Personal information error — request correction of inaccurate consumer data (FCRA).",
+      "Error de información personal — solicitar corrección de datos inexactos (FCRA).",
+    )
+    .replace(
+      "Active 90+ delinquency — high-impact; dispute inaccurate status/dates with all reporting bureaus.",
+      "Morosidad activa 90+ — alto impacto; disputar estado/fechas inexactas con las 3 agencias.",
+    )
+    .replace(
+      "Charge-off not consistent across all 3 bureaus — prioritize metro inconsistency dispute (FCRA).",
+      "Cargo fallido inconsistente entre las 3 agencias — priorizar disputa por inconsistencia (FCRA).",
+    )
+    .replace(
+      "Charge-off on file — dispute inaccurate balance, status, or dates; request method of verification.",
+      "Cargo fallido en el archivo — disputar saldo, estado o fechas; solicitar método de verificación.",
+    )
+    .replace(
+      "Small collection (<$500) — dispute validation under FDCPA/FCRA; verify original creditor & amount.",
+      "Cobro pequeño (<$500) — disputar validación bajo FDCPA/FCRA; verificar acreedor original y monto.",
+    )
+    .replace(
+      "Collection account — demand validation (FDCPA) and dispute inaccurate reporting (FCRA).",
+      "Cuenta en cobro — exigir validación (FDCPA) y disputar reporte inexacto (FCRA).",
+    )
+    .replace(
+      "Recent late payment — dispute incorrect late marks; verify payment history dates.",
+      "Pago atrasado reciente — disputar marcas incorrectas; verificar fechas del historial.",
+    )
+    .replace(
+      "Public-record / severe derogatory — verify court data accuracy and reporting period (FCRA).",
+      "Registro público / negativo severo — verificar exactitud judicial y período de reporte (FCRA).",
+    );
+}
+
+function buildNegativeHtml(items: RankedNeg[]): string {
+  return items
+    .map(
+      (n) =>
+        `<tr><td style="padding:8px;border-bottom:1px solid ${OFG_COLORS.border};"><strong>${escapeHtml(n.account)}</strong></td><td style="padding:8px;border-bottom:1px solid ${OFG_COLORS.border};">${escapeHtml(n.type)}</td><td style="padding:8px;border-bottom:1px solid ${OFG_COLORS.border};text-align:center;">${escapeHtml(n.bureaus)}</td><td style="padding:8px;border-bottom:1px solid ${OFG_COLORS.border};text-align:center;color:${priorityColor(n.priority)};font-weight:bold;">${n.priority}</td><td style="padding:8px;border-bottom:1px solid ${OFG_COLORS.border};font-size:12px;">${escapeHtml(n.dispute_basis)}</td></tr>`,
+    )
+    .join("");
+}
+
+function buildUtilHtml(rows: AnalystUtilRow[]): string {
+  return rows
+    .map(
+      (u) =>
+        `<tr><td style="padding:8px;border-bottom:1px solid ${OFG_COLORS.border};"><strong>${escapeHtml(u.account)}</strong></td><td style="padding:8px;border-bottom:1px solid ${OFG_COLORS.border};">${money(u.limit)}</td><td style="padding:8px;border-bottom:1px solid ${OFG_COLORS.border};">${money(u.balance)}</td><td style="padding:8px;border-bottom:1px solid ${OFG_COLORS.border};color:${utilColor(u.pctUsed)};font-weight:bold;">${u.pctUsed}%</td><td style="padding:8px;border-bottom:1px solid ${OFG_COLORS.border};">${money(u.payTo30)}</td><td style="padding:8px;border-bottom:1px solid ${OFG_COLORS.border};">${money(u.payTo10)}</td></tr>`,
+    )
+    .join("");
+}
+
+function buildActionPlanHtml(
+  actions: Array<{ time: string; action: string; reason: string }>,
+): string {
+  return actions
+    .map(
+      (a) =>
+        `<tr><td style="padding:10px;border-bottom:1px solid ${OFG_COLORS.border};font-weight:bold;white-space:nowrap;background:${OFG_COLORS.navy};color:${OFG_COLORS.gold};">${escapeHtml(a.time)}</td><td style="padding:10px;border-bottom:1px solid ${OFG_COLORS.border};font-weight:bold;color:${OFG_COLORS.foreground};">${escapeHtml(a.action)}</td><td style="padding:10px;border-bottom:1px solid ${OFG_COLORS.border};color:${OFG_COLORS.muted};font-size:13px;">${escapeHtml(a.reason)}</td></tr>`,
+    )
+    .join("");
+}
+
+function lendingConversion(
+  kind: GoalKind,
+  scores: AnalystScores,
+  mid: number | null,
+  delta: number,
+  t: TFn,
+): {
+  fha_status: string;
+  goal_score: number;
+  goal_description: string;
+  mortgage_tu: number | null;
+  mortgage_ex: number | null;
+  mortgage_eq: number | null;
+  lendingMid: number | null;
+} {
+  const convert = (s: number | null, bump: number) =>
+    s == null ? null : clampScore(s - (delta + bump));
+
+  if (kind === "fha" || kind === "conventional" || kind === "jumbo") {
+    const mortgage_tu = convert(scores.transunion, 5); // ~FICO 4
+    const mortgage_ex = convert(scores.experian, 0); // ~FICO 2
+    const mortgage_eq = convert(scores.equifax, 8); // ~FICO 5
+    const lendingMid = computeMiddleScore({
+      transunion: mortgage_tu,
+      experian: mortgage_ex,
+      equifax: mortgage_eq,
+    });
+    const m = lendingMid ?? mid ?? 0;
+
+    if (kind === "fha") {
+      let status: string;
+      if (m >= 580)
+        status = t(
+          "FHA Eligible (3.5% down path) — focus on rate optimization",
+          "Elegible FHA (enganche 3.5%) — enfocarse en optimizar tasa",
+        );
+      else if (m >= 500)
+        status = t(
+          "FHA possible with 10% down (500–579) — strengthen mid score toward 580+",
+          "FHA posible con 10% de enganche (500–579) — fortalecer puntaje medio hacia 580+",
+        );
+      else
+        status = t(
+          "Below typical FHA thresholds — prioritize score repair before application",
+          "Por debajo de umbrales FHA típicos — priorizar reparación antes de aplicar",
+        );
+      return {
+        fha_status: status,
+        goal_score: Math.max(620, Math.min(680, nextTierGoal(m))),
+        goal_description: t(
+          "Target mortgage mid score typically 620–680 for stronger FHA pricing",
+          "Meta de puntaje hipotecario medio típicamente 620–680 para mejor precio FHA",
+        ),
+        mortgage_tu,
+        mortgage_ex,
+        mortgage_eq,
+        lendingMid,
+      };
+    }
+
+    if (kind === "conventional") {
+      const ok = m >= 620;
+      return {
+        fha_status: t(
+          `Conventional Loan Eligibility: ${ok ? "Eligible at minimum — ideal 740+" : "Below 620 minimum — repair needed"}`,
+          `Elegibilidad Hipoteca Convencional: ${ok ? "Elegible al mínimo — ideal 740+" : "Bajo el mínimo 620 — se necesita reparación"}`,
+        ),
+        goal_score: Math.max(680, Math.min(740, nextTierGoal(Math.max(m, 620)))),
+        goal_description: t(
+          "Conventional programs typically need 620+; best pricing near 740+",
+          "Programas convencionales suelen requerir 620+; mejor precio cerca de 740+",
+        ),
+        mortgage_tu,
+        mortgage_ex,
+        mortgage_eq,
+        lendingMid,
+      };
+    }
+
+    // jumbo
+    const ok = m >= 700;
+    return {
+      fha_status: t(
+        `Jumbo Loan Eligibility: ${ok ? "Meets common 700+ floor — ideal 740+" : "Below typical 700 Jumbo floor"}`,
+        `Elegibilidad Préstamo Jumbo: ${ok ? "Cumple piso común 700+ — ideal 740+" : "Bajo el piso típico Jumbo de 700"}`,
+      ),
+      goal_score: Math.max(720, Math.min(760, nextTierGoal(Math.max(m, 700)))),
+      goal_description: t(
+        "Jumbo underwriting commonly looks for 700+, with 740+ preferred",
+        "Suscripción Jumbo suele buscar 700+, con preferencia 740+",
+      ),
+      mortgage_tu,
+      mortgage_ex,
+      mortgage_eq,
+      lendingMid,
+    };
+  }
+
+  if (kind === "auto") {
+    const autoDelta = Math.min(30, Math.max(10, Math.round(delta * 0.55)));
+    const mortgage_tu =
+      scores.transunion == null
+        ? null
+        : clampScore(scores.transunion - autoDelta + 2);
+    const mortgage_ex =
+      scores.experian == null
+        ? null
+        : clampScore(scores.experian - autoDelta);
+    const mortgage_eq =
+      scores.equifax == null
+        ? null
+        : clampScore(scores.equifax - autoDelta - 2);
+    const lendingMid = computeMiddleScore({
+      transunion: mortgage_tu,
+      experian: mortgage_ex,
+      equifax: mortgage_eq,
+    });
+    const m = lendingMid ?? mid ?? 0;
+    const tier = autoTier(m);
+    return {
+      fha_status: t(
+        `Auto Financing Tier: ${tier.tier} — ${tier.label}`,
+        `Nivel Financiamiento Auto: ${tier.tier} — ${tier.label}`,
+      ),
+      goal_score: m < 660 ? 660 : m < 720 ? 720 : Math.min(760, m + 20),
+      goal_description: t(
+        "Auto lending scores often differ 10–30 pts from FICO 8; Tier 1 starts at 720+",
+        "Puntajes auto suelen diferir 10–30 pts del FICO 8; Tier 1 inicia en 720+",
+      ),
+      mortgage_tu,
+      mortgage_ex,
+      mortgage_eq,
+      lendingMid,
+    };
+  }
+
+  if (kind === "business") {
+    const m = mid ?? 0;
+    let status: string;
+    if (m >= 680)
+      status = t(
+        "Business Funding Eligibility: Strong for SBA / lines of credit",
+        "Elegibilidad Financiamiento Empresarial: Fuerte para SBA / líneas de crédito",
+      );
+    else if (m >= 650)
+      status = t(
+        "Business Funding Eligibility: Possible for some SBA programs; strengthen toward 680+",
+        "Elegibilidad Financiamiento Empresarial: Posible en algunos programas SBA; fortalecer hacia 680+",
+      );
+    else if (m >= 600)
+      status = t(
+        "Business Funding Eligibility: Some term loans possible; SBA/LOC prefer 680+",
+        "Elegibilidad Financiamiento Empresarial: Algunos préstamos a plazo posibles; SBA/LOC prefieren 680+",
+      );
+    else
+      status = t(
+        "Business Funding Eligibility: Below common lender floors — prioritize personal FICO 8 repair",
+        "Elegibilidad Financiamiento Empresarial: Bajo pisos comunes — priorizar reparación de FICO 8 personal",
+      );
+    return {
+      fha_status: status,
+      goal_score: Math.max(680, Math.min(720, nextTierGoal(m || 600))),
+      goal_description: t(
+        "Most business lenders use personal FICO 8 or SBSS; 680+ preferred",
+        "La mayoría de prestamistas usan FICO 8 personal o SBSS; se prefiere 680+",
+      ),
+      mortgage_tu: scores.transunion,
+      mortgage_ex: scores.experian,
+      mortgage_eq: scores.equifax,
+      lendingMid: mid,
+    };
+  }
+
+  // general
+  const m = mid ?? 0;
+  const band = scoreBandLabel(m) || "FAIR";
+  return {
+    fha_status: t(
+      `General Credit Health: ${band}`,
+      `Salud Crediticia General: ${band}`,
+    ),
+    goal_score: nextTierGoal(m || 580),
+    goal_description: t(
+      "Focus on overall credit health and the next score tier",
+      "Enfocarse en la salud crediticia general y el siguiente nivel de puntaje",
+    ),
+    mortgage_tu: scores.transunion,
+    mortgage_ex: scores.experian,
+    mortgage_eq: scores.equifax,
+    lendingMid: mid,
+  };
+}
+
+function timelineLabel(kind: GoalKind, t: TFn): string {
+  if (kind === "auto")
+    return t("Auto lending score progression", "Progresión puntaje auto");
+  if (kind === "business")
+    return t(
+      "Business lending score progression",
+      "Progresión puntaje financiamiento empresarial",
+    );
+  if (kind === "general")
+    return t("Credit score progression", "Progresión del puntaje de crédito");
+  return t("Mortgage mid score progression", "Progresión puntaje hipotecario medio");
+}
+
+function buildFileStrength(
+  kind: GoalKind,
+  util: AnalystUtilRow[],
+  text: string,
+  ranked: RankedNeg[],
+  scores: AnalystScores,
+  t: TFn,
+): {
+  labels: [string, string, string, string, string];
+  values: [string, string, string, string, string];
+  total: number;
+  rating: string;
+  tradelineNeeded: boolean;
+  tradelineRec: string;
+} {
+  const openRev = countOpenRevolving(util, text);
+  let fs1 = 0;
+  let n1 = "";
+  if (openRev >= 3) {
+    fs1 = 20;
+    n1 = t("3+ open bank cards / low util", "3+ tarjetas abiertas / util baja");
+  } else if (openRev >= 1) {
+    fs1 = 10;
+    n1 = t("1–2 open revolving", "1–2 revolving abiertas");
+  } else {
+    fs1 = 0;
+    n1 = t("no open bank revolving", "sin revolving bancario abierto");
+  }
+
+  const types =
+    (util.length > 0 || /credit card|revolving/i.test(text) ? 1 : 0) +
+    (/installment|student|personal loan/i.test(text) ? 1 : 0) +
+    (hasAuto(text) ? 1 : 0) +
+    (hasMortgage(text) ? 1 : 0);
+  let fs2 = 10;
+  let n2 = t("1 account type", "1 tipo de cuenta");
+  if (types >= 3) {
+    fs2 = 20;
+    n2 = t("revolving + installment + auto", "revolving + installment + auto");
+  } else if (types === 2) {
+    fs2 = 15;
+    n2 = t("2 account types", "2 tipos de cuenta");
+  }
+
+  let label3 = "";
+  let fs3 = 0;
+  let n3 = "";
+  if (kind === "fha" || kind === "conventional" || kind === "jumbo") {
+    label3 = t("Mortgage History", "Historial Hipotecario");
+    if (hasMortgage(text)) {
+      fs3 = 20;
+      n3 = t("active mortgage on file", "hipoteca activa en archivo");
+    } else {
+      fs3 = 0;
+      n3 = t("no mortgage (expected for new buyers)", "sin hipoteca (esperado en compradores nuevos)");
+    }
+  } else if (kind === "auto") {
+    label3 = t("Auto Loan History", "Historial de Auto");
+    if (/paid as agreed|never late/i.test(text) && hasAuto(text)) {
+      fs3 = 20;
+      n3 = t("prior auto loan paid on time", "auto previo pagado a tiempo");
+    } else if (hasAuto(text)) {
+      fs3 = 10;
+      n3 = t("current auto loan", "auto actual");
+    } else {
+      fs3 = 0;
+      n3 = t("no auto history", "sin historial de auto");
+    }
+  } else if (kind === "business") {
+    label3 = t("Business Credit Lines", "Líneas de Crédito Empresarial");
+    if (hasBusinessLine(text)) {
+      fs3 = 20;
+      n3 = t("business credit line on file", "línea empresarial en archivo");
+    } else if (util.length > 0 || /credit card/i.test(text)) {
+      fs3 = 10;
+      n3 = t("personal lines only", "solo líneas personales");
+    } else {
+      fs3 = 0;
+      n3 = t("none", "ninguna");
+    }
+  } else {
+    label3 = t("Account Diversity", "Diversidad de Cuentas");
+    const div =
+      (hasMortgage(text) ? 1 : 0) +
+      (hasAuto(text) ? 1 : 0) +
+      (util.length > 0 || /credit card/i.test(text) ? 1 : 0);
+    if (div >= 3) {
+      fs3 = 20;
+      n3 = t("mortgage + auto + cards", "hipoteca + auto + tarjetas");
+    } else if (div === 2) {
+      fs3 = 15;
+      n3 = t("2 types", "2 tipos");
+    } else if (div === 1) {
+      fs3 = 10;
+      n3 = t("1 type", "1 tipo");
+    } else {
+      fs3 = 5;
+      n3 = t("thin file", "archivo delgado");
+    }
+  }
+
+  const age = estimateAccountAgeYears(text);
+  let fs4 = 5;
+  let n4 = t("under 2 years", "menos de 2 años");
+  if (age >= 7) {
+    fs4 = 20;
+    n4 = t("7+ years", "7+ años");
+  } else if (age >= 3) {
+    fs4 = 12;
+    n4 = t("3–6 years", "3–6 años");
+  }
+
+  const remain = Math.min(ranked.length, 5);
+  let fs5 = 20;
+  let n5 = t("none expected after repair", "ninguno esperado tras reparación");
+  if (remain >= 3) {
+    fs5 = 5;
+    n5 = t("3+ may remain", "3+ pueden permanecer");
+  } else if (remain >= 1) {
+    fs5 = 10;
+    n5 = t("1–2 may remain", "1–2 pueden permanecer");
+  }
+
+  const total = fs1 + fs2 + fs3 + fs4 + fs5;
+  let rating = "WEAK";
+  if (total >= 80) rating = "STRONG";
+  else if (total >= 60) rating = "GOOD";
+  else if (total >= 40) rating = "MODERATE";
+
+  const exNull = scores.experian == null;
+  const tradelineNeeded =
+    openRev === 0 ||
+    exNull ||
+    openRev + (hasInstallment(text) ? 1 : 0) < 2 ||
+    age < 2 ||
+    (text.match(/\baccount\b/gi) || []).length < 4;
+
+  const tradelineRec = tradelineNeeded
+    ? t(
+        "Authorized-user / seasoned tradeline support may help deepen thin areas of the file after disputes begin.",
+        "Una tradeline autorizada / sazonada puede ayudar a fortalecer áreas delgadas del archivo tras iniciar disputas.",
+      )
+    : t(
+        "File depth looks adequate — prioritize disputes and utilization before adding tradelines.",
+        "La profundidad del archivo parece adecuada — priorizar disputas y utilización antes de agregar tradelines.",
+      );
+
+  return {
+    labels: [
+      t(
+        "Open Revolving Accounts (3+ needed)",
+        "Cuentas Revolving Abiertas (se necesitan 3+)",
+      ),
+      t("Credit Mix", "Mezcla de Crédito"),
+      label3,
+      t("Account Age", "Antigüedad de Cuentas"),
+      t(
+        "Negative Items Post-Repair",
+        "Ítems Negativos Post-Reparación",
+      ),
+    ],
+    values: [
+      fsFormat(fs1, 20, n1),
+      fsFormat(fs2, 20, n2),
+      fsFormat(fs3, 20, n3),
+      fsFormat(fs4, 20, n4),
+      fsFormat(fs5, 20, n5),
+    ],
+    total,
+    rating,
+    tradelineNeeded,
+    tradelineRec,
+  };
+}
+
+function bullet(items: string[]): string {
+  return items.map((i) => `★ ${i}`).join("\n");
+}
+
+export function runCreditAnalysisAlgorithm(
+  input: CreditAnalysisAlgorithmInput,
+): CreditAnalysisAnalystFlat {
+  const lang = resolveTextLanguage(input.language, input.lastName);
+  const t = makeT(lang);
+  const goalRaw =
+    (input.clientGoal || "").trim() ||
+    t("General Improvement", "Mejora General");
+  const goalKind = classifyGoalKind(input.clientGoal);
+  const scores = input.scores;
+  const mid = computeMiddleScore(scores);
+  const util =
+    input.utilization ??
+    extractUtilizationFromText(input.reportText || "");
+  const ranked = [...input.negatives.map(rankNegativeItem)].sort(
+    (a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority],
+  );
+  for (const n of ranked) {
+    n.dispute_basis = localizeDisputeBasis(n.dispute_basis, lang);
+  }
+
+  const delta = adjustmentFactors(util, ranked, input.reportText || "");
+  const lending = lendingConversion(goalKind, scores, mid, delta, t);
+  const lendingToday = lending.lendingMid ?? mid;
+
+  const totalLimit = util.reduce((s, u) => s + u.limit, 0);
+  const totalBal = util.reduce((s, u) => s + u.balance, 0);
+  const totalPct =
+    totalLimit > 0 ? Math.round((totalBal / totalLimit) * 100) : 0;
+  const topUtil = [...util].sort((a, b) => b.pctUsed - a.pctUsed).slice(0, 3);
+
+  const goalScore = lending.goal_score;
+  const today = lendingToday;
+  const gapToGoal =
+    today != null ? Math.max(0, goalScore - today) : goalScore;
+  const score_30 =
+    today == null
+      ? null
+      : clampScore(today + Math.min(25, Math.round(gapToGoal * 0.2)));
+  const score_60 =
+    today == null
+      ? null
+      : clampScore(today + Math.min(45, Math.round(gapToGoal * 0.45)));
+  const score_90 =
+    today == null
+      ? null
+      : clampScore(today + Math.min(70, Math.round(gapToGoal * 0.7)));
+  const score_target =
+    today == null ? goalScore : clampScore(Math.min(goalScore, score_90! + 15));
+
+  const top5 = ranked.slice(0, 5);
+  const negSlots = [0, 1, 2, 3, 4].map((i) => top5[i] || null);
+
+  const utilSlots = [0, 1, 2].map((i) => topUtil[i] || null);
+
+  const fs = buildFileStrength(
+    goalKind,
+    util,
+    input.reportText || "",
+    ranked,
+    scores,
+    t,
+  );
+
+  const topNames = top5.map((n) => n.account).filter(Boolean);
+  const round1 = bullet(
+    [
+      topNames[0]
+        ? t(
+            `Dispute ${topNames[0]} (${top5[0]?.priority}) with all reporting bureaus`,
+            `Disputar ${topNames[0]} (${top5[0]?.priority}) con todas las agencias`,
+          )
+        : t(
+            "Audit personal info & freeze unauthorized inquiries",
+            "Auditar info personal y congelar consultas no autorizadas",
+          ),
+      topNames[1]
+        ? t(
+            `Package documentation for ${topNames[1]}`,
+            `Preparar documentación para ${topNames[1]}`,
+          )
+        : t(
+            "Pull method-of-verification requests for top derogatories",
+            "Solicitar método de verificación de los principales negativos",
+          ),
+      t(
+        "Keep all open accounts current — no new late marks",
+        "Mantener todas las cuentas al corriente — sin nuevos atrasos",
+      ),
+    ].slice(0, 4),
+  );
+
+  const round2 = bullet([
+    t(
+      "Follow up Round 1 disputes; escalate inconsistent bureau responses",
+      "Seguimiento de disputas Ronda 1; escalar respuestas inconsistentes",
+    ),
+    topNames[2]
+      ? t(
+          `Second-wave dispute on ${topNames[2]}`,
+          `Segunda ola de disputa sobre ${topNames[2]}`,
+        )
+      : t(
+          "Re-dispute remaining HIGH items with fresh evidence",
+          "Redisputar ítems HIGH restantes con evidencia nueva",
+        ),
+    totalPct > 30
+      ? t(
+          "Re-check revolving utilization after paydown progress",
+          "Revisar utilización revolving tras avances de pago",
+        )
+      : t(
+          "Protect positive accounts — do not close oldest cards",
+          "Proteger cuentas positivas — no cerrar las tarjetas más antiguas",
+        ),
+  ]);
+
+  const round3 = bullet([
+    t(
+      "Final challenge on stubborn negatives still reporting",
+      "Desafío final a negativos persistentes que siguen reportando",
+    ),
+    t(
+      "Confirm deletions/updates across TU, EX, and EQ",
+      "Confirmar eliminaciones/actualizaciones en TU, EX y EQ",
+    ),
+    fs.tradelineNeeded
+      ? t(
+          "Evaluate seasoned tradeline if file still thin for goal",
+          "Evaluar tradeline sazonada si el archivo sigue delgado para la meta",
+        )
+      : t(
+          "Lock in utilization under 10–30% before funding applications",
+          "Fijar utilización bajo 10–30% antes de solicitudes de financiamiento",
+        ),
+  ]);
+
+  const actions = [
+    {
+      time: t("WEEK 1", "SEMANA 1"),
+      action: t(
+        "Complete credit analysis review & dispute intake",
+        "Completar revisión del análisis e ingreso de disputas",
+      ),
+      reason: t(
+        "Establish accurate baseline and priority queue",
+        "Establecer línea base precisa y cola de prioridades",
+      ),
+    },
+    {
+      time: t("WEEK 1–2", "SEMANA 1–2"),
+      action: t(
+        "File Round 1 disputes on CRITICAL/HIGH items",
+        "Presentar disputas Ronda 1 en ítems CRITICAL/HIGH",
+      ),
+      reason: t(
+        "Highest-impact negatives move first",
+        "Los negativos de mayor impacto se atienden primero",
+      ),
+    },
+    {
+      time: t("MONTH 1", "MES 1"),
+      action:
+        totalPct > 30
+          ? t(
+              "Lower revolving utilization toward 30%",
+              "Bajar utilización revolving hacia 30%",
+            )
+          : t(
+              "Hold utilization at or under 30%",
+              "Mantener utilización en o bajo 30%",
+            ),
+      reason: t(
+        "Utilization is a fast-moving FICO lever",
+        "La utilización es una palanca FICO de movimiento rápido",
+      ),
+    },
+    {
+      time: t("MONTH 2", "MES 2"),
+      action: t(
+        "Round 2 follow-ups + bureau consistency checks",
+        "Seguimientos Ronda 2 + chequeos de consistencia entre agencias",
+      ),
+      reason: t(
+        "Catch metro 2 mismatches and incomplete deletions",
+        "Detectar inconsistencias metro 2 y eliminaciones incompletas",
+      ),
+    },
+    {
+      time: t("MONTH 2–3", "MES 2–3"),
+      action: t(
+        "Round 3 + goal-specific readiness check",
+        "Ronda 3 + revisión de preparación según la meta",
+      ),
+      reason: lending.goal_description,
+    },
+    {
+      time: t("MONTH 3+", "MES 3+"),
+      action: fs.tradelineNeeded
+        ? t(
+            "Consider file-strength options (tradeline / mix)",
+            "Considerar opciones de fortaleza (tradeline / mezcla)",
+          )
+        : t(
+            "Re-score & prepare lending application package",
+            "Re-puntuar y preparar paquete de solicitud de financiamiento",
+          ),
+      reason: t(
+        "Align timing with goal score and lender guidelines",
+        "Alinear el momento con el puntaje meta y guías del prestamista",
+      ),
+    },
+  ];
+
+  const positives =
+    input.positiveAccounts && input.positiveAccounts.length
+      ? input.positiveAccounts.slice(0, 5).join("; ")
+      : t(
+          "Keep oldest revolving accounts open and paid as agreed.",
+          "Mantener abiertas las revolving más antiguas y pagadas según acuerdo.",
+        );
+
+  const rep =
+    (input.repName || "").trim() ||
+    t("Your Optimum Advisor", "Tu Asesor Optimum");
+  const premium =
+    "https://www.optimum-financial-group.com/premium-plan-payment";
+
+  let line1: string;
+  let line2: string;
+  if (goalKind === "auto") {
+    line1 = t(
+      `Hi ${input.firstName}, your estimated auto lending mid score is ${lendingToday ?? "—"}.`,
+      `Hola ${input.firstName}, tu puntaje medio estimado de auto es ${lendingToday ?? "—"}.`,
+    );
+    line2 = lending.fha_status;
+  } else if (goalKind === "business") {
+    line1 = t(
+      `Hi ${input.firstName}, your business lending score (personal FICO 8 mid) is ${lendingToday ?? "—"}.`,
+      `Hola ${input.firstName}, tu puntaje de financiamiento empresarial (FICO 8 medio) es ${lendingToday ?? "—"}.`,
+    );
+    line2 = lending.fha_status;
+  } else if (goalKind === "general") {
+    line1 = t(
+      `Hi ${input.firstName}, your current mid score is ${mid ?? "—"}.`,
+      `Hola ${input.firstName}, tu puntaje medio actual es ${mid ?? "—"}.`,
+    );
+    line2 = t(
+      `There's clear room to climb toward ${goalScore} with a focused dispute plan.`,
+      `Hay un claro margen para subir hacia ${goalScore} con un plan de disputas enfocado.`,
+    );
+  } else {
+    line1 = t(
+      `Hi ${input.firstName}, your estimated mortgage mid score is ${lendingToday ?? "—"}.`,
+      `Hola ${input.firstName}, tu puntaje hipotecario medio estimado es ${lendingToday ?? "—"}.`,
+    );
+    line2 = lending.fha_status;
+  }
+  const line3 = t(
+    `When you're ready, start here: ${premium}`,
+    `Cuando estés listo, comienza aquí: ${premium}`,
+  );
+  const client_text_message = `${line1} ${line2}\n${line3}\n- ${rep} | Optimum Financial Group`;
+
+  const utilNote =
+    totalPct > 50
+      ? t(
+          "Utilization is elevated — paying revolving balances down is one of the fastest score levers.",
+          "La utilización está elevada — bajar saldos revolving es una de las palancas más rápidas.",
+        )
+      : totalPct > 30
+        ? t(
+            "Utilization is above the ideal 30% band on one or more cards.",
+            "La utilización está por encima del rango ideal del 30% en una o más tarjetas.",
+          )
+        : t(
+            "Revolving utilization looks manageable — protect it while disputes run.",
+            "La utilización revolving se ve manejable — protégela mientras corren las disputas.",
+          );
+
+  const gap = (s: number | null) =>
+    s == null || goalScore == null ? null : Math.max(0, goalScore - s);
+
+  const out: CreditAnalysisAnalystFlat = {
+    client_name: input.clientName,
+    analysis_goal: goalRaw,
+    report_date: input.reportDate || new Date().toISOString().slice(0, 10),
+    referral_name: "Optimum Financial Group",
+    referral_company: "Optimum Financial Group",
+
+    score_transunion: scores.transunion,
+    score_experian: scores.experian,
+    score_equifax: scores.equifax,
+    score_tu_label: scoreBandLabel(scores.transunion),
+    score_ex_label: scoreBandLabel(scores.experian),
+    score_eq_label: scoreBandLabel(scores.equifax),
+    middle_score: mid,
+    fha_status: lending.fha_status,
+    goal_score: goalScore,
+    goal_description: lending.goal_description,
+    gap_tu: gap(lending.mortgage_tu ?? scores.transunion),
+    gap_ex: gap(lending.mortgage_ex ?? scores.experian),
+    gap_eq: gap(lending.mortgage_eq ?? scores.equifax),
+
+    neg_1_account: negSlots[0]?.account || "",
+    neg_1_type: negSlots[0]?.type || "",
+    neg_1_bureaus: negSlots[0]?.bureaus || "",
+    neg_1_priority: negSlots[0]?.priority || "",
+    neg_1_dispute_basis: negSlots[0]?.dispute_basis || "",
+    neg_2_account: negSlots[1]?.account || "",
+    neg_2_type: negSlots[1]?.type || "",
+    neg_2_bureaus: negSlots[1]?.bureaus || "",
+    neg_2_priority: negSlots[1]?.priority || "",
+    neg_2_dispute_basis: negSlots[1]?.dispute_basis || "",
+    neg_3_account: negSlots[2]?.account || "",
+    neg_3_type: negSlots[2]?.type || "",
+    neg_3_bureaus: negSlots[2]?.bureaus || "",
+    neg_3_priority: negSlots[2]?.priority || "",
+    neg_3_dispute_basis: negSlots[2]?.dispute_basis || "",
+    neg_4_account: negSlots[3]?.account || "",
+    neg_4_type: negSlots[3]?.type || "",
+    neg_4_bureaus: negSlots[3]?.bureaus || "",
+    neg_4_priority: negSlots[3]?.priority || "",
+    neg_4_dispute_basis: negSlots[3]?.dispute_basis || "",
+    neg_5_account: negSlots[4]?.account || "",
+    neg_5_type: negSlots[4]?.type || "",
+    neg_5_bureaus: negSlots[4]?.bureaus || "",
+    neg_5_priority: negSlots[4]?.priority || "",
+    neg_5_dispute_basis: negSlots[4]?.dispute_basis || "",
+
+    utilization_critical_note: utilNote,
+    util_1_account: utilSlots[0]?.account || "",
+    util_1_limit: utilSlots[0] ? money(utilSlots[0].limit) : "",
+    util_1_balance: utilSlots[0] ? money(utilSlots[0].balance) : "",
+    util_1_percent: utilSlots[0] ? `${utilSlots[0].pctUsed}%` : "",
+    util_1_pay30: utilSlots[0] ? money(utilSlots[0].payTo30) : "",
+    util_1_pay10: utilSlots[0] ? money(utilSlots[0].payTo10) : "",
+    util_2_account: utilSlots[1]?.account || "",
+    util_2_limit: utilSlots[1] ? money(utilSlots[1].limit) : "",
+    util_2_balance: utilSlots[1] ? money(utilSlots[1].balance) : "",
+    util_2_percent: utilSlots[1] ? `${utilSlots[1].pctUsed}%` : "",
+    util_2_pay30: utilSlots[1] ? money(utilSlots[1].payTo30) : "",
+    util_2_pay10: utilSlots[1] ? money(utilSlots[1].payTo10) : "",
+    util_3_account: utilSlots[2]?.account || "",
+    util_3_limit: utilSlots[2] ? money(utilSlots[2].limit) : "",
+    util_3_balance: utilSlots[2] ? money(utilSlots[2].balance) : "",
+    util_3_percent: utilSlots[2] ? `${utilSlots[2].pctUsed}%` : "",
+    util_3_pay30: utilSlots[2] ? money(utilSlots[2].payTo30) : "",
+    util_3_pay10: utilSlots[2] ? money(utilSlots[2].payTo10) : "",
+    total_revolving_limit: money(totalLimit),
+    total_revolving_balance: money(totalBal),
+    total_revolving_util: `${totalPct}%`,
+    paydown_30_instruction:
+      totalPct > 30
+        ? t(
+            `Pay down about ${money(Math.max(0, totalBal - totalLimit * 0.3))} across revolving to reach ~30% util.`,
+            `Abona aproximadamente ${money(Math.max(0, totalBal - totalLimit * 0.3))} en revolving para llegar a ~30% de util.`,
+          )
+        : t(
+            "Already near or under 30% — maintain statement balances.",
+            "Ya cerca o bajo 30% — mantén los saldos del estado de cuenta.",
+          ),
+    paydown_10_instruction:
+      totalPct > 10
+        ? t(
+            `For stronger scoring, target ~10% util (~${money(Math.max(0, totalBal - totalLimit * 0.1))} paydown).`,
+            `Para un puntaje más fuerte, apunta a ~10% util (~${money(Math.max(0, totalBal - totalLimit * 0.1))} de abono).`,
+          )
+        : t(
+            "Utilization already near the 10% sweet spot.",
+            "La utilización ya está cerca del punto ideal del 10%.",
+          ),
+
+    score_today: today,
+    score_30_days: score_30,
+    score_60_days: score_60,
+    score_90_days: score_90,
+    score_target,
+    target_timeframe: `${timelineLabel(goalKind, t)} · ${t("≈ 90 days", "≈ 90 días")}`,
+
+    round_1_actions: round1,
+    round_2_actions: round2,
+    round_3_actions: round3,
+    positive_accounts_protect: positives,
+
+    action_1_time: actions[0].time,
+    action_1_action: actions[0].action,
+    action_1_reason: actions[0].reason,
+    action_2_time: actions[1].time,
+    action_2_action: actions[1].action,
+    action_2_reason: actions[1].reason,
+    action_3_time: actions[2].time,
+    action_3_action: actions[2].action,
+    action_3_reason: actions[2].reason,
+    action_4_time: actions[3].time,
+    action_4_action: actions[3].action,
+    action_4_reason: actions[3].reason,
+    action_5_time: actions[4].time,
+    action_5_action: actions[4].action,
+    action_5_reason: actions[4].reason,
+    action_6_time: actions[5].time,
+    action_6_action: actions[5].action,
+    action_6_reason: actions[5].reason,
+
+    file_strength_score: fs.total,
+    file_strength_rating: fs.rating,
+    fs_label_1: fs.labels[0],
+    fs_open_revolving: fs.values[0],
+    fs_label_2: fs.labels[1],
+    fs_installment_mix: fs.values[1],
+    fs_label_3: fs.labels[2],
+    fs_mortgage: fs.values[2],
+    fs_label_4: fs.labels[3],
+    fs_account_age: fs.values[3],
+    fs_label_5: fs.labels[4],
+    fs_post_repair: fs.values[4],
+    tradeline_recommendation: fs.tradelineRec,
+
+    negative_items_html: buildNegativeHtml(ranked),
+    negative_count: ranked.length,
+    critical_count: ranked.filter((n) => n.priority === "CRITICAL").length,
+    high_count: ranked.filter((n) => n.priority === "HIGH").length,
+    utilization_html: buildUtilHtml(util),
+    action_plan_html: buildActionPlanHtml(actions),
+    mortgage_tu: lending.mortgage_tu,
+    mortgage_ex: lending.mortgage_ex,
+    mortgage_eq: lending.mortgage_eq,
+    tradeline_needed: fs.tradelineNeeded
+      ? t("Yes", "Sí")
+      : t("No", "No"),
+    client_text_message,
+    text_language: lang,
+  };
+
+  if (input.weakExtraction) {
+    out.utilization_critical_note = t(
+      "Limited PDF text extraction — scores and tables may be incomplete. Re-upload a text-based SmartCredit PDF for a full analysis.",
+      "Extracción limitada del PDF — puntajes y tablas pueden estar incompletos. Sube un PDF de texto de SmartCredit para un análisis completo.",
+    );
+    out.fha_status = t(
+      "Analysis limited — could not fully read the report",
+      "Análisis limitado — no se pudo leer el informe por completo",
+    );
+  }
+
+  return out;
+}
+
+/**
+ * Rich HTML narrative for email + result panel (Optimum navy/gold styling).
+ */
+export function buildAnalystAnalysisHtml(opts: {
+  firstName: string;
+  analyst: CreditAnalysisAnalystFlat;
+  weakExtraction?: boolean;
+  croaDisclosure: string;
+}): { html: string; text: string } {
+  const a = opts.analyst;
+  const isEs = a.text_language === "Spanish";
+  const C = OFG_COLORS;
+
+  if (opts.weakExtraction) {
+    const html = `
+      <h2 style="margin:0 0 12px;font-size:20px;font-weight:800;color:${C.foreground};">${isEs ? `Tu análisis de crédito, ${escapeHtml(opts.firstName)}` : `Your Credit Analysis, ${escapeHtml(opts.firstName)}`}</h2>
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">${escapeHtml(a.utilization_critical_note)}</p>
+      <p style="margin:16px 0 0;font-size:12px;line-height:1.5;color:#94a3b8;">${opts.croaDisclosure}</p>
+    `.trim();
+    return {
+      html,
+      text: [
+        isEs
+          ? `Tu análisis de crédito, ${opts.firstName}`
+          : `Your Credit Analysis, ${opts.firstName}`,
+        a.utilization_critical_note,
+        opts.croaDisclosure,
+      ].join("\n\n"),
+    };
+  }
+
+  const scoreRow = (label: string, score: number | null, band: string) =>
+    `<td style="padding:12px;text-align:center;border:1px solid ${C.border};">
+      <div style="font-size:11px;font-weight:700;letter-spacing:0.06em;color:${C.muted};text-transform:uppercase;">${label}</div>
+      <div style="font-size:28px;font-weight:800;color:${C.navy};margin:6px 0;">${score ?? "—"}</div>
+      <div style="font-size:11px;font-weight:700;color:${C.gold};">${escapeHtml(band || "—")}</div>
+    </td>`;
+
+  const html = `
+    <h2 style="margin:0 0 8px;font-size:22px;font-weight:800;color:${C.navy};">${isEs ? `Tu análisis de crédito, ${escapeHtml(opts.firstName)}` : `Your Credit Analysis, ${escapeHtml(opts.firstName)}`}</h2>
+    <p style="margin:0 0 20px;font-size:14px;color:${C.muted};">${isEs ? "Meta" : "Goal"}: <strong style="color:${C.foreground};">${escapeHtml(a.analysis_goal)}</strong></p>
+
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px;border-collapse:collapse;">
+      <tr>
+        ${scoreRow("TransUnion", a.score_transunion, a.score_tu_label)}
+        ${scoreRow("Experian", a.score_experian, a.score_ex_label)}
+        ${scoreRow("Equifax", a.score_equifax, a.score_eq_label)}
+      </tr>
+    </table>
+
+    <div style="margin:0 0 20px;padding:16px;border-radius:12px;background:${C.cardBg};border:1px solid ${C.border};">
+      <div style="font-size:12px;font-weight:700;color:${C.gold};letter-spacing:0.04em;text-transform:uppercase;margin-bottom:6px;">${isEs ? "Puntaje medio / meta" : "Mid score / goal"}</div>
+      <p style="margin:0 0 8px;font-size:15px;color:#334155;"><strong style="color:${C.navy};font-size:22px;">${a.middle_score ?? "—"}</strong>
+        → <strong style="color:${C.gold};">${a.goal_score}</strong></p>
+      <p style="margin:0;font-size:14px;color:#334155;">${escapeHtml(a.fha_status)}</p>
+      <p style="margin:8px 0 0;font-size:13px;color:${C.muted};">${escapeHtml(a.goal_description)}</p>
+    </div>
+
+    ${
+      a.negative_count > 0
+        ? `<h3 style="margin:0 0 8px;font-size:15px;font-weight:800;color:${C.navy};">${isEs ? "Ítems negativos (prioridad de disputa)" : "Negative items (dispute priority)"}</h3>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px;border-collapse:collapse;font-size:13px;">
+        <tr style="background:${C.navy};color:${C.gold};">
+          <th style="padding:8px;text-align:left;">${isEs ? "Cuenta" : "Account"}</th>
+          <th style="padding:8px;text-align:left;">${isEs ? "Tipo" : "Type"}</th>
+          <th style="padding:8px;text-align:center;">${isEs ? "Agencias" : "Bureaus"}</th>
+          <th style="padding:8px;text-align:center;">${isEs ? "Prioridad" : "Priority"}</th>
+          <th style="padding:8px;text-align:left;">${isEs ? "Base" : "Basis"}</th>
+        </tr>
+        ${a.negative_items_html}
+      </table>`
+        : `<p style="margin:0 0 20px;font-size:14px;color:${C.utilOk};font-weight:600;">${isEs ? "No detectamos ítems negativos obvios." : "No obvious negative items detected."}</p>`
+    }
+
+    ${
+      a.utilization_html
+        ? `<h3 style="margin:0 0 8px;font-size:15px;font-weight:800;color:${C.navy};">${isEs ? "Utilización revolving" : "Revolving utilization"}</h3>
+      <p style="margin:0 0 8px;font-size:13px;color:${C.muted};">${escapeHtml(a.utilization_critical_note)}</p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 8px;border-collapse:collapse;font-size:13px;">
+        <tr style="background:${C.cardBg};">
+          <th style="padding:8px;text-align:left;">${isEs ? "Cuenta" : "Account"}</th>
+          <th style="padding:8px;text-align:left;">${isEs ? "Límite" : "Limit"}</th>
+          <th style="padding:8px;text-align:left;">${isEs ? "Saldo" : "Balance"}</th>
+          <th style="padding:8px;text-align:left;">Util%</th>
+          <th style="padding:8px;text-align:left;">→30%</th>
+          <th style="padding:8px;text-align:left;">→10%</th>
+        </tr>
+        ${a.utilization_html}
+      </table>
+      <p style="margin:0 0 20px;font-size:12px;color:${C.muted};">${escapeHtml(a.total_revolving_util)} util · ${escapeHtml(a.paydown_30_instruction)}</p>`
+        : ""
+    }
+
+    <h3 style="margin:0 0 8px;font-size:15px;font-weight:800;color:${C.navy};">${isEs ? "Línea de tiempo estimada" : "Estimated timeline"}</h3>
+    <p style="margin:0 0 4px;font-size:13px;color:${C.muted};">${escapeHtml(a.target_timeframe)}</p>
+    <p style="margin:0 0 20px;font-size:14px;color:#334155;">
+      <strong>${a.score_today ?? "—"}</strong> → 30d <strong>${a.score_30_days ?? "—"}</strong> → 60d <strong>${a.score_60_days ?? "—"}</strong> → 90d <strong>${a.score_90_days ?? "—"}</strong> → ${isEs ? "meta" : "target"} <strong style="color:${C.gold};">${a.score_target ?? "—"}</strong>
+    </p>
+
+    <h3 style="margin:0 0 8px;font-size:15px;font-weight:800;color:${C.navy};">${isEs ? "Fortaleza del archivo" : "File strength"}: ${a.file_strength_score}/100 · ${escapeHtml(a.file_strength_rating)}</h3>
+    <ul style="margin:0 0 20px;padding-left:18px;font-size:13px;color:#334155;line-height:1.7;">
+      <li><strong>${escapeHtml(a.fs_label_1)}</strong> — ${escapeHtml(a.fs_open_revolving)}</li>
+      <li><strong>${escapeHtml(a.fs_label_2)}</strong> — ${escapeHtml(a.fs_installment_mix)}</li>
+      <li><strong>${escapeHtml(a.fs_label_3)}</strong> — ${escapeHtml(a.fs_mortgage)}</li>
+      <li><strong>${escapeHtml(a.fs_label_4)}</strong> — ${escapeHtml(a.fs_account_age)}</li>
+      <li><strong>${escapeHtml(a.fs_label_5)}</strong> — ${escapeHtml(a.fs_post_repair)}</li>
+    </ul>
+
+    <h3 style="margin:0 0 8px;font-size:15px;font-weight:800;color:${C.navy};">${isEs ? "Plan de acción" : "Action plan"}</h3>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px;border-collapse:collapse;font-size:13px;">
+      ${a.action_plan_html}
+    </table>
+
+    <div style="margin:0 0 16px;padding:14px;border-left:3px solid ${C.gold};background:${C.cardBg};">
+      <div style="font-size:12px;font-weight:700;color:${C.navy};margin-bottom:6px;">${isEs ? "Mensaje para el cliente" : "Client message"}</div>
+      <p style="margin:0;font-size:13px;line-height:1.6;color:#334155;white-space:pre-wrap;">${escapeHtml(a.client_text_message)}</p>
+    </div>
+
+    <p style="margin:16px 0 0;font-size:12px;line-height:1.5;color:#94a3b8;">${opts.croaDisclosure}</p>
+  `.trim();
+
+  const text = [
+    isEs
+      ? `Tu análisis de crédito, ${opts.firstName}`
+      : `Your Credit Analysis, ${opts.firstName}`,
+    `Goal: ${a.analysis_goal}`,
+    `TU ${a.score_transunion ?? "—"} (${a.score_tu_label}) · EX ${a.score_experian ?? "—"} (${a.score_ex_label}) · EQ ${a.score_equifax ?? "—"} (${a.score_eq_label})`,
+    `Mid: ${a.middle_score ?? "—"} → Goal: ${a.goal_score}`,
+    a.fha_status,
+    a.goal_description,
+    `Negatives: ${a.negative_count} (CRITICAL ${a.critical_count}, HIGH ${a.high_count})`,
+    a.neg_1_account && `${a.neg_1_priority}: ${a.neg_1_account} — ${a.neg_1_type}`,
+    a.neg_2_account && `${a.neg_2_priority}: ${a.neg_2_account} — ${a.neg_2_type}`,
+    a.neg_3_account && `${a.neg_3_priority}: ${a.neg_3_account} — ${a.neg_3_type}`,
+    `Timeline: ${a.score_today} → ${a.score_30_days} → ${a.score_60_days} → ${a.score_90_days} → ${a.score_target}`,
+    `File strength: ${a.file_strength_score}/100 ${a.file_strength_rating}`,
+    a.client_text_message,
+    opts.croaDisclosure,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  return { html, text };
+}
+
+
+// ============================================================================
+// INFO REQUEST HELPERS (inline — Vercel serverless cannot import ../shared runtime modules)
+// ============================================================================
+
+type InfoRequestValidationError = {
+  code: string;
+  message: string;
+  fieldKey?: string;
+};
+
+function isSensitiveInfoFieldType(type: string): boolean {
+  return type === "password" || type === "smart_credit_block";
+}
+
+export function canClientSubmitInfoRequest(
+  status: InfoRequestStatus | string,
+): boolean {
+  return status === "open" || status === "rejected";
+}
+
+export function isInfoRequestActionable(
+  status: InfoRequestStatus | string,
+): boolean {
+  return status === "open" || status === "rejected";
+}
+
+export function countsTowardPipelineSoftWarn(
+  status: InfoRequestStatus | string,
+): boolean {
+  return status === "open" || status === "submitted" || status === "rejected";
+}
+
+export function canAdminReviewInfoRequest(
+  status: InfoRequestStatus | string,
+): boolean {
+  return status === "submitted";
+}
+
+export function canAdminCancelInfoRequest(
+  status: InfoRequestStatus | string,
+): boolean {
+  return !["approved", "cancelled"].includes(String(status));
+}
+
+export function validateInfoRequestConsent(
+  agreedTerms: boolean,
+  agreedSms: boolean,
+): InfoRequestValidationError | null {
+  if (!agreedTerms || !agreedSms) {
+    return {
+      code: "consent_required",
+      message: "You must agree to the Terms of Service and SMS Terms",
+    };
+  }
+  return null;
+}
+
+export function parseInfoFieldsJson(raw: unknown): InfoRequestFieldDef[] {
+  if (Array.isArray(raw)) return raw as InfoRequestFieldDef[];
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? (parsed as InfoRequestFieldDef[]) : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+export function parseInfoResponseJson(
+  raw: unknown,
+): Record<string, unknown> | null {
+  if (raw == null) return null;
+  if (typeof raw === "object" && !Array.isArray(raw))
+    return raw as Record<string, unknown>;
+  if (typeof raw === "string") {
+    try {
+      return JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+export function normalizeCardLast4(value: unknown): string {
+  return String(value ?? "")
+    .replace(/\D/g, "")
+    .slice(-4);
+}
+
+export function validateSmartCreditBlock(
+  value: unknown,
+  required: boolean,
+): InfoRequestValidationError | null {
+  const block =
+    value && typeof value === "object"
+      ? (value as Record<string, unknown>)
+      : {};
+  const email = String(block.email || "").trim();
+  const password = String(block.password || "");
+  const security_question = String(block.security_question || "").trim();
+  const security_answer = String(block.security_answer || "");
+
+  if (
+    !required &&
+    !email &&
+    !password &&
+    !security_question &&
+    !security_answer
+  )
+    return null;
+
+  if (!email || !password || !security_question || !security_answer) {
+    return {
+      code: "smart_credit_incomplete",
+      message:
+        "Smart Credit email, password, and security Q&A are required",
+    };
+  }
+  if (!email.includes("@")) {
+    return {
+      code: "smart_credit_email_invalid",
+      message: "Smart Credit email looks invalid",
+    };
+  }
+  return null;
+}
+
+export function validateBillingConfirm(
+  value: unknown,
+  required: boolean,
+): InfoRequestValidationError | null {
+  const block =
+    value && typeof value === "object"
+      ? (value as Record<string, unknown>)
+      : {};
+  const last4 = normalizeCardLast4(block.card_last4);
+  const filled =
+    !!block.address_line1 ||
+    !!block.city ||
+    !!block.state ||
+    !!block.postal_code ||
+    !!last4;
+
+  if (!required && !filled) return null;
+
+  if (
+    !String(block.address_line1 || "").trim() ||
+    !String(block.city || "").trim() ||
+    !String(block.state || "").trim() ||
+    !String(block.postal_code || "").trim() ||
+    last4.length !== 4
+  ) {
+    return {
+      code: "billing_incomplete",
+      message: "Billing confirmation fields are required",
+    };
+  }
+  return null;
+}
+
+type PartitionedInfoResponses = {
+  safeResponses: Record<string, unknown>;
+  secrets: Record<string, unknown>;
+  errors: InfoRequestValidationError[];
+  requiresPaymentOpaque: boolean;
+  requiresUploadKeys: string[];
+};
+
+export function partitionInfoRequestResponses(
+  fields: InfoRequestFieldDef[],
+  responses: Record<string, unknown>,
+  opts: {
+    hasPaymentOpaque?: boolean;
+    uploadedFieldKeys?: Set<string>;
+  } = {},
+): PartitionedInfoResponses {
+  const safeResponses: Record<string, unknown> = {};
+  const secrets: Record<string, unknown> = {};
+  const errors: InfoRequestValidationError[] = [];
+  let requiresPaymentOpaque = false;
+  const requiresUploadKeys: string[] = [];
+  const uploaded = opts.uploadedFieldKeys ?? new Set<string>();
+
+  for (const field of fields) {
+    const key = String(field.key || "");
+    if (!key) {
+      errors.push({
+        code: "field_key_missing",
+        message: "Field definition is missing a key",
+      });
+      continue;
+    }
+    const type = String(field.type || "text");
+    const required = !!field.required;
+    const value = responses[key];
+
+    if (type === "upload") {
+      requiresUploadKeys.push(key);
+      if (required && !uploaded.has(key)) {
+        errors.push({
+          code: "file_required",
+          message: `File required for ${key}`,
+          fieldKey: key,
+        });
+      }
+      continue;
+    }
+
+    if (type === "payment_card") {
+      requiresPaymentOpaque = true;
+      if (required && !opts.hasPaymentOpaque) {
+        errors.push({
+          code: "card_required",
+          message: "Card details are required",
+          fieldKey: key,
+        });
+      } else if (opts.hasPaymentOpaque) {
+        safeResponses[key] = { card_updated: true };
+      }
+      continue;
+    }
+
+    if (type === "smart_credit_block") {
+      const err = validateSmartCreditBlock(value, required);
+      if (err) {
+        errors.push({ ...err, fieldKey: key });
+        continue;
+      }
+      const block =
+        value && typeof value === "object"
+          ? (value as Record<string, unknown>)
+          : {};
+      const email = String(block.email || "").trim();
+      if (email) {
+        secrets[key] = {
+          email,
+          password: String(block.password || ""),
+          security_question: String(block.security_question || "").trim(),
+          security_answer: String(block.security_answer || ""),
+        };
+        safeResponses[key] = { email, credentials_received: true };
+      }
+      continue;
+    }
+
+    if (type === "billing_confirm") {
+      const err = validateBillingConfirm(value, required);
+      if (err) {
+        errors.push({ ...err, fieldKey: key });
+        continue;
+      }
+      const block =
+        value && typeof value === "object"
+          ? (value as Record<string, unknown>)
+          : {};
+      if (
+        String(block.address_line1 || "").trim() ||
+        normalizeCardLast4(block.card_last4)
+      ) {
+        safeResponses[key] = {
+          address_line1: String(block.address_line1 || "").trim(),
+          address_line2: String(block.address_line2 || "").trim() || null,
+          city: String(block.city || "").trim(),
+          state: String(block.state || "").trim(),
+          postal_code: String(block.postal_code || "").trim(),
+          card_last4: normalizeCardLast4(block.card_last4),
+        };
+      }
+      continue;
+    }
+
+    if (type === "password" || isSensitiveInfoFieldType(type)) {
+      if (required && !String(value || "").trim()) {
+        errors.push({
+          code: "required",
+          message: `${key} is required`,
+          fieldKey: key,
+        });
+        continue;
+      }
+      if (value != null && String(value).length > 0) {
+        secrets[key] = String(value);
+        safeResponses[key] = { received: true };
+      }
+      continue;
+    }
+
+    if (required && (value == null || String(value).trim() === "")) {
+      errors.push({
+        code: "required",
+        message: `${key} is required`,
+        fieldKey: key,
+      });
+      continue;
+    }
+    if (value != null) safeResponses[key] = value;
+  }
+
+  return {
+    safeResponses,
+    secrets,
+    errors,
+    requiresPaymentOpaque,
+    requiresUploadKeys,
+  };
+}
+
+export function localizeInfoRequestCopy(
+  row: {
+    title_en: string;
+    title_es: string;
+    message_en?: string | null;
+    message_es?: string | null;
+  },
+  lang: string,
+): { title: string; message: string | null } {
+  const isEs = lang === "es";
+  return {
+    title: isEs ? row.title_es : row.title_en,
+    message: (isEs ? row.message_es : row.message_en) || null,
+  };
+}
+
+export function validateCreateInfoRequestPayload(body: {
+  title_en?: unknown;
+  title_es?: unknown;
+  fields_json?: unknown;
+}): InfoRequestValidationError | null {
+  if (
+    !String(body.title_en ?? "").trim() ||
+    !String(body.title_es ?? "").trim()
+  ) {
+    return {
+      code: "titles_required",
+      message: "title_en and title_es required",
+    };
+  }
+  if (!Array.isArray(body.fields_json) || body.fields_json.length === 0) {
+    return {
+      code: "fields_required",
+      message: "fields_json must be a non-empty array",
+    };
+  }
+  const keys = new Set<string>();
+  for (const f of body.fields_json as InfoRequestFieldDef[]) {
+    const key = String(f?.key || "").trim();
+    if (!key) {
+      return {
+        code: "field_key_missing",
+        message: "Every field must have a key",
+      };
+    }
+    if (keys.has(key)) {
+      return {
+        code: "duplicate_field_key",
+        message: `Duplicate field key: ${key}`,
+      };
+    }
+    keys.add(key);
+  }
+  return null;
+}
+
+// ============================================================================
+// FRIENDLY API / DB ERRORS (never leak raw MySQL to clients)
+// ============================================================================
+
+function isDuplicateKeyError(err: unknown): boolean {
+  const e = err as { code?: string; message?: string; errno?: number };
+  return (
+    e?.code === "ER_DUP_ENTRY" ||
+    e?.errno === 1062 ||
+    String(e?.message || "").includes("Duplicate entry")
+  );
+}
+
+function isForeignKeyError(err: unknown): boolean {
+  const e = err as { code?: string; message?: string; errno?: number };
+  return (
+    e?.code === "ER_NO_REFERENCED_ROW_2" ||
+    e?.code === "ER_NO_REFERENCED_ROW" ||
+    e?.code === "ER_ROW_IS_REFERENCED_2" ||
+    e?.errno === 1451 ||
+    e?.errno === 1452 ||
+    String(e?.message || "").toLowerCase().includes("foreign key")
+  );
+}
+
+/** Map known DB / validation errors to a safe client-facing response. */
+function mapFriendlyError(
+  err: unknown,
+  context?: { duplicateLabel?: string },
+): { status: number; error: string } | null {
+  if (!err) return null;
+  const e = err as { status?: number; message?: string; code?: string };
+  if (typeof e.status === "number" && e.status >= 400 && e.status < 600) {
+    return {
+      status: e.status,
+      error: String(e.message || "Request failed"),
+    };
+  }
+  if (isDuplicateKeyError(err)) {
+    const msg = String(e.message || "").toLowerCase();
+    if (msg.includes("email") || context?.duplicateLabel === "email") {
+      return {
+        status: 409,
+        error: "An account with this email already exists",
+      };
+    }
+    if (msg.includes("slug") || context?.duplicateLabel === "slug") {
+      return { status: 409, error: "This slug is already in use" };
+    }
+    if (msg.includes("code") || context?.duplicateLabel === "coupon") {
+      return { status: 409, error: "This code already exists" };
+    }
+    if (msg.includes("case_number")) {
+      return { status: 409, error: "Case number conflict — please retry" };
+    }
+    return {
+      status: 409,
+      error: context?.duplicateLabel
+        ? `This ${context.duplicateLabel} already exists`
+        : "This record already exists",
+    };
+  }
+  if (isForeignKeyError(err)) {
+    return {
+      status: 400,
+      error: "Related record not found or still in use",
+    };
+  }
+  return null;
+}
+
+function sendFriendlyError(
+  res: Response,
+  err: unknown,
+  context?: { duplicateLabel?: string; fallback?: string },
+): boolean {
+  const mapped = mapFriendlyError(err, context);
+  if (mapped) {
+    res.status(mapped.status).json({ error: mapped.error });
+    return true;
+  }
+  return false;
+}
+
+// ============================================================================
+// BULK CSV IMPORT — CLIENTS (inline — Vercel serverless, no runtime import
+// from ../shared; helpers here parse/validate, ../shared/bulkImport.ts only
+// has browser-side preview/report utilities)
+// ============================================================================
+
+const CLIENT_CSV_HEADERS: string[] = [
+  "first_name",
+  "last_name",
+  "email",
+  "phone",
+  "status",
+  "preferred_language",
+  "package_slug",
+  "admin_notes",
+  "address_line1",
+  "address_line2",
+  "city",
+  "state",
+  "zip",
+  "date_of_birth",
+  "external_ref",
+];
+const CLIENT_CSV_REQUIRED_HEADERS: string[] = [
+  "first_name",
+  "last_name",
+  "email",
+];
+const CLIENT_CSV_ALLOWED_STATUS: string[] = [
+  "pending_payment",
+  "onboarding",
+  "active",
+  "paused",
+  "cancelled",
+];
+const CLIENT_CSV_ALLOWED_LANGUAGE: string[] = ["en", "es"];
+const BULK_IMPORT_MAX_ROWS = 500;
+const BULK_IMPORT_MAX_FILE_BYTES = 5 * 1024 * 1024;
+const BULK_IMPORT_JOB_TTL_MS = 60 * 60 * 1000; // 1 hour
+const BULK_IMPORT_FORBIDDEN_COLUMNS: string[] = [
+  "password",
+  "password_hash",
+  "ssn",
+  "social_security",
+];
+
+/** Off by default in production unless explicitly enabled. */
+function resolveBulkCsvImportEnabled(): boolean {
+  if (process.env.BULK_CSV_IMPORT_ENABLED === "0") return false;
+  if (process.env.NODE_ENV === "production") {
+    return (
+      process.env.BULK_CSV_IMPORT_ENABLED === "1" ||
+      process.env.BULK_CSV_IMPORT_ALLOW_PRODUCTION === "1"
+    );
+  }
+  return true;
+}
+
+function sanitizeCsvCell(value: string | null | undefined): string {
+  if (value == null) return "";
+  // eslint-disable-next-line no-control-regex
+  return String(value)
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "")
+    .trim();
+}
+
+function normalizePhoneLast10(
+  phone: string | null | undefined,
+): string | null {
+  if (!phone) return null;
+  const digits = String(phone).replace(/\D/g, "");
+  if (digits.length < 10) return null;
+  return digits.slice(-10);
+}
+
+function isValidEmail(email: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function isValidDateIso(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const d = new Date(`${value}T00:00:00Z`);
+  return !isNaN(d.getTime()) && d.toISOString().slice(0, 10) === value;
+}
+
+const US_STATE_ABBR: Record<string, string> = {
+  alabama: "AL", alaska: "AK", arizona: "AZ", arkansas: "AR",
+  california: "CA", colorado: "CO", connecticut: "CT", delaware: "DE",
+  florida: "FL", georgia: "GA", hawaii: "HI", idaho: "ID", illinois: "IL",
+  indiana: "IN", iowa: "IA", kansas: "KS", kentucky: "KY", louisiana: "LA",
+  maine: "ME", maryland: "MD", massachusetts: "MA", michigan: "MI",
+  minnesota: "MN", mississippi: "MS", missouri: "MO", montana: "MT",
+  nebraska: "NE", nevada: "NV", "new hampshire": "NH", "new jersey": "NJ",
+  "new mexico": "NM", "new york": "NY", "north carolina": "NC",
+  "north dakota": "ND", ohio: "OH", oklahoma: "OK", oregon: "OR",
+  pennsylvania: "PA", "rhode island": "RI", "south carolina": "SC",
+  "south dakota": "SD", tennessee: "TN", texas: "TX", utah: "UT",
+  vermont: "VT", virginia: "VA", washington: "WA", "west virginia": "WV",
+  wisconsin: "WI", wyoming: "WY", "district of columbia": "DC",
+};
+
+/** Best-effort normalization to a 2-letter US state code; falls back to the raw input. */
+function normalizeUsState(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  if (/^[A-Za-z]{2}$/.test(raw)) return raw.toUpperCase();
+  const abbr = US_STATE_ABBR[raw.toLowerCase()];
+  return abbr || raw.slice(0, 50);
+}
+
+/** Minimal RFC4180 CSV tokenizer (handles quoted fields, escaped quotes, CRLF/LF). */
+function tokenizeCsv(text: string): string[][] {
+  const s = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = "";
+  let inQuotes = false;
+  let sawAnyField = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (s[i + 1] === '"') {
+          field += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        field += c;
+      }
+      continue;
+    }
+    if (c === '"') {
+      inQuotes = true;
+      sawAnyField = true;
+      continue;
+    }
+    if (c === ",") {
+      row.push(field);
+      field = "";
+      sawAnyField = true;
+      continue;
+    }
+    if (c === "\r") continue;
+    if (c === "\n") {
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = "";
+      sawAnyField = false;
+      continue;
+    }
+    field += c;
+    sawAnyField = true;
+  }
+  if (sawAnyField || field.length > 0 || row.length > 0) {
+    row.push(field);
+    rows.push(row);
+  }
+  return rows;
+}
+
+interface ParsedBulkCsv {
+  headers: string[];
+  rows: string[][];
+  error?: string;
+}
+
+/** Parses + validates a client-import CSV against CLIENT_CSV_HEADERS (BOM/quotes/# comment rows). */
+function parseBulkCsv(text: string): ParsedBulkCsv {
+  const allRows = tokenizeCsv(text).filter(
+    (r) => !(r.length <= 1 && (r[0] ?? "").trim() === ""),
+  );
+  const dataLines = allRows.filter((r) => !(r[0] ?? "").trim().startsWith("#"));
+  if (dataLines.length === 0) {
+    return { headers: [], rows: [], error: "CSV file is empty" };
+  }
+  const headerRow = dataLines[0].map((h) => sanitizeCsvCell(h).toLowerCase());
+  const forbidden = headerRow.filter((h) =>
+    BULK_IMPORT_FORBIDDEN_COLUMNS.includes(h),
+  );
+  if (forbidden.length > 0) {
+    return {
+      headers: headerRow,
+      rows: [],
+      error: `Forbidden column(s): ${forbidden.join(", ")}`,
+    };
+  }
+  const unknown = headerRow.filter((h) => !CLIENT_CSV_HEADERS.includes(h));
+  if (unknown.length > 0) {
+    return {
+      headers: headerRow,
+      rows: [],
+      error: `Unknown column(s): ${unknown.join(", ")}. Allowed columns: ${CLIENT_CSV_HEADERS.join(", ")}`,
+    };
+  }
+  const missingRequired = CLIENT_CSV_REQUIRED_HEADERS.filter(
+    (h) => !headerRow.includes(h),
+  );
+  if (missingRequired.length > 0) {
+    return {
+      headers: headerRow,
+      rows: [],
+      error: `Missing required column(s): ${missingRequired.join(", ")}`,
+    };
+  }
+  return { headers: headerRow, rows: dataLines.slice(1) };
+}
+
+interface OptimumClientImportRow {
+  row_number: number;
+  external_ref: string | null;
+  first_name: string;
+  last_name: string;
+  email: string;
+  phone: string | null;
+  normalized_phone: string | null;
+  client_status: string;
+  preferred_language: string;
+  package_slug: string | null;
+  package_id: number | null;
+  admin_notes: string | null;
+  address_line1: string | null;
+  address_line2: string | null;
+  city: string | null;
+  state: string | null;
+  zip: string | null;
+  date_of_birth: string | null;
+  import_status: "will_create" | "skipped" | "error";
+  message?: string;
+  conflict_client_id?: number | null;
+}
+
+interface BulkImportPreviewRow {
+  row_number: number;
+  status: "will_create" | "skipped" | "error";
+  message?: string;
+  external_ref: string | null;
+  display_name: string;
+  email: string | null;
+  phone: string | null;
+  badge: string | null;
+  conflict_entity_id: number | null;
+}
+
+/** Recomputes counts + UI preview rows from the current row states (call after any bulk mutation). */
+function rebuildOptimumClientPreview(rows: OptimumClientImportRow[]): {
+  preview_rows: BulkImportPreviewRow[];
+  row_count: number;
+  will_create_count: number;
+  skipped_count: number;
+  error_count: number;
+} {
+  const will_create_count = rows.filter(
+    (r) => r.import_status === "will_create",
+  ).length;
+  const skipped_count = rows.filter((r) => r.import_status === "skipped").length;
+  const error_count = rows.filter((r) => r.import_status === "error").length;
+  const preview_rows: BulkImportPreviewRow[] = rows.map((r) => ({
+    row_number: r.row_number,
+    status: r.import_status,
+    message: r.message,
+    external_ref: r.external_ref,
+    display_name:
+      `${r.first_name} ${r.last_name}`.trim() || r.email || `Row ${r.row_number}`,
+    email: r.email || null,
+    phone: r.phone,
+    badge: r.client_status || r.package_slug || null,
+    conflict_entity_id: r.conflict_client_id ?? null,
+  }));
+  return {
+    preview_rows,
+    row_count: rows.length,
+    will_create_count,
+    skipped_count,
+    error_count,
+  };
+}
+
+/** Field-level validation + within-file duplicate detection (no DB access). */
+function validateOptimumClientRows(
+  headers: string[],
+  dataRows: string[][],
+): { rows: OptimumClientImportRow[] } & ReturnType<
+  typeof rebuildOptimumClientPreview
+> {
+  const idx = (name: string) => headers.indexOf(name);
+  const iFirst = idx("first_name");
+  const iLast = idx("last_name");
+  const iEmail = idx("email");
+  const iPhone = idx("phone");
+  const iStatus = idx("status");
+  const iLang = idx("preferred_language");
+  const iPkg = idx("package_slug");
+  const iNotes = idx("admin_notes");
+  const iAddr1 = idx("address_line1");
+  const iAddr2 = idx("address_line2");
+  const iCity = idx("city");
+  const iState = idx("state");
+  const iZip = idx("zip");
+  const iDob = idx("date_of_birth");
+  const iRef = idx("external_ref");
+
+  const cell = (r: string[], i: number): string =>
+    i >= 0 && i < r.length ? sanitizeCsvCell(r[i]) : "";
+
+  const rows: OptimumClientImportRow[] = dataRows.map((r, arrIdx) => {
+    const rowNumber = arrIdx + 2; // header is row 1
+    const firstName = cell(r, iFirst);
+    const lastName = cell(r, iLast);
+    const email = cell(r, iEmail).toLowerCase();
+    const phone = cell(r, iPhone) || null;
+    const statusRaw = cell(r, iStatus).toLowerCase();
+    const langRaw = cell(r, iLang).toLowerCase();
+    const packageSlug = cell(r, iPkg) || null;
+    const adminNotes = cell(r, iNotes) || null;
+    const addressLine1 = cell(r, iAddr1) || null;
+    const addressLine2 = cell(r, iAddr2) || null;
+    const city = cell(r, iCity) || null;
+    const stateRaw = cell(r, iState) || null;
+    const zip = cell(r, iZip) || null;
+    const dob = cell(r, iDob) || null;
+    const externalRef = cell(r, iRef) || null;
+
+    const errors: string[] = [];
+    if (!firstName) errors.push("first_name is required");
+    if (!lastName) errors.push("last_name is required");
+    if (!email) errors.push("email is required");
+    else if (!isValidEmail(email)) errors.push("email is invalid");
+
+    let normalizedPhone: string | null = null;
+    if (phone) {
+      normalizedPhone = normalizePhoneLast10(phone);
+      if (!normalizedPhone) errors.push("phone is invalid");
+    }
+
+    let clientStatus = "pending_payment";
+    if (statusRaw) {
+      if (!CLIENT_CSV_ALLOWED_STATUS.includes(statusRaw)) {
+        errors.push(`invalid status "${statusRaw}"`);
+      } else {
+        clientStatus = statusRaw;
+      }
+    }
+
+    let preferredLanguage = "en";
+    if (langRaw) {
+      if (!CLIENT_CSV_ALLOWED_LANGUAGE.includes(langRaw)) {
+        errors.push(`invalid preferred_language "${langRaw}"`);
+      } else {
+        preferredLanguage = langRaw;
+      }
+    }
+
+    if (dob && !isValidDateIso(dob)) {
+      errors.push("date_of_birth must be YYYY-MM-DD");
+    }
+
+    return {
+      row_number: rowNumber,
+      external_ref: externalRef,
+      first_name: firstName,
+      last_name: lastName,
+      email,
+      phone,
+      normalized_phone: normalizedPhone,
+      client_status: clientStatus,
+      preferred_language: preferredLanguage,
+      package_slug: packageSlug,
+      package_id: null,
+      admin_notes: adminNotes,
+      address_line1: addressLine1,
+      address_line2: addressLine2,
+      city,
+      state: normalizeUsState(stateRaw),
+      zip,
+      date_of_birth: dob,
+      import_status: errors.length > 0 ? "error" : "will_create",
+      message: errors.length > 0 ? errors.join("; ") : undefined,
+    };
+  });
+
+  // Duplicate emails/phones within the file itself
+  const emailCount = new Map<string, number>();
+  const phoneCount = new Map<string, number>();
+  for (const row of rows) {
+    if (row.email) emailCount.set(row.email, (emailCount.get(row.email) || 0) + 1);
+    if (row.normalized_phone) {
+      phoneCount.set(
+        row.normalized_phone,
+        (phoneCount.get(row.normalized_phone) || 0) + 1,
+      );
+    }
+  }
+  for (const row of rows) {
+    if (row.import_status === "error") continue;
+    const dupEmail = !!row.email && (emailCount.get(row.email) || 0) > 1;
+    const dupPhone =
+      !!row.normalized_phone && (phoneCount.get(row.normalized_phone) || 0) > 1;
+    if (dupEmail || dupPhone) {
+      row.import_status = "error";
+      row.message = dupEmail
+        ? "Duplicate email within file"
+        : "Duplicate phone within file";
+    }
+  }
+
+  return { rows, ...rebuildOptimumClientPreview(rows) };
+}
+
+/** Resolves package_slug → package_id; unknown slugs become row errors. */
+async function resolveOptimumClientPackages(
+  dbPool: Pool,
+  rows: OptimumClientImportRow[],
+): Promise<void> {
+  const slugs = Array.from(
+    new Set(rows.filter((r) => r.package_slug).map((r) => r.package_slug as string)),
+  );
+  if (slugs.length === 0) return;
+  const [pkgRows] = await dbPool.query<RowDataPacket[]>(
+    `SELECT id, slug FROM packages WHERE slug IN (?)`,
+    [slugs],
+  );
+  const slugMap = new Map<string, number>();
+  for (const p of pkgRows) slugMap.set(String(p.slug), Number(p.id));
+  for (const row of rows) {
+    if (!row.package_slug) continue;
+    const pkgId = slugMap.get(row.package_slug);
+    if (pkgId == null) {
+      row.package_id = null;
+      const unknownMsg = `Unknown package_slug "${row.package_slug}"`;
+      row.message = row.message ? `${row.message}; ${unknownMsg}` : unknownMsg;
+      row.import_status = "error";
+    } else {
+      row.package_id = pkgId;
+    }
+  }
+}
+
+/** DB preflight: rows that would create a client with an already-registered email are skipped instead. */
+async function applyOptimumClientDbPreflight(
+  dbPool: Pool,
+  rows: OptimumClientImportRow[],
+): Promise<void> {
+  const emails = Array.from(
+    new Set(
+      rows
+        .filter((r) => r.import_status === "will_create" && r.email)
+        .map((r) => r.email),
+    ),
+  );
+  if (emails.length === 0) return;
+  const [existing] = await dbPool.query<RowDataPacket[]>(
+    `SELECT id, email FROM clients WHERE email IN (?)`,
+    [emails],
+  );
+  const existingMap = new Map<string, number>();
+  for (const row of existing) {
+    existingMap.set(String(row.email).toLowerCase(), Number(row.id));
+  }
+  for (const row of rows) {
+    if (row.import_status !== "will_create") continue;
+    const conflictId = existingMap.get(row.email);
+    if (conflictId != null) {
+      row.import_status = "skipped";
+      row.conflict_client_id = conflictId;
+      row.message = "A client with this email already exists";
+    }
+  }
+}
+
+function buildOptimumClientTemplateCsv(): string {
+  const escape = (v: string) =>
+    /[",\n\r]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+  const sampleRow = [
+    "Jane",
+    "Doe",
+    "jane.doe@example.com",
+    "5551234567",
+    "pending_payment",
+    "en",
+    "standard",
+    "Referred by John Smith",
+    "123 Main St",
+    "",
+    "Austin",
+    "TX",
+    "78701",
+    "1990-01-15",
+    "EXT-1001",
+  ];
+  return [CLIENT_CSV_HEADERS.join(","), sampleRow.map(escape).join(",")].join(
+    "\n",
+  );
+}
+
+function parseBulkImportJsonField<T>(val: unknown): T | null {
+  if (val == null) return null;
+  if (typeof val === "object") return val as T;
+  try {
+    return JSON.parse(String(val)) as T;
+  } catch {
+    return null;
+  }
+}
 
 // ============================================================================
 // ENV VALIDATION
@@ -34,14 +2974,64 @@ if (MISSING_DB_VARS.length > 0) {
   );
 }
 
-const JWT_SECRET =
-  process.env.JWT_SECRET ||
-  (() => {
-    console.warn(
-      "⚠️  WARNING: Using default JWT_SECRET. Set JWT_SECRET in .env for production!",
+// Production = deployed on Vercel with a production environment. Local =
+// anything else that isn't production, unless explicitly opted out — this
+// keeps CI/staging runs without ALLOW_INSECURE_DEFAULTS from silently
+// falling back to insecure defaults just because VERCEL isn't set there.
+const IS_PROD =
+  process.env.VERCEL_ENV === "production" ||
+  process.env.NODE_ENV === "production";
+const IS_LOCAL =
+  !IS_PROD &&
+  (process.env.ALLOW_INSECURE_DEFAULTS === "true" || !process.env.VERCEL);
+
+/**
+ * Affiliates feature flag. Set AFFILIATES_ENABLED=0|false to hide the admin
+ * Affiliates / My Affiliate sections (lock icon), block those routes' APIs,
+ * and disable public /r/:slug resolve until subscription pricing is ready.
+ * Unset or 1|true = enabled (default).
+ */
+function affiliatesFeatureEnabled(): boolean {
+  const v = String(process.env.AFFILIATES_ENABLED ?? "1").trim().toLowerCase();
+  return v !== "0" && v !== "false" && v !== "off" && v !== "no";
+}
+
+const AFFILIATES_FF_LOCK_REASON =
+  "Coming soon — affiliate subscriptions are being finalized.";
+
+function applyAffiliatesFeatureFlagToLocks<T extends Record<string, any>>(
+  rows: T[],
+): T[] {
+  if (affiliatesFeatureEnabled()) return rows;
+  return rows.map((r) => {
+    if (r.section_key !== "affiliates" && r.section_key !== "affiliate-portal") {
+      return r;
+    }
+    return {
+      ...r,
+      is_locked: true,
+      lock_reason: r.lock_reason || AFFILIATES_FF_LOCK_REASON,
+    };
+  });
+}
+
+const RAW_JWT_SECRET = process.env.JWT_SECRET;
+if (!RAW_JWT_SECRET) {
+  if (IS_PROD) {
+    throw new Error(
+      "❌ JWT_SECRET is required in production. Refusing to start with an insecure default.",
     );
-    return "default-jwt-secret-CHANGE-THIS-IN-PRODUCTION";
-  })();
+  } else if (!IS_LOCAL) {
+    throw new Error(
+      "❌ JWT_SECRET is required. Set JWT_SECRET in .env, or ALLOW_INSECURE_DEFAULTS=true for local dev only.",
+    );
+  } else {
+    console.warn(
+      "⚠️  WARNING: Using default JWT_SECRET (ALLOW_INSECURE_DEFAULTS=true, local only). Set JWT_SECRET in .env for anything beyond local dev!",
+    );
+  }
+}
+const JWT_SECRET = RAW_JWT_SECRET || "default-jwt-secret-CHANGE-THIS-IN-PRODUCTION";
 
 const APP_URL = process.env.PUBLIC_APP_URL || "http://localhost:8080";
 const SESSION_TTL_DAYS = 30;
@@ -99,6 +3089,7 @@ const pool = mysql.createPool({
 // ============================================================================
 
 export const PIPELINE_STAGES = [
+  "prospect",
   "new_client",
   "docs_ready",
   "round_1",
@@ -110,6 +3101,43 @@ export const PIPELINE_STAGES = [
   "cancelled",
 ] as const;
 
+/**
+ * Index of a stage within PIPELINE_STAGES. `cancelled` is treated as the
+ * terminal-most stage regardless of its array position so any move away
+ * from it (or into it) still resolves sensibly for forward/backward checks.
+ */
+export function pipelineStageIndex(stage: string): number {
+  if (stage === "cancelled") return PIPELINE_STAGES.length - 1;
+  const idx = (PIPELINE_STAGES as readonly string[]).indexOf(stage);
+  return idx === -1 ? 0 : idx;
+}
+
+/** True when `to` is further along the pipeline than `from`. */
+export function isForwardStageMove(from: string, to: string): boolean {
+  return pipelineStageIndex(to) > pipelineStageIndex(from);
+}
+
+/** True when `to` is earlier in the pipeline than `from`. */
+export function isBackwardStageMove(from: string, to: string): boolean {
+  return pipelineStageIndex(to) < pipelineStageIndex(from);
+}
+
+/**
+ * Per product decision 6C: forward moves, backward moves, and stage jumps
+ * all require confirmation in the UI — i.e. any actual stage change.
+ */
+export function shouldConfirmStageMove(from: string, to: string): boolean {
+  return from !== to;
+}
+
+/**
+ * Prospects (status/stage = 'prospect') have no case yet, so the only
+ * legal drag on the pipeline board is prospect -> new_client, which the
+ * UI should route to the convert endpoint rather than a plain stage update.
+ */
+export function canDragProspect(from: string, to: string): boolean {
+  return from === "prospect" && to === "new_client";
+}
 
 function pipelineStageAfterRoundReport(roundNumber: number): string {
   if (roundNumber >= 5) return "completed";
@@ -477,6 +3505,76 @@ function detectNegativeLines(text: string): string[] {
   return out.slice(0, 25);
 }
 
+/**
+ * Keyword → negative-item "type" classification, used both to build the
+ * structured negatives array returned to the public credit-analysis form
+ * and to derive human-readable analysis label suggestions.
+ */
+const NEGATIVE_TYPE_PATTERNS: Array<[string, RegExp]> = [
+  ["Bankruptcy", /bankrupt/i],
+  ["Foreclosure", /foreclosure/i],
+  ["Repossession", /repossession/i],
+  ["Charge-Off", /charge.?off|charged off/i],
+  ["Collection", /collection/i],
+  ["Judgment", /judgment/i],
+  ["Lien", /\blien\b/i],
+  ["Late Payment", /late payment|past due|delinquent/i],
+  ["Hard Inquiry", /inquiry/i],
+  ["Derogatory Item", /derogatory/i],
+];
+
+/** Turn the flat lines from detectNegativeLines into structured items for the API/UI. */
+function classifyNegativeLine(line: string): CreditAnalysisNegativeItem {
+  const found = NEGATIVE_TYPE_PATTERNS.find(([, re]) => re.test(line));
+  const type = found ? found[0] : "Derogatory Item";
+  const creditorGuess = line
+    .replace(
+      /[-–—]?\s*(collection|charge.?off|charged off|late payment|inquiry|repossession|foreclosure|bankrupt(?:cy)?|lien|judgment|delinquent|past due|derogatory).*$/i,
+      "",
+    )
+    .trim();
+  const creditor =
+    creditorGuess && creditorGuess.length > 1 && creditorGuess.length < line.length
+      ? creditorGuess
+      : undefined;
+  return { type, creditor, detail: line };
+}
+
+function buildNegativeItems(lines: string[]): CreditAnalysisNegativeItem[] {
+  return lines.map(classifyNegativeLine);
+}
+
+/**
+ * Map detected negative lines + full report text to analysis label slugs.
+ * Slugs must match the seeded `labels` rows (layer='analysis') from
+ * database/migrations/20260731_190000_prospects_labels_analysis.sql.
+ */
+export function inferAnalysisLabelSlugs(
+  negatives: string[],
+  text: string,
+): string[] {
+  const haystack = `${negatives.join(" \n ")}\n${text}`.toLowerCase();
+  const rules: Array<[string, RegExp]> = [
+    ["housing", /mortgage|foreclosure|\brent\b|landlord|housing/],
+    ["auto", /auto loan|vehicle|car loan|repossession|\bauto\b/],
+    ["credit_card", /credit card|visa|mastercard|discover|amex|american express/],
+    ["collections", /collection agency|placed for collection|\bcollections?\b/],
+    ["student_loan", /student loan|sallie mae|navient|dept\.? of education/],
+    ["personal_loan", /personal loan|installment loan|signature loan/],
+    ["medical", /medical|hospital|clinic|health ?care/],
+    ["bankruptcy", /bankrupt/],
+    ["inquiry", /hard inquiry|\binquiry\b/],
+  ];
+  const matched = new Set<string>();
+  for (const [slug, re] of rules) {
+    if (re.test(haystack)) matched.add(slug);
+  }
+  if (matched.size === 0 && negatives.length > 0) {
+    matched.add("other_derogatory");
+  }
+  return Array.from(matched);
+}
+
 function extractUtilization(text: string): OfGReportData["utilization"] {
   const results: OfGReportData["utilization"] = [];
   const lines = text.split(/\r?\n/);
@@ -805,6 +3903,130 @@ async function extractFromCreditReportPdfs(
       utilization_detected: data.utilization.length,
     },
   };
+}
+
+// ============================================================================
+// PUBLIC CREDIT ANALYSIS — branded narrative builder (3A: heuristic +
+// templated HTML, not a real dispute report). Returns an HTML *fragment*
+// (no <html>/<body>) so it renders both inline on the public results page
+// (client/pages/CreditAnalysis.tsx, `prose` container) and inside the
+// full emailLayout() wrapper when opted in for email delivery.
+// ============================================================================
+/**
+ * Classifies how well we were able to read text out of an uploaded credit
+ * report so the caller can avoid making false-positive "no negatives found"
+ * claims when we simply couldn't read the file (e.g. a scanned photo, or a
+ * PDF whose text layer failed to parse).
+ */
+export type CreditAnalysisExtractionStatus =
+  | "ok"
+  | "empty"
+  | "parse_failed"
+  | "unsupported_type";
+
+export function resolveExtractionStatus(
+  mime: string | null | undefined,
+  text: string,
+  parseFailed: boolean,
+): CreditAnalysisExtractionStatus {
+  if (mime !== "application/pdf") return "unsupported_type";
+  if (parseFailed) return "parse_failed";
+  if (text.trim().length < 80) return "empty";
+  return "ok";
+}
+
+/**
+ * Reminder-flow audience gate: returns required slugs the client is missing.
+ * Empty array ⇒ client passes the filter (or no requirements).
+ */
+export function missingRequiredLabelSlugs(
+  clientSlugs: string[],
+  requiredSlugs: string[],
+): string[] {
+  if (!requiredSlugs.length) return [];
+  const have = new Set(clientSlugs);
+  return requiredSlugs.filter((s) => !have.has(s));
+}
+
+function buildProspectAnalysisHtml(opts: {
+  firstName: string;
+  scores: BureauScores;
+  negatives: CreditAnalysisNegativeItem[];
+  clientGoal?: string | null;
+  lang?: string;
+  /** True when extraction_status !== 'ok' — suppresses "no negatives found" claims. */
+  weakExtraction?: boolean;
+  extractionStatus?: CreditAnalysisExtractionStatus;
+}): { html: string; text: string } {
+  const isEs = opts.lang === "es";
+  const mid = middleScore(opts.scores);
+  const negCount = opts.negatives.length;
+  const weak = opts.weakExtraction ?? opts.extractionStatus !== "ok";
+
+  const scoreLine = mid
+    ? isEs
+      ? `Tu puntaje estimado combinado es de <strong>${mid}</strong>.`
+      : `Your estimated combined credit score is <strong>${mid}</strong>.`
+    : weak
+      ? isEs
+        ? "No pudimos leer un puntaje numérico de tu informe porque no extrajimos texto suficiente."
+        : "We couldn't read a numeric score from your report because we didn't extract enough text."
+      : isEs
+        ? "No pudimos leer un puntaje numérico de tu informe, pero aún así identificamos áreas de oportunidad abajo."
+        : "We couldn't read a numeric score from your report, but we still identified opportunities below.";
+
+  const negLine = weak
+    ? isEs
+      ? "No pudimos leer tu informe de manera confiable, así que no podemos confirmar si tiene ítems negativos. Por favor sube un PDF de texto (no una foto o escaneo) de tu reporte de SmartCredit para obtener un análisis preciso."
+      : "We couldn't reliably read your report, so we can't confirm whether it has negative items. Please upload a text-based SmartCredit PDF (not a photo or scan) so we can give you an accurate analysis."
+    : negCount > 0
+      ? isEs
+        ? `Encontramos <strong>${negCount}</strong> ítem${negCount === 1 ? "" : "s"} negativo${negCount === 1 ? "" : "s"} que probablemente estén afectando tu puntaje.`
+        : `We found <strong>${negCount}</strong> negative item${negCount === 1 ? "" : "s"} that are likely impacting your score.`
+      : isEs
+        ? "¡Buenas noticias! No detectamos ítems negativos obvios en tu informe."
+        : "Good news — we didn't detect any obvious negative items on your report.";
+
+  const goalLine = opts.clientGoal
+    ? isEs
+      ? `<p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">Nos dijiste que tu meta es: <em>"${escapeHtml(opts.clientGoal)}"</em>. Nuestro equipo puede construir un plan de disputas dirigido a ayudarte a alcanzarla.</p>`
+      : `<p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">You told us your goal is: <em>"${escapeHtml(opts.clientGoal)}"</em>. Our team can build a targeted dispute plan aimed at getting you there.</p>`
+    : "";
+
+  const itemsHtml =
+    negCount > 0
+      ? `<ul style="margin:0 0 16px;padding-left:20px;color:#334155;font-size:14px;line-height:1.7;">
+          ${opts.negatives
+            .slice(0, 10)
+            .map(
+              (n) =>
+                `<li><strong>${escapeHtml(n.creditor || n.type)}</strong>${n.creditor ? ` — ${escapeHtml(n.type)}` : ""}</li>`,
+            )
+            .join("")}
+        </ul>`
+      : "";
+
+  const html = `
+    <h2 style="margin:0 0 12px;font-size:20px;font-weight:800;color:#0f172a;">${isEs ? `Tu análisis de crédito, ${escapeHtml(opts.firstName)}` : `Your Credit Analysis, ${escapeHtml(opts.firstName)}`}</h2>
+    <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">${scoreLine}</p>
+    <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">${negLine}</p>
+    ${itemsHtml}
+    ${goalLine}
+    <p style="margin:16px 0 0;font-size:12px;line-height:1.5;color:#94a3b8;">${isEs ? CROA_DISCLOSURE_ES : CROA_DISCLOSURE_EN}</p>
+  `.trim();
+
+  const text = [
+    isEs ? `Tu análisis de crédito, ${opts.firstName}` : `Your Credit Analysis, ${opts.firstName}`,
+    scoreLine.replace(/<\/?strong>/g, ""),
+    negLine.replace(/<\/?strong>/g, ""),
+    ...opts.negatives.slice(0, 10).map((n) => `- ${n.creditor || n.type}${n.creditor ? ` (${n.type})` : ""}`),
+    opts.clientGoal ? `Goal: ${opts.clientGoal}` : "",
+    isEs ? CROA_DISCLOSURE_ES : CROA_DISCLOSURE_EN,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  return { html, text };
 }
 
 // ============================================================================
@@ -1385,9 +4607,15 @@ interface AuthedRequest extends Request {
 
 function getDocEncKey(): Buffer {
   const hex = process.env.DOC_ENCRYPTION_KEY || "";
-  if (hex.length !== 64) {
+  const isValidHex = hex.length === 64 && /^[0-9a-fA-F]{64}$/.test(hex);
+  if (!isValidHex) {
+    if (IS_PROD) {
+      throw new Error(
+        "DOC_ENCRYPTION_KEY is not set or invalid — refusing to use an insecure fallback in production",
+      );
+    }
     console.warn(
-      "⚠️  DOC_ENCRYPTION_KEY not set or invalid — using insecure fallback",
+      "⚠️  DOC_ENCRYPTION_KEY not set or invalid — using insecure fallback (local/dev only)",
     );
     return Buffer.alloc(32, 0);
   }
@@ -1421,6 +4649,30 @@ function decryptFile(encrypted: Buffer, ivHex: string, tagHex: string): Buffer {
   return Buffer.concat([decipher.update(encrypted), decipher.final()]);
 }
 
+function encryptJsonSecrets(payload: Record<string, unknown>): {
+  ciphertext: Buffer;
+  iv: string;
+  tag: string;
+} {
+  const { encrypted, iv, tag } = encryptFile(
+    Buffer.from(JSON.stringify(payload), "utf8"),
+  );
+  return { ciphertext: encrypted, iv, tag };
+}
+
+function decryptJsonSecrets(
+  ciphertext: Buffer,
+  ivHex: string,
+  tagHex: string,
+): Record<string, unknown> {
+  const raw = decryptFile(ciphertext, ivHex, tagHex).toString("utf8");
+  try {
+    return JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
 /**
  * Upload a file buffer to the Disrupting Labs CDN and return the full public URL.
  * The URL is stored as storage_key in the DB and is never sent directly to the browser —
@@ -1434,8 +4686,14 @@ async function uploadToCDN(
 ): Promise<string> {
   if (!CDN_UPLOAD_SECRET)
     throw new Error("CDN_UPLOAD_SECRET is not configured");
-  const folderId =
-    typeof clientId === "string" ? clientId : `client-${clientId}`;
+  // Opaque folder id: a bare `client-123` folder on the CDN is guessable —
+  // anyone iterating IDs could probe for other clients' folders (the CDN
+  // itself has no per-tenant auth; our API is the only access control, and
+  // that's bypassed once you know/guess the folder path). Appending a random
+  // suffix makes the folder unguessable while the real clientId still lives
+  // only in our DB metadata / storage_key, never in a URL pattern an
+  // attacker could iterate.
+  const folderId = `c-${clientId}-${crypto.randomUUID().slice(0, 8)}`;
   const formData = new FormData();
   formData.append("main_folder", CDN_MAIN_FOLDER);
   formData.append("id", folderId);
@@ -1518,6 +4776,63 @@ function sha256(input: string): string {
   return crypto.createHash("sha256").update(input).digest("hex");
 }
 
+/**
+ * Constant-time secret comparison. Pads both buffers to the same (max)
+ * length before comparing so `crypto.timingSafeEqual` never throws on a
+ * length mismatch — a length-mismatch failure would otherwise itself be
+ * a (crude) timing side-channel, so we always compare a fixed size.
+ */
+function timingSafeStringEqual(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  const len = Math.max(a.length, b.length, 1);
+  const bufA = Buffer.alloc(len);
+  const bufB = Buffer.alloc(len);
+  bufA.write(a);
+  bufB.write(b);
+  return crypto.timingSafeEqual(bufA, bufB) && a.length === b.length;
+}
+
+// ============================================================================
+// IN-MEMORY RATE LIMITER
+// ----------------------------------------------------------------------------
+// Best-effort, per-instance limiter — good enough to blunt brute-force /
+// credential-stuffing bursts on a single serverless instance without adding
+// an external store. Resets on cold start; that's an acceptable trade-off
+// for these endpoints (OTP, registration, payments already have their own
+// DB-level guards as the real backstop).
+// ============================================================================
+const rateLimitBuckets = new Map<string, { count: number; resetAt: number }>();
+
+function hitRateLimit(key: string, max: number, windowMs: number): boolean {
+  const now = Date.now();
+  sweepRateLimitBuckets();
+  const bucket = rateLimitBuckets.get(key);
+  if (!bucket || bucket.resetAt <= now) {
+    rateLimitBuckets.set(key, { count: 1, resetAt: now + windowMs });
+    return false;
+  }
+  bucket.count += 1;
+  if (bucket.count > max) return true;
+  return false;
+}
+
+// Opportunistic cleanup so the map doesn't grow unbounded on long-lived
+// instances. Cheap since buckets are tiny; runs at most once/minute.
+let lastRateLimitSweep = 0;
+function sweepRateLimitBuckets() {
+  const now = Date.now();
+  if (now - lastRateLimitSweep < 60_000) return;
+  lastRateLimitSweep = now;
+  for (const [key, bucket] of rateLimitBuckets) {
+    if (bucket.resetAt <= now) rateLimitBuckets.delete(key);
+  }
+}
+
+function rateLimitKey(req: Request, suffix: string): string {
+  const ip = req.ip || "unknown-ip";
+  return `${suffix}:${ip}`;
+}
+
 function generateOtpCode(): string {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
@@ -1556,26 +4871,56 @@ async function createOtp(
   return code;
 }
 
+const OTP_MAX_ATTEMPTS = 5;
+
+/**
+ * Look up the latest unconsumed, unexpired OTP for this actor+purpose
+ * (regardless of code) and check the submitted code against it. This closes
+ * two gaps in the old "match code_hash directly" approach: (1) a caller could
+ * brute-force codes indefinitely since a wrong guess never touched the row,
+ * and (2) requesting a fresh code left the old one guessable in parallel.
+ * Now every wrong guess increments `attempts` on the live OTP row, and once
+ * attempts >= OTP_MAX_ATTEMPTS the OTP is dead even with the right code.
+ */
 async function consumeOtp(
   actor: ActorType,
   actorId: number,
   code: string,
   purpose: string,
 ): Promise<boolean> {
-  const codeHash = sha256(code);
   const table = actor === "admin" ? "admin_otp_codes" : "client_otp_codes";
   const idCol = actor === "admin" ? "admin_id" : "client_id";
   const [rows] = await pool.query<RowDataPacket[]>(
-    `SELECT id FROM ${table}
-     WHERE ${idCol} = ? AND code_hash = ? AND purpose = ?
+    `SELECT id, code_hash, attempts FROM ${table}
+     WHERE ${idCol} = ? AND purpose = ?
        AND consumed_at IS NULL AND expires_at > NOW()
      ORDER BY id DESC LIMIT 1`,
-    [actorId, codeHash, purpose],
+    [actorId, purpose],
   );
   if (rows.length === 0) return false;
+  const otp = rows[0];
+
+  if (Number(otp.attempts) >= OTP_MAX_ATTEMPTS) {
+    // Locked out — burn it so it can't linger as a target.
+    await pool.query<ResultSetHeader>(
+      `UPDATE ${table} SET consumed_at = NOW() WHERE id = ?`,
+      [otp.id],
+    );
+    return false;
+  }
+
+  const codeHash = sha256(code);
+  if (codeHash !== otp.code_hash) {
+    await pool.query<ResultSetHeader>(
+      `UPDATE ${table} SET attempts = attempts + 1 WHERE id = ?`,
+      [otp.id],
+    );
+    return false;
+  }
+
   await pool.query<ResultSetHeader>(
     `UPDATE ${table} SET consumed_at = NOW() WHERE id = ?`,
-    [rows[0].id],
+    [otp.id],
   );
   return true;
 }
@@ -1622,6 +4967,23 @@ async function isSessionActive(payload: JwtPayload): Promise<boolean> {
   return rows.length > 0;
 }
 
+/**
+ * Kill every active session for an actor — used when an admin/client is
+ * deactivated/suspended/cancelled so a leaked or still-open token can't
+ * keep working until it naturally expires (up to SESSION_TTL_DAYS later).
+ */
+async function revokeAllSessions(
+  actor: ActorType,
+  actorId: number,
+): Promise<void> {
+  const table = actor === "admin" ? "admin_sessions" : "client_sessions";
+  const idCol = actor === "admin" ? "admin_id" : "client_id";
+  await pool.query<ResultSetHeader>(
+    `UPDATE ${table} SET is_active = 0 WHERE ${idCol} = ? AND is_active = 1`,
+    [actorId],
+  );
+}
+
 function extractToken(req: Request): string | null {
   const header = req.headers.authorization;
   if (header && header.startsWith("Bearer ")) return header.slice(7);
@@ -1638,6 +5000,29 @@ function requireAuth(actor: ActorType) {
     }
     const ok = await isSessionActive(payload);
     if (!ok) return res.status(401).json({ error: "Session expired" });
+
+    // Re-check the actor's current status on every request — a session
+    // token stays cryptographically valid for SESSION_TTL_DAYS, so without
+    // this a deactivated admin or cancelled client could keep using an
+    // already-issued token until it expires on its own.
+    if (actor === "admin") {
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT status FROM admins WHERE id = ? LIMIT 1`,
+        [payload.id],
+      );
+      if (rows.length === 0 || rows[0].status !== "active") {
+        return res.status(401).json({ error: "Account is no longer active" });
+      }
+    } else {
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT status FROM clients WHERE id = ? LIMIT 1`,
+        [payload.id],
+      );
+      if (rows.length === 0 || rows[0].status === "cancelled") {
+        return res.status(401).json({ error: "Account is no longer active" });
+      }
+    }
+
     req.auth = payload;
     next();
   };
@@ -1682,7 +5067,9 @@ interface SendEmailOptions {
 }
 
 async function sendEmail(opts: SendEmailOptions) {
-  if (!emailClient) {
+  // Never hit Resend during vitest — integration suites use fake
+  // @*.test addresses that bounce and pollute the sending domain.
+  if (!emailClient || process.env.VITEST === "true") {
     console.log("[email:dry-run]", opts.to, opts.subject);
     return { id: "dry-run" };
   }
@@ -1695,6 +5082,7 @@ async function sendEmail(opts: SendEmailOptions) {
     replyTo: opts.replyTo,
   });
   if (error) throw new Error(error.message);
+  console.log("[email:sent]", opts.to, opts.subject, data?.id || "(no-id)");
   return { id: data?.id };
 }
 
@@ -1958,6 +5346,98 @@ function tplAllDocsApproved(opts: {
       preheader: isEs
         ? "Todos tus documentos han sido aprobados. ¡Manos a la obra!"
         : "All your documents have been approved. We're on it!",
+      bodyHtml: body,
+      lang: opts.lang,
+    }),
+  };
+}
+
+function tplInfoRequestCreated(opts: {
+  firstName: string;
+  title: string;
+  portalUrl: string;
+  lang?: string;
+}) {
+  const isEs = opts.lang === "es";
+  const body = isEs
+    ? `
+    <h1 style="margin:0 0 12px;font-size:24px;font-weight:800;color:#0f172a;">Necesitamos información adicional</h1>
+    <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">Hola ${escapeHtml(opts.firstName)}, nuestro equipo solicitó: <strong>${escapeHtml(opts.title)}</strong>.</p>
+    <p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:#334155;">Inicia sesión en tu portal para completar la solicitud. Tus datos están protegidos y solo se usan para tu caso de reparación crediticia.</p>
+    ${emailButton(opts.portalUrl, "Abrir solicitud")}`
+    : `
+    <h1 style="margin:0 0 12px;font-size:24px;font-weight:800;color:#0f172a;">Additional information needed</h1>
+    <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">Hi ${escapeHtml(opts.firstName)}, our team requested: <strong>${escapeHtml(opts.title)}</strong>.</p>
+    <p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:#334155;">Log in to your portal to complete the request. Your information is protected and used only for your credit repair case.</p>
+    ${emailButton(opts.portalUrl, "Open request")}`;
+  return {
+    subject: isEs
+      ? `Optimum Credit: información solicitada — ${opts.title}`
+      : `Optimum Credit: information requested — ${opts.title}`,
+    html: emailLayout({
+      title: isEs ? "Información solicitada" : "Information requested",
+      preheader: isEs
+        ? "Completa la solicitud en tu portal."
+        : "Complete the request in your portal.",
+      bodyHtml: body,
+      lang: opts.lang,
+    }),
+  };
+}
+
+function tplInfoRequestReviewed(opts: {
+  firstName: string;
+  title: string;
+  approved: boolean;
+  reason?: string | null;
+  portalUrl: string;
+  lang?: string;
+}) {
+  const isEs = opts.lang === "es";
+  if (opts.approved) {
+    const body = isEs
+      ? `
+      <h1 style="margin:0 0 12px;font-size:24px;font-weight:800;color:#0f172a;">Información recibida</h1>
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">Hola ${escapeHtml(opts.firstName)}, revisamos y aprobamos tu respuesta a <strong>${escapeHtml(opts.title)}</strong>. ¡Gracias!</p>
+      ${emailButton(opts.portalUrl, "Ver portal")}`
+      : `
+      <h1 style="margin:0 0 12px;font-size:24px;font-weight:800;color:#0f172a;">Information received</h1>
+      <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">Hi ${escapeHtml(opts.firstName)}, we reviewed and approved your response to <strong>${escapeHtml(opts.title)}</strong>. Thank you!</p>
+      ${emailButton(opts.portalUrl, "View portal")}`;
+    return {
+      subject: isEs
+        ? `Optimum Credit: información aprobada — ${opts.title}`
+        : `Optimum Credit: information approved — ${opts.title}`,
+      html: emailLayout({
+        title: isEs ? "Aprobado" : "Approved",
+        bodyHtml: body,
+        lang: opts.lang,
+      }),
+    };
+  }
+  const body = isEs
+    ? `
+    <h1 style="margin:0 0 12px;font-size:24px;font-weight:800;color:#0f172a;">Acción requerida</h1>
+    <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">Hola ${escapeHtml(opts.firstName)}, necesitamos que vuelvas a enviar tu respuesta a <strong>${escapeHtml(opts.title)}</strong>.</p>
+    <div style="margin:20px 0;padding:16px 20px;background:#fef2f2;border-left:4px solid #ef4444;border-radius:8px;">
+      <div style="font-size:13px;font-weight:700;color:#991b1b;">Motivo</div>
+      <div style="margin-top:6px;font-size:14px;color:#7f1d1d;">${escapeHtml(opts.reason || "Por favor revisa y vuelve a enviar.")}</div>
+    </div>
+    ${emailButton(opts.portalUrl, "Volver a enviar")}`
+    : `
+    <h1 style="margin:0 0 12px;font-size:24px;font-weight:800;color:#0f172a;">Action needed</h1>
+    <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">Hi ${escapeHtml(opts.firstName)}, we need you to resubmit your response to <strong>${escapeHtml(opts.title)}</strong>.</p>
+    <div style="margin:20px 0;padding:16px 20px;background:#fef2f2;border-left:4px solid #ef4444;border-radius:8px;">
+      <div style="font-size:13px;font-weight:700;color:#991b1b;">Reason</div>
+      <div style="margin-top:6px;font-size:14px;color:#7f1d1d;">${escapeHtml(opts.reason || "Please review and resubmit.")}</div>
+    </div>
+    ${emailButton(opts.portalUrl, "Resubmit now")}`;
+  return {
+    subject: isEs
+      ? `Optimum Credit: vuelve a enviar — ${opts.title}`
+      : `Optimum Credit: please resubmit — ${opts.title}`,
+    html: emailLayout({
+      title: isEs ? "Reenvío requerido" : "Resubmission required",
       bodyHtml: body,
       lang: opts.lang,
     }),
@@ -2246,6 +5726,48 @@ function tplCaseStarted(opts: {
 }
 
 // ============================================================================
+// PROSPECT CONVERT WELCOME EMAIL (5A/7A — dedicated template, NOT
+// payment_confirmed/tplClientWelcome, sent when a prospect is converted
+// to a client + case by an admin without ever taking a payment)
+// ============================================================================
+function tplProspectConvertWelcome(opts: {
+  firstName: string;
+  caseNumber: string;
+  portalUrl: string;
+  lang?: string;
+}) {
+  const isEs = opts.lang === "es";
+  const body = isEs
+    ? `<h1 style="margin:0 0 16px;font-size:26px;font-weight:800;color:#0f172a;">¡Es oficial, ${escapeHtml(opts.firstName)}!</h1>
+       <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">Con base en tu análisis de crédito, hemos activado tu expediente de reparación de crédito <strong>${escapeHtml(opts.caseNumber)}</strong>. El siguiente paso es completar tus tareas de inicio para que podamos comenzar a trabajar en tus disputas.</p>
+       <div style="margin:20px 0;padding:16px 20px;background:#f0fdf4;border-left:4px solid #22c55e;border-radius:8px;">
+         <div style="font-size:13px;font-weight:700;color:#15803d;">Número de caso: ${escapeHtml(opts.caseNumber)}</div>
+       </div>
+       ${emailButton(opts.portalUrl, "Completar mis tareas de inicio")}
+       <p style="margin:24px 0 0;font-size:13px;color:#64748b;">¿Preguntas? Responde este correo y con gusto te ayudamos.</p>`
+    : `<h1 style="margin:0 0 16px;font-size:26px;font-weight:800;color:#0f172a;">It's official, ${escapeHtml(opts.firstName)}!</h1>
+       <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">Based on your credit analysis, we've activated your credit repair case <strong>${escapeHtml(opts.caseNumber)}</strong>. The next step is completing your Get Started tasks so our team can begin working on your disputes.</p>
+       <div style="margin:20px 0;padding:16px 20px;background:#f0fdf4;border-left:4px solid #22c55e;border-radius:8px;">
+         <div style="font-size:13px;font-weight:700;color:#15803d;">Case number: ${escapeHtml(opts.caseNumber)}</div>
+       </div>
+       ${emailButton(opts.portalUrl, "Complete My Get Started Tasks")}
+       <p style="margin:24px 0 0;font-size:13px;color:#64748b;">Have questions? Just reply to this email — we're happy to help.</p>`;
+  return {
+    subject: isEs
+      ? `Bienvenido a Optimum Credit — tu caso ${opts.caseNumber} está activo`
+      : `Welcome to Optimum Credit — your case ${opts.caseNumber} is active`,
+    html: emailLayout({
+      title: isEs ? "Bienvenido" : "Welcome",
+      preheader: isEs
+        ? "Completa tus tareas de inicio para comenzar."
+        : "Complete your Get Started tasks to begin.",
+      bodyHtml: body,
+      lang: opts.lang,
+    }),
+  };
+}
+
+// ============================================================================
 // PAYMENT DUE EMAIL (split reminder — used by scheduleSplitReminders)
 // ============================================================================
 function tplPaymentDue(opts: {
@@ -2361,6 +5883,7 @@ const ROLE_LABELS: Record<string, string> = {
   super_admin: "Super Admin",
   admin: "Admin",
   agent: "Agent",
+  affiliate: "Affiliate",
 };
 
 function tplAdminWelcome(opts: {
@@ -2430,7 +5953,7 @@ function tplAdminWelcome(opts: {
 // ============================================================================
 
 async function sendSms(opts: { to: string; body: string }) {
-  if (!twilioClient || !TWILIO_FROM) {
+  if (!twilioClient || !TWILIO_FROM || process.env.VITEST === "true") {
     console.log("[sms:dry-run]", opts.to, opts.body);
     return { sid: "dry-run", status: "dry-run" };
   }
@@ -2440,6 +5963,30 @@ async function sendSms(opts: { to: string; body: string }) {
     body: opts.body,
   });
   return { sid: msg.sid, status: msg.status };
+}
+
+/**
+ * Validate an inbound Twilio webhook's X-Twilio-Signature. Returns true
+ * when TWILIO_AUTH_TOKEN isn't configured AND we're not in production —
+ * every other case requires a valid signature. This stops anyone from
+ * POSTing forged inbound-SMS/voice payloads directly to our webhook URL.
+ */
+function isValidTwilioWebhookRequest(req: Request): boolean {
+  const authToken = process.env.TWILIO_AUTH_TOKEN;
+  if (!authToken) return !IS_PROD;
+  const signature = req.headers["x-twilio-signature"] as string | undefined;
+  if (!signature) return false;
+  const url = `${APP_URL}${req.originalUrl}`;
+  try {
+    return twilio.validateRequest(
+      authToken,
+      signature,
+      url,
+      (req.body as Record<string, string>) || {},
+    );
+  } catch {
+    return false;
+  }
 }
 
 // ============================================================================
@@ -2577,8 +6124,148 @@ async function chargeCard(opts: {
   return { transactionId, customerProfileId, customerPaymentProfileId };
 }
 
+/**
+ * Create or replace an Authorize.net customer/payment profile from Accept.js
+ * opaque data without charging (used by info-request payment_card fields).
+ */
+async function createOrUpdatePaymentProfileFromOpaque(opts: {
+  dataDescriptor: string;
+  dataValue: string;
+  clientId: number;
+  email: string;
+  firstName: string;
+  lastName: string;
+  existingCustomerProfileId?: string | null;
+}): Promise<{
+  customerProfileId: string;
+  customerPaymentProfileId?: string;
+  last4?: string | null;
+}> {
+  const merchantAuthentication = {
+    name: process.env.AUTHORIZENET_API_LOGIN_ID,
+    transactionKey: process.env.AUTHORIZENET_TRANSACTION_KEY,
+  };
+
+  if (opts.existingCustomerProfileId) {
+    const payload = {
+      createCustomerPaymentProfileRequest: {
+        merchantAuthentication,
+        customerProfileId: opts.existingCustomerProfileId,
+        paymentProfile: {
+          billTo: {
+            firstName: opts.firstName,
+            lastName: opts.lastName,
+          },
+          payment: {
+            opaqueData: {
+              dataDescriptor: opts.dataDescriptor,
+              dataValue: opts.dataValue,
+            },
+          },
+          defaultPaymentProfile: true,
+        },
+        validationMode:
+          process.env.AUTHORIZENET_ENV === "production"
+            ? "liveMode"
+            : "testMode",
+      },
+    };
+    const resp = await fetch(AUTHORIZENET_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = (await resp.json()) as any;
+    if (data?.messages?.resultCode === "Ok") {
+      const paymentProfileId = data?.customerPaymentProfileId as
+        | string
+        | undefined;
+      if (paymentProfileId) {
+        await pool.query(
+          `UPDATE clients SET anet_payment_profile_id = ? WHERE id = ?`,
+          [paymentProfileId, opts.clientId],
+        );
+      }
+      return {
+        customerProfileId: opts.existingCustomerProfileId,
+        customerPaymentProfileId: paymentProfileId,
+        last4: null,
+      };
+    }
+    // Fall through to create a fresh customer profile if adding a payment profile fails
+    console.warn(
+      "[anet:paymentProfile]",
+      data?.messages?.message?.[0]?.text || "createCustomerPaymentProfile failed",
+    );
+  }
+
+  const createPayload = {
+    createCustomerProfileRequest: {
+      merchantAuthentication,
+      profile: {
+        merchantCustomerId: `c${opts.clientId}-${Date.now()}`.slice(0, 20),
+        email: opts.email,
+        paymentProfiles: {
+          customerType: "individual",
+          billTo: {
+            firstName: opts.firstName,
+            lastName: opts.lastName,
+          },
+          payment: {
+            opaqueData: {
+              dataDescriptor: opts.dataDescriptor,
+              dataValue: opts.dataValue,
+            },
+          },
+        },
+      },
+      validationMode:
+        process.env.AUTHORIZENET_ENV === "production" ? "liveMode" : "testMode",
+    },
+  };
+  const resp = await fetch(AUTHORIZENET_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(createPayload),
+  });
+  const data = (await resp.json()) as any;
+  if (data?.messages?.resultCode !== "Ok") {
+    throw new Error(
+      data?.messages?.message?.[0]?.text || "Failed to save payment card",
+    );
+  }
+  const customerProfileId = String(data.customerProfileId);
+  const customerPaymentProfileId = data.customerPaymentProfileIdList
+    ?.numericString?.[0]
+    ? String(data.customerPaymentProfileIdList.numericString[0])
+    : data.customerPaymentProfileIdList?.[0]
+      ? String(data.customerPaymentProfileIdList[0])
+      : undefined;
+
+  await pool.query(
+    `UPDATE clients SET anet_customer_profile_id = ?, anet_payment_profile_id = ? WHERE id = ?`,
+    [customerProfileId, customerPaymentProfileId ?? null, opts.clientId],
+  );
+
+  return {
+    customerProfileId,
+    customerPaymentProfileId,
+    last4: null,
+  };
+}
+
 function anetDateYmd(d = new Date()): string {
   return d.toISOString().slice(0, 10);
+}
+
+/** True if the affiliate row already has a live or in-flight ARB subscription. */
+function hasActiveOrPendingSubscription(aff: RowDataPacket): boolean {
+  const status = aff.subscription_status as string;
+  return (
+    status === "active" ||
+    status === "pending" ||
+    !!aff.anet_subscription_id
+  );
 }
 
 async function createARBSubscription(opts: {
@@ -2832,6 +6519,27 @@ async function processMockRegistrationPayment(
   return { transactionId: txnId, paymentId: payIns.insertId };
 }
 
+/** $0 checkout (e.g. 100% coupon) — no Authorize.net charge; records a manual payment. */
+async function processFreeRegistrationPayment(
+  clientId: number,
+  packageId: number,
+  metadata: Record<string, unknown> = {},
+): Promise<{ transactionId: string; paymentId: number }> {
+  const txnId = `free_${Date.now()}_${clientId}_${crypto.randomBytes(4).toString("hex")}`;
+  const [payIns] = await pool.query<ResultSetHeader>(
+    `INSERT INTO payments (client_id, package_id, amount_cents, status, provider, provider_transaction_id, metadata_json)
+     VALUES (?, ?, 0, 'pending', 'manual', ?, ?)`,
+    [
+      clientId,
+      packageId,
+      txnId,
+      JSON.stringify({ ...metadata, free_checkout: true }),
+    ],
+  );
+  await markPaymentSucceeded(clientId, txnId);
+  return { transactionId: txnId, paymentId: payIns.insertId };
+}
+
 async function loadActiveTradelineProducts(
   ids: number[],
 ): Promise<RowDataPacket[]> {
@@ -2926,13 +6634,438 @@ async function autoAssignTasksForClient(
   await autoAssignTasksForCase(clientId, resolved);
 }
 
+// ============================================================================
+// LABELS (source + analysis layers)
+// ============================================================================
+
+/** Attach labels to a client by slug, ignoring unknown slugs and dupes. */
+async function attachLabelsBySlug(
+  clientId: number,
+  slugs: string[],
+): Promise<void> {
+  const uniqueSlugs = Array.from(new Set(slugs.filter(Boolean)));
+  if (uniqueSlugs.length === 0) return;
+  const [labelRows] = await pool.query<RowDataPacket[]>(
+    `SELECT id FROM labels WHERE slug IN (?)`,
+    [uniqueSlugs],
+  );
+  if (labelRows.length === 0) return;
+  const values = labelRows.map(() => "(?, ?)").join(", ");
+  const params = labelRows.flatMap((l) => [clientId, l.id]);
+  await pool.query<ResultSetHeader>(
+    `INSERT IGNORE INTO client_labels (client_id, label_id) VALUES ${values}`,
+    params,
+  );
+}
+
+async function getClientLabels(clientId: number): Promise<Label[]> {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT l.* FROM client_labels cl
+     JOIN labels l ON l.id = cl.label_id
+     WHERE cl.client_id = ?
+     ORDER BY l.layer ASC, l.sort_order ASC, l.id ASC`,
+    [clientId],
+  );
+  return rows as unknown as Label[];
+}
+
+/**
+ * Batch-attach `labels` onto a list of rows, keyed by the client id found on
+ * each row under `keyField` (defaults to `id` — the client's own primary key;
+ * pass `"client_id"` for rows like pipeline cases where `id` is the case id).
+ */
+async function attachLabelsToRows(
+  rows: RowDataPacket[],
+  keyField: string = "id",
+): Promise<void> {
+  if (rows.length === 0) return;
+  const ids = rows.map((r) => r[keyField] as number);
+  const [labelRows] = await pool.query<RowDataPacket[]>(
+    `SELECT cl.client_id, l.* FROM client_labels cl
+     JOIN labels l ON l.id = cl.label_id
+     WHERE cl.client_id IN (?)
+     ORDER BY l.layer ASC, l.sort_order ASC, l.id ASC`,
+    [ids],
+  );
+  const byClient = new Map<number, Label[]>();
+  for (const lr of labelRows) {
+    const cid = lr.client_id as number;
+    const { client_id, ...label } = lr as any;
+    if (!byClient.has(cid)) byClient.set(cid, []);
+    byClient.get(cid)!.push(label as Label);
+  }
+  for (const r of rows) {
+    (r as any).labels = byClient.get(r[keyField] as number) ?? [];
+  }
+}
+
+/**
+ * Prospects (1C): clients with status='prospect' + their latest credit
+ * analysis summary. Pass `scopedAffiliateIds` (from `getAffiliateScope`) to
+ * restrict results to an affiliate's own + sub-affiliates' referred prospects.
+ */
+async function fetchProspectsWithLabels(
+  scopedAffiliateIds?: number[],
+): Promise<RowDataPacket[]> {
+  const scopeClause =
+    scopedAffiliateIds && scopedAffiliateIds.length > 0
+      ? "AND c.affiliate_id IN (?)"
+      : "";
+  const args = scopedAffiliateIds && scopedAffiliateIds.length > 0
+    ? [scopedAffiliateIds]
+    : [];
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT c.id, c.first_name, c.last_name, c.email, c.phone,
+            c.preferred_language, c.created_at,
+            ca.id AS credit_analysis_id, ca.mode AS analysis_mode,
+            ca.client_goal, ca.notes, ca.agent_phone, ca.rep_name
+     FROM clients c
+     LEFT JOIN (
+       SELECT ca1.*
+       FROM credit_analyses ca1
+       INNER JOIN (
+         SELECT client_id, MAX(id) AS max_id FROM credit_analyses GROUP BY client_id
+       ) latest ON latest.client_id = ca1.client_id AND latest.max_id = ca1.id
+     ) ca ON ca.client_id = c.id
+     WHERE c.status = 'prospect' ${scopeClause}
+     ORDER BY c.created_at DESC`,
+    args,
+  );
+  await attachLabelsToRows(rows);
+  for (const r of rows) {
+    (r as any).source_label =
+      ((r as any).labels as Label[]).find((l) => l.layer === "source")
+        ?.slug ?? null;
+  }
+  return rows;
+}
+
+// ============================================================================
+// AFFILIATES v1 — scope, attribution, and commission helpers
+// ============================================================================
+
+/**
+ * Resolve an affiliate id from a public code — accepts either the full
+ * `slug` (up to 64 chars) or the legacy `referral_code` (max 32 chars,
+ * historically `slug.slice(0, 32)`). Used for both link-click capture and
+ * lead/registration attribution.
+ *
+ * v1 rule: resolve as long as the affiliate is not inactive/suspended —
+ * invited-but-unpaid affiliates can still share links early.
+ */
+async function resolveAffiliateIdBySlugOrCode(
+  code: string | null | undefined,
+): Promise<number | null> {
+  const raw = String(code || "").trim();
+  if (!raw) return null;
+  // referral_code is VARCHAR(32); only attempt that match when the raw
+  // code fits, so longer slugs don't silently truncate into a wrong hit.
+  const referralMatch =
+    raw.length <= 32
+      ? `OR referral_code = ?`
+      : "";
+  const params: string[] = raw.length <= 32 ? [raw, raw] : [raw];
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT id, status FROM affiliates
+     WHERE (slug = ? ${referralMatch})
+       AND status NOT IN ('inactive','suspended')
+     LIMIT 1`,
+    params,
+  );
+  if (rows.length === 0) return null;
+  if (!affiliateCanReceiveClicks({ status: rows[0].status as string }))
+    return null;
+  return rows[0].id as number;
+}
+
+interface AffiliateScope {
+  affiliateId: number;
+  plan: AffiliatePlan;
+  parentId: number | null;
+  status: string;
+  subscriptionStatus: string;
+  hasPortalAccess: boolean;
+  /** Self + (if master) all direct sub-affiliate ids — used for `affiliate_id IN (...)` filters. */
+  scopedAffiliateIds: number[];
+}
+
+/**
+ * Determine the affiliate isolation scope for an authenticated admin.
+ * Returns `null` when the caller is not an affiliate (full/unscoped access
+ * for super_admin/admin/agent). Returns the scope otherwise, including
+ * sub-affiliates' ids when the caller is a `master`.
+ */
+async function getAffiliateScope(
+  adminId: number,
+): Promise<AffiliateScope | null> {
+  const [adminRows] = await pool.query<RowDataPacket[]>(
+    `SELECT role FROM admins WHERE id = ? LIMIT 1`,
+    [adminId],
+  );
+  if (adminRows.length === 0 || adminRows[0].role !== "affiliate") return null;
+
+  const [affRows] = await pool.query<RowDataPacket[]>(
+    `SELECT id, plan, parent_affiliate_id, status, subscription_status
+     FROM affiliates WHERE admin_id = ? LIMIT 1`,
+    [adminId],
+  );
+  if (affRows.length === 0) {
+    // Role says affiliate but no profile row — treat as fully locked out.
+    return {
+      affiliateId: 0,
+      plan: "standard",
+      parentId: null,
+      status: "inactive",
+      subscriptionStatus: "none",
+      hasPortalAccess: false,
+      scopedAffiliateIds: [],
+    };
+  }
+  const aff = affRows[0];
+  const affiliateId = aff.id as number;
+  const scopedAffiliateIds = [affiliateId];
+  if (aff.plan === "master") {
+    const [children] = await pool.query<RowDataPacket[]>(
+      `SELECT id FROM affiliates WHERE parent_affiliate_id = ?`,
+      [affiliateId],
+    );
+    scopedAffiliateIds.push(...children.map((c) => c.id as number));
+  }
+  return {
+    affiliateId,
+    plan: aff.plan as AffiliatePlan,
+    parentId: (aff.parent_affiliate_id as number | null) ?? null,
+    status: aff.status as string,
+    subscriptionStatus: aff.subscription_status as string,
+    hasPortalAccess: affiliateHasPortalAccess({
+      status: aff.status as string,
+      subscription_status: aff.subscription_status as string,
+    }),
+    scopedAffiliateIds,
+  };
+}
+
+/** True when `clientId` belongs to the caller's affiliate scope (or scope is null = full access). */
+async function assertClientInAffiliateScope(
+  clientId: number,
+  scope: AffiliateScope | null,
+): Promise<boolean> {
+  if (!scope) return true;
+  if (scope.scopedAffiliateIds.length === 0) return false;
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT affiliate_id FROM clients WHERE id = ? LIMIT 1`,
+    [clientId],
+  );
+  if (rows.length === 0) return false;
+  const affiliateId = rows[0].affiliate_id as number | null;
+  return affiliateId != null && scope.scopedAffiliateIds.includes(affiliateId);
+}
+
+/**
+ * Block affiliate-role callers from team-only admin surfaces
+ * (payments, documents, messaging, settings tooling, etc.).
+ */
+async function denyAffiliateAccess(
+  req: AuthedRequest,
+  res: Response,
+  next: NextFunction,
+) {
+  const scope = await getAffiliateScope(req.auth!.id);
+  if (scope) {
+    return res.status(403).json({
+      error: "This area is not available to affiliates",
+    });
+  }
+  next();
+}
+
+/** Require portal access when the caller is an affiliate; no-op for staff. */
+async function requirePortalIfAffiliate(
+  req: AuthedRequest,
+  res: Response,
+  next: NextFunction,
+) {
+  const scope = await getAffiliateScope(req.auth!.id);
+  if (scope && !scope.hasPortalAccess) {
+    return res.status(403).json({
+      error: "Affiliate subscription required",
+      code: "affiliate_subscription_required",
+    });
+  }
+  next();
+}
+
+function serializeCommissionRow(row: RowDataPacket) {
+  const first = (row.client_first_name as string) || "";
+  const last = (row.client_last_name as string) || "";
+  const clientName = `${first} ${last}`.trim() || null;
+  return {
+    ...row,
+    client_name: clientName,
+  };
+}
+
+/**
+ * Record enrollment commission (+ parent override for sub-affiliates) for a
+ * successful payment. No-ops if the client has no affiliate_id, or if a
+ * commission row already exists for this payment_id (idempotent — safe to
+ * call from multiple payment-success code paths, e.g. retries/duplicate
+ * webhook calls). Because the guard is keyed on `payment_id` rather than
+ * `client_id`, calling this once per successful split payment (registration
+ * webhook, direct pay, or split-pay-by-link) correctly earns a commission on
+ * each payment rather than only the client's first one.
+ */
+async function recordEnrollmentCommissions(
+  clientId: number,
+  paymentId: number,
+  baseAmountCents: number,
+): Promise<void> {
+  if (!paymentId || baseAmountCents <= 0) return;
+  const [clientRows] = await pool.query<RowDataPacket[]>(
+    `SELECT affiliate_id FROM clients WHERE id = ? LIMIT 1`,
+    [clientId],
+  );
+  const affiliateId = clientRows[0]?.affiliate_id as number | null | undefined;
+  if (!affiliateId) return;
+
+  const [existing] = await pool.query<RowDataPacket[]>(
+    `SELECT id FROM affiliate_commissions WHERE payment_id = ? LIMIT 1`,
+    [paymentId],
+  );
+  if (existing.length > 0) return; // already recorded — avoid double-pay
+
+  const [affRows] = await pool.query<RowDataPacket[]>(
+    `SELECT id, commission_rate_bps, parent_affiliate_id FROM affiliates WHERE id = ? LIMIT 1`,
+    [affiliateId],
+  );
+  if (affRows.length === 0) return;
+  const aff = affRows[0];
+
+  const enrollmentCents = computeCommissionCents(
+    baseAmountCents,
+    Number(aff.commission_rate_bps),
+  );
+  if (enrollmentCents > 0) {
+    try {
+      await pool.query<ResultSetHeader>(
+        `INSERT INTO affiliate_commissions
+           (affiliate_id, client_id, payment_id, kind, amount_cents, rate_bps, base_amount_cents, status)
+         VALUES (?, ?, ?, 'enrollment', ?, ?, ?, 'pending')`,
+        [
+          affiliateId,
+          clientId,
+          paymentId,
+          enrollmentCents,
+          Number(aff.commission_rate_bps),
+          baseAmountCents,
+        ],
+      );
+    } catch (err) {
+      // uq_aff_comm_payment_kind_aff backstop — a duplicate here means a
+      // concurrent call already recorded this commission; treat as no-op
+      // rather than double-paying or failing the payment flow.
+      if (!isDuplicateKeyError(err)) throw err;
+    }
+  }
+
+  const parentAffiliateId = aff.parent_affiliate_id as number | null;
+  if (parentAffiliateId) {
+    const [parentRows] = await pool.query<RowDataPacket[]>(
+      `SELECT parent_override_rate_bps FROM affiliates WHERE id = ? LIMIT 1`,
+      [parentAffiliateId],
+    );
+    if (parentRows.length > 0) {
+      const overrideCents = computeCommissionCents(
+        baseAmountCents,
+        Number(parentRows[0].parent_override_rate_bps),
+      );
+      if (overrideCents > 0) {
+        try {
+          await pool.query<ResultSetHeader>(
+            `INSERT INTO affiliate_commissions
+               (affiliate_id, client_id, payment_id, source_affiliate_id, kind, amount_cents, rate_bps, base_amount_cents, status)
+             VALUES (?, ?, ?, ?, 'override', ?, ?, ?, 'pending')`,
+            [
+              parentAffiliateId,
+              clientId,
+              paymentId,
+              affiliateId,
+              overrideCents,
+              Number(parentRows[0].parent_override_rate_bps),
+              baseAmountCents,
+            ],
+          );
+        } catch (err) {
+          if (!isDuplicateKeyError(err)) throw err;
+        }
+      }
+    }
+  }
+}
+
+/** Generate a unique affiliate slug, appending -2, -3, ... on collision.
+ * Also avoids referral_code (first 32 chars) collisions. */
+async function generateUniqueAffiliateSlug(base: string): Promise<string> {
+  const normalized = normalizeAffiliateSlug(base) || "affiliate";
+  let candidate = normalized;
+  for (let attempt = 1; attempt <= 50; attempt++) {
+    const referralCode = candidate.slice(0, 32);
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT id FROM affiliates WHERE slug = ? OR referral_code = ? LIMIT 1`,
+      [candidate, referralCode],
+    );
+    if (rows.length === 0) return candidate;
+    const suffix = `-${attempt + 1}`;
+    candidate = `${normalized.slice(0, 64 - suffix.length)}${suffix}`;
+  }
+  return `${normalized.slice(0, 48)}-${Date.now()}`;
+}
+
+/** Public-facing affiliate summary shape shared by list/detail admin endpoints. */
+function serializeAffiliateRow(row: RowDataPacket) {
+  return {
+    ...row,
+    has_portal_access: affiliateHasPortalAccess({
+      status: row.status as string,
+      subscription_status: row.subscription_status as string,
+    }),
+  };
+}
+
 async function markPaymentSucceeded(clientId: number, transactionId: string) {
+  const [paymentRows] = await pool.query<RowDataPacket[]>(
+    `SELECT id, amount_cents, status FROM payments WHERE provider_transaction_id = ? LIMIT 1`,
+    [transactionId],
+  );
   await pool.query<ResultSetHeader>(
     `UPDATE payments SET status='succeeded', paid_at=NOW() WHERE provider_transaction_id = ? AND status <> 'succeeded'`,
     [transactionId],
   );
+
+  // Affiliate enrollment commission — first successful payment only, guarded
+  // by payment_id inside recordEnrollmentCommissions to avoid double-paying
+  // on retries/duplicate webhook calls. Awaited so a transient DB error is
+  // logged against a real attempt rather than silently dropped by .catch.
+  if (paymentRows.length > 0 && paymentRows[0].status !== "succeeded") {
+    try {
+      await recordEnrollmentCommissions(
+        clientId,
+        paymentRows[0].id as number,
+        Number(paymentRows[0].amount_cents),
+      );
+    } catch (e: any) {
+      console.error("[affiliates:record-commission]", e?.message ?? e);
+    }
+  }
+
+  // A client that paid while still `status='prospect'` (e.g. converted directly
+  // from a credit-analysis lead) may also still carry `pipeline_stage='prospect'`
+  // — bump it to `new_client` so the case created below doesn't inherit `prospect`.
   await pool.query<ResultSetHeader>(
-    `UPDATE clients SET status='onboarding' WHERE id = ? AND status='pending_payment'`,
+    `UPDATE clients
+     SET status='onboarding',
+         pipeline_stage = IF(pipeline_stage = 'prospect', 'new_client', pipeline_stage)
+     WHERE id = ? AND status IN ('pending_payment','prospect')`,
     [clientId],
   );
 
@@ -3011,16 +7144,11 @@ async function processAuthorizeNetPayment(
   lastName: string,
   metadata: Record<string, unknown> = {},
 ): Promise<{ transactionId: string; paymentId: number }> {
-  const result = await chargeCard({
-    amountDollars: (amountCents / 100).toFixed(2),
-    dataDescriptor,
-    dataValue,
-    clientId,
-    email,
-    firstName,
-    lastName,
-  });
-
+  // Insert a provisional payments row BEFORE charging so a successful ANet
+  // charge that crashes before the DB write still has a ledger trace — the
+  // same pattern used by POST /api/pay/:token. On decline/error we mark the
+  // row failed; on success we swap in the real provider_transaction_id.
+  const provisionalTxnId = `pending-${crypto.randomUUID()}`;
   const [payIns] = await pool.query<ResultSetHeader>(
     `INSERT INTO payments (client_id, package_id, amount_cents, status, provider, provider_transaction_id, metadata_json)
      VALUES (?, ?, ?, 'pending', 'authorize_net', ?, ?)`,
@@ -3028,11 +7156,39 @@ async function processAuthorizeNetPayment(
       clientId,
       packageId,
       amountCents,
-      result.transactionId,
+      provisionalTxnId,
       JSON.stringify(metadata),
     ],
   );
   const paymentId = payIns.insertId;
+
+  let result: {
+    transactionId: string;
+    customerProfileId?: string;
+    customerPaymentProfileId?: string;
+  };
+  try {
+    result = await chargeCard({
+      amountDollars: (amountCents / 100).toFixed(2),
+      dataDescriptor,
+      dataValue,
+      clientId,
+      email,
+      firstName,
+      lastName,
+    });
+  } catch (err: any) {
+    await pool.query<ResultSetHeader>(
+      `UPDATE payments SET status = 'failed', failure_reason = ? WHERE id = ?`,
+      [String(err?.message || "Payment processing failed").slice(0, 500), paymentId],
+    );
+    throw err;
+  }
+
+  await pool.query<ResultSetHeader>(
+    `UPDATE payments SET provider_transaction_id = ? WHERE id = ?`,
+    [result.transactionId, paymentId],
+  );
 
   // Store Authorize.net customer/payment profile IDs so future charges can
   // reference the same customer and they appear in Authorize.net Manage Customers.
@@ -3055,27 +7211,53 @@ async function triggerReminderFlow(
   triggerEvent: string,
   clientId: number,
   extraVars?: Record<string, string>,
+  opts?: { deliverToEmail?: string; skipIdempotency?: boolean },
 ): Promise<void> {
   const [flows] = await pool.query<RowDataPacket[]>(
-    `SELECT id FROM reminder_flows WHERE trigger_event = ? AND is_active = 1 LIMIT 1`,
+    `SELECT id, required_label_slugs_json FROM reminder_flows WHERE trigger_event = ? AND is_active = 1 LIMIT 1`,
     [triggerEvent],
   );
   if (flows.length === 0) return;
   const flowId = flows[0].id as number;
 
+  // Optional label gate: if the flow specifies required_label_slugs, only run
+  // it when the client currently holds ALL of those label slugs.
+  // Sandbox "email myself" still uses the selected client for merge fields /
+  // label gates so the preview matches a real send.
+  const requiredSlugs =
+    parseWizardJsonField<string[]>(flows[0].required_label_slugs_json) ?? [];
+  if (requiredSlugs.length > 0) {
+    const [labelRows] = await pool.query<RowDataPacket[]>(
+      `SELECT l.slug FROM client_labels cl
+       JOIN labels l ON l.id = cl.label_id
+       WHERE cl.client_id = ?`,
+      [clientId],
+    );
+    const clientSlugs = labelRows.map((r) => r.slug as string);
+    const missing = missingRequiredLabelSlugs(clientSlugs, requiredSlugs);
+    if (missing.length > 0) {
+      console.log(
+        `[flow:${triggerEvent}] Skipping client ${clientId} — missing required label(s): ${missing.join(", ")}`,
+      );
+      return;
+    }
+  }
+
   // Idempotency guard: skip if this flow already ran for this client within the last 10 minutes
-  // (prevents duplicates from double webhooks / retries).
-  const [recent] = await pool.query<RowDataPacket[]>(
-    `SELECT id FROM reminder_flow_executions
+  // (prevents duplicates from double webhooks / retries). Sandbox re-tests may skip it.
+  if (!opts?.skipIdempotency) {
+    const [recent] = await pool.query<RowDataPacket[]>(
+      `SELECT id FROM reminder_flow_executions
      WHERE flow_id = ? AND client_id = ? AND triggered_at >= NOW() - INTERVAL 10 MINUTE
      LIMIT 1`,
-    [flowId, clientId],
-  );
-  if (recent.length > 0) {
-    console.warn(
-      `[flow:${triggerEvent}] Skipping duplicate trigger for client ${clientId} (already ran within 10 min)`,
+      [flowId, clientId],
     );
-    return;
+    if (recent.length > 0) {
+      console.warn(
+        `[flow:${triggerEvent}] Skipping duplicate trigger for client ${clientId} (already ran within 10 min)`,
+      );
+      return;
+    }
   }
 
   const [steps] = await pool.query<RowDataPacket[]>(
@@ -3092,6 +7274,13 @@ async function triggerReminderFlow(
   if (clientRows.length === 0) return;
   const client = clientRows[0];
   const lang = (client.preferred_language as string | null) || "en";
+  const deliverTo =
+    (opts?.deliverToEmail || "").trim() || (client.email as string);
+  const isSandboxDelivery = !!(
+    opts?.deliverToEmail &&
+    opts.deliverToEmail.trim().toLowerCase() !==
+      String(client.email || "").toLowerCase()
+  );
 
   const vars: Record<string, string> = {
     first_name: client.first_name as string,
@@ -3154,7 +7343,10 @@ async function triggerReminderFlow(
         const stepReplaceVars = (tmpl: string) =>
           tmpl.replace(/\{\{(\w+)\}\}/g, (_, k) => stepVars[k] ?? `{{${k}}}`);
 
-        const resolvedSubj = stepReplaceVars(subj);
+        let resolvedSubj = stepReplaceVars(subj);
+        if (isSandboxDelivery && !resolvedSubj.startsWith("[TEST]")) {
+          resolvedSubj = `[TEST] ${resolvedSubj}`;
+        }
         const resolvedBody = stepReplaceVars(bodyHtml);
         const btnLabel = lang === "es" ? "Ir a mi portal" : "Go to My Portal";
         const fullHtml = emailLayout({
@@ -3165,19 +7357,34 @@ async function triggerReminderFlow(
 
         if (isImmediate) {
           try {
-            await sendEmail({
-              to: client.email as string,
-              subject: resolvedSubj,
-              html: fullHtml,
-            });
+            await Promise.race([
+              sendEmail({
+                to: deliverTo,
+                subject: resolvedSubj,
+                html: fullHtml,
+              }),
+              new Promise<never>((_, reject) =>
+                setTimeout(
+                  () => reject(new Error("SMTP timeout after 8s")),
+                  8_000,
+                ),
+              ),
+            ]);
             stepsExecuted++;
           } catch (e: any) {
             console.error("[flow:send_email]", e?.message);
+            // Fall back to queue so the cron worker can retry without
+            // blocking stage/convert handlers on a hung SMTP socket.
+            await pool.query<ResultSetHeader>(
+              `INSERT INTO notification_queue (client_id, channel, to_address, subject, body, scheduled_for) VALUES (?, 'email', ?, ?, ?, NOW())`,
+              [clientId, deliverTo, resolvedSubj, fullHtml],
+            );
+            stepsScheduled++;
           }
         } else {
           await pool.query<ResultSetHeader>(
             `INSERT INTO notification_queue (client_id, channel, to_address, subject, body, scheduled_for) VALUES (?, 'email', ?, ?, ?, ?)`,
-            [clientId, client.email, resolvedSubj, fullHtml, scheduledFor],
+            [clientId, deliverTo, resolvedSubj, fullHtml, scheduledFor],
           );
           stepsScheduled++;
         }
@@ -3288,7 +7495,13 @@ async function crcPost(
 ): Promise<{ success: boolean; crcId?: string; raw?: any; dryRun?: boolean }> {
   if (!crcConfigured || crcDryRun) {
     const mode = !crcConfigured ? "no-keys" : "dry-run";
-    console.log(`[crc:${mode}]`, path, "\n" + xmlData);
+    // Never log full CRC XML — it can include SSN, DOB, email.
+    const redacted = xmlData
+      .replace(/<(ssn|socialsecuritynumber)>[^<]*<\/\1>/gi, "<$1>***</$1>")
+      .replace(/<(dob|dateofbirth)>[^<]*<\/\1>/gi, "<$1>***</$1>")
+      .replace(/<(email|emailaddress)>[^<]*<\/\1>/gi, "<$1>***</$1>")
+      .replace(/<(phone|cellphone|homephone)>[^<]*<\/\1>/gi, "<$1>***</$1>");
+    console.log(`[crc:${mode}]`, path, "\n" + redacted);
     // Return a fake CRC ID so local testing exercises the full code path
     return { success: true, crcId: undefined, dryRun: true };
   }
@@ -3453,9 +7666,74 @@ const upload = multer({
   limits: { fileSize: 15 * 1024 * 1024 },
 });
 
+/**
+ * Build the browser CORS allowlist.
+ * - Always includes PUBLIC_APP_URL + local Vite/dev hosts
+ * - Includes Vercel preview/deployment URL when present
+ * - Includes comma-separated CORS_ALLOWED_ORIGINS (extra custom domains)
+ * - Includes known Optimum production hostnames (ofgllc.com) so a mis-set
+ *   PUBLIC_APP_URL (e.g. still pointing at *.vercel.app) does not lock admins out
+ *
+ * `undefined` origin (server-to-server, curl, same-origin proxy) is always
+ * allowed by the cors middleware callback — CORS only governs browser XHR.
+ */
+function buildCorsAllowedOrigins(opts?: {
+  appUrl?: string;
+  extraCsv?: string;
+  vercelUrl?: string;
+}): string[] {
+  const normalize = (raw: string) => raw.trim().replace(/\/+$/, "");
+  const fromCsv = String(opts?.extraCsv ?? process.env.CORS_ALLOWED_ORIGINS ?? "")
+    .split(",")
+    .map(normalize)
+    .filter(Boolean);
+  const vercelHost = String(
+    opts?.vercelUrl ?? process.env.VERCEL_URL ?? "",
+  ).trim();
+  const vercelOrigin = vercelHost
+    ? normalize(
+        vercelHost.startsWith("http") ? vercelHost : `https://${vercelHost}`,
+      )
+    : "";
+  return Array.from(
+    new Set(
+      [
+        normalize(opts?.appUrl ?? APP_URL),
+        vercelOrigin,
+        ...fromCsv,
+        // Production custom domains (Optimum Financial Group)
+        "https://www.ofgllc.com",
+        "https://ofgllc.com",
+        "http://localhost:8080",
+        "https://localhost:8080",
+        "http://localhost:5173",
+        "https://localhost:5173",
+      ].filter(Boolean),
+    ),
+  );
+}
+
+const CORS_ALLOWED_ORIGINS = buildCorsAllowedOrigins();
+
 function buildApp() {
   const app = express();
-  app.use(cors());
+  // Vercel (and most reverse proxies) set X-Forwarded-For. Required for
+  // express-rate-limit / req.ip — otherwise ValidationError on every request.
+  app.set("trust proxy", 1);
+  app.use(
+    cors({
+      origin(origin, callback) {
+        if (!origin || CORS_ALLOWED_ORIGINS.includes(origin)) {
+          return callback(null, true);
+        }
+        // Deny without throwing — throwing becomes a 500 "unexpected error"
+        // in our Express error handler (what admins saw on request-otp).
+        console.warn(`[cors] blocked origin: ${origin}`);
+        return callback(null, false);
+      },
+      credentials: true,
+    }),
+  );
   app.use(
     express.json({
       verify: (req: any, _res, buf) => {
@@ -3464,6 +7742,21 @@ function buildApp() {
     }),
   );
   app.use(express.urlencoded({ extended: true }));
+
+  // Global API rate limit (defense-in-depth). Auth/pay/OTP also have tighter
+  // per-route hitRateLimit buckets. Health checks stay unlimited.
+  const apiRateLimit = rateLimit({
+    windowMs: 60 * 1000,
+    max: 300,
+    standardHeaders: true,
+    legacyHeaders: false,
+    skip: (req) =>
+      req.path === "/api/health" ||
+      req.path === "/api/ping" ||
+      req.path.startsWith("/api/cron/"),
+    message: { error: "Too many requests. Please try again shortly." },
+  });
+  app.use("/api/", apiRateLimit);
 
   // ── Request logger ──────────────────────────────────────────
   app.use((req: Request, res: Response, next: NextFunction) => {
@@ -3491,14 +7784,17 @@ function buildApp() {
   });
 
   // ============================================================
-  // SMOKE-TEST HELPERS (only active when SMOKE_TEST_SECRET is set)
+  // SMOKE-TEST HELPERS (only active when SMOKE_TEST_SECRET is set AND
+  // never in production — these routes mint real session tokens and
+  // delete data, so they must be impossible to reach on a live deploy
+  // even if the secret leaked or was left set by accident.)
   // ============================================================
   const SMOKE_SECRET = process.env.SMOKE_TEST_SECRET;
-  if (SMOKE_SECRET) {
+  if (SMOKE_SECRET && !IS_PROD) {
     // POST /api/smoke/token — returns a real session token for admin or client
     app.post("/api/smoke/token", async (req, res) => {
       const { secret, actor, email } = req.body || {};
-      if (!secret || secret !== SMOKE_SECRET)
+      if (!timingSafeStringEqual(String(secret || ""), SMOKE_SECRET))
         return res.status(401).json({ error: "Unauthorized" });
       if (!["admin", "client"].includes(String(actor)) || !email)
         return res
@@ -3525,7 +7821,7 @@ function buildApp() {
     app.delete("/api/smoke/cleanup", async (req, res) => {
       const { secret, ticket_id, faq_id, session_revoke_token } =
         req.body || {};
-      if (!secret || secret !== SMOKE_SECRET)
+      if (!timingSafeStringEqual(String(secret || ""), SMOKE_SECRET))
         return res.status(401).json({ error: "Unauthorized" });
       if (faq_id)
         await pool.query("DELETE FROM support_faq WHERE id = ?", [
@@ -3549,6 +7845,11 @@ function buildApp() {
   // ============================================================
   // AUTH (CLIENT + ADMIN)
   // ============================================================
+  const OTP_REQUEST_LIMIT = 5; // per IP+email per window
+  const OTP_REQUEST_WINDOW_MS = 15 * 60 * 1000;
+  const OTP_VERIFY_LIMIT = 10; // per IP+email per window
+  const OTP_VERIFY_WINDOW_MS = 15 * 60 * 1000;
+
   app.post("/api/auth/client/request-otp", async (req, res) => {
     const email = String(req.body?.email || "")
       .trim()
@@ -3556,14 +7857,29 @@ function buildApp() {
     if (!email || !/.+@.+\..+/.test(email)) {
       return res.status(400).json({ error: "Valid email required" });
     }
+    if (
+      hitRateLimit(
+        rateLimitKey(req, `otp-req:client:${email}`),
+        OTP_REQUEST_LIMIT,
+        OTP_REQUEST_WINDOW_MS,
+      )
+    ) {
+      return res
+        .status(429)
+        .json({ error: "Too many requests. Please try again later." });
+    }
     const [rows] = await pool.query<RowDataPacket[]>(
       "SELECT id, first_name, preferred_language FROM clients WHERE email = ? LIMIT 1",
       [email],
     );
     if (rows.length === 0) {
-      return res
-        .status(404)
-        .json({ error: "No account found for that email." });
+      console.warn(
+        `[auth:client:request-otp] no client for ${email} — email not sent`,
+      );
+      return res.status(404).json({
+        error: "No account found for that email.",
+        code: "ACCOUNT_NOT_FOUND",
+      });
     }
     const code = await createOtp(
       "client",
@@ -3577,7 +7893,10 @@ function buildApp() {
       lang: rows[0].preferred_language || "en",
     });
     await sendEmail({ to: email, subject: tpl.subject, html: tpl.html });
-    res.json({ ok: true, message: "Verification code sent." });
+    res.json({
+      ok: true,
+      message: "A sign-in code has been sent to that email.",
+    });
   });
 
   app.post("/api/auth/client/verify-otp", async (req, res) => {
@@ -3587,6 +7906,17 @@ function buildApp() {
     const code = String(req.body?.code || "").trim();
     if (!email || !code)
       return res.status(400).json({ error: "Missing fields" });
+    if (
+      hitRateLimit(
+        rateLimitKey(req, `otp-verify:client:${email}`),
+        OTP_VERIFY_LIMIT,
+        OTP_VERIFY_WINDOW_MS,
+      )
+    ) {
+      return res
+        .status(429)
+        .json({ error: "Too many attempts. Please try again later." });
+    }
     const [rows] = await pool.query<RowDataPacket[]>(
       "SELECT id, email, first_name, last_name FROM clients WHERE email = ? LIMIT 1",
       [email],
@@ -3622,15 +7952,39 @@ function buildApp() {
         .trim()
         .toLowerCase();
       if (!email) return res.status(400).json({ error: "Email required" });
+      if (
+        hitRateLimit(
+          rateLimitKey(req, `otp-req:admin:${email}`),
+          OTP_REQUEST_LIMIT,
+          OTP_REQUEST_WINDOW_MS,
+        )
+      ) {
+        return res
+          .status(429)
+          .json({ error: "Too many requests. Please try again later." });
+      }
       const [rows] = await pool.query<RowDataPacket[]>(
-        "SELECT id, first_name FROM admins WHERE email = ? AND status = 'active' LIMIT 1",
+        "SELECT id, first_name, status FROM admins WHERE email = ? LIMIT 1",
         [email],
       );
-      if (rows.length === 0)
+      if (rows.length === 0) {
+        console.warn(
+          `[auth:admin:request-otp] no admin for ${email} — email not sent`,
+        );
         return res.status(404).json({
-          error:
-            "No staff account found for that email. Double-check for typos or contact your super admin.",
+          error: "No staff account found for that email.",
+          code: "ACCOUNT_NOT_FOUND",
         });
+      }
+      if (rows[0].status !== "active") {
+        console.warn(
+          `[auth:admin:request-otp] inactive admin ${email} (status=${rows[0].status}) — email not sent`,
+        );
+        return res.status(403).json({
+          error: "This staff account is not active. Contact a super admin.",
+          code: "ACCOUNT_INACTIVE",
+        });
+      }
       const code = await createOtp(
         "admin",
         rows[0].id as number,
@@ -3643,7 +7997,10 @@ function buildApp() {
         isAdmin: true,
       });
       await sendEmail({ to: email, subject: tpl.subject, html: tpl.html });
-      res.json({ ok: true });
+      res.json({
+        ok: true,
+        message: "A sign-in code has been sent to that email.",
+      });
     } catch (err: any) {
       console.error("[/api/auth/admin/request-otp]", err?.message ?? err);
       res.status(503).json({
@@ -3659,6 +8016,17 @@ function buildApp() {
     const code = String(req.body?.code || "").trim();
     if (!email || !code)
       return res.status(400).json({ error: "Missing fields" });
+    if (
+      hitRateLimit(
+        rateLimitKey(req, `otp-verify:admin:${email}`),
+        OTP_VERIFY_LIMIT,
+        OTP_VERIFY_WINDOW_MS,
+      )
+    ) {
+      return res
+        .status(429)
+        .json({ error: "Too many attempts. Please try again later." });
+    }
     const [rows] = await pool.query<RowDataPacket[]>(
       "SELECT id, email, first_name, last_name, role, avatar_url FROM admins WHERE email = ? AND status = 'active' LIMIT 1",
       [email],
@@ -3722,7 +8090,31 @@ function buildApp() {
       );
       if (rows.length === 0)
         return res.status(404).json({ error: "Not found" });
-      res.json({ user: rows[0] });
+      const user = rows[0] as any;
+
+      if (user.role === "affiliate") {
+        const [affRows] = await pool.query<RowDataPacket[]>(
+          `SELECT id, plan, slug, referral_code, default_landing, status,
+                  subscription_status, monthly_price_cents, commission_rate_bps,
+                  parent_override_rate_bps, parent_affiliate_id, bio, avatar_url,
+                  social_facebook, social_instagram, social_tiktok, social_linkedin
+           FROM affiliates WHERE admin_id = ? LIMIT 1`,
+          [req.auth!.id],
+        );
+        if (affRows.length > 0) {
+          const aff = affRows[0];
+          user.affiliate = aff;
+          user.has_portal_access = affiliateHasPortalAccess({
+            status: aff.status as string,
+            subscription_status: aff.subscription_status as string,
+          });
+        } else {
+          user.affiliate = null;
+          user.has_portal_access = false;
+        }
+      }
+
+      res.json({ user });
     },
   );
 
@@ -3858,7 +8250,19 @@ function buildApp() {
       const rawBody =
         (req as any).rawBody?.toString?.() || JSON.stringify(req.body ?? {});
       const sigKey = process.env.ANET_WEBHOOK_SIGNATURE_KEY;
-      if (sigKey) {
+      if (!sigKey) {
+        if (IS_PROD) {
+          console.error(
+            "[anet:webhook] ANET_WEBHOOK_SIGNATURE_KEY not configured in production — rejecting",
+          );
+          return res
+            .status(503)
+            .json({ error: "Webhook not configured" });
+        }
+      } else {
+        // Once a signature key is configured, a missing/invalid header is
+        // ALWAYS rejected — previously an absent header silently skipped
+        // verification, letting anyone forge subscription-status events.
         const headerSig = String(req.headers["x-anet-signature"] || "").replace(
           /^sha512=/i,
           "",
@@ -3868,8 +8272,8 @@ function buildApp() {
           .update(rawBody)
           .digest("hex")
           .toUpperCase();
-        if (headerSig && headerSig.toUpperCase() !== expected) {
-          console.warn("[anet:webhook] Invalid signature");
+        if (!headerSig || headerSig.toUpperCase() !== expected) {
+          console.warn("[anet:webhook] Invalid or missing signature");
           return res.status(401).json({ error: "Invalid signature" });
         }
       }
@@ -3878,32 +8282,124 @@ function buildApp() {
       const eventType = String(
         payload.eventType || payload.event_type || "",
       ).toLowerCase();
+      const subPayload = payload.payload || {};
       const subscriptionId = String(
-        payload.payload?.id ||
-          payload.payload?.subscriptionId ||
+        subPayload.subscriptionId ||
+          subPayload.subscription?.id ||
+          (eventType.includes("subscription") ? subPayload.id : "") ||
           payload.subscriptionId ||
           "",
       );
+      const transactionId = String(
+        (eventType.includes("payment") ? subPayload.id : "") ||
+          subPayload.transId ||
+          subPayload.transactionId ||
+          "",
+      );
+      const authAmount = Number(
+        subPayload.authAmount ?? subPayload.amount ?? NaN,
+      );
 
+      // ── Subscription lifecycle (cancel / suspend / fail) ─────────────────
       if (subscriptionId && eventType.includes("subscription")) {
         let newStatus: string | null = null;
+        let affiliateSubStatus: string | null = null;
         if (eventType.includes("cancel") || eventType.includes("terminat")) {
           newStatus = "cancelled";
+          affiliateSubStatus = "cancelled";
         } else if (
           eventType.includes("suspend") ||
-          eventType.includes("fail")
+          eventType.includes("fail") ||
+          eventType.includes("expired")
         ) {
           newStatus = "suspended";
+          affiliateSubStatus = "past_due";
         }
 
         if (newStatus) {
           await pool.query<ResultSetHeader>(
             `UPDATE client_subscriptions
              SET status = ?, cancelled_at = IF(? = 'cancelled', NOW(), cancelled_at), updated_at = NOW()
-             WHERE anet_subscription_id = ? AND status = 'active'`,
+             WHERE anet_subscription_id = ? AND status IN ('active','suspended')`,
             [newStatus, newStatus, subscriptionId],
           );
         }
+        if (affiliateSubStatus) {
+          await pool.query<ResultSetHeader>(
+            `UPDATE affiliates
+             SET subscription_status = ?, updated_at = NOW()
+             WHERE anet_subscription_id = ?
+               AND subscription_status IN ('active','pending','past_due')`,
+            [affiliateSubStatus, subscriptionId],
+          );
+        }
+      }
+
+      // ── Successful ARB / recurring charge → ledger row + restore active ──
+      // Authorize.net emits net.authorize.payment.authcapture.created (and
+      // similar) for subscription renewals. Without this, PoM revenue never
+      // lands in payments and past_due never recovers.
+      const isPaymentEvent =
+        eventType.includes("payment") &&
+        (eventType.includes("authcapture") ||
+          eventType.includes("capture") ||
+          eventType.includes("paid"));
+      if (isPaymentEvent && subscriptionId) {
+        const [clientSubs] = await pool.query<RowDataPacket[]>(
+          `SELECT id, client_id, package_id, amount_cents, status
+           FROM client_subscriptions
+           WHERE anet_subscription_id = ?
+           LIMIT 1`,
+          [subscriptionId],
+        );
+        if (clientSubs.length > 0) {
+          const sub = clientSubs[0];
+          const amountCents =
+            Number.isFinite(authAmount) && authAmount > 0
+              ? Math.round(authAmount * 100)
+              : Number(sub.amount_cents);
+          const providerTxn =
+            transactionId || `arb-${subscriptionId}-${Date.now()}`;
+
+          // Idempotent: provider_transaction_id is UNIQUE
+          try {
+            await pool.query<ResultSetHeader>(
+              `INSERT INTO payments
+                 (client_id, package_id, amount_cents, currency, status, provider,
+                  provider_transaction_id, paid_at, metadata_json)
+               VALUES (?, ?, ?, 'USD', 'succeeded', 'authorize_net', ?, NOW(), ?)`,
+              [
+                sub.client_id,
+                sub.package_id,
+                amountCents,
+                providerTxn,
+                JSON.stringify({
+                  source: "anet_webhook_arb",
+                  subscription_id: subscriptionId,
+                  event_type: eventType,
+                }),
+              ],
+            );
+          } catch (e: any) {
+            // Duplicate txn id from webhook retry — ignore
+            if (e?.code !== "ER_DUP_ENTRY") throw e;
+          }
+
+          await pool.query<ResultSetHeader>(
+            `UPDATE client_subscriptions
+             SET status = 'active', cancelled_at = NULL, updated_at = NOW()
+             WHERE id = ? AND status IN ('active','suspended','cancelled')`,
+            [sub.id],
+          );
+        }
+
+        await pool.query<ResultSetHeader>(
+          `UPDATE affiliates
+           SET subscription_status = 'active', updated_at = NOW()
+           WHERE anet_subscription_id = ?
+             AND subscription_status IN ('active','pending','past_due')`,
+          [subscriptionId],
+        );
       }
 
       res.json({ ok: true });
@@ -3913,18 +8409,488 @@ function buildApp() {
     }
   });
 
+  // ============================================================================
+  // PUBLIC CREDIT ANALYSIS + LEAD CAPTURE (no auth — 1C/2C/3A/4C/8C/10A)
+  // ============================================================================
+  const PUBLIC_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+  app.post(
+    "/api/public/credit-analysis",
+    upload.single("report_file"),
+    async (req, res) => {
+      const b = req.body || {};
+      const mode: CreditAnalysisMode = b.mode === "agent" ? "agent" : "client";
+      const firstName = String(b.first_name || "").trim();
+      const lastName = String(b.last_name || "").trim();
+      const email = String(b.email || "").trim().toLowerCase();
+      const phone = String(b.phone || "").trim();
+      const textLanguage: "en" | "es" = b.text_language === "es" ? "es" : "en";
+      const clientGoal = b.client_goal
+        ? String(b.client_goal).trim().slice(0, 255)
+        : null;
+      const notes = b.notes ? String(b.notes).trim() : null;
+      const agentPhone =
+        mode === "agent" && b.agent_phone
+          ? String(b.agent_phone).trim()
+          : null;
+      const repName =
+        mode === "agent" && b.rep_name ? String(b.rep_name).trim() : null;
+      const emailOptIn = b.email_opt_in === "true" || b.email_opt_in === true;
+      const file = (req as any).file as Express.Multer.File | undefined;
+      // Affiliate first-touch attribution — cookie is set client-side; server
+      // also accepts any of these field names for direct API callers.
+      const affiliateCode = b.affiliate_code || b.affiliateCode || b.ref || b.slug;
+
+      if (!firstName || !lastName || !email || !phone) {
+        return res.status(400).json({
+          error: "first_name, last_name, email and phone are required",
+        });
+      }
+      if (!PUBLIC_EMAIL_RE.test(email)) {
+        return res.status(400).json({ error: "Invalid email address" });
+      }
+      if (!file) {
+        return res.status(400).json({ error: "report_file is required" });
+      }
+
+      // Best-effort text extraction — only PDFs are parsed; other file types
+      // (e.g. photos of a report) are still stored but yield no scores/negatives.
+      let reportText = "";
+      let pdfParseFailed = false;
+      if (file.mimetype === "application/pdf") {
+        try {
+          const pdfParse = await loadPdfParse();
+          const parsed = await pdfParse(file.buffer);
+          reportText = parsed.text || "";
+        } catch (e: any) {
+          pdfParseFailed = true;
+          console.error(
+            "[public:credit-analysis] pdf parse failed:",
+            e?.message,
+          );
+        }
+      }
+      const extractionStatus = resolveExtractionStatus(
+        file.mimetype,
+        reportText,
+        pdfParseFailed,
+      );
+      const charsExtracted = reportText.trim().length;
+      const weakExtraction = extractionStatus !== "ok";
+
+      const provider = reportText ? detectProvider(reportText) : "generic";
+      const scores: BureauScores = reportText
+        ? extractAllScores(reportText, provider)
+        : { transunion: null, experian: null, equifax: null };
+      const hasScores = !!(
+        scores.transunion ||
+        scores.experian ||
+        scores.equifax
+      );
+      const negativeLines = reportText ? detectNegativeLines(reportText) : [];
+      const negatives = buildNegativeItems(negativeLines);
+      const suggestedLabels = inferAnalysisLabelSlugs(
+        negativeLines,
+        reportText,
+      );
+
+      try {
+        const affiliateId = await resolveAffiliateIdBySlugOrCode(
+          affiliateCode,
+        );
+
+        const [existingRows] = await pool.query<RowDataPacket[]>(
+          `SELECT id, status FROM clients WHERE email = ? LIMIT 1`,
+          [email],
+        );
+
+        let clientId: number;
+        let isProspectFlow = true;
+        if (existingRows.length > 0) {
+          clientId = existingRows[0].id as number;
+          isProspectFlow = existingRows[0].status === "prospect";
+          if (affiliateId) {
+            // First-touch: never overwrite an existing attribution.
+            await pool.query<ResultSetHeader>(
+              `UPDATE clients SET affiliate_id = COALESCE(affiliate_id, ?) WHERE id = ?`,
+              [affiliateId, clientId],
+            );
+          }
+        } else {
+          const [ins] = await pool.query<ResultSetHeader>(
+            `INSERT INTO clients (email, first_name, last_name, phone, preferred_language, status, pipeline_stage, affiliate_id)
+             VALUES (?, ?, ?, ?, ?, 'prospect', 'prospect', ?)`,
+            [email, firstName, lastName, phone || null, textLanguage, affiliateId],
+          );
+          clientId = ins.insertId;
+        }
+
+        if (isProspectFlow) {
+          const sourceLabel =
+            mode === "agent" ? "agent_submission" : "web_analysis";
+          const labelSlugs = [sourceLabel, ...suggestedLabels];
+          if (b.lead_source === "get_started")
+            labelSlugs.push("get_started_wizard");
+          if (affiliateId) labelSlugs.push("affiliate_referral");
+          attachLabelsBySlug(clientId, labelSlugs).catch((e) =>
+            console.error(
+              "[public:credit-analysis] attachLabels failed:",
+              e?.message,
+            ),
+          );
+        }
+
+        // Best-effort CDN upload of the raw report — never blocks analysis generation.
+        let storageKey: string | null = null;
+        try {
+          storageKey = await uploadToCDN(
+            file.buffer,
+            file.originalname,
+            file.mimetype,
+            `analysis-${clientId}`,
+          );
+        } catch (e: any) {
+          console.error(
+            "[public:credit-analysis] CDN upload failed:",
+            e?.message,
+          );
+        }
+
+        const utilization = reportText
+          ? extractUtilization(reportText).map((u) => ({
+              account: u.account,
+              limit: u.limit,
+              balance: u.balance,
+              pctUsed: u.pctUsed,
+              payTo30: u.payTo30,
+              payTo10: u.payTo10,
+            }))
+          : [];
+        const positiveAccounts = reportText
+          ? extractPositiveAccounts(reportText)
+          : [];
+
+        const analyst: CreditAnalysisAnalystFlat = runCreditAnalysisAlgorithm({
+          clientName: `${firstName} ${lastName}`.trim(),
+          firstName,
+          lastName,
+          repName,
+          clientGoal,
+          language: textLanguage,
+          scores,
+          negatives,
+          reportText,
+          utilization,
+          positiveAccounts,
+          weakExtraction,
+        });
+
+        const croa =
+          analyst.text_language === "Spanish"
+            ? CROA_DISCLOSURE_ES
+            : CROA_DISCLOSURE_EN;
+        const { html, text } = buildAnalystAnalysisHtml({
+          firstName,
+          analyst,
+          weakExtraction,
+          croaDisclosure: croa,
+        });
+
+        // Prefer algorithm language for email copy when surname-biased Spanish.
+        const emailLang: "en" | "es" =
+          analyst.text_language === "Spanish" ? "es" : "en";
+
+        let emailSent = false;
+        if (emailOptIn) {
+          try {
+            await sendEmail({
+              to: email,
+              subject:
+                emailLang === "es"
+                  ? "Tu análisis de crédito — Optimum Credit"
+                  : "Your Credit Analysis — Optimum Credit",
+              html: emailLayout({
+                title:
+                  emailLang === "es"
+                    ? "Tu análisis de crédito"
+                    : "Your Credit Analysis",
+                bodyHtml: html,
+                lang: emailLang,
+              }),
+              text,
+            });
+            emailSent = true;
+          } catch (e: any) {
+            console.error(
+              "[public:credit-analysis] email send failed:",
+              e?.message,
+            );
+          }
+        }
+
+        const generatedAt = new Date();
+        const [insAnalysis] = await pool.query<ResultSetHeader>(
+          `INSERT INTO credit_analyses
+             (client_id, mode, submitter_first_name, submitter_last_name, agent_phone, rep_name,
+              client_goal, text_language, notes, report_file_name, report_mime_type, report_storage_key,
+              provider_detected, scores_json, negatives_json, labels_suggested_json, analyst_json,
+              analysis_html, analysis_text, email_opt_in, email_sent_at, generated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            clientId,
+            mode,
+            firstName,
+            lastName,
+            agentPhone,
+            repName,
+            clientGoal,
+            textLanguage,
+            notes,
+            file.originalname || null,
+            file.mimetype || null,
+            storageKey,
+            provider,
+            JSON.stringify(scores),
+            JSON.stringify(negatives),
+            JSON.stringify(suggestedLabels),
+            JSON.stringify(analyst),
+            html,
+            text,
+            emailOptIn ? 1 : 0,
+            emailSent ? generatedAt : null,
+            generatedAt,
+          ],
+        );
+
+        const result: CreditAnalysisResult = {
+          id: insAnalysis.insertId,
+          client_id: clientId,
+          mode,
+          scores: hasScores ? scores : null,
+          negatives,
+          suggested_labels: suggestedLabels,
+          analysis_html: html,
+          analysis_text: text,
+          email_sent: emailSent,
+          generated_at: generatedAt.toISOString(),
+          extraction_status: extractionStatus,
+          chars_extracted: charsExtracted,
+          analyst,
+        };
+        res.json(result);
+      } catch (err: any) {
+        if (sendFriendlyError(res, err, { duplicateLabel: "email" })) return;
+        console.error("[public:credit-analysis] error:", err?.message ?? err);
+        res
+          .status(500)
+          .json({ error: "We couldn't generate your analysis. Please try again." });
+      }
+    },
+  );
+
+  // Lighter lead capture (no file) — homepage "Get my free analysis" mini-form.
+  app.post("/api/public/prospect-lead", async (req, res) => {
+    const b = req.body || {};
+    const firstName = String(b.first_name || "").trim();
+    const lastName = String(b.last_name || "").trim();
+    const email = String(b.email || "").trim().toLowerCase();
+    const phone = b.phone ? String(b.phone).trim() : null;
+    const sourceLabel = b.source_label
+      ? String(b.source_label).trim()
+      : "web_analysis";
+    const notes = b.notes ? String(b.notes).trim() : null;
+    const affiliateCode = b.affiliate_code || b.affiliateCode || b.ref || b.slug;
+
+    if (!firstName || !lastName || !email) {
+      return res
+        .status(400)
+        .json({ error: "first_name, last_name and email are required" });
+    }
+    if (!PUBLIC_EMAIL_RE.test(email)) {
+      return res.status(400).json({ error: "Invalid email address" });
+    }
+
+    try {
+      const affiliateId = await resolveAffiliateIdBySlugOrCode(affiliateCode);
+      const [existingRows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, status FROM clients WHERE email = ? LIMIT 1`,
+        [email],
+      );
+
+      let clientId: number;
+      let isProspectFlow = true;
+      if (existingRows.length > 0) {
+        clientId = existingRows[0].id as number;
+        isProspectFlow = existingRows[0].status === "prospect";
+        if (isProspectFlow && phone) {
+          await pool.query<ResultSetHeader>(
+            `UPDATE clients SET phone = COALESCE(?, phone) WHERE id = ?`,
+            [phone, clientId],
+          );
+        }
+        if (affiliateId) {
+          await pool.query<ResultSetHeader>(
+            `UPDATE clients SET affiliate_id = COALESCE(affiliate_id, ?) WHERE id = ?`,
+            [affiliateId, clientId],
+          );
+        }
+      } else {
+        const [ins] = await pool.query<ResultSetHeader>(
+          `INSERT INTO clients (email, first_name, last_name, phone, status, pipeline_stage, affiliate_id)
+           VALUES (?, ?, ?, ?, 'prospect', 'prospect', ?)`,
+          [email, firstName, lastName, phone, affiliateId],
+        );
+        clientId = ins.insertId;
+      }
+
+      if (isProspectFlow) {
+        const labelSlugs = [sourceLabel];
+        if (b.lead_source === "get_started")
+          labelSlugs.push("get_started_wizard");
+        if (affiliateId) labelSlugs.push("affiliate_referral");
+        await attachLabelsBySlug(clientId, labelSlugs);
+        if (notes) {
+          await pool.query<ResultSetHeader>(
+            `INSERT INTO credit_analyses
+               (client_id, mode, submitter_first_name, submitter_last_name, notes, generated_at)
+             VALUES (?, 'client', ?, ?, ?, NOW())`,
+            [clientId, firstName, lastName, notes],
+          );
+        }
+      }
+
+      res.json({ ok: true, client_id: clientId });
+    } catch (err: any) {
+      if (sendFriendlyError(res, err, { duplicateLabel: "email" })) return;
+      console.error("[public:prospect-lead] error:", err?.message ?? err);
+      res
+        .status(500)
+        .json({ error: "We couldn't submit your info. Please try again." });
+    }
+  });
+
+  // ============================================================================
+  // PUBLIC AFFILIATE LINKS — /r/{slug} resolve + click logging (no PII beyond first_name)
+  // ============================================================================
+
+  // Resolve a public referral slug into a redirect path + shareable links.
+  // Used by the client-side /r/:slug route to set the 30-day first-touch
+  // attribution cookie and redirect to the affiliate's default landing page.
+  app.get("/api/public/affiliates/:slug", async (req, res) => {
+    if (!affiliatesFeatureEnabled()) {
+      return res.status(503).json({
+        error: "Affiliates temporarily unavailable",
+        code: "AFFILIATES_DISABLED",
+      });
+    }
+    const rawSlug = String(req.params.slug || "").trim();
+    if (!rawSlug) return res.status(400).json({ error: "slug required" });
+    try {
+      // Match slug always; referral_code only when ≤32 chars (column width)
+      // so longer values never silently truncate into a wrong hit.
+      const referralMatch = rawSlug.length <= 32 ? "OR referral_code = ?" : "";
+      const params = rawSlug.length <= 32 ? [rawSlug, rawSlug] : [rawSlug];
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, first_name, slug, referral_code, default_landing, status
+         FROM affiliates
+         WHERE (slug = ? ${referralMatch})
+           AND status NOT IN ('inactive','suspended')
+         LIMIT 1`,
+        params,
+      );
+      if (rows.length === 0 || !affiliateCanReceiveClicks({ status: rows[0].status as string })) {
+        return res.status(404).json({ error: "Referral link not found" });
+      }
+      const aff = rows[0];
+      const slug = (aff.slug as string) || (aff.referral_code as string);
+      const requestedTo = String(req.query.to || "");
+      const landing: AffiliateLanding =
+        requestedTo === "analysis"
+          ? "credit_analysis"
+          : requestedTo === "pricing"
+            ? "pricing"
+            : (aff.default_landing as AffiliateLanding);
+      const redirectPath = affiliateLandingPath(landing, slug);
+      res.json({
+        slug,
+        first_name: aff.first_name,
+        redirect_path: redirectPath,
+        links: buildAffiliatePublicLinks(slug, APP_URL),
+      });
+    } catch (err: any) {
+      console.error("[public:affiliates:resolve]", err?.message ?? err);
+      res.status(503).json({
+        error: "Service temporarily unavailable. Please try again shortly.",
+      });
+    }
+  });
+
+  // Log a link click for attribution analytics. Best-effort — never blocks
+  // the redirect on the client.
+  app.post("/api/public/affiliates/:slug/click", async (req, res) => {
+    if (!affiliatesFeatureEnabled()) {
+      return res.status(503).json({
+        error: "Affiliates temporarily unavailable",
+        code: "AFFILIATES_DISABLED",
+      });
+    }
+    const rawSlug = String(req.params.slug || "").trim();
+    if (!rawSlug) return res.status(400).json({ error: "slug required" });
+    const landing = ["credit_analysis", "pricing", "other"].includes(
+      req.body?.landing,
+    )
+      ? req.body.landing
+      : "other";
+    try {
+      const referralMatch = rawSlug.length <= 32 ? "OR referral_code = ?" : "";
+      const params = rawSlug.length <= 32 ? [rawSlug, rawSlug] : [rawSlug];
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, slug, referral_code, status FROM affiliates
+         WHERE (slug = ? ${referralMatch})
+           AND status NOT IN ('inactive','suspended')
+         LIMIT 1`,
+        params,
+      );
+      if (rows.length === 0) return res.status(404).json({ error: "Not found" });
+      const aff = rows[0];
+      const slug = (aff.slug as string) || (aff.referral_code as string);
+      await pool.query<ResultSetHeader>(
+        `INSERT INTO affiliate_link_clicks (affiliate_id, slug, landing, ip_address, user_agent, referer)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          aff.id,
+          slug,
+          landing,
+          req.ip || null,
+          String(req.headers["user-agent"] || "").slice(0, 500),
+          String(req.headers["referer"] || req.headers["referrer"] || "").slice(0, 500),
+        ],
+      );
+      res.json({ ok: true, slug });
+    } catch (err: any) {
+      console.error("[public:affiliates:click]", err?.message ?? err);
+      // Never block the redirect flow on a logging failure.
+      res.json({ ok: false, slug: rawSlug });
+    }
+  });
+
   // Single-step registration: charge card first, create client only on success.
   // Accepts all form fields + Accept.js nonce (dataDescriptor + dataValue).
   app.post("/api/registration", async (req, res) => {
     const b = req.body || {};
-    const required = ["firstName", "lastName", "email", "phone", "packageSlug"];
-    if (authorizeNetConfigured) {
-      required.push("dataDescriptor", "dataValue");
-    } else if (!mockPaymentsAllowed()) {
+    if (
+      hitRateLimit(
+        rateLimitKey(req, `registration:${String(b?.email || "").toLowerCase()}`),
+        10,
+        15 * 60 * 1000,
+      )
+    ) {
       return res
-        .status(503)
-        .json({ error: "Payment provider not configured" });
+        .status(429)
+        .json({ error: "Too many attempts. Please try again later." });
     }
+    const required = ["firstName", "lastName", "email", "phone", "packageSlug"];
+    // Card nonce required later — only when amount due > 0 (100% coupons are $0)
     for (const f of required) {
       if (!b[f] || String(b[f]).trim().length === 0) {
         return res.status(400).json({ error: `Missing field: ${f}` });
@@ -3936,7 +8902,10 @@ function buildApp() {
       "SELECT id, status FROM clients WHERE email = ? LIMIT 1",
       [email],
     );
-    if (existing.length > 0 && existing[0].status !== "pending_payment") {
+    if (
+      existing.length > 0 &&
+      !["pending_payment", "prospect"].includes(existing[0].status)
+    ) {
       return res.status(409).json({
         error: "An account with this email already exists. Please sign in.",
       });
@@ -3982,14 +8951,10 @@ function buildApp() {
       }
     }
 
-    let affiliateId: number | null = null;
-    if (b.affiliateCode) {
-      const [afs] = await pool.query<RowDataPacket[]>(
-        "SELECT id FROM affiliates WHERE referral_code = ? AND status = 'active' LIMIT 1",
-        [b.affiliateCode],
-      );
-      if (afs.length > 0) affiliateId = afs[0].id as number;
-    }
+    // Affiliate first-touch attribution — accepts referral_code, slug, or `ref`.
+    const affiliateId = await resolveAffiliateIdBySlugOrCode(
+      b.affiliateCode || b.affiliate_code || b.ref || b.slug,
+    );
 
     // ── Coupon validation ──────────────────────────────────────────────────────
     let couponId: number | null = null;
@@ -4068,11 +9033,25 @@ function buildApp() {
       chargeAmountCents = chargeAmountCents - discountCents;
     }
 
-    // Use a temporary clientId placeholder for the charge (real ID assigned after insert).
-    // For re-attempts on pending_payment accounts, reuse the existing id.
-    const tempClientId = existing.length > 0 ? (existing[0].id as number) : 0;
+    const isFreeCheckout = chargeAmountCents <= 0;
+
+    // Card / payment provider required only when we will charge
+    if (!isFreeCheckout) {
+      if (authorizeNetConfigured) {
+        if (!b.dataDescriptor || !b.dataValue) {
+          return res.status(400).json({
+            error: "Card details are required to complete payment",
+          });
+        }
+      } else if (!mockPaymentsAllowed()) {
+        return res
+          .status(503)
+          .json({ error: "Payment provider not configured" });
+      }
+    }
 
     // 1. Charge card FIRST — no DB record written on failure (mock when ANet off)
+    //    $0 after coupon: skip Authorize.net (processor rejects $0.00 charges).
     let chargeResult: Awaited<
       ReturnType<typeof processAuthorizeNetPayment>
     > | null = null;
@@ -4115,9 +9094,20 @@ function buildApp() {
             tradeline_names: tradelineProducts.map((p) => p.name),
           }
         : {};
+    if (isFreeCheckout && b.coupon_code) {
+      paymentMetadata.coupon_code = String(b.coupon_code)
+        .toUpperCase()
+        .trim();
+    }
 
     try {
-      if (authorizeNetConfigured) {
+      if (isFreeCheckout) {
+        chargeResult = await processFreeRegistrationPayment(
+          clientId,
+          pkg.id as number,
+          paymentMetadata,
+        );
+      } else if (authorizeNetConfigured) {
         chargeResult = await processAuthorizeNetPayment(
           clientId,
           email,
@@ -4214,13 +9204,27 @@ function buildApp() {
   });
 
   // Process a real Authorize.net payment via Accept.js nonce (legacy two-step flow).
+  // Legacy two-step flow — the current client never calls this (registration
+  // charges the card in one step via POST /api/registration). Kept only for
+  // local/sandbox testing and disabled in production unless explicitly
+  // opted back in, since it lets anyone with a clientId attempt a charge.
   app.post("/api/registration/process-payment", async (req, res) => {
+    if (IS_PROD && process.env.ALLOW_LEGACY_PROCESS_PAYMENT !== "true") {
+      return res.status(410).json({ error: "Use POST /api/registration" });
+    }
     const { clientId, dataDescriptor, dataValue, tradelineProductIds } =
       req.body || {};
     if (!clientId) return res.status(400).json({ error: "Missing clientId" });
+    if (
+      hitRateLimit(rateLimitKey(req, `process-payment:${clientId}`), 10, 15 * 60 * 1000)
+    ) {
+      return res
+        .status(429)
+        .json({ error: "Too many attempts. Please try again later." });
+    }
 
     const [rows] = await pool.query<RowDataPacket[]>(
-      `SELECT c.id, c.email, c.first_name, c.last_name, c.package_id,
+      `SELECT c.id, c.email, c.first_name, c.last_name, c.package_id, c.status,
               p.price_cents, p.checkout_type
        FROM clients c LEFT JOIN packages p ON p.id = c.package_id
        WHERE c.id = ? LIMIT 1`,
@@ -4229,6 +9233,9 @@ function buildApp() {
     if (rows.length === 0)
       return res.status(404).json({ error: "Client not found" });
     const client = rows[0];
+    if (!["pending_payment", "prospect"].includes(String(client.status))) {
+      return res.status(410).json({ error: "Use POST /api/registration" });
+    }
     const checkoutType = (client.checkout_type as string) || "fixed_price";
 
     let tradelineProducts: RowDataPacket[] = [];
@@ -5081,9 +10088,25 @@ function buildApp() {
   });
 
   // ── POST /api/pay/:token — charge payment ─────────────────────────────────
+  // Reserves the split (status pending → processing, guarded by an
+  // affected-rows check under FOR UPDATE) BEFORE charging the card, so two
+  // concurrent submits of the same link can't both charge — the loser gets
+  // a 409 instead of a duplicate charge. The card is charged only after the
+  // reservation commits (never inside the lock — Authorize.net round-trips
+  // can take seconds and would hold the row lock the whole time). A
+  // provisional `payments` row is inserted before the charge call so a
+  // charge that succeeds but crashes before we can record it still has a
+  // trace; on failure the split is released back to `pending` so the link
+  // remains usable.
   app.post("/api/pay/:token", async (req, res) => {
     const { token } = req.params;
     if (!token) return res.status(400).json({ error: "Missing token" });
+
+    if (hitRateLimit(rateLimitKey(req, `pay-token:${token}`), 8, 15 * 60 * 1000)) {
+      return res
+        .status(429)
+        .json({ error: "Too many attempts. Please try again later." });
+    }
 
     const { method, data_descriptor, data_value } = req.body || {};
     if (!method || !["stored_profile", "new_card"].includes(method))
@@ -5100,163 +10123,244 @@ function buildApp() {
         .json({ error: "Payment provider not configured" });
     }
 
-    // Load token
-    const [rows] = await pool.query<RowDataPacket[]>(
-      `SELECT pst.id AS token_id, pst.split_id, pst.expires_at, pst.used_at,
-              ps.id AS split_id_direct, ps.case_id, ps.client_id,
-              ps.label, ps.amount_cents, ps.currency, ps.status,
-              c.first_name, c.last_name, c.email, c.preferred_language,
-              c.anet_customer_profile_id, c.anet_payment_profile_id
-       FROM payment_split_tokens pst
-       JOIN payment_splits ps ON ps.id = pst.split_id
-       JOIN clients c ON c.id = ps.client_id
-       WHERE pst.token = ? LIMIT 1`,
-      [token],
-    );
-    if (rows.length === 0)
-      return res.status(404).json({ error: "Payment link not found" });
-    const row = rows[0];
+    // ── Step 1: reserve the split under a row lock ──────────────────────────
+    const reserveConn = await pool.getConnection();
+    let splitId: number;
+    let caseId: number;
+    let clientId: number;
+    let amountCents: number;
+    let currency: string;
+    let label: string;
+    let email: string;
+    let firstName: string;
+    let lastName: string;
+    let anetCustomerProfileId: string | null;
+    let anetPaymentProfileId: string | null;
+    let paymentId: number;
+    try {
+      await reserveConn.beginTransaction();
+      const [rows] = await reserveConn.query<RowDataPacket[]>(
+        `SELECT pst.id AS token_id, pst.split_id, pst.expires_at, pst.used_at,
+                ps.id AS split_id_direct, ps.case_id, ps.client_id,
+                ps.label, ps.amount_cents, ps.currency, ps.status,
+                c.first_name, c.last_name, c.email, c.preferred_language,
+                c.anet_customer_profile_id, c.anet_payment_profile_id
+         FROM payment_split_tokens pst
+         JOIN payment_splits ps ON ps.id = pst.split_id
+         JOIN clients c ON c.id = ps.client_id
+         WHERE pst.token = ? LIMIT 1 FOR UPDATE`,
+        [token],
+      );
+      if (rows.length === 0) {
+        await reserveConn.rollback();
+        return res.status(404).json({ error: "Payment link not found" });
+      }
+      const row = rows[0];
 
-    if (row.used_at)
-      return res
-        .status(410)
-        .json({ error: "This payment link has already been used" });
-    if (new Date(row.expires_at) < new Date())
-      return res.status(410).json({ error: "Payment link has expired" });
-    if (row.status === "paid")
-      return res.status(410).json({ error: "Already paid" });
-    if (row.status === "cancelled")
-      return res.status(410).json({ error: "Payment cancelled" });
+      if (row.used_at) {
+        await reserveConn.rollback();
+        return res
+          .status(410)
+          .json({ error: "This payment link has already been used" });
+      }
+      if (new Date(row.expires_at) < new Date()) {
+        await reserveConn.rollback();
+        return res.status(410).json({ error: "Payment link has expired" });
+      }
+      if (row.status === "paid") {
+        await reserveConn.rollback();
+        return res.status(410).json({ error: "Already paid" });
+      }
+      if (row.status === "cancelled") {
+        await reserveConn.rollback();
+        return res.status(410).json({ error: "Payment cancelled" });
+      }
+      if (row.status !== "pending") {
+        // Already reserved by a concurrent request (status = 'processing').
+        await reserveConn.rollback();
+        return res.status(409).json({
+          error: "This payment is already being processed. Please wait a moment.",
+        });
+      }
 
-    const amountDollars = (Number(row.amount_cents) / 100).toFixed(2);
-    const splitId = row.split_id as number;
-    const caseId = row.case_id as number;
-    const clientId = row.client_id as number;
+      splitId = row.split_id as number;
+      caseId = row.case_id as number;
+      clientId = row.client_id as number;
+      amountCents = Number(row.amount_cents);
+      currency = (row.currency as string) || "USD";
+      label = row.label as string;
+      email = row.email as string;
+      firstName = row.first_name as string;
+      lastName = row.last_name as string;
+      anetCustomerProfileId = row.anet_customer_profile_id as string | null;
+      anetPaymentProfileId = row.anet_payment_profile_id as string | null;
 
-    let chargeResult: { transactionId: string };
-
-    if (method === "stored_profile") {
-      if (!row.anet_customer_profile_id || !row.anet_payment_profile_id)
+      if (
+        method === "stored_profile" &&
+        (!anetCustomerProfileId || !anetPaymentProfileId)
+      ) {
+        await reserveConn.rollback();
         return res
           .status(400)
           .json({ error: "No stored card on file. Please use a new card." });
+      }
 
-      // Charge via Authorize.net CIM
-      const payload = {
-        createCustomerProfileTransactionRequest: {
-          merchantAuthentication: {
-            name: process.env.AUTHORIZENET_API_LOGIN_ID,
-            transactionKey: process.env.AUTHORIZENET_TRANSACTION_KEY,
-          },
-          transaction: {
-            profileTransAuthCapture: {
-              amount: amountDollars,
-              customerProfileId: row.anet_customer_profile_id,
-              customerPaymentProfileId: row.anet_payment_profile_id,
-              order: {
-                description: String(row.label).slice(0, 255),
+      const [reserveResult] = await reserveConn.query<ResultSetHeader>(
+        `UPDATE payment_splits SET status = 'processing' WHERE id = ? AND status = 'pending'`,
+        [splitId],
+      );
+      if (reserveResult.affectedRows === 0) {
+        await reserveConn.rollback();
+        return res.status(409).json({
+          error: "This payment is already being processed. Please wait a moment.",
+        });
+      }
+
+      const provisionalTxnId = `pending-${crypto.randomUUID()}`;
+      const [payResult] = await reserveConn.query<ResultSetHeader>(
+        `INSERT INTO payments
+           (client_id, case_id, split_id, amount_cents, currency,
+            status, provider, provider_transaction_id)
+         VALUES (?, ?, ?, ?, ?, 'pending', 'authorize_net', ?)`,
+        [clientId, caseId, splitId, amountCents, currency, provisionalTxnId],
+      );
+      paymentId = payResult.insertId;
+
+      await reserveConn.commit();
+    } catch (err) {
+      await reserveConn.rollback();
+      throw err;
+    } finally {
+      reserveConn.release();
+    }
+
+    // ── Step 2: charge the card OUTSIDE the lock ────────────────────────────
+    const amountDollars = (amountCents / 100).toFixed(2);
+    let chargeResult: { transactionId: string } | null = null;
+    let chargeError: string | null = null;
+    let newAnetProfile: { customerProfileId?: string; customerPaymentProfileId?: string } | null =
+      null;
+
+    try {
+      if (method === "stored_profile") {
+        const payload = {
+          createCustomerProfileTransactionRequest: {
+            merchantAuthentication: {
+              name: process.env.AUTHORIZENET_API_LOGIN_ID,
+              transactionKey: process.env.AUTHORIZENET_TRANSACTION_KEY,
+            },
+            transaction: {
+              profileTransAuthCapture: {
+                amount: amountDollars,
+                customerProfileId: anetCustomerProfileId,
+                customerPaymentProfileId: anetPaymentProfileId,
+                order: {
+                  description: String(label).slice(0, 255),
+                },
               },
             },
           },
-        },
-      };
+        };
 
-      const anetResp = await fetch(AUTHORIZENET_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const anetData = (await anetResp.json()) as any;
+        const anetResp = await fetch(AUTHORIZENET_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const anetData = (await anetResp.json()) as any;
 
-      const txResp =
-        anetData?.createCustomerProfileTransactionResponse?.directResponse;
-      if (!txResp) {
-        console.error("[pay/token] CIM error:", JSON.stringify(anetData));
-        return res
-          .status(402)
-          .json({ error: "Payment declined. Please try a different card." });
-      }
-      const parts = txResp.split(",");
-      // Position 0: result code (1=approved, 2=declined, 3=error)
-      if (parts[0] !== "1") {
-        return res.status(402).json({ error: parts[3] || "Payment declined" });
-      }
-      chargeResult = { transactionId: parts[6] || `CIM-${Date.now()}` };
-    } else {
-      // new_card — charge via Accept.js nonce
-      const result = await chargeCard({
-        amountDollars,
-        dataDescriptor: data_descriptor,
-        dataValue: data_value,
-        clientId,
-        email: row.email as string,
-        firstName: row.first_name as string,
-        lastName: row.last_name as string,
-      });
-      if (!result.transactionId)
-        return res.status(402).json({ error: "Payment failed" });
-      chargeResult = { transactionId: result.transactionId };
-
-      // Persist anet profile IDs if returned
-      if (result.customerProfileId) {
-        try {
-          await pool.query(
-            `UPDATE clients SET anet_customer_profile_id = ?, anet_payment_profile_id = ? WHERE id = ?`,
-            [
-              result.customerProfileId,
-              result.customerPaymentProfileId ?? null,
-              clientId,
-            ],
-          );
-        } catch (e) {
-          console.error("[pay/token] anet profile update failed:", e);
+        const txResp =
+          anetData?.createCustomerProfileTransactionResponse?.directResponse;
+        if (!txResp) {
+          console.error("[pay/token] CIM error:", JSON.stringify(anetData));
+          chargeError = "Payment declined. Please try a different card.";
+        } else {
+          const parts = txResp.split(",");
+          // Position 0: result code (1=approved, 2=declined, 3=error)
+          if (parts[0] !== "1") {
+            chargeError = parts[3] || "Payment declined";
+          } else {
+            chargeResult = { transactionId: parts[6] || `CIM-${Date.now()}` };
+          }
         }
+      } else {
+        // new_card — charge via Accept.js nonce
+        const result = await chargeCard({
+          amountDollars,
+          dataDescriptor: data_descriptor,
+          dataValue: data_value,
+          clientId,
+          email,
+          firstName,
+          lastName,
+        });
+        if (!result.transactionId) {
+          chargeError = "Payment failed";
+        } else {
+          chargeResult = { transactionId: result.transactionId };
+          if (result.customerProfileId) {
+            newAnetProfile = {
+              customerProfileId: result.customerProfileId,
+              customerPaymentProfileId: result.customerPaymentProfileId,
+            };
+          }
+        }
+      }
+    } catch (e: any) {
+      console.error("[pay/token] charge threw:", e?.message ?? e);
+      chargeError = e?.message || "Payment failed";
+    }
+
+    // ── Step 3: settle the reservation based on the charge outcome ─────────
+    if (!chargeResult) {
+      await pool.query(
+        `UPDATE payment_splits SET status = 'pending' WHERE id = ? AND status = 'processing'`,
+        [splitId],
+      );
+      await pool.query(
+        `UPDATE payments SET status = 'failed', failure_reason = ? WHERE id = ?`,
+        [chargeError || "Payment failed", paymentId],
+      );
+      return res.status(402).json({ error: chargeError || "Payment failed" });
+    }
+
+    if (newAnetProfile?.customerProfileId) {
+      try {
+        await pool.query(
+          `UPDATE clients SET anet_customer_profile_id = ?, anet_payment_profile_id = ? WHERE id = ?`,
+          [
+            newAnetProfile.customerProfileId,
+            newAnetProfile.customerPaymentProfileId ?? null,
+            clientId,
+          ],
+        );
+      } catch (e) {
+        console.error("[pay/token] anet profile update failed:", e);
       }
     }
 
-    // Record payment and update split atomically
-    const conn = await pool.getConnection();
+    await pool.query(
+      `UPDATE payments SET status = 'succeeded', provider_transaction_id = ?, paid_at = NOW() WHERE id = ?`,
+      [chargeResult.transactionId, paymentId],
+    );
+    await pool.query(
+      `UPDATE payment_splits
+       SET status = 'paid', completion_source = 'authorize_link', paid_at = NOW(), payments_id = ?
+       WHERE id = ? AND status = 'processing'`,
+      [paymentId, splitId],
+    );
+    await pool.query(
+      `UPDATE payment_split_tokens SET used_at = NOW() WHERE split_id = ?`,
+      [splitId],
+    );
+
+    // Affiliate commission for this split payment — guarded by payment_id
+    // inside recordEnrollmentCommissions, so each split's own payment id
+    // earns its own commission (no double-pay on retries).
     try {
-      await conn.beginTransaction();
-
-      const [payResult] = await conn.query<ResultSetHeader>(
-        `INSERT INTO payments
-           (client_id, case_id, split_id, amount_cents, currency,
-            status, provider, provider_transaction_id, paid_at)
-         VALUES (?, ?, ?, ?, ?, 'succeeded', 'authorize_net', ?, NOW())`,
-        [
-          clientId,
-          caseId,
-          splitId,
-          row.amount_cents,
-          row.currency || "USD",
-          chargeResult.transactionId,
-        ],
-      );
-      const paymentId = payResult.insertId;
-
-      await conn.query(
-        `UPDATE payment_splits
-         SET status = 'paid', completion_source = ?, paid_at = NOW(), payments_id = ?
-         WHERE id = ?`,
-        [
-          method === "stored_profile" ? "authorize_link" : "authorize_link",
-          paymentId,
-          splitId,
-        ],
-      );
-
-      await conn.query(
-        `UPDATE payment_split_tokens SET used_at = NOW() WHERE split_id = ?`,
-        [splitId],
-      );
-
-      await conn.commit();
-    } catch (err) {
-      await conn.rollback();
-      throw err;
-    } finally {
-      conn.release();
+      await recordEnrollmentCommissions(clientId, paymentId, amountCents);
+    } catch (e: any) {
+      console.error("[pay/token:record-commission]", e?.message ?? e);
     }
 
     // Cancel pending notifications for this split
@@ -5276,7 +10380,50 @@ function buildApp() {
   // ============================================================
   // ADMIN
   // ============================================================
-  app.get("/api/admin/dashboard", requireAdmin, async (_req, res) => {
+  app.get("/api/admin/dashboard", requireAdmin, async (req: AuthedRequest, res) => {
+    const scope = await getAffiliateScope(req.auth!.id);
+    if (scope && !scope.hasPortalAccess) {
+      return res.status(403).json({
+        error: "Affiliate subscription required",
+        code: "affiliate_subscription_required",
+      });
+    }
+
+    if (scope) {
+      const ids = scope.scopedAffiliateIds;
+      const [stages] = await pool.query<RowDataPacket[]>(
+        `SELECT pipeline_stage, COUNT(*) AS count FROM clients
+         WHERE affiliate_id IN (?) GROUP BY pipeline_stage`,
+        [ids],
+      );
+      const [stats] = await pool.query<RowDataPacket[]>(
+        `SELECT
+          (SELECT COUNT(*) FROM clients WHERE affiliate_id IN (?) AND status = 'active') AS active_clients,
+          (SELECT COUNT(*) FROM clients WHERE affiliate_id IN (?) AND status = 'prospect') AS pending_payments,
+          0 AS pending_doc_reviews,
+          0 AS open_tickets,
+          0 AS revenue_cents_30d,
+          (SELECT COUNT(*) FROM clients WHERE affiliate_id IN (?) AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)) AS new_clients_30d,
+          (SELECT COUNT(*) FROM clients WHERE affiliate_id IN (?) AND pipeline_stage = 'completed') AS completed_clients,
+          0 AS avg_score_improvement`,
+        [ids, ids, ids, ids],
+      );
+      const [recent] = await pool.query<RowDataPacket[]>(
+        `SELECT c.id, c.first_name, c.last_name, c.email, c.pipeline_stage, c.status, c.created_at, p.name AS package_name
+         FROM clients c LEFT JOIN packages p ON p.id = c.package_id
+         WHERE c.affiliate_id IN (?)
+         ORDER BY c.created_at DESC LIMIT 6`,
+        [ids],
+      );
+      return res.json({
+        stages,
+        stats: stats[0] || {},
+        recent_clients: recent,
+        recent_tickets: [],
+        recent_payments: [],
+      });
+    }
+
     const [stages] = await pool.query<RowDataPacket[]>(
       `SELECT pipeline_stage, COUNT(*) AS count FROM clients GROUP BY pipeline_stage`,
     );
@@ -5289,7 +10436,9 @@ function buildApp() {
         (SELECT COALESCE(SUM(amount_cents),0) FROM payments WHERE status = 'succeeded' AND paid_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)) AS revenue_cents_30d,
         (SELECT COUNT(*) FROM clients WHERE created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)) AS new_clients_30d,
         (SELECT COUNT(*) FROM clients WHERE pipeline_stage = 'completed') AS completed_clients,
-        (SELECT COALESCE(ROUND(AVG(score_after - score_before),0),0) FROM client_round_reports WHERE score_before IS NOT NULL AND score_after IS NOT NULL) AS avg_score_improvement`,
+        (SELECT COALESCE(ROUND(AVG(CAST(score_after AS SIGNED) - CAST(score_before AS SIGNED)),0),0)
+           FROM client_round_reports
+          WHERE score_before IS NOT NULL AND score_after IS NOT NULL) AS avg_score_improvement`,
     );
     const [recent] = await pool.query<RowDataPacket[]>(
       `SELECT c.id, c.first_name, c.last_name, c.email, c.pipeline_stage, c.status, c.created_at, p.name AS package_name
@@ -5321,7 +10470,11 @@ function buildApp() {
     });
   });
 
-  app.get("/api/admin/clients", requireAdmin, async (req, res) => {
+  app.get("/api/admin/clients", requireAdmin, async (req: AuthedRequest, res) => {
+    const scope = await getAffiliateScope(req.auth!.id);
+    if (scope && !scope.hasPortalAccess) {
+      return res.status(403).json({ error: "Portal access required" });
+    }
     const stage = req.query.stage as string | undefined;
     const search = req.query.search as string | undefined;
     const status = req.query.status as string | undefined;
@@ -5330,6 +10483,12 @@ function buildApp() {
     const joined_from = req.query.joined_from as string | undefined;
     const joined_to = req.query.joined_to as string | undefined;
     const has_notes = req.query.has_notes as string | undefined;
+    const labelParam =
+      (req.query.labels as string | undefined) ||
+      (req.query.label as string | undefined);
+    const labelSlugs = labelParam
+      ? labelParam.split(",").map((s) => s.trim()).filter(Boolean)
+      : [];
     const limit = Math.min(
       parseInt((req.query.limit as string) || "200", 10),
       200,
@@ -5392,6 +10551,17 @@ function buildApp() {
           " AND NOT EXISTS (SELECT 1 FROM payment_splits ps WHERE ps.client_id = c.id)",
       );
     }
+    if (labelSlugs.length > 0) {
+      where.push(
+        `EXISTS (SELECT 1 FROM client_labels cl JOIN labels l ON l.id = cl.label_id
+                 WHERE cl.client_id = c.id AND l.slug IN (?))`,
+      );
+      args.push(labelSlugs);
+    }
+    if (scope) {
+      where.push("c.affiliate_id IN (?)");
+      args.push(scope.scopedAffiliateIds);
+    }
     const [rows] = await pool.query<RowDataPacket[]>(
       `SELECT c.id, c.first_name, c.last_name, c.email, c.phone, c.pipeline_stage,
               c.status, c.admin_notes, c.created_at, c.preferred_language,
@@ -5428,11 +10598,38 @@ function buildApp() {
        ORDER BY c.created_at DESC LIMIT ${limit}`,
       args,
     );
+    if (rows.length > 0) {
+      const ids = rows.map((r) => r.id as number);
+      const [labelRows] = await pool.query<RowDataPacket[]>(
+        `SELECT cl.client_id, l.* FROM client_labels cl
+         JOIN labels l ON l.id = cl.label_id
+         WHERE cl.client_id IN (?)
+         ORDER BY l.layer ASC, l.sort_order ASC, l.id ASC`,
+        [ids],
+      );
+      const byClient = new Map<number, Label[]>();
+      for (const lr of labelRows) {
+        const cid = lr.client_id as number;
+        const { client_id, ...label } = lr as any;
+        if (!byClient.has(cid)) byClient.set(cid, []);
+        byClient.get(cid)!.push(label as Label);
+      }
+      for (const r of rows) {
+        (r as any).labels = byClient.get(r.id as number) ?? [];
+      }
+    }
     res.json({ clients: rows });
   });
 
-  app.get("/api/admin/clients/:id", requireAdmin, async (req, res) => {
+  app.get("/api/admin/clients/:id", requireAdmin, async (req: AuthedRequest, res) => {
     const id = Number(req.params.id);
+    const scope = await getAffiliateScope(req.auth!.id);
+    if (scope && !scope.hasPortalAccess) {
+      return res.status(403).json({ error: "Portal access required" });
+    }
+    if (scope && !(await assertClientInAffiliateScope(id, scope))) {
+      return res.status(404).json({ error: "Not found" });
+    }
     const [c] = await pool.query<RowDataPacket[]>(
       `SELECT c.*, p.name AS package_name, p.slug AS package_slug, p.price_cents AS package_price_cents
        FROM clients c LEFT JOIN packages p ON p.id = c.package_id
@@ -5491,7 +10688,13 @@ function buildApp() {
     });
   });
 
-  app.get("/api/admin/pipeline", requireAdmin, async (_req, res) => {
+  app.get("/api/admin/pipeline", requireAdmin, async (req: AuthedRequest, res) => {
+    const scope = await getAffiliateScope(req.auth!.id);
+    if (scope && !scope.hasPortalAccess) {
+      return res.status(403).json({ error: "Portal access required" });
+    }
+    const scopeClause = scope ? "AND c.affiliate_id IN (?)" : "";
+    const scopeArgs = scope ? [scope.scopedAffiliateIds] : [];
     const [rows] = await pool.query<RowDataPacket[]>(
       `SELECT cr.id, cr.case_number, cr.client_id, cr.pipeline_stage,
               cr.pipeline_stage_changed_at, cr.status, cr.created_at,
@@ -5506,6 +10709,8 @@ function buildApp() {
               COALESCE(ts.tasks_approved,      0) AS tasks_approved,
               COALESCE(ts.tasks_pending_review,0) AS tasks_pending_review,
               COALESCE(ts.tasks_rejected,      0) AS tasks_rejected,
+              COALESCE(ir.info_requests_open, 0) AS info_requests_open,
+              COALESCE(ir.info_requests_pending_review, 0) AS info_requests_pending_review,
               GREATEST(
                 (SELECT COUNT(*) FROM credit_repair_cases cr2
                  WHERE cr2.client_id = cr.client_id
@@ -5526,14 +10731,224 @@ function buildApp() {
          JOIN onboarding_task_templates ott ON ott.id = ctc.task_template_id AND ott.is_active = 1
          GROUP BY ctc.case_id
        ) ts ON ts.case_id = cr.id
-       WHERE cr.status NOT IN ('cancelled')
+       LEFT JOIN (
+         SELECT case_id,
+           SUM(CASE WHEN status IN ('open','rejected') THEN 1 ELSE 0 END) AS info_requests_open,
+           SUM(CASE WHEN status = 'submitted' THEN 1 ELSE 0 END) AS info_requests_pending_review
+         FROM client_info_requests
+         GROUP BY case_id
+       ) ir ON ir.case_id = cr.id
+       WHERE cr.status NOT IN ('cancelled') ${scopeClause}
        ORDER BY cr.pipeline_stage_changed_at DESC, cr.created_at DESC`,
+      scopeArgs,
     );
-    res.json({ cases: rows });
+
+    await attachLabelsToRows(rows, "client_id");
+    const prospectRows = await fetchProspectsWithLabels(
+      scope?.scopedAffiliateIds,
+    );
+
+    res.json({ cases: rows, prospects: prospectRows });
   });
 
+  // ── Labels (source + analysis) ────────────────────────────────────────────
+  app.get("/api/admin/labels", requireAdmin, async (req, res) => {
+    const layer = req.query.layer as string | undefined;
+    const validLayer = layer === "source" || layer === "analysis";
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT * FROM labels ${validLayer ? "WHERE layer = ?" : ""}
+       ORDER BY layer ASC, sort_order ASC, id ASC`,
+      validLayer ? [layer] : [],
+    );
+    res.json({ labels: rows });
+  });
+
+  // ── Attach/remove labels on a client (merge, by slug) ─────────────────────
+  app.post(
+    "/api/admin/clients/:id/labels",
+    requireAdmin,
+    async (req: AuthedRequest, res) => {
+      const clientId = Number(req.params.id);
+      if (!clientId || isNaN(clientId))
+        return res.status(400).json({ error: "Invalid client id" });
+      const [clientRows] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM clients WHERE id = ? LIMIT 1`,
+        [clientId],
+      );
+      if (clientRows.length === 0)
+        return res.status(404).json({ error: "Client not found" });
+      const scope = await getAffiliateScope(req.auth!.id);
+      if (scope && !(await assertClientInAffiliateScope(clientId, scope))) {
+        return res.status(404).json({ error: "Client not found" });
+      }
+
+      const { add, remove } = req.body || {};
+      const addSlugs: string[] = Array.isArray(add)
+        ? add.filter((s) => typeof s === "string" && s.trim())
+        : [];
+      const removeSlugs: string[] = Array.isArray(remove)
+        ? remove.filter((s) => typeof s === "string" && s.trim())
+        : [];
+
+      if (addSlugs.length > 0) await attachLabelsBySlug(clientId, addSlugs);
+      if (removeSlugs.length > 0) {
+        const [labelRows] = await pool.query<RowDataPacket[]>(
+          `SELECT id FROM labels WHERE slug IN (?)`,
+          [removeSlugs],
+        );
+        if (labelRows.length > 0) {
+          await pool.query<ResultSetHeader>(
+            `DELETE FROM client_labels WHERE client_id = ? AND label_id IN (?)`,
+            [clientId, labelRows.map((l) => l.id)],
+          );
+        }
+      }
+      const labels = await getClientLabels(clientId);
+      res.json({ labels });
+    },
+  );
+
+  // ── Prospects list ─────────────────────────────────────────────────────────
+  app.get("/api/admin/prospects", requireAdmin, async (req: AuthedRequest, res) => {
+    const scope = await getAffiliateScope(req.auth!.id);
+    if (scope && !scope.hasPortalAccess) {
+      return res.status(403).json({ error: "Portal access required" });
+    }
+    const prospects = await fetchProspectsWithLabels(scope?.scopedAffiliateIds);
+    res.json({ prospects });
+  });
+
+  // ── Convert a prospect into a client + case (5A/7A) ────────────────────────
+  app.post(
+    "/api/admin/prospects/:id/convert",
+    requireAdmin,
+    async (req: AuthedRequest, res) => {
+      const clientId = Number(req.params.id);
+      if (!clientId || isNaN(clientId))
+        return res.status(400).json({ error: "Invalid prospect id" });
+
+      const scope = await getAffiliateScope(req.auth!.id);
+      if (scope && !scope.hasPortalAccess) {
+        return res.status(403).json({ error: "Portal access required" });
+      }
+      if (scope && !(await assertClientInAffiliateScope(clientId, scope))) {
+        return res.status(404).json({ error: "Prospect not found" });
+      }
+
+      const { package_id, notes } = req.body || {};
+
+      const [clientRows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, first_name, last_name, email, status, preferred_language
+         FROM clients WHERE id = ? LIMIT 1`,
+        [clientId],
+      );
+      if (clientRows.length === 0)
+        return res.status(404).json({ error: "Prospect not found" });
+      const client = clientRows[0];
+      if (client.status !== "prospect") {
+        return res
+          .status(409)
+          .json({ error: "This client is not a prospect" });
+      }
+
+      const conn = await pool.getConnection();
+      let caseId: number;
+      let caseNumber: string;
+      try {
+        await conn.beginTransaction();
+
+        await conn.query<ResultSetHeader>(
+          `UPDATE clients
+           SET status = 'onboarding', pipeline_stage = 'new_client',
+               pipeline_stage_changed_at = NOW(),
+               package_id = COALESCE(?, package_id),
+               admin_notes = CASE WHEN ? IS NOT NULL
+                 THEN CONCAT(COALESCE(admin_notes, ''), CASE WHEN admin_notes IS NULL OR admin_notes = '' THEN '' ELSE '\n' END, ?)
+                 ELSE admin_notes END
+           WHERE id = ?`,
+          [
+            package_id ? Number(package_id) : null,
+            notes || null,
+            notes || null,
+            clientId,
+          ],
+        );
+
+        const [caseResult] = await conn.query<ResultSetHeader>(
+          `INSERT INTO credit_repair_cases (client_id, package_id, pipeline_stage, status, notes)
+           VALUES (?, ?, 'new_client', 'active', ?)`,
+          [clientId, package_id ? Number(package_id) : null, notes || null],
+        );
+        caseId = caseResult.insertId;
+        caseNumber = `CR-${String(caseId).padStart(5, "0")}`;
+        await conn.query(
+          `UPDATE credit_repair_cases SET case_number = ? WHERE id = ?`,
+          [caseNumber, caseId],
+        );
+
+        await conn.query<ResultSetHeader>(
+          `INSERT INTO client_pipeline_history (client_id, from_stage, to_stage, changed_by_admin_id, notes)
+           VALUES (?, 'prospect', 'new_client', ?, ?)`,
+          [clientId, req.auth!.id, "Converted from prospect"],
+        );
+
+        await conn.commit();
+      } catch (err) {
+        await conn.rollback();
+        throw err;
+      } finally {
+        conn.release();
+      }
+
+      autoAssignTasksForCase(clientId, caseId).catch((e) =>
+        console.error("[prospects:convert] autoAssignTasks failed:", e?.message),
+      );
+
+      const lang = (client.preferred_language as string) || "en";
+      // Welcome email is best-effort — don't block the convert response on SMTP.
+      (async () => {
+        try {
+          const token = await createOnboardingToken(clientId);
+          const portalUrl = `${APP_URL}/portal/onboarding/${token}`;
+          const tpl = tplProspectConvertWelcome({
+            firstName: client.first_name as string,
+            caseNumber,
+            portalUrl,
+            lang,
+          });
+          await sendEmail({
+            to: client.email as string,
+            subject: tpl.subject,
+            html: tpl.html,
+          });
+        } catch (e: any) {
+          console.error("[prospects:convert] welcome email failed:", e?.message);
+        }
+      })();
+
+      crcSyncClient(clientId).catch((e) =>
+        console.error("[crc:convert-sync]", e?.message),
+      );
+
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT c.id, c.first_name, c.last_name, c.email, c.phone, c.pipeline_stage,
+                c.pipeline_stage_changed_at, c.status, c.created_at, c.preferred_language,
+                p.name AS package_name, p.slug AS package_slug
+         FROM clients c LEFT JOIN packages p ON p.id = c.package_id
+         WHERE c.id = ? LIMIT 1`,
+        [clientId],
+      );
+      (rows[0] as any).labels = await getClientLabels(clientId);
+
+      res.json({
+        client: rows[0],
+        case: { id: caseId, case_number: caseNumber },
+      });
+    },
+  );
+
   // ── Create case manually (admin) ──────────────────────────────────────────
-  app.post("/api/admin/cases", requireAdmin, async (req, res) => {
+  app.post("/api/admin/cases", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const {
       client_id,
       package_id,
@@ -5550,13 +10965,23 @@ function buildApp() {
 
     const [clientRows] = await pool.query<RowDataPacket[]>(
       `SELECT id, first_name, last_name, email, preferred_language,
-              anet_customer_profile_id
+              anet_customer_profile_id, status
        FROM clients WHERE id = ? LIMIT 1`,
       [cId],
     );
     if (clientRows.length === 0)
       return res.status(404).json({ error: "Client not found" });
     const client = clientRows[0];
+
+    // Prospects have no case yet by design (1C) — route them through the
+    // dedicated convert endpoint so they get new_client stage + the
+    // prospect welcome email instead of payment_confirmed (5A/7A).
+    if (client.status === "prospect") {
+      return res.status(409).json({
+        error:
+          "This client is a prospect. Use POST /api/admin/prospects/:id/convert to create their first case.",
+      });
+    }
 
     const [activeCases] = await pool.query<RowDataPacket[]>(
       `SELECT id, case_number, pipeline_stage
@@ -5603,22 +11028,30 @@ function buildApp() {
         flow_id: number | null;
         send_link: boolean;
       }> = [];
+      const manuallyPaidSplits: Array<{ splitId: number; paymentId: number; amountCents: number }> =
+        [];
 
       for (const sp of splitDefs) {
         if (!sp.label || !sp.amount_cents || !sp.due_date) continue;
+        const markPaid = !!sp.mark_as_paid;
+        // Already-paid splits don't need a client payment link or reminders
+        const sendLink = markPaid ? false : !!sp.send_payment_link;
         const [spResult] = await conn.query<ResultSetHeader>(
           `INSERT INTO payment_splits
              (case_id, client_id, label, amount_cents, due_date,
+              status, completion_source, paid_at,
               reminder_flow_id, send_payment_link, notes, created_by_admin_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ${markPaid ? "NOW()" : "NULL"}, ?, ?, ?, ?)`,
           [
             caseId,
             cId,
             String(sp.label).trim(),
             Number(sp.amount_cents),
             sp.due_date,
-            sp.reminder_flow_id ? Number(sp.reminder_flow_id) : null,
-            sp.send_payment_link ? 1 : 0,
+            markPaid ? "paid" : "pending",
+            markPaid ? "manual" : null,
+            markPaid ? null : sp.reminder_flow_id ? Number(sp.reminder_flow_id) : null,
+            sendLink ? 1 : 0,
             sp.notes || null,
             (req as AuthedRequest).auth!.id,
           ],
@@ -5626,7 +11059,7 @@ function buildApp() {
         const splitId = spResult.insertId;
         let tokenStr: string | null = null;
 
-        if (sp.send_payment_link) {
+        if (sendLink) {
           tokenStr = crypto.randomUUID();
           const expiresAt = new Date(sp.due_date);
           expiresAt.setDate(expiresAt.getDate() + 7); // token valid 7 days after due date
@@ -5637,18 +11070,50 @@ function buildApp() {
           );
         }
 
+        if (markPaid) {
+          const amountCents = Number(sp.amount_cents);
+          const [manualPayment] = await conn.query<ResultSetHeader>(
+            `INSERT INTO payments
+               (client_id, case_id, split_id, amount_cents, currency,
+                status, provider, provider_transaction_id, paid_at)
+             VALUES (?, ?, ?, ?, 'USD', 'succeeded', 'manual', ?, NOW())`,
+            [cId, caseId, splitId, amountCents, `manual-${crypto.randomUUID()}`],
+          );
+          const manualPaymentId = manualPayment.insertId;
+          await conn.query(
+            `UPDATE payment_splits SET payments_id = ? WHERE id = ?`,
+            [manualPaymentId, splitId],
+          );
+          manuallyPaidSplits.push({ splitId, paymentId: manualPaymentId, amountCents });
+        }
+
         insertedSplits.push({
           id: splitId,
           token: tokenStr,
           label: String(sp.label).trim(),
           amount_cents: Number(sp.amount_cents),
           due_date: new Date(sp.due_date),
-          flow_id: sp.reminder_flow_id ? Number(sp.reminder_flow_id) : null,
-          send_link: !!sp.send_payment_link,
+          flow_id:
+            markPaid || !sp.reminder_flow_id
+              ? null
+              : Number(sp.reminder_flow_id),
+          send_link: sendLink,
         });
       }
 
       await conn.commit();
+
+      // Affiliate commissions for any splits marked paid at creation time —
+      // run after commit (not inside the txn) same as the online-payment
+      // paths, so a slow/failing commission insert can never block the
+      // case/split creation itself.
+      for (const mp of manuallyPaidSplits) {
+        try {
+          await recordEnrollmentCommissions(cId, mp.paymentId, mp.amountCents);
+        } catch (e: any) {
+          console.error("[admin/cases:manual-paid:commission]", e?.message ?? e);
+        }
+      }
 
       // Post-commit: emails + reminders (best effort)
       const lang = (client.preferred_language as string) || "en";
@@ -5734,7 +11199,7 @@ function buildApp() {
   });
 
   // ── List splits for a case ────────────────────────────────────────────────
-  app.get("/api/admin/cases/:id/splits", requireAdmin, async (req, res) => {
+  app.get("/api/admin/cases/:id/splits", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const caseId = Number(req.params.id);
     if (!caseId || isNaN(caseId))
       return res.status(400).json({ error: "Invalid case id" });
@@ -5760,7 +11225,7 @@ function buildApp() {
   });
 
   // ── Create split for a case ───────────────────────────────────────────────
-  app.post("/api/admin/cases/:id/splits", requireAdmin, async (req, res) => {
+  app.post("/api/admin/cases/:id/splits", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const caseId = Number(req.params.id);
     if (!caseId || isNaN(caseId))
       return res.status(400).json({ error: "Invalid case id" });
@@ -5782,11 +11247,17 @@ function buildApp() {
       send_payment_link,
       reminder_flow_id,
       notes,
+      mark_as_paid,
     } = req.body || {};
     if (!label || !amount_cents || !due_date)
       return res
         .status(400)
         .json({ error: "label, amount_cents, and due_date are required" });
+
+    const markPaid = !!mark_as_paid;
+    const sendLink = markPaid ? false : !!send_payment_link;
+    const flowId =
+      markPaid || !reminder_flow_id ? null : Number(reminder_flow_id);
 
     const conn = await pool.getConnection();
     try {
@@ -5795,16 +11266,19 @@ function buildApp() {
       const [spResult] = await conn.query<ResultSetHeader>(
         `INSERT INTO payment_splits
            (case_id, client_id, label, amount_cents, due_date,
+            status, completion_source, paid_at,
             reminder_flow_id, send_payment_link, notes, created_by_admin_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ${markPaid ? "NOW()" : "NULL"}, ?, ?, ?, ?)`,
         [
           caseId,
           cr.client_id,
           String(label).trim(),
           Number(amount_cents),
           due_date,
-          reminder_flow_id ? Number(reminder_flow_id) : null,
-          send_payment_link ? 1 : 0,
+          markPaid ? "paid" : "pending",
+          markPaid ? "manual" : null,
+          flowId,
+          sendLink ? 1 : 0,
           notes || null,
           (req as AuthedRequest).auth!.id,
         ],
@@ -5812,7 +11286,7 @@ function buildApp() {
       const splitId = spResult.insertId;
       let tokenStr: string | null = null;
 
-      if (send_payment_link) {
+      if (sendLink) {
         tokenStr = crypto.randomUUID();
         const expiresAt = new Date(due_date);
         expiresAt.setDate(expiresAt.getDate() + 7);
@@ -5822,10 +11296,44 @@ function buildApp() {
         );
       }
 
+      let manualPaymentId: number | null = null;
+      if (markPaid) {
+        const [manualPayment] = await conn.query<ResultSetHeader>(
+          `INSERT INTO payments
+             (client_id, case_id, split_id, amount_cents, currency,
+              status, provider, provider_transaction_id, paid_at)
+           VALUES (?, ?, ?, ?, 'USD', 'succeeded', 'manual', ?, NOW())`,
+          [
+            cr.client_id,
+            caseId,
+            splitId,
+            Number(amount_cents),
+            `manual-${crypto.randomUUID()}`,
+          ],
+        );
+        manualPaymentId = manualPayment.insertId;
+        await conn.query(`UPDATE payment_splits SET payments_id = ? WHERE id = ?`, [
+          manualPaymentId,
+          splitId,
+        ]);
+      }
+
       await conn.commit();
 
+      if (manualPaymentId) {
+        try {
+          await recordEnrollmentCommissions(
+            cr.client_id as number,
+            manualPaymentId,
+            Number(amount_cents),
+          );
+        } catch (e: any) {
+          console.error("[admin/splits:manual-paid:commission]", e?.message ?? e);
+        }
+      }
+
       // Schedule reminders
-      if (reminder_flow_id && tokenStr) {
+      if (flowId && tokenStr) {
         try {
           const appUrl = APP_URL;
           const dueDate = new Date(due_date);
@@ -5838,7 +11346,7 @@ function buildApp() {
           await scheduleSplitReminders({
             splitId,
             clientId: cr.client_id as number,
-            flowId: Number(reminder_flow_id),
+            flowId,
             dueDate,
             paymentLink: `${appUrl}/pay/${tokenStr}`,
             label: String(label).trim(),
@@ -5857,7 +11365,15 @@ function buildApp() {
          WHERE ps.id = ? LIMIT 1`,
         [splitId],
       );
-      res.status(201).json({ split: rows[0] });
+      const created = rows[0];
+      res.status(201).json({
+        split: {
+          ...created,
+          payment_link: created.payment_token
+            ? `${APP_URL}/pay/${created.payment_token}`
+            : null,
+        },
+      });
     } catch (err) {
       await conn.rollback();
       throw err;
@@ -5869,7 +11385,7 @@ function buildApp() {
   // ── Update split ──────────────────────────────────────────────────────────
   app.put(
     "/api/admin/cases/:id/splits/:splitId",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     async (req, res) => {
       const caseId = Number(req.params.id);
       const splitId = Number(req.params.splitId);
@@ -5894,6 +11410,7 @@ function buildApp() {
         completion_source,
         notes,
         reminder_flow_id,
+        send_payment_link,
       } = req.body || {};
 
       const updates: string[] = [];
@@ -5918,6 +11435,10 @@ function buildApp() {
         updates.push("reminder_flow_id = ?");
         args.push(reminder_flow_id ? Number(reminder_flow_id) : null);
       }
+      if (send_payment_link !== undefined) {
+        updates.push("send_payment_link = ?");
+        args.push(send_payment_link ? 1 : 0);
+      }
       const allowedStatuses = ["pending", "paid", "overdue", "cancelled"];
       if (status != null && allowedStatuses.includes(status)) {
         updates.push("status = ?");
@@ -5936,6 +11457,64 @@ function buildApp() {
         `UPDATE payment_splits SET ${updates.join(", ")} WHERE id = ?`,
         args,
       );
+
+      // Manually marking a split paid (e.g. cash/check/manual entry outside
+      // Authorize.net) previously updated payment_splits alone — no payments
+      // row, no affiliate commission, and it didn't show up in Admin →
+      // Payments. Insert the ledger row here and earn the commission the
+      // same way an online payment does.
+      const transitioningToPaid =
+        status === "paid" && current.status !== "paid" && !current.payments_id;
+      if (transitioningToPaid) {
+        const finalAmountCents = Number(amount_cents ?? current.amount_cents);
+        const [manualPayment] = await pool.query<ResultSetHeader>(
+          `INSERT INTO payments
+             (client_id, case_id, split_id, amount_cents, currency,
+              status, provider, provider_transaction_id, paid_at)
+           VALUES (?, ?, ?, ?, ?, 'succeeded', 'manual', ?, NOW())`,
+          [
+            current.client_id,
+            caseId,
+            splitId,
+            finalAmountCents,
+            current.currency || "USD",
+            `manual-${crypto.randomUUID()}`,
+          ],
+        );
+        const manualPaymentId = manualPayment.insertId;
+        await pool.query(
+          `UPDATE payment_splits SET payments_id = ? WHERE id = ?`,
+          [manualPaymentId, splitId],
+        );
+        try {
+          await recordEnrollmentCommissions(
+            current.client_id as number,
+            manualPaymentId,
+            finalAmountCents,
+          );
+        } catch (e: any) {
+          console.error("[admin/splits:manual-paid:commission]", e?.message ?? e);
+        }
+      }
+
+      // Enable payment link: create a token if one does not exist yet
+      // (and the split is still collectible).
+      const wantsLink = send_payment_link === true;
+      const stillOpen =
+        (status ?? current.status) !== "paid" &&
+        (status ?? current.status) !== "cancelled";
+      if (wantsLink && stillOpen && !current.token) {
+        const tokenStr = crypto.randomUUID();
+        const expiresAt = new Date(
+          due_date != null ? due_date : (current.due_date as string),
+        );
+        expiresAt.setDate(expiresAt.getDate() + 7);
+        await pool.query(
+          `INSERT INTO payment_split_tokens (split_id, token, expires_at)
+           VALUES (?, ?, ?)`,
+          [splitId, tokenStr, expiresAt],
+        );
+      }
 
       // If due_date changed, cancel old notifications and reschedule
       const dueDateChanged =
@@ -5992,14 +11571,22 @@ function buildApp() {
          WHERE ps.id = ? LIMIT 1`,
         [splitId],
       );
-      res.json({ split: updated[0] });
+      const row = updated[0];
+      res.json({
+        split: {
+          ...row,
+          payment_link: row.payment_token
+            ? `${APP_URL}/pay/${row.payment_token}`
+            : null,
+        },
+      });
     },
   );
 
   // ── Delete split ──────────────────────────────────────────────────────────
   app.delete(
     "/api/admin/cases/:id/splits/:splitId",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     async (req, res) => {
       const caseId = Number(req.params.id);
       const splitId = Number(req.params.splitId);
@@ -6026,7 +11613,7 @@ function buildApp() {
   );
 
   // ── Admin payment splits overview (all cases) ─────────────────────────────
-  app.get("/api/admin/payment-splits", requireAdmin, async (req, res) => {
+  app.get("/api/admin/payment-splits", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const page = Math.max(1, Number(req.query.page) || 1);
     const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25));
     const offset = (page - 1) * limit;
@@ -6078,7 +11665,7 @@ function buildApp() {
   });
 
   // ── Admin calendar: splits in date range ──────────────────────────────────
-  app.get("/api/admin/calendar", requireAdmin, async (req, res) => {
+  app.get("/api/admin/calendar", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const { from, to } = req.query as { from?: string; to?: string };
     if (!from || !to)
       return res
@@ -6089,19 +11676,30 @@ function buildApp() {
       `SELECT ps.id, ps.case_id, cr.case_number, ps.client_id,
               c.first_name AS client_first_name, c.last_name AS client_last_name,
               ps.label, ps.amount_cents, ps.currency, ps.due_date,
-              ps.status, ps.completion_source
+              ps.status, ps.completion_source, ps.send_payment_link,
+              pst.token AS payment_token
        FROM payment_splits ps
        JOIN credit_repair_cases cr ON cr.id = ps.case_id
        JOIN clients c ON c.id = ps.client_id
+       LEFT JOIN payment_split_tokens pst ON pst.split_id = ps.id
        WHERE ps.due_date BETWEEN ? AND ?
        ORDER BY ps.due_date ASC`,
       [from, to],
     );
-    res.json({ splits });
+    const appUrl = APP_URL;
+    res.json({
+      splits: splits.map((s) => ({
+        ...s,
+        send_payment_link: !!s.send_payment_link,
+        payment_link: s.payment_token
+          ? `${appUrl}/pay/${s.payment_token}`
+          : null,
+      })),
+    });
   });
 
   // ── Get single case detail (pipeline panel) ──────────────────────────────
-  app.get("/api/admin/cases/:id", requireAdmin, async (req, res) => {
+  app.get("/api/admin/cases/:id", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const caseId = Number(req.params.id);
     if (!caseId || isNaN(caseId))
       return res.status(400).json({ error: "Invalid case id" });
@@ -6204,7 +11802,7 @@ function buildApp() {
   // ── Update case pipeline stage ────────────────────────────────────────────
   app.post(
     "/api/admin/cases/:id/stage",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     async (req: AuthedRequest, res) => {
       const caseId = Number(req.params.id);
       if (!caseId || isNaN(caseId))
@@ -6234,6 +11832,15 @@ function buildApp() {
 
       const fromStage = cur[0].pipeline_stage as string;
       const clientId = cur[0].client_id as number;
+
+      const scope = await getAffiliateScope(req.auth!.id);
+      if (scope && !scope.hasPortalAccess) {
+        return res.status(403).json({ error: "Portal access required" });
+      }
+      if (scope && !(await assertClientInAffiliateScope(clientId, scope))) {
+        return res.status(404).json({ error: "Case not found" });
+      }
+
       if (fromStage === stage) return res.json({ ok: true, unchanged: true });
 
       // Enforce docs_ready rule: all required tasks must be approved
@@ -6271,6 +11878,11 @@ function buildApp() {
       });
       if (unchanged) return res.json({ ok: true, unchanged: true });
 
+      if (stage === "docs_ready") {
+        triggerReminderFlow("docs_ready", clientId).catch((e) =>
+          console.error("[flow:docs_ready]", e?.message),
+        );
+      }
       if (stage === "completed") {
         triggerReminderFlow("completed", clientId).catch((e) =>
           console.error("[flow:completed]", e?.message),
@@ -6284,183 +11896,600 @@ function buildApp() {
   );
 
   // ── Create client ────────────────────────────────────────────────────────
-  app.post("/api/admin/clients", requireAdmin, async (req, res) => {
-    const {
-      first_name,
-      last_name,
-      email,
-      phone,
-      package_id,
-      status,
-      admin_notes,
-      send_welcome_email,
-      preferred_language,
-    } = req.body || {};
-    if (!first_name || !last_name || !email)
-      return res
-        .status(400)
-        .json({ error: "first_name, last_name and email are required" });
-    const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRe.test(String(email)))
-      return res.status(400).json({ error: "Invalid email address" });
-    const allowedStatus = [
-      "pending_payment",
-      "onboarding",
-      "active",
-      "paused",
-      "cancelled",
-    ];
-    const clientStatus = allowedStatus.includes(status)
-      ? status
-      : "pending_payment";
-    const lang = preferred_language === "es" ? "es" : "en";
-    try {
-      const [result] = await pool.query<ResultSetHeader>(
-        `INSERT INTO clients (first_name, last_name, email, phone, package_id, status, preferred_language, admin_notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          String(first_name).trim(),
-          String(last_name).trim(),
-          String(email).trim().toLowerCase(),
-          phone ? String(phone).trim() : null,
-          package_id ? Number(package_id) : null,
-          clientStatus,
-          lang,
-          admin_notes ? String(admin_notes).trim() : null,
-        ],
+  app.post(
+    "/api/admin/clients",
+    requireAdmin,
+    requirePortalIfAffiliate,
+    async (req: AuthedRequest, res) => {
+      const scope = await getAffiliateScope(req.auth!.id);
+      const {
+        first_name,
+        last_name,
+        email,
+        phone,
+        package_id,
+        status,
+        admin_notes,
+        send_welcome_email,
+        preferred_language,
+      } = req.body || {};
+      if (!first_name || !last_name || !email)
+        return res
+          .status(400)
+          .json({ error: "first_name, last_name and email are required" });
+      const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRe.test(String(email)))
+        return res.status(400).json({ error: "Invalid email address" });
+      const allowedStatus = [
+        "pending_payment",
+        "onboarding",
+        "active",
+        "paused",
+        "cancelled",
+      ];
+      // Affiliate-referred leads always land as unscoped prospects — status,
+      // pipeline stage, package, and admin notes are staff-only concerns.
+      const clientStatus = scope
+        ? "prospect"
+        : allowedStatus.includes(status)
+          ? status
+          : "pending_payment";
+      const pipelineStage = scope ? "prospect" : "new_client";
+      const affiliateId = scope ? scope.affiliateId : null;
+      const lang = preferred_language === "es" ? "es" : "en";
+      try {
+        const [result] = await pool.query<ResultSetHeader>(
+          `INSERT INTO clients (first_name, last_name, email, phone, package_id, status, pipeline_stage, preferred_language, admin_notes, affiliate_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            String(first_name).trim(),
+            String(last_name).trim(),
+            String(email).trim().toLowerCase(),
+            phone ? String(phone).trim() : null,
+            scope ? null : package_id ? Number(package_id) : null,
+            clientStatus,
+            pipelineStage,
+            lang,
+            scope ? null : admin_notes ? String(admin_notes).trim() : null,
+            affiliateId,
+          ],
+        );
+        const clientId = result.insertId;
+        if (affiliateId) {
+          attachLabelsBySlug(clientId, ["affiliate_referral"]).catch((e) =>
+            console.error(
+              "[admin/clients] attachLabels failed:",
+              e?.message ?? e,
+            ),
+          );
+        }
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT c.id, c.first_name, c.last_name, c.email, c.phone, c.pipeline_stage,
+                  c.status, c.created_at, p.name AS package_name, p.slug AS package_slug
+           FROM clients c LEFT JOIN packages p ON p.id = c.package_id
+           WHERE c.id = ? LIMIT 1`,
+          [clientId],
+        );
+        // Optionally send welcome email with portal access link — staff only.
+        if (send_welcome_email && !scope) {
+          try {
+            const token = await createOnboardingToken(clientId, 72);
+            const portalUrl = `${APP_URL}/portal/onboarding/${token}`;
+            const tpl = tplClientWelcome({
+              firstName: String(first_name).trim(),
+              portalUrl,
+              lang,
+            });
+            await sendEmail({
+              to: String(email).trim().toLowerCase(),
+              subject: tpl.subject,
+              html: tpl.html,
+            });
+          } catch (emailErr) {
+            console.error("[admin/clients] welcome email failed:", emailErr);
+          }
+        }
+        res.status(201).json({ client: rows[0] });
+      } catch (err: any) {
+        if (sendFriendlyError(res, err, { duplicateLabel: "email" })) return;
+        throw err;
+      }
+    },
+  );
+
+  // ── Update client ────────────────────────────────────────────────────────
+  app.put(
+    "/api/admin/clients/:id",
+    requireAdmin,
+    async (req: AuthedRequest, res) => {
+      const id = Number(req.params.id);
+      const scope = await getAffiliateScope(req.auth!.id);
+      if (scope && !scope.hasPortalAccess) {
+        return res.status(403).json({
+          error: "Affiliate subscription required",
+          code: "affiliate_subscription_required",
+        });
+      }
+      const {
+        first_name,
+        last_name,
+        email,
+        phone,
+        package_id,
+        status,
+        admin_notes,
+      } = req.body || {};
+      const [existing] = await pool.query<RowDataPacket[]>(
+        "SELECT id FROM clients WHERE id = ? LIMIT 1",
+        [id],
       );
-      const clientId = result.insertId;
+      if (existing.length === 0)
+        return res.status(404).json({ error: "Client not found" });
+      if (scope && !(await assertClientInAffiliateScope(id, scope))) {
+        return res.status(404).json({ error: "Client not found" });
+      }
+      const allowedStatus = [
+        "pending_payment",
+        "onboarding",
+        "active",
+        "paused",
+        "cancelled",
+      ];
+      const updates: string[] = [];
+      const args: any[] = [];
+      if (first_name != null) {
+        updates.push("first_name = ?");
+        args.push(String(first_name).trim());
+      }
+      if (last_name != null) {
+        updates.push("last_name = ?");
+        args.push(String(last_name).trim());
+      }
+      if (email != null) {
+        const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRe.test(String(email)))
+          return res.status(400).json({ error: "Invalid email address" });
+        updates.push("email = ?");
+        args.push(String(email).trim().toLowerCase());
+      }
+      if (phone !== undefined) {
+        updates.push("phone = ?");
+        args.push(phone ? String(phone).trim() : null);
+      }
+      // Affiliates are limited to contact-info fields — package/status/notes
+      // are staff-only concerns.
+      if (!scope) {
+        if (package_id !== undefined) {
+          updates.push("package_id = ?");
+          args.push(package_id ? Number(package_id) : null);
+        }
+        if (status != null && allowedStatus.includes(status)) {
+          updates.push("status = ?");
+          args.push(status);
+        }
+        if (admin_notes !== undefined) {
+          updates.push("admin_notes = ?");
+          args.push(admin_notes ? String(admin_notes).trim() : null);
+        }
+      }
+      if (updates.length === 0)
+        return res.status(400).json({ error: "No valid fields to update" });
+      args.push(id);
+      try {
+        await pool.query<ResultSetHeader>(
+          `UPDATE clients SET ${updates.join(", ")} WHERE id = ?`,
+          args,
+        );
+      } catch (err: any) {
+        if (sendFriendlyError(res, err, { duplicateLabel: "email" })) return;
+        throw err;
+      }
+      // `suspended` isn't a valid client status today, but check for it too
+      // in case the enum grows — cancelled is the one that exists now.
+      if (status === "cancelled" || status === "suspended") {
+        await revokeAllSessions("client", id).catch((e) =>
+          console.error("[admin/clients:revoke-sessions]", e?.message ?? e),
+        );
+      }
       const [rows] = await pool.query<RowDataPacket[]>(
         `SELECT c.id, c.first_name, c.last_name, c.email, c.phone, c.pipeline_stage,
                 c.status, c.created_at, p.name AS package_name, p.slug AS package_slug
          FROM clients c LEFT JOIN packages p ON p.id = c.package_id
          WHERE c.id = ? LIMIT 1`,
-        [clientId],
+        [id],
       );
-      // Optionally send welcome email with portal access link
-      if (send_welcome_email) {
-        try {
-          const token = await createOnboardingToken(clientId, 72);
-          const portalUrl = `${APP_URL}/onboarding?token=${token}`;
-          const tpl = tplClientWelcome({
-            firstName: String(first_name).trim(),
-            portalUrl,
-            lang,
-          });
-          await sendEmail({
-            to: String(email).trim().toLowerCase(),
-            subject: tpl.subject,
-            html: tpl.html,
-          });
-        } catch (emailErr) {
-          console.error("[admin/clients] welcome email failed:", emailErr);
-        }
-      }
-      res.status(201).json({ client: rows[0] });
-    } catch (err: any) {
-      if (err?.code === "ER_DUP_ENTRY")
-        return res
-          .status(409)
-          .json({ error: "A client with that email already exists" });
-      throw err;
-    }
-  });
-
-  // ── Update client ────────────────────────────────────────────────────────
-  app.put("/api/admin/clients/:id", requireAdmin, async (req, res) => {
-    const id = Number(req.params.id);
-    const {
-      first_name,
-      last_name,
-      email,
-      phone,
-      package_id,
-      status,
-      admin_notes,
-    } = req.body || {};
-    const [existing] = await pool.query<RowDataPacket[]>(
-      "SELECT id FROM clients WHERE id = ? LIMIT 1",
-      [id],
-    );
-    if (existing.length === 0)
-      return res.status(404).json({ error: "Client not found" });
-    const allowedStatus = [
-      "pending_payment",
-      "onboarding",
-      "active",
-      "paused",
-      "cancelled",
-    ];
-    const updates: string[] = [];
-    const args: any[] = [];
-    if (first_name != null) {
-      updates.push("first_name = ?");
-      args.push(String(first_name).trim());
-    }
-    if (last_name != null) {
-      updates.push("last_name = ?");
-      args.push(String(last_name).trim());
-    }
-    if (email != null) {
-      const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      if (!emailRe.test(String(email)))
-        return res.status(400).json({ error: "Invalid email address" });
-      updates.push("email = ?");
-      args.push(String(email).trim().toLowerCase());
-    }
-    if (phone !== undefined) {
-      updates.push("phone = ?");
-      args.push(phone ? String(phone).trim() : null);
-    }
-    if (package_id !== undefined) {
-      updates.push("package_id = ?");
-      args.push(package_id ? Number(package_id) : null);
-    }
-    if (status != null && allowedStatus.includes(status)) {
-      updates.push("status = ?");
-      args.push(status);
-    }
-    if (admin_notes !== undefined) {
-      updates.push("admin_notes = ?");
-      args.push(admin_notes ? String(admin_notes).trim() : null);
-    }
-    if (updates.length === 0)
-      return res.status(400).json({ error: "No valid fields to update" });
-    args.push(id);
-    try {
-      await pool.query<ResultSetHeader>(
-        `UPDATE clients SET ${updates.join(", ")} WHERE id = ?`,
-        args,
-      );
-    } catch (err: any) {
-      if (err?.code === "ER_DUP_ENTRY")
-        return res
-          .status(409)
-          .json({ error: "A client with that email already exists" });
-      throw err;
-    }
-    const [rows] = await pool.query<RowDataPacket[]>(
-      `SELECT c.id, c.first_name, c.last_name, c.email, c.phone, c.pipeline_stage,
-              c.status, c.created_at, p.name AS package_name, p.slug AS package_slug
-       FROM clients c LEFT JOIN packages p ON p.id = c.package_id
-       WHERE c.id = ? LIMIT 1`,
-      [id],
-    );
-    res.json({ client: rows[0] });
-  });
+      res.json({ client: rows[0] });
+    },
+  );
 
   // ── Delete client ────────────────────────────────────────────────────────
-  app.delete("/api/admin/clients/:id", requireAdmin, async (req, res) => {
-    const id = Number(req.params.id);
-    const [existing] = await pool.query<RowDataPacket[]>(
-      "SELECT id FROM clients WHERE id = ? LIMIT 1",
-      [id],
-    );
-    if (existing.length === 0)
-      return res.status(404).json({ error: "Client not found" });
-    await pool.query<ResultSetHeader>("DELETE FROM clients WHERE id = ?", [id]);
-    res.json({ ok: true });
-  });
+  app.delete(
+    "/api/admin/clients/:id",
+    requireAdmin,
+    async (req: AuthedRequest, res) => {
+      const id = Number(req.params.id);
+      const scope = await getAffiliateScope(req.auth!.id);
+      if (scope && !scope.hasPortalAccess) {
+        return res.status(403).json({
+          error: "Affiliate subscription required",
+          code: "affiliate_subscription_required",
+        });
+      }
+      const [existing] = await pool.query<RowDataPacket[]>(
+        "SELECT id, status, affiliate_id FROM clients WHERE id = ? LIMIT 1",
+        [id],
+      );
+      if (existing.length === 0)
+        return res.status(404).json({ error: "Client not found" });
+      if (scope) {
+        if (!(await assertClientInAffiliateScope(id, scope))) {
+          return res.status(404).json({ error: "Client not found" });
+        }
+        // Affiliates may only remove their own referred prospects, never
+        // clients that have already entered the paid pipeline.
+        if (existing[0].status !== "prospect") {
+          return res.status(403).json({
+            error: "Only prospect leads can be deleted by affiliates",
+          });
+        }
+      }
+      await pool.query<ResultSetHeader>("DELETE FROM clients WHERE id = ?", [
+        id,
+      ]);
+      res.json({ ok: true });
+    },
+  );
+
+  // ============================================================================
+  // BULK CSV IMPORT — CLIENTS
+  // ============================================================================
+
+  // Download an empty starter CSV with the expected headers + one sample row
+  app.get(
+    "/api/admin/bulk-import/templates/clients.csv",
+    requireAdmin, denyAffiliateAccess,
+    async (_req: AuthedRequest, res) => {
+      const csv = buildOptimumClientTemplateCsv();
+      res.set("Content-Type", "text/csv; charset=utf-8");
+      res.set(
+        "Content-Disposition",
+        'attachment; filename="optimum-credit-clients-template.csv"',
+      );
+      res.send(csv);
+    },
+  );
+
+  // Upload + validate a CSV (no DB writes to clients yet — stages a job for review/commit)
+  app.post(
+    "/api/admin/bulk-import/validate",
+    requireAdmin, denyAffiliateAccess,
+    upload.single("file"),
+    async (req: AuthedRequest, res) => {
+      if (!resolveBulkCsvImportEnabled()) {
+        return res.status(403).json({ error: "Bulk CSV import is disabled" });
+      }
+      const entity = String((req.body || {}).entity || "clients");
+      if (entity !== "clients") {
+        return res
+          .status(400)
+          .json({ error: `Unsupported entity type: ${entity}` });
+      }
+      const file = (req as any).file as Express.Multer.File | undefined;
+      if (!file) return res.status(400).json({ error: "No file provided" });
+      if (file.size > BULK_IMPORT_MAX_FILE_BYTES) {
+        return res.status(400).json({
+          error: `File is too large — max ${Math.floor(BULK_IMPORT_MAX_FILE_BYTES / (1024 * 1024))}MB`,
+        });
+      }
+
+      const text = file.buffer.toString("utf8");
+      const parsed = parseBulkCsv(text);
+      if (parsed.error) return res.status(400).json({ error: parsed.error });
+      if (parsed.rows.length === 0) {
+        return res.status(400).json({ error: "CSV file has no data rows" });
+      }
+      if (parsed.rows.length > BULK_IMPORT_MAX_ROWS) {
+        return res.status(400).json({
+          error: `Too many rows — max ${BULK_IMPORT_MAX_ROWS} per file`,
+        });
+      }
+
+      try {
+        const validation = validateOptimumClientRows(
+          parsed.headers,
+          parsed.rows,
+        );
+        await resolveOptimumClientPackages(pool, validation.rows);
+        await applyOptimumClientDbPreflight(pool, validation.rows);
+        const summary = rebuildOptimumClientPreview(validation.rows);
+
+        const expiresAt = new Date(Date.now() + BULK_IMPORT_JOB_TTL_MS);
+        const fileSha256 = crypto
+          .createHash("sha256")
+          .update(file.buffer)
+          .digest("hex");
+
+        const [result] = await pool.query<ResultSetHeader>(
+          `INSERT INTO bulk_import_jobs
+             (entity, uploaded_by_admin_id, file_name, file_sha256, status, preview_json,
+              row_count, created_count, skipped_count, error_count, expires_at)
+           VALUES ('clients', ?, ?, ?, 'validated', ?, ?, 0, ?, ?, ?)`,
+          [
+            req.auth!.id,
+            file.originalname || "clients.csv",
+            fileSha256,
+            JSON.stringify({ rows: validation.rows }),
+            summary.row_count,
+            summary.skipped_count,
+            summary.error_count,
+            expiresAt,
+          ],
+        );
+
+        res.json({
+          success: true,
+          job_id: result.insertId,
+          expires_at: expiresAt.toISOString(),
+          row_count: summary.row_count,
+          will_create_count: summary.will_create_count,
+          skipped_count: summary.skipped_count,
+          error_count: summary.error_count,
+          preview_rows: summary.preview_rows,
+          breakdown: {
+            will_create: summary.will_create_count,
+            skipped: summary.skipped_count,
+            error: summary.error_count,
+          },
+        });
+      } catch (err) {
+        if (sendFriendlyError(res, err)) return;
+        console.error("[bulk-import/validate]", err);
+        res
+          .status(500)
+          .json({ error: "Failed to validate the file. Please try again." });
+      }
+    },
+  );
+
+  // Fetch a staged import job (status + preview + result, if committed)
+  app.get(
+    "/api/admin/bulk-import/:jobId",
+    requireAdmin, denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const jobId = Number(req.params.jobId);
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM bulk_import_jobs WHERE id = ? AND uploaded_by_admin_id = ? LIMIT 1`,
+        [jobId, req.auth!.id],
+      );
+      if (rows.length === 0)
+        return res.status(404).json({ error: "Import job not found" });
+      const job = rows[0];
+      const preview = parseBulkImportJsonField<{
+        rows?: OptimumClientImportRow[];
+      }>(job.preview_json);
+      const previewSummary = preview?.rows
+        ? rebuildOptimumClientPreview(preview.rows)
+        : null;
+      res.json({
+        job: {
+          id: job.id,
+          entity: job.entity,
+          status: job.status,
+          file_name: job.file_name,
+          row_count: job.row_count,
+          created_count: job.created_count,
+          skipped_count: job.skipped_count,
+          error_count: job.error_count,
+          expires_at: job.expires_at,
+          created_at: job.created_at,
+          committed_at: job.committed_at,
+        },
+        will_create_count: previewSummary?.will_create_count ?? 0,
+        preview_rows: previewSummary?.preview_rows ?? [],
+        result: parseBulkImportJsonField(job.result_json),
+      });
+    },
+  );
+
+  // Commit a validated job — creates clients for `will_create` rows
+  app.post(
+    "/api/admin/bulk-import/:jobId/commit",
+    requireAdmin, denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      if (!resolveBulkCsvImportEnabled()) {
+        return res.status(403).json({ error: "Bulk CSV import is disabled" });
+      }
+      const jobId = Number(req.params.jobId);
+      const sendWelcomeEmails = !!(req.body || {}).send_welcome_emails;
+
+      const [jobRows] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM bulk_import_jobs WHERE id = ? AND uploaded_by_admin_id = ? LIMIT 1`,
+        [jobId, req.auth!.id],
+      );
+      if (jobRows.length === 0)
+        return res.status(404).json({ error: "Import job not found" });
+      const job = jobRows[0];
+
+      if (new Date(job.expires_at as string).getTime() < Date.now()) {
+        if (job.status === "validated") {
+          await pool.query(
+            `UPDATE bulk_import_jobs SET status = 'expired' WHERE id = ?`,
+            [jobId],
+          );
+        }
+        return res.status(410).json({
+          error: "This import job has expired — please re-upload and validate again",
+        });
+      }
+      if (job.status !== "validated") {
+        return res.status(409).json({
+          error: `Import job cannot be committed (status: ${job.status})`,
+        });
+      }
+
+      const [claim] = await pool.query<ResultSetHeader>(
+        `UPDATE bulk_import_jobs SET status = 'processing' WHERE id = ? AND status = 'validated'`,
+        [jobId],
+      );
+      if (claim.affectedRows === 0) {
+        return res
+          .status(409)
+          .json({ error: "Import job is already being processed" });
+      }
+
+      const preview = parseBulkImportJsonField<{
+        rows?: OptimumClientImportRow[];
+      }>(job.preview_json);
+      const rows = preview?.rows || [];
+
+      let createdCount = 0;
+      let skippedCount = 0;
+      let errorCount = 0;
+      const results: Array<{
+        row_number: number;
+        status: "created" | "skipped" | "error";
+        entity_id?: number | null;
+        message?: string;
+        external_ref?: string | null;
+      }> = [];
+
+      try {
+        for (const row of rows) {
+          if (row.import_status === "error") {
+            errorCount++;
+            results.push({
+              row_number: row.row_number,
+              status: "error",
+              message: row.message,
+              external_ref: row.external_ref,
+            });
+            continue;
+          }
+          if (row.import_status === "skipped") {
+            skippedCount++;
+            results.push({
+              row_number: row.row_number,
+              status: "skipped",
+              message: row.message,
+              external_ref: row.external_ref,
+            });
+            continue;
+          }
+          // will_create — re-check for email conflicts created since validation
+          try {
+            const [dupRows] = await pool.query<RowDataPacket[]>(
+              `SELECT id FROM clients WHERE email = ? LIMIT 1`,
+              [row.email],
+            );
+            if (dupRows.length > 0) {
+              skippedCount++;
+              results.push({
+                row_number: row.row_number,
+                status: "skipped",
+                entity_id: dupRows[0].id as number,
+                message: "A client with this email already exists",
+                external_ref: row.external_ref,
+              });
+              continue;
+            }
+            const [insertResult] = await pool.query<ResultSetHeader>(
+              `INSERT INTO clients
+                 (first_name, last_name, email, phone, package_id, status, preferred_language,
+                  admin_notes, address_line1, address_line2, city, state, zip, date_of_birth)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              [
+                row.first_name,
+                row.last_name,
+                row.email,
+                row.phone || null,
+                row.package_id,
+                row.client_status,
+                row.preferred_language,
+                row.admin_notes,
+                row.address_line1,
+                row.address_line2,
+                row.city,
+                row.state,
+                row.zip,
+                row.date_of_birth,
+              ],
+            );
+            const clientId = insertResult.insertId;
+            createdCount++;
+            results.push({
+              row_number: row.row_number,
+              status: "created",
+              entity_id: clientId,
+              external_ref: row.external_ref,
+            });
+
+            if (sendWelcomeEmails && row.email) {
+              try {
+                const token = await createOnboardingToken(clientId, 72);
+                const portalUrl = `${APP_URL}/portal/onboarding/${token}`;
+                const tpl = tplClientWelcome({
+                  firstName: row.first_name,
+                  portalUrl,
+                  lang: row.preferred_language,
+                });
+                await sendEmail({
+                  to: row.email,
+                  subject: tpl.subject,
+                  html: tpl.html,
+                });
+              } catch (emailErr) {
+                console.error(
+                  "[bulk-import/commit] welcome email failed:",
+                  emailErr,
+                );
+              }
+            }
+          } catch (rowErr) {
+            errorCount++;
+            const friendly = mapFriendlyError(rowErr, {
+              duplicateLabel: "email",
+            });
+            results.push({
+              row_number: row.row_number,
+              status: "error",
+              message: friendly?.error || "Failed to create client",
+              external_ref: row.external_ref,
+            });
+          }
+        }
+
+        await pool.query(
+          `UPDATE bulk_import_jobs
+           SET status = 'committed', result_json = ?, created_count = ?, skipped_count = ?, error_count = ?, committed_at = NOW()
+           WHERE id = ?`,
+          [
+            JSON.stringify({ results }),
+            createdCount,
+            skippedCount,
+            errorCount,
+            jobId,
+          ],
+        );
+
+        res.json({
+          success: true,
+          created_count: createdCount,
+          skipped_count: skippedCount,
+          error_count: errorCount,
+          results,
+        });
+      } catch (err) {
+        await pool.query(
+          `UPDATE bulk_import_jobs SET status = 'failed', result_json = ? WHERE id = ?`,
+          [JSON.stringify({ results, error: String(err) }), jobId],
+        );
+        console.error("[bulk-import/commit]", err);
+        res
+          .status(500)
+          .json({ error: "Failed to commit the import job. Please try again." });
+      }
+    },
+  );
 
   app.post(
     "/api/admin/clients/:id/stage",
@@ -6486,6 +12515,15 @@ function buildApp() {
         [id],
       );
       if (cur.length === 0) return res.status(404).json({ error: "Not found" });
+
+      const scope = await getAffiliateScope(req.auth!.id);
+      if (scope && !scope.hasPortalAccess) {
+        return res.status(403).json({ error: "Portal access required" });
+      }
+      if (scope && !(await assertClientInAffiliateScope(id, scope))) {
+        return res.status(404).json({ error: "Not found" });
+      }
+
       const fromStage = cur[0].pipeline_stage as string;
       if (fromStage === stage) return res.json({ ok: true, unchanged: true });
 
@@ -6523,7 +12561,12 @@ function buildApp() {
       });
       if (unchanged) return res.json({ ok: true, unchanged: true });
 
-      // Trigger reminder flow for completed stage
+      // Trigger reminder flows for docs_ready / completed stages
+      if (stage === "docs_ready") {
+        triggerReminderFlow("docs_ready", id).catch((e) =>
+          console.error("[flow:docs_ready]", e?.message),
+        );
+      }
       if (stage === "completed") {
         triggerReminderFlow("completed", id).catch((e) =>
           console.error("[flow:completed]", e?.message),
@@ -6542,7 +12585,7 @@ function buildApp() {
   // ============================================================
 
   /** GET /api/admin/crc/status — check CRC configuration */
-  app.get("/api/admin/crc/status", requireAdmin, (_req, res) => {
+  app.get("/api/admin/crc/status", requireAdmin, denyAffiliateAccess, (_req, res) => {
     res.json({
       configured: crcConfigured,
       dry_run: crcDryRun,
@@ -6554,7 +12597,7 @@ function buildApp() {
    * GET /api/admin/crc/preview/:id — preview the XML payload for a client
    * without sending anything to CRC. Safe to use anytime.
    */
-  app.get("/api/admin/crc/preview/:id", requireAdmin, async (req, res) => {
+  app.get("/api/admin/crc/preview/:id", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const id = Number(req.params.id);
     if (isNaN(id)) return res.status(400).json({ error: "Invalid id" });
     const [rows] = await pool.query<RowDataPacket[]>(
@@ -6605,7 +12648,7 @@ function buildApp() {
    */
   app.post(
     "/api/admin/crc/simulate-webhook",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     async (req, res) => {
       const { clientId, email, stage } = req.body || {};
       if (!stage) return res.status(400).json({ error: "Missing stage" });
@@ -6667,7 +12710,7 @@ function buildApp() {
   );
 
   /** GET /api/admin/crc/sync-log — latest CRC sync log entries */
-  app.get("/api/admin/crc/sync-log", requireAdmin, async (req, res) => {
+  app.get("/api/admin/crc/sync-log", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const limit = Math.min(Number(req.query.limit) || 50, 200);
     const [rows] = await pool.query<RowDataPacket[]>(
       `SELECT l.id, l.client_id, c.first_name, c.last_name, c.email,
@@ -6700,12 +12743,16 @@ function buildApp() {
   app.post("/api/webhooks/crc", async (req, res) => {
     // Verify shared secret if configured (timing-safe comparison)
     const webhookSecret = process.env.CRC_WEBHOOK_SECRET;
-    if (webhookSecret) {
+    if (!webhookSecret) {
+      if (IS_PROD) {
+        console.error(
+          "[crc:webhook] CRC_WEBHOOK_SECRET not configured in production — rejecting",
+        );
+        return res.status(503).json({ error: "Webhook not configured" });
+      }
+    } else {
       const provided = String(req.body?.secret ?? "");
-      const secretBuf = Buffer.from(webhookSecret);
-      const providedBuf = Buffer.alloc(secretBuf.length);
-      providedBuf.write(provided.slice(0, secretBuf.length));
-      if (!crypto.timingSafeEqual(secretBuf, providedBuf)) {
+      if (!timingSafeStringEqual(provided, webhookSecret)) {
         return res.status(401).json({ error: "Unauthorized" });
       }
     }
@@ -6803,11 +12850,16 @@ function buildApp() {
         console.error("[flow:completed]", e?.message),
       );
     }
+    if (mapped === "docs_ready") {
+      triggerReminderFlow("docs_ready", clientId).catch((e) =>
+        console.error("[flow:docs_ready]", e?.message),
+      );
+    }
 
     res.json({ ok: true, stage: mapped, clientId });
   });
 
-  app.get("/api/admin/documents", requireAdmin, async (req, res) => {
+  app.get("/api/admin/documents", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const status = (req.query.status as string) || "all";
     const search = ((req.query.search as string) || "").trim();
 
@@ -6856,7 +12908,7 @@ function buildApp() {
 
   app.patch(
     "/api/admin/documents/:id/pipeline-round",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     async (req: AuthedRequest, res) => {
       const id = Number(req.params.id);
       const { pipeline_round } = req.body || {};
@@ -6889,7 +12941,7 @@ function buildApp() {
   // Serve decrypted document file to admin (streamed, authenticated)
   app.get(
     "/api/admin/documents/:id/file",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     async (req: AuthedRequest, res) => {
       const id = Number(req.params.id);
       const [rows] = await pool.query<RowDataPacket[]>(
@@ -6999,13 +13051,21 @@ function buildApp() {
           [d.client_id],
         );
         if (cur[0]?.pipeline_stage === "new_client") {
+          // advanceCasePipeline also moves the client's active credit_repair_cases
+          // row to docs_ready — a plain UPDATE clients here would leave the case
+          // stuck at new_client and out of sync with the client.
+          await advanceCasePipeline(pool, {
+            clientId: d.client_id,
+            stage: "docs_ready",
+            adminId: req.auth!.id,
+            notes: "Auto-advanced: all documents approved",
+          });
           await pool.query<ResultSetHeader>(
-            `UPDATE clients SET pipeline_stage = 'docs_ready', pipeline_stage_changed_at = NOW(), status='active' WHERE id = ?`,
+            `UPDATE clients SET status='active' WHERE id = ? AND status <> 'active'`,
             [d.client_id],
           );
-          await pool.query<ResultSetHeader>(
-            `INSERT INTO client_pipeline_history (client_id, from_stage, to_stage, changed_by_admin_id, notes) VALUES (?, 'new_client', 'docs_ready', ?, 'Auto-advanced: all documents approved')`,
-            [d.client_id, req.auth!.id],
+          triggerReminderFlow("docs_ready", d.client_id).catch((e) =>
+            console.error("[flow:docs_ready]", e?.message),
           );
           // Notify client that all their documents have been approved
           const portalUrl = `${APP_URL}/portal/documents`;
@@ -7265,7 +13325,7 @@ function buildApp() {
     },
   );
 
-  app.get("/api/admin/conversations", requireAdmin, async (_req, res) => {
+  app.get("/api/admin/conversations", requireAdmin, denyAffiliateAccess, async (_req, res) => {
     const [rows] = await pool.query<RowDataPacket[]>(
       `SELECT cv.id, cv.channel, cv.status, cv.last_message_at, cv.last_message_preview, cv.unread_count,
               c.id AS client_id, c.first_name, c.last_name, c.email, c.phone
@@ -7277,7 +13337,7 @@ function buildApp() {
 
   app.get(
     "/api/admin/conversations/:id/messages",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     async (req, res) => {
       const [rows] = await pool.query<RowDataPacket[]>(
         `SELECT id, direction, channel, body, from_address, to_address, sent_by_admin_id, created_at
@@ -7290,7 +13350,7 @@ function buildApp() {
 
   app.post(
     "/api/admin/conversations/send",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     async (req: AuthedRequest, res) => {
       const { client_id, channel, body, subject } = req.body || {};
       if (!client_id || !channel || !body)
@@ -7363,7 +13423,7 @@ function buildApp() {
     },
   );
 
-  app.get("/api/admin/tickets", requireAdmin, async (req, res) => {
+  app.get("/api/admin/tickets", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const status = req.query.status as string | undefined;
     const args: any[] = [];
     let where = "";
@@ -7382,7 +13442,7 @@ function buildApp() {
     res.json({ tickets: rows });
   });
 
-  app.get("/api/admin/tickets/:id", requireAdmin, async (req, res) => {
+  app.get("/api/admin/tickets/:id", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const [t] = await pool.query<RowDataPacket[]>(
       `SELECT t.*, c.first_name, c.last_name, c.email
        FROM support_tickets t JOIN clients c ON c.id = t.client_id WHERE t.id = ? LIMIT 1`,
@@ -7399,7 +13459,7 @@ function buildApp() {
 
   app.post(
     "/api/admin/tickets/:id/replies",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     async (req: AuthedRequest, res) => {
       const { body, is_internal_note } = req.body || {};
       if (!body) return res.status(400).json({ error: "Body required" });
@@ -7415,7 +13475,7 @@ function buildApp() {
     },
   );
 
-  app.post("/api/admin/tickets/:id/status", requireAdmin, async (req, res) => {
+  app.post("/api/admin/tickets/:id/status", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const { status } = req.body || {};
     const allowed = [
       "open",
@@ -7434,14 +13494,14 @@ function buildApp() {
   });
 
   // Support FAQ — admin CRUD
-  app.get("/api/admin/support-faq", requireAdmin, async (_req, res) => {
+  app.get("/api/admin/support-faq", requireAdmin, denyAffiliateAccess, async (_req, res) => {
     const [rows] = await pool.query<RowDataPacket[]>(
       `SELECT id, question, answer, category, sort_order, is_active, created_at, updated_at FROM support_faq ORDER BY sort_order ASC, id ASC`,
     );
     res.json({ faqs: rows });
   });
 
-  app.post("/api/admin/support-faq", requireAdmin, async (req, res) => {
+  app.post("/api/admin/support-faq", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const { question, answer, category, sort_order, is_active } =
       req.body || {};
     if (!question || !answer)
@@ -7461,7 +13521,7 @@ function buildApp() {
     res.json({ id: r.insertId });
   });
 
-  app.put("/api/admin/support-faq/:id", requireAdmin, async (req, res) => {
+  app.put("/api/admin/support-faq/:id", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const { question, answer, category, sort_order, is_active } =
       req.body || {};
     await pool.query<ResultSetHeader>(
@@ -7478,14 +13538,14 @@ function buildApp() {
     res.json({ ok: true });
   });
 
-  app.delete("/api/admin/support-faq/:id", requireAdmin, async (req, res) => {
+  app.delete("/api/admin/support-faq/:id", requireAdmin, denyAffiliateAccess, async (req, res) => {
     await pool.query<ResultSetHeader>(`DELETE FROM support_faq WHERE id = ?`, [
       req.params.id,
     ]);
     res.json({ ok: true });
   });
 
-  app.get("/api/admin/templates", requireAdmin, async (_req, res) => {
+  app.get("/api/admin/templates", requireAdmin, denyAffiliateAccess, async (_req, res) => {
     const [rows] = await pool.query<RowDataPacket[]>(
       `SELECT id, slug, name, channel, subject, body, variables_json, is_active, updated_at
        FROM communication_templates ORDER BY channel, name`,
@@ -7493,7 +13553,7 @@ function buildApp() {
     res.json({ templates: rows });
   });
 
-  app.post("/api/admin/templates/:id", requireAdmin, async (req, res) => {
+  app.post("/api/admin/templates/:id", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const { name, subject, body, is_active } = req.body || {};
     await pool.query<ResultSetHeader>(
       `UPDATE communication_templates SET name = COALESCE(?, name), subject = ?, body = COALESCE(?, body), is_active = COALESCE(?, is_active) WHERE id = ?`,
@@ -7508,7 +13568,7 @@ function buildApp() {
     res.json({ ok: true });
   });
 
-  app.post("/api/admin/templates", requireAdmin, async (req, res) => {
+  app.post("/api/admin/templates", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const { slug, name, channel, subject, body, variables } = req.body || {};
     if (!slug || !name || !channel || !body) {
       return res
@@ -7528,14 +13588,19 @@ function buildApp() {
       Array.isArray(variables) && variables.length > 0
         ? JSON.stringify(variables)
         : null;
-    const [result] = await pool.query<ResultSetHeader>(
-      `INSERT INTO communication_templates (slug, name, channel, subject, body, variables_json, is_active) VALUES (?,?,?,?,?,?,1)`,
-      [slug, name, channel, subject || null, body, vars],
-    );
-    res.json({ ok: true, id: result.insertId });
+    try {
+      const [result] = await pool.query<ResultSetHeader>(
+        `INSERT INTO communication_templates (slug, name, channel, subject, body, variables_json, is_active) VALUES (?,?,?,?,?,?,1)`,
+        [slug, name, channel, subject || null, body, vars],
+      );
+      res.json({ ok: true, id: result.insertId });
+    } catch (err: unknown) {
+      if (sendFriendlyError(res, err, { duplicateLabel: "slug" })) return;
+      throw err;
+    }
   });
 
-  app.delete("/api/admin/templates/:id", requireAdmin, async (req, res) => {
+  app.delete("/api/admin/templates/:id", requireAdmin, denyAffiliateAccess, async (req, res) => {
     // Guard: block delete if template is referenced by any reminder flow step
     const [usages] = await pool.query<RowDataPacket[]>(
       `SELECT rf.name AS flow_name
@@ -7563,7 +13628,7 @@ function buildApp() {
     res.json({ ok: true });
   });
 
-  app.get("/api/admin/videos", requireAdmin, async (_req, res) => {
+  app.get("/api/admin/videos", requireAdmin, denyAffiliateAccess, async (_req, res) => {
     const [rows] = await pool.query<RowDataPacket[]>(
       `SELECT * FROM educational_videos ORDER BY sort_order ASC, id DESC`,
     );
@@ -7587,12 +13652,13 @@ function buildApp() {
         );
         res.json({ url: cdnUrl, mime_type: f.mimetype, size: f.size });
       } catch (err: any) {
-        res.status(500).json({ error: err.message || "Upload failed" });
+        console.error("[educational-content/upload]", err?.message ?? err);
+        res.status(500).json({ error: "Upload failed. Please try again." });
       }
     },
   );
 
-  app.post("/api/admin/videos", requireAdmin, async (req, res) => {
+  app.post("/api/admin/videos", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const {
       title,
       content_type,
@@ -7638,7 +13704,7 @@ function buildApp() {
     res.json({ id: r.insertId });
   });
 
-  app.put("/api/admin/videos/:id", requireAdmin, async (req, res) => {
+  app.put("/api/admin/videos/:id", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const id = Number(req.params.id);
     const {
       title,
@@ -7678,7 +13744,7 @@ function buildApp() {
     res.json({ ok: true });
   });
 
-  app.delete("/api/admin/videos/:id", requireAdmin, async (req, res) => {
+  app.delete("/api/admin/videos/:id", requireAdmin, denyAffiliateAccess, async (req, res) => {
     await pool.query<ResultSetHeader>(
       `DELETE FROM educational_videos WHERE id = ?`,
       [req.params.id],
@@ -7687,7 +13753,7 @@ function buildApp() {
   });
 
   // ── ADMIN PAYMENTS ──────────────────────────────────────────────────────────
-  app.get("/api/admin/payments", requireAdmin, async (req, res) => {
+  app.get("/api/admin/payments", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const status = (req.query.status as string) || "all";
     const search = ((req.query.search as string) || "").trim();
     const provider = (req.query.provider as string) || "";
@@ -7768,8 +13834,50 @@ function buildApp() {
     });
   });
 
+  // ── Refund a payment (ledger clawback) ──────────────────────────────────────
+  // Marks the payment refunded and voids any pending/approved commissions
+  // tied to it so affiliates aren't paid out on money that came back. This
+  // does NOT call Authorize.net's refund/void API yet — it's a bookkeeping
+  // clawback only. If the charge is still within the settlement window, ANet
+  // still needs a separate void/refund performed through the merchant portal
+  // (or a follow-up API integration) — this endpoint only fixes our ledger
+  // and commission accounting.
+  app.post(
+    "/api/admin/payments/:id/refund",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id)) return res.status(400).json({ error: "Invalid id" });
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, status FROM payments WHERE id = ? LIMIT 1`,
+        [id],
+      );
+      if (rows.length === 0)
+        return res.status(404).json({ error: "Payment not found" });
+      if (rows[0].status === "refunded") {
+        return res.json({ ok: true }); // already refunded — idempotent
+      }
+      if (rows[0].status !== "succeeded") {
+        return res.status(400).json({
+          error: "Only succeeded payments can be refunded",
+        });
+      }
+      await pool.query<ResultSetHeader>(
+        `UPDATE payments SET status = 'refunded' WHERE id = ?`,
+        [id],
+      );
+      await pool.query<ResultSetHeader>(
+        `UPDATE affiliate_commissions SET status = 'void'
+         WHERE payment_id = ? AND status IN ('pending','approved')`,
+        [id],
+      );
+      res.json({ ok: true });
+    },
+  );
+
   // ── ADMIN SUBSCRIPTIONS ─────────────────────────────────────────────────────
-  app.get("/api/admin/subscriptions", requireAdmin, async (req, res) => {
+  app.get("/api/admin/subscriptions", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const status = (req.query.status as string) || "all";
     const search = ((req.query.search as string) || "").trim();
     const page = Math.max(1, parseInt((req.query.page as string) || "1", 10));
@@ -7842,7 +13950,7 @@ function buildApp() {
   });
 
   // ── TRADELINE PRODUCTS (admin CRUD) ───────────────────────────────────────
-  app.get("/api/admin/tradeline-products", requireAdmin, async (_req, res) => {
+  app.get("/api/admin/tradeline-products", requireAdmin, denyAffiliateAccess, async (_req, res) => {
     const [rows] = await pool.query<RowDataPacket[]>(
       `SELECT * FROM tradeline_products ORDER BY sort_order ASC, id ASC`,
     );
@@ -7851,7 +13959,7 @@ function buildApp() {
 
   app.post(
     "/api/admin/tradeline-products",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     async (req: AuthedRequest, res) => {
       const {
         slug,
@@ -7871,30 +13979,35 @@ function buildApp() {
         .toLowerCase()
         .replace(/[^a-z0-9_]+/g, "_")
         .replace(/^_|_$/g, "");
-      const [r] = await pool.query<ResultSetHeader>(
-        `INSERT INTO tradeline_products (slug, name, details, price_cents, compare_price_cents, is_active, sort_order)
-         VALUES (?,?,?,?,?,?,?)`,
-        [
-          cleanSlug,
-          String(name).trim(),
-          String(details).trim(),
-          Number(price_cents),
-          compare_price_cents != null ? Number(compare_price_cents) : null,
-          is_active != null ? Number(is_active) : 1,
-          Number(sort_order) || 0,
-        ],
-      );
-      const [created] = await pool.query<RowDataPacket[]>(
-        `SELECT * FROM tradeline_products WHERE id = ? LIMIT 1`,
-        [r.insertId],
-      );
-      res.status(201).json({ product: created[0] });
+      try {
+        const [r] = await pool.query<ResultSetHeader>(
+          `INSERT INTO tradeline_products (slug, name, details, price_cents, compare_price_cents, is_active, sort_order)
+           VALUES (?,?,?,?,?,?,?)`,
+          [
+            cleanSlug,
+            String(name).trim(),
+            String(details).trim(),
+            Number(price_cents),
+            compare_price_cents != null ? Number(compare_price_cents) : null,
+            is_active != null ? Number(is_active) : 1,
+            Number(sort_order) || 0,
+          ],
+        );
+        const [created] = await pool.query<RowDataPacket[]>(
+          `SELECT * FROM tradeline_products WHERE id = ? LIMIT 1`,
+          [r.insertId],
+        );
+        res.status(201).json({ product: created[0] });
+      } catch (err: unknown) {
+        if (sendFriendlyError(res, err, { duplicateLabel: "slug" })) return;
+        throw err;
+      }
     },
   );
 
   app.put(
     "/api/admin/tradeline-products/:id",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     async (req, res) => {
       const id = Number(req.params.id);
       const {
@@ -7948,7 +14061,7 @@ function buildApp() {
 
   app.delete(
     "/api/admin/tradeline-products/:id",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     async (req, res) => {
       const id = Number(req.params.id);
       await pool.query<ResultSetHeader>(
@@ -7960,7 +14073,7 @@ function buildApp() {
   );
 
   // ── COUPONS (admin CRUD) ────────────────────────────────────────────────────
-  app.get("/api/admin/coupons", requireAdmin, async (_req, res) => {
+  app.get("/api/admin/coupons", requireAdmin, denyAffiliateAccess, async (_req, res) => {
     const [rows] = await pool.query<RowDataPacket[]>(
       `SELECT c.*,
               CONCAT(a.first_name,' ',a.last_name) AS created_by_name
@@ -7973,7 +14086,7 @@ function buildApp() {
 
   app.post(
     "/api/admin/coupons",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     async (req: AuthedRequest, res) => {
       const {
         code,
@@ -8019,37 +14132,42 @@ function buildApp() {
       if (existing.length > 0)
         return res.status(409).json({ error: "Coupon code already exists" });
 
-      const [r] = await pool.query<ResultSetHeader>(
-        `INSERT INTO coupons
+      try {
+        const [r] = await pool.query<ResultSetHeader>(
+          `INSERT INTO coupons
         (code, description, discount_type, discount_value, min_amount_cents, max_uses,
          applicable_packages, valid_from, expires_at, is_active, created_by_admin_id)
        VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-        [
-          upperCode,
-          description || null,
-          discount_type,
-          val,
-          Number(min_amount_cents) || 0,
-          max_uses != null ? Number(max_uses) : null,
-          applicable_packages ? JSON.stringify(applicable_packages) : null,
-          valid_from || null,
-          expires_at || null,
-          is_active != null ? Number(is_active) : 1,
-          req.auth!.id,
-        ],
-      );
+          [
+            upperCode,
+            description || null,
+            discount_type,
+            val,
+            Number(min_amount_cents) || 0,
+            max_uses != null ? Number(max_uses) : null,
+            applicable_packages ? JSON.stringify(applicable_packages) : null,
+            valid_from || null,
+            expires_at || null,
+            is_active != null ? Number(is_active) : 1,
+            req.auth!.id,
+          ],
+        );
 
-      const [created] = await pool.query<RowDataPacket[]>(
-        `SELECT c.*, CONCAT(a.first_name,' ',a.last_name) AS created_by_name
+        const [created] = await pool.query<RowDataPacket[]>(
+          `SELECT c.*, CONCAT(a.first_name,' ',a.last_name) AS created_by_name
        FROM coupons c LEFT JOIN admins a ON a.id = c.created_by_admin_id
        WHERE c.id = ? LIMIT 1`,
-        [r.insertId],
-      );
-      res.status(201).json({ coupon: created[0] });
+          [r.insertId],
+        );
+        res.status(201).json({ coupon: created[0] });
+      } catch (err: unknown) {
+        if (sendFriendlyError(res, err, { duplicateLabel: "coupon" })) return;
+        throw err;
+      }
     },
   );
 
-  app.put("/api/admin/coupons/:id", requireAdmin, async (req, res) => {
+  app.put("/api/admin/coupons/:id", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const id = Number(req.params.id);
     const {
       code,
@@ -8144,7 +14262,7 @@ function buildApp() {
     res.json({ coupon: updated[0] });
   });
 
-  app.delete("/api/admin/coupons/:id", requireAdmin, async (req, res) => {
+  app.delete("/api/admin/coupons/:id", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const id = Number(req.params.id);
     const [rows] = await pool.query<RowDataPacket[]>(
       `SELECT id FROM coupons WHERE id = ? LIMIT 1`,
@@ -8372,11 +14490,15 @@ function buildApp() {
       `SELECT id, section_key, label, is_locked, lock_reason, updated_by_admin_id, updated_at
        FROM section_locks ORDER BY id ASC`,
     );
-    res.json({
-      section_locks: rows.map((r) => ({
+    const mapped = applyAffiliatesFeatureFlagToLocks(
+      rows.map((r) => ({
         ...r,
         is_locked: Boolean(r.is_locked),
       })),
+    );
+    res.json({
+      section_locks: mapped,
+      affiliates_enabled: affiliatesFeatureEnabled(),
     });
   });
 
@@ -8388,6 +14510,16 @@ function buildApp() {
       const { key } = req.params;
       const { is_locked, lock_reason } = req.body || {};
       const adminId = (req as any).adminId as number;
+      if (
+        !affiliatesFeatureEnabled() &&
+        (key === "affiliates" || key === "affiliate-portal") &&
+        (is_locked === false || is_locked === 0)
+      ) {
+        return res.status(403).json({
+          error:
+            "Affiliates is disabled by AFFILIATES_ENABLED. Set AFFILIATES_ENABLED=1 to unlock.",
+        });
+      }
       if (
         typeof is_locked !== "boolean" &&
         is_locked !== 0 &&
@@ -8415,7 +14547,7 @@ function buildApp() {
     },
   );
 
-  app.get("/api/admin/admins", requireAdmin, async (req, res) => {
+  app.get("/api/admin/admins", requireSuperAdmin, async (req, res) => {
     const search = ((req.query.search as string) || "").trim();
     const role = (req.query.role as string) || "";
     const conditions: string[] = [];
@@ -8441,7 +14573,7 @@ function buildApp() {
 
   app.post(
     "/api/admin/admins",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     async (req: AuthedRequest, res) => {
       const [me] = await pool.query<RowDataPacket[]>(
         `SELECT role FROM admins WHERE id = ? LIMIT 1`,
@@ -8452,44 +14584,109 @@ function buildApp() {
       const { email, first_name, last_name, phone, role } = req.body || {};
       if (!email || !first_name || !last_name)
         return res.status(400).json({ error: "Missing fields" });
-      const [r] = await pool.query<ResultSetHeader>(
-        `INSERT INTO admins (email, first_name, last_name, phone, role) VALUES (?,?,?,?,?)`,
-        [
-          String(email).toLowerCase(),
-          first_name,
-          last_name,
-          phone || null,
-          role || "admin",
-        ],
-      );
-      // Send welcome email (non-blocking)
-      const [inviter] = await pool.query<RowDataPacket[]>(
-        `SELECT first_name, last_name FROM admins WHERE id = ? LIMIT 1`,
+      if (role === "affiliate") {
+        return res.status(400).json({
+          error:
+            "Use POST /api/admin/affiliates to invite affiliates — it also creates their affiliate profile.",
+        });
+      }
+      const emailNorm = String(email).trim().toLowerCase();
+      try {
+        const [r] = await pool.query<ResultSetHeader>(
+          `INSERT INTO admins (email, first_name, last_name, phone, role) VALUES (?,?,?,?,?)`,
+          [
+            emailNorm,
+            String(first_name).trim(),
+            String(last_name).trim(),
+            phone || null,
+            role || "admin",
+          ],
+        );
+        // Send welcome email (non-blocking)
+        const [inviter] = await pool.query<RowDataPacket[]>(
+          `SELECT first_name, last_name FROM admins WHERE id = ? LIMIT 1`,
+          [req.auth!.id],
+        );
+        const inviterName = inviter[0]
+          ? `${inviter[0].first_name} ${inviter[0].last_name}`
+          : "The Optimum Credit team";
+        const welcomeTpl = tplAdminWelcome({
+          firstName: String(first_name).trim(),
+          lastName: String(last_name).trim(),
+          email: emailNorm,
+          role: role || "admin",
+          loginUrl: `${APP_URL}/admin/login`,
+          invitedByName: inviterName,
+        });
+        sendEmail({
+          to: emailNorm,
+          subject: welcomeTpl.subject,
+          html: welcomeTpl.html,
+        }).catch((err) => console.error("[admin-welcome-email]:", err));
+        res.json({ id: r.insertId });
+      } catch (e: any) {
+        if (isDuplicateKeyError(e)) {
+          return res.status(409).json({
+            error: `An admin with email ${emailNorm} already exists`,
+          });
+        }
+        if (sendFriendlyError(res, e)) return;
+        throw e;
+      }
+    },
+  );
+
+  // Resend team welcome email (super_admin only)
+  app.post(
+    "/api/admin/admins/:id/resend-welcome",
+    requireAdmin, denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const [me] = await pool.query<RowDataPacket[]>(
+        `SELECT role, first_name, last_name FROM admins WHERE id = ? LIMIT 1`,
         [req.auth!.id],
       );
-      const inviterName = inviter[0]
-        ? `${inviter[0].first_name} ${inviter[0].last_name}`
-        : "The Optimum Credit team";
+      if (me[0]?.role !== "super_admin")
+        return res.status(403).json({ error: "Forbidden" });
+      const targetId = Number(req.params.id);
+      if (!targetId || isNaN(targetId))
+        return res.status(400).json({ error: "Invalid id" });
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, email, first_name, last_name, role, status FROM admins WHERE id = ? LIMIT 1`,
+        [targetId],
+      );
+      if (!rows[0]) return res.status(404).json({ error: "Admin not found" });
+      const target = rows[0];
+      if (target.status && target.status !== "active")
+        return res
+          .status(422)
+          .json({ error: "Cannot email an inactive admin" });
+
+      const inviterName = `${me[0].first_name} ${me[0].last_name}`;
       const welcomeTpl = tplAdminWelcome({
-        firstName: first_name,
-        lastName: last_name,
-        email: String(email).toLowerCase(),
-        role: role || "admin",
+        firstName: String(target.first_name),
+        lastName: String(target.last_name),
+        email: String(target.email),
+        role: String(target.role || "admin"),
         loginUrl: `${APP_URL}/admin/login`,
         invitedByName: inviterName,
       });
-      sendEmail({
-        to: String(email).toLowerCase(),
-        subject: welcomeTpl.subject,
-        html: welcomeTpl.html,
-      }).catch((err) => console.error("[admin-welcome-email]:", err));
-      res.json({ id: r.insertId });
+      try {
+        await sendEmail({
+          to: String(target.email),
+          subject: welcomeTpl.subject,
+          html: welcomeTpl.html,
+        });
+      } catch (err: any) {
+        console.error("[admin-welcome-resend]:", err?.message || err);
+        return res.status(502).json({ error: "Failed to send welcome email" });
+      }
+      res.json({ ok: true, emailed: target.email });
     },
   );
 
   app.put(
     "/api/admin/admins/:id",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     async (req: AuthedRequest, res) => {
       const [me] = await pool.query<RowDataPacket[]>(
         `SELECT role FROM admins WHERE id = ? LIMIT 1`,
@@ -8499,6 +14696,16 @@ function buildApp() {
         return res.status(403).json({ error: "Forbidden" });
       const targetId = Number(req.params.id);
       const { first_name, last_name, phone, role, status } = req.body || {};
+      const [targetRows] = await pool.query<RowDataPacket[]>(
+        `SELECT role FROM admins WHERE id = ? LIMIT 1`,
+        [targetId],
+      );
+      if (role === "affiliate" || targetRows[0]?.role === "affiliate") {
+        return res.status(400).json({
+          error:
+            "Manage affiliate admins via PATCH /api/admin/affiliates/:id — it keeps the affiliate profile in sync.",
+        });
+      }
       await pool.query(
         `UPDATE admins SET first_name=COALESCE(?,first_name), last_name=COALESCE(?,last_name), phone=COALESCE(?,phone), role=COALESCE(?,role), status=COALESCE(?,status) WHERE id=?`,
         [
@@ -8510,13 +14717,18 @@ function buildApp() {
           targetId,
         ],
       );
+      if (status === "inactive" || status === "suspended") {
+        await revokeAllSessions("admin", targetId).catch((e) =>
+          console.error("[admin/admins:revoke-sessions]", e?.message ?? e),
+        );
+      }
       res.json({ ok: true });
     },
   );
 
   app.delete(
     "/api/admin/admins/:id",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     async (req: AuthedRequest, res) => {
       const [me] = await pool.query<RowDataPacket[]>(
         `SELECT role FROM admins WHERE id = ? LIMIT 1`,
@@ -8527,8 +14739,868 @@ function buildApp() {
       const targetId = Number(req.params.id);
       if (targetId === req.auth!.id)
         return res.status(400).json({ error: "Cannot delete yourself" });
+      const [targetRows] = await pool.query<RowDataPacket[]>(
+        `SELECT role FROM admins WHERE id = ? LIMIT 1`,
+        [targetId],
+      );
+      if (targetRows[0]?.role === "affiliate") {
+        return res.status(400).json({
+          error:
+            "Set the affiliate's status to inactive via PATCH /api/admin/affiliates/:id instead of deleting — deleting would orphan their referral/commission history.",
+        });
+      }
       await pool.query(`DELETE FROM admins WHERE id = ?`, [targetId]);
       res.json({ ok: true });
+    },
+  );
+
+  // ============================================================
+  // AFFILIATES v1 — admin management
+  // ============================================================
+
+  function requireAffiliatesEnabled(
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ) {
+    if (!affiliatesFeatureEnabled()) {
+      return res.status(503).json({
+        error: "Affiliates temporarily unavailable",
+        code: "AFFILIATES_DISABLED",
+        reason: AFFILIATES_FF_LOCK_REASON,
+      });
+    }
+    next();
+  }
+
+  /** super_admin + admin only — affiliates themselves never manage other affiliates. */
+  async function requireAffiliateManager(
+    req: AuthedRequest,
+    res: Response,
+    next: NextFunction,
+  ) {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT role FROM admins WHERE id = ? LIMIT 1`,
+      [req.auth!.id],
+    );
+    const role = rows[0]?.role;
+    if (role !== "super_admin" && role !== "admin") {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    next();
+  }
+
+  app.get(
+    "/api/admin/affiliates",
+    requireAdmin,
+    requireAffiliatesEnabled,
+    requireAffiliateManager,
+    async (req, res) => {
+      const search = ((req.query.search as string) || "").trim();
+      const plan = (req.query.plan as string) || "";
+      const status = (req.query.status as string) || "";
+      const where: string[] = [];
+      const args: any[] = [];
+      if (search) {
+        where.push(
+          "(a.email LIKE ? OR a.first_name LIKE ? OR a.last_name LIKE ? OR a.slug LIKE ?)",
+        );
+        const like = `%${search}%`;
+        args.push(like, like, like, like);
+      }
+      if (plan) {
+        where.push("a.plan = ?");
+        args.push(plan);
+      }
+      if (status) {
+        where.push("a.status = ?");
+        args.push(status);
+      }
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT a.*,
+                (SELECT COUNT(*) FROM clients c WHERE c.affiliate_id = a.id) AS clients_count,
+                (SELECT COUNT(*) FROM affiliates sub WHERE sub.parent_affiliate_id = a.id) AS sub_affiliates_count,
+                (SELECT COALESCE(SUM(ac.amount_cents), 0) FROM affiliate_commissions ac
+                 WHERE ac.affiliate_id = a.id AND ac.status IN ('approved','paid')) AS commissions_total_cents,
+                (SELECT COALESCE(SUM(ac.amount_cents), 0) FROM affiliate_commissions ac
+                 WHERE ac.affiliate_id = a.id AND ac.status = 'pending') AS commissions_pending_cents
+         FROM affiliates a
+         ${where.length ? "WHERE " + where.join(" AND ") : ""}
+         ORDER BY a.created_at DESC`,
+        args,
+      );
+      res.json({ affiliates: rows.map(serializeAffiliateRow) });
+    },
+  );
+
+  app.get(
+    "/api/admin/affiliates/meta/suggestions",
+    requireAdmin,
+    requireAffiliatesEnabled,
+    requireAffiliateManager,
+    async (_req, res) => {
+      const plans: AffiliatePlan[] = ["standard", "master", "sub_affiliate"];
+      res.json({
+        suggestions: plans.reduce(
+          (acc, plan) => {
+            acc[plan] = suggestedTierDefaults(plan);
+            return acc;
+          },
+          {} as Record<AffiliatePlan, ReturnType<typeof suggestedTierDefaults>>,
+        ),
+        features: AFFILIATE_FEATURES_ALL_ON,
+      });
+    },
+  );
+
+  app.post(
+    "/api/admin/affiliates",
+    requireAdmin,
+    requireAffiliatesEnabled,
+    requireAffiliateManager,
+    async (req: AuthedRequest, res) => {
+      const b = req.body || {};
+      const firstName = String(b.first_name || "").trim();
+      const lastName = String(b.last_name || "").trim();
+      const email = String(b.email || "").trim().toLowerCase();
+      if (!firstName || !lastName || !email) {
+        return res
+          .status(400)
+          .json({ error: "first_name, last_name and email are required" });
+      }
+      const plan: AffiliatePlan = ["standard", "master", "sub_affiliate"].includes(
+        b.plan,
+      )
+        ? b.plan
+        : "standard";
+
+      let parentAffiliateId: number | null = null;
+      if (plan === "sub_affiliate") {
+        parentAffiliateId = Number(b.parent_affiliate_id) || null;
+        if (!parentAffiliateId) {
+          return res.status(400).json({
+            error: "parent_affiliate_id is required for sub_affiliate plan",
+          });
+        }
+        const [parentRows] = await pool.query<RowDataPacket[]>(
+          `SELECT id, plan FROM affiliates WHERE id = ? LIMIT 1`,
+          [parentAffiliateId],
+        );
+        if (parentRows.length === 0 || parentRows[0].plan !== "master") {
+          return res
+            .status(400)
+            .json({ error: "parent_affiliate_id must reference a master affiliate" });
+        }
+      }
+
+      const defaults = suggestedTierDefaults(plan);
+      const monthlyPriceCents =
+        b.monthly_price_cents != null
+          ? Math.max(0, Number(b.monthly_price_cents))
+          : defaults.monthly_price_cents;
+      const commissionRateBps =
+        b.commission_rate_bps != null
+          ? Math.max(0, Number(b.commission_rate_bps))
+          : defaults.commission_rate_bps;
+      const parentOverrideRateBps =
+        b.parent_override_rate_bps != null
+          ? Math.max(0, Number(b.parent_override_rate_bps))
+          : defaults.parent_override_rate_bps;
+
+      const requestedSlug = b.slug
+        ? normalizeAffiliateSlug(String(b.slug))
+        : slugifyAffiliateName(firstName, lastName);
+      if (b.slug && !isValidAffiliateSlug(requestedSlug)) {
+        return res.status(400).json({ error: "Invalid slug" });
+      }
+      const slug = await generateUniqueAffiliateSlug(requestedSlug);
+      const referralCode = slug.slice(0, 32);
+      const compSubscription = b.comp_subscription === true;
+      const defaultLanding: AffiliateLanding =
+        b.default_landing === "pricing" ? "pricing" : "credit_analysis";
+
+      const conn = await pool.getConnection();
+      try {
+        await conn.beginTransaction();
+        const [adminIns] = await conn.query<ResultSetHeader>(
+          `INSERT INTO admins (email, first_name, last_name, phone, role)
+           VALUES (?, ?, ?, ?, 'affiliate')`,
+          [email, firstName, lastName, b.phone || null],
+        );
+        const adminId = adminIns.insertId;
+
+        const [affIns] = await conn.query<ResultSetHeader>(
+          `INSERT INTO affiliates
+             (admin_id, email, first_name, last_name, phone, plan, monthly_price_cents,
+              commission_rate_bps, parent_override_rate_bps, parent_affiliate_id,
+              status, subscription_status, referral_code, slug, default_landing, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            adminId,
+            email,
+            firstName,
+            lastName,
+            b.phone || null,
+            plan,
+            monthlyPriceCents,
+            commissionRateBps,
+            parentOverrideRateBps,
+            parentAffiliateId,
+            compSubscription ? "active" : "invited",
+            compSubscription ? "comped" : "none",
+            referralCode,
+            slug,
+            defaultLanding,
+            b.notes || null,
+          ],
+        );
+        await conn.commit();
+
+        const [inviter] = await pool.query<RowDataPacket[]>(
+          `SELECT first_name, last_name FROM admins WHERE id = ? LIMIT 1`,
+          [req.auth!.id],
+        );
+        const inviterName = inviter[0]
+          ? `${inviter[0].first_name} ${inviter[0].last_name}`
+          : "The Optimum Credit team";
+        const welcomeTpl = tplAdminWelcome({
+          firstName,
+          lastName,
+          email,
+          role: "affiliate",
+          loginUrl: `${APP_URL}/admin/login`,
+          invitedByName: inviterName,
+        });
+        sendEmail({
+          to: email,
+          subject: welcomeTpl.subject,
+          html: welcomeTpl.html,
+        }).catch((err) => console.error("[affiliate-welcome-email]:", err));
+
+        res.json({
+          id: affIns.insertId,
+          admin_id: adminId,
+          slug,
+          referral_code: referralCode,
+        });
+      } catch (err: any) {
+        await conn.rollback();
+        if (sendFriendlyError(res, err, { duplicateLabel: "email" })) return;
+        throw err;
+      } finally {
+        conn.release();
+      }
+    },
+  );
+
+  app.get(
+    "/api/admin/affiliates/:id",
+    requireAdmin,
+    requireAffiliatesEnabled,
+    requireAffiliateManager,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id)) return res.status(400).json({ error: "Invalid id" });
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT a.*, ad.status AS admin_status, ad.last_login_at
+         FROM affiliates a LEFT JOIN admins ad ON ad.id = a.admin_id
+         WHERE a.id = ? LIMIT 1`,
+        [id],
+      );
+      if (rows.length === 0)
+        return res.status(404).json({ error: "Affiliate not found" });
+      const [children] = await pool.query<RowDataPacket[]>(
+        `SELECT id, first_name, last_name, email, slug, status, subscription_status
+         FROM affiliates WHERE parent_affiliate_id = ? ORDER BY created_at DESC`,
+        [id],
+      );
+      const [clients] = await pool.query<RowDataPacket[]>(
+        `SELECT id, first_name, last_name, email, status, pipeline_stage, created_at
+         FROM clients WHERE affiliate_id = ? ORDER BY created_at DESC LIMIT 50`,
+        [id],
+      );
+      res.json({
+        affiliate: serializeAffiliateRow(rows[0]),
+        links: buildAffiliatePublicLinks(rows[0].slug as string, APP_URL),
+        sub_affiliates: children,
+        clients,
+      });
+    },
+  );
+
+  app.patch(
+    "/api/admin/affiliates/:id",
+    requireAdmin,
+    requireAffiliatesEnabled,
+    requireAffiliateManager,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id)) return res.status(400).json({ error: "Invalid id" });
+      const [existingRows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, admin_id FROM affiliates WHERE id = ? LIMIT 1`,
+        [id],
+      );
+      if (existingRows.length === 0)
+        return res.status(404).json({ error: "Affiliate not found" });
+      const b = req.body || {};
+
+      let slug: string | undefined;
+      if (b.slug !== undefined) {
+        const normalized = normalizeAffiliateSlug(String(b.slug));
+        if (!isValidAffiliateSlug(normalized)) {
+          return res.status(400).json({ error: "Invalid slug" });
+        }
+        slug = normalized;
+      }
+      if (b.parent_affiliate_id !== undefined && b.parent_affiliate_id !== null) {
+        const parentId = Number(b.parent_affiliate_id);
+        if (parentId === id) {
+          return res
+            .status(400)
+            .json({ error: "An affiliate cannot be its own parent" });
+        }
+        const [parentRows] = await pool.query<RowDataPacket[]>(
+          `SELECT id, plan FROM affiliates WHERE id = ? LIMIT 1`,
+          [parentId],
+        );
+        if (parentRows.length === 0 || parentRows[0].plan !== "master") {
+          return res
+            .status(400)
+            .json({ error: "parent_affiliate_id must reference a master affiliate" });
+        }
+      }
+
+      try {
+        await pool.query<ResultSetHeader>(
+          `UPDATE affiliates SET
+             slug = COALESCE(?, slug),
+             referral_code = COALESCE(?, referral_code),
+             plan = COALESCE(?, plan),
+             monthly_price_cents = COALESCE(?, monthly_price_cents),
+             commission_rate_bps = COALESCE(?, commission_rate_bps),
+             parent_override_rate_bps = COALESCE(?, parent_override_rate_bps),
+             parent_affiliate_id = ?,
+             default_landing = COALESCE(?, default_landing),
+             status = COALESCE(?, status),
+             first_name = COALESCE(?, first_name),
+             last_name = COALESCE(?, last_name),
+             phone = COALESCE(?, phone),
+             bio = COALESCE(?, bio),
+             notes = COALESCE(?, notes)
+           WHERE id = ?`,
+          [
+            slug ?? null,
+            slug ? slug.slice(0, 32) : null,
+            b.plan ?? null,
+            b.monthly_price_cents != null ? Number(b.monthly_price_cents) : null,
+            b.commission_rate_bps != null ? Number(b.commission_rate_bps) : null,
+            b.parent_override_rate_bps != null
+              ? Number(b.parent_override_rate_bps)
+              : null,
+            b.parent_affiliate_id !== undefined
+              ? b.parent_affiliate_id
+                ? Number(b.parent_affiliate_id)
+                : null
+              : existingRows[0].parent_affiliate_id,
+            b.default_landing ?? null,
+            b.status ?? null,
+            b.first_name ?? null,
+            b.last_name ?? null,
+            b.phone ?? null,
+            b.bio ?? null,
+            b.notes ?? null,
+            id,
+          ],
+        );
+
+        // Keep the linked admin row's name/phone in sync for display purposes.
+        if (existingRows[0].admin_id && (b.first_name || b.last_name || b.phone)) {
+          await pool.query<ResultSetHeader>(
+            `UPDATE admins SET
+               first_name = COALESCE(?, first_name),
+               last_name = COALESCE(?, last_name),
+               phone = COALESCE(?, phone)
+             WHERE id = ?`,
+            [b.first_name ?? null, b.last_name ?? null, b.phone ?? null, existingRows[0].admin_id],
+          );
+        }
+
+        const [updated] = await pool.query<RowDataPacket[]>(
+          `SELECT * FROM affiliates WHERE id = ? LIMIT 1`,
+          [id],
+        );
+        res.json({ affiliate: serializeAffiliateRow(updated[0]) });
+      } catch (err: any) {
+        if (sendFriendlyError(res, err, { duplicateLabel: "slug" })) return;
+        throw err;
+      }
+    },
+  );
+
+  app.post(
+    "/api/admin/affiliates/:id/comp",
+    requireAdmin,
+    requireAffiliatesEnabled,
+    requireAffiliateManager,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id)) return res.status(400).json({ error: "Invalid id" });
+      const [result] = await pool.query<ResultSetHeader>(
+        `UPDATE affiliates SET subscription_status = 'comped', status = 'active' WHERE id = ?`,
+        [id],
+      );
+      if (result.affectedRows === 0)
+        return res.status(404).json({ error: "Affiliate not found" });
+      res.json({ ok: true });
+    },
+  );
+
+  app.post(
+    "/api/admin/affiliates/:id/subscribe",
+    requireAdmin,
+    requireAffiliatesEnabled,
+    requireAffiliateManager,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id)) return res.status(400).json({ error: "Invalid id" });
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM affiliates WHERE id = ? LIMIT 1`,
+        [id],
+      );
+      if (rows.length === 0)
+        return res.status(404).json({ error: "Affiliate not found" });
+      const aff = rows[0];
+      if (hasActiveOrPendingSubscription(aff)) {
+        return res.status(409).json({
+          error:
+            "Affiliate already has an active or pending subscription. Cancel it first.",
+        });
+      }
+      const { dataDescriptor, dataValue } = req.body || {};
+      if (!dataDescriptor || !dataValue) {
+        return res.status(400).json({ error: "Card details are required" });
+      }
+      try {
+        const sub = await createARBSubscription({
+          amountDollars: (Number(aff.monthly_price_cents) / 100).toFixed(2),
+          dataDescriptor: String(dataDescriptor),
+          dataValue: String(dataValue),
+          clientId: id,
+          email: aff.email as string,
+          firstName: aff.first_name as string,
+          lastName: aff.last_name as string,
+          subscriptionName: `Affiliate ${aff.plan} — ${aff.first_name} ${aff.last_name}`,
+        });
+        await pool.query<ResultSetHeader>(
+          `UPDATE affiliates SET anet_subscription_id = ?, subscription_status = 'active',
+             status = 'active', subscription_started_at = NOW() WHERE id = ?`,
+          [sub.subscriptionId, id],
+        );
+        res.json({ ok: true, subscription_id: sub.subscriptionId });
+      } catch (e: any) {
+        res.status(402).json({ error: e.message || "Subscription failed" });
+      }
+    },
+  );
+
+  app.get(
+    "/api/admin/affiliates/:id/commissions",
+    requireAdmin,
+    requireAffiliatesEnabled,
+    requireAffiliateManager,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id)) return res.status(400).json({ error: "Invalid id" });
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT ac.*, c.first_name AS client_first_name, c.last_name AS client_last_name,
+                sa.first_name AS source_first_name, sa.last_name AS source_last_name
+         FROM affiliate_commissions ac
+         LEFT JOIN clients c ON c.id = ac.client_id
+         LEFT JOIN affiliates sa ON sa.id = ac.source_affiliate_id
+         WHERE ac.affiliate_id = ?
+         ORDER BY ac.created_at DESC`,
+        [id],
+      );
+      res.json({ commissions: rows.map(serializeCommissionRow) });
+    },
+  );
+
+  app.post(
+    "/api/admin/affiliates/:id/commissions",
+    requireAdmin,
+    requireAffiliatesEnabled,
+    requireAffiliateManager,
+    async (req: AuthedRequest, res) => {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id)) return res.status(400).json({ error: "Invalid id" });
+      const b = req.body || {};
+      const amountCents = Number(b.amount_cents);
+      if (!amountCents || amountCents === 0) {
+        return res.status(400).json({ error: "amount_cents is required" });
+      }
+      const [affRows] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM affiliates WHERE id = ? LIMIT 1`,
+        [id],
+      );
+      if (affRows.length === 0)
+        return res.status(404).json({ error: "Affiliate not found" });
+      const [ins] = await pool.query<ResultSetHeader>(
+        `INSERT INTO affiliate_commissions
+           (affiliate_id, client_id, kind, amount_cents, notes, created_by_admin_id, status)
+         VALUES (?, ?, 'manual', ?, ?, ?, 'pending')`,
+        [
+          id,
+          b.client_id ? Number(b.client_id) : null,
+          amountCents,
+          b.notes || null,
+          req.auth!.id,
+        ],
+      );
+      res.json({ id: ins.insertId });
+    },
+  );
+
+  app.patch(
+    "/api/admin/affiliates/commissions/:id",
+    requireAdmin,
+    requireAffiliatesEnabled,
+    requireAffiliateManager,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id)) return res.status(400).json({ error: "Invalid id" });
+      const status = req.body?.status;
+      if (!["approved", "paid", "void"].includes(status)) {
+        return res.status(400).json({ error: "Invalid status" });
+      }
+      const [result] = await pool.query<ResultSetHeader>(
+        `UPDATE affiliate_commissions
+         SET status = ?, paid_at = IF(? = 'paid', NOW(), paid_at)
+         WHERE id = ?`,
+        [status, status, id],
+      );
+      if (result.affectedRows === 0)
+        return res.status(404).json({ error: "Commission not found" });
+      res.json({ ok: true });
+    },
+  );
+
+  // ============================================================
+  // AFFILIATES v1 — self-service portal (role='affiliate')
+  // ============================================================
+
+  interface AffiliateSelfRequest extends AuthedRequest {
+    affiliateRow?: RowDataPacket;
+  }
+
+  /** Attaches the caller's own affiliate row (req.affiliateRow); 403 if not an affiliate. */
+  async function requireAffiliateActor(
+    req: AffiliateSelfRequest,
+    res: Response,
+    next: NextFunction,
+  ) {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT a.*, ad.role AS admin_role FROM affiliates a
+       JOIN admins ad ON ad.id = a.admin_id
+       WHERE a.admin_id = ? LIMIT 1`,
+      [req.auth!.id],
+    );
+    if (rows.length === 0 || rows[0].admin_role !== "affiliate") {
+      return res.status(403).json({ error: "Affiliate access required" });
+    }
+    req.affiliateRow = rows[0];
+    next();
+  }
+
+  function requireAffiliatePortalAccess(
+    req: AffiliateSelfRequest,
+    res: Response,
+    next: NextFunction,
+  ) {
+    const aff = req.affiliateRow!;
+    const hasAccess = affiliateHasPortalAccess({
+      status: aff.status as string,
+      subscription_status: aff.subscription_status as string,
+    });
+    if (!hasAccess) {
+      return res.status(403).json({
+        error: "Portal access required — please complete your subscription",
+      });
+    }
+    next();
+  }
+
+  app.get(
+    "/api/admin/affiliate/me",
+    requireAdmin,
+    requireAffiliatesEnabled,
+    requireAffiliateActor,
+    async (req: AffiliateSelfRequest, res) => {
+      const aff = req.affiliateRow!;
+      const [clicksAgg] = await pool.query<RowDataPacket[]>(
+        `SELECT COUNT(*) AS clicks_total FROM affiliate_link_clicks WHERE affiliate_id = ?`,
+        [aff.id],
+      );
+      const [clientsAgg] = await pool.query<RowDataPacket[]>(
+        `SELECT COUNT(*) AS referred_clients FROM clients WHERE affiliate_id = ?`,
+        [aff.id],
+      );
+      const [commissionsAgg] = await pool.query<RowDataPacket[]>(
+        `SELECT
+           COALESCE(SUM(CASE WHEN status = 'pending' THEN amount_cents ELSE 0 END), 0) AS pending_cents,
+           COALESCE(SUM(CASE WHEN status IN ('approved','paid') THEN amount_cents ELSE 0 END), 0) AS earned_cents
+         FROM affiliate_commissions WHERE affiliate_id = ?`,
+        [aff.id],
+      );
+      res.json({
+        affiliate: serializeAffiliateRow(aff),
+        links: buildAffiliatePublicLinks(aff.slug as string, APP_URL),
+        stats: {
+          clicks_total: Number(clicksAgg[0]?.clicks_total || 0),
+          referred_clients: Number(clientsAgg[0]?.referred_clients || 0),
+          commissions_pending_cents: Number(commissionsAgg[0]?.pending_cents || 0),
+          commissions_earned_cents: Number(commissionsAgg[0]?.earned_cents || 0),
+        },
+      });
+    },
+  );
+
+  app.patch(
+    "/api/admin/affiliate/me",
+    requireAdmin,
+    requireAffiliatesEnabled,
+    requireAffiliateActor,
+    async (req: AffiliateSelfRequest, res) => {
+      const aff = req.affiliateRow!;
+      const b = req.body || {};
+      // Limited self-edit surface — rates/plan/status are admin-managed only.
+      const defaultLanding =
+        b.default_landing === "pricing" || b.default_landing === "credit_analysis"
+          ? b.default_landing
+          : null;
+      await pool.query<ResultSetHeader>(
+        `UPDATE affiliates SET
+           default_landing = COALESCE(?, default_landing),
+           bio = COALESCE(?, bio),
+           phone = COALESCE(?, phone),
+           social_facebook = COALESCE(?, social_facebook),
+           social_instagram = COALESCE(?, social_instagram),
+           social_tiktok = COALESCE(?, social_tiktok),
+           social_linkedin = COALESCE(?, social_linkedin)
+         WHERE id = ?`,
+        [
+          defaultLanding,
+          b.bio ?? null,
+          b.phone ?? null,
+          b.social_facebook ?? null,
+          b.social_instagram ?? null,
+          b.social_tiktok ?? null,
+          b.social_linkedin ?? null,
+          aff.id,
+        ],
+      );
+      if (b.phone) {
+        await pool.query<ResultSetHeader>(
+          `UPDATE admins SET phone = ? WHERE id = ?`,
+          [b.phone, aff.admin_id],
+        );
+      }
+      const [updated] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM affiliates WHERE id = ? LIMIT 1`,
+        [aff.id],
+      );
+      res.json({ affiliate: serializeAffiliateRow(updated[0]) });
+    },
+  );
+
+  app.post(
+    "/api/admin/affiliate/me/subscribe",
+    requireAdmin,
+    requireAffiliatesEnabled,
+    requireAffiliateActor,
+    async (req: AffiliateSelfRequest, res) => {
+      const aff = req.affiliateRow!;
+      if (hasActiveOrPendingSubscription(aff)) {
+        return res.status(409).json({
+          error:
+            "You already have an active or pending subscription. Cancel it first.",
+        });
+      }
+      const { dataDescriptor, dataValue } = req.body || {};
+      if (!dataDescriptor || !dataValue) {
+        return res.status(400).json({ error: "Card details are required" });
+      }
+      try {
+        const sub = await createARBSubscription({
+          amountDollars: (Number(aff.monthly_price_cents) / 100).toFixed(2),
+          dataDescriptor: String(dataDescriptor),
+          dataValue: String(dataValue),
+          clientId: aff.id as number,
+          email: aff.email as string,
+          firstName: aff.first_name as string,
+          lastName: aff.last_name as string,
+          subscriptionName: `Affiliate ${aff.plan} — ${aff.first_name} ${aff.last_name}`,
+        });
+        await pool.query<ResultSetHeader>(
+          `UPDATE affiliates SET anet_subscription_id = ?, subscription_status = 'active',
+             status = 'active', subscription_started_at = NOW() WHERE id = ?`,
+          [sub.subscriptionId, aff.id],
+        );
+        res.json({ ok: true, subscription_id: sub.subscriptionId });
+      } catch (e: any) {
+        res.status(402).json({ error: e.message || "Subscription failed" });
+      }
+    },
+  );
+
+  app.post(
+    "/api/admin/affiliate/leads",
+    requireAdmin,
+    requireAffiliatesEnabled,
+    requireAffiliateActor,
+    requireAffiliatePortalAccess,
+    async (req: AffiliateSelfRequest, res) => {
+      const aff = req.affiliateRow!;
+      const b = req.body || {};
+      const firstName = String(b.first_name || "").trim();
+      const lastName = String(b.last_name || "").trim();
+      const email = String(b.email || "").trim().toLowerCase();
+      const phone = b.phone ? String(b.phone).trim() : null;
+      if (!firstName || !lastName || !email) {
+        return res
+          .status(400)
+          .json({ error: "first_name, last_name and email are required" });
+      }
+      try {
+        const [existing] = await pool.query<RowDataPacket[]>(
+          `SELECT id, status FROM clients WHERE email = ? LIMIT 1`,
+          [email],
+        );
+        let clientId: number;
+        if (existing.length > 0) {
+          clientId = existing[0].id as number;
+          await pool.query<ResultSetHeader>(
+            `UPDATE clients SET affiliate_id = COALESCE(affiliate_id, ?) WHERE id = ?`,
+            [aff.id, clientId],
+          );
+        } else {
+          const [ins] = await pool.query<ResultSetHeader>(
+            `INSERT INTO clients (email, first_name, last_name, phone, status, pipeline_stage, affiliate_id)
+             VALUES (?, ?, ?, ?, 'prospect', 'prospect', ?)`,
+            [email, firstName, lastName, phone, aff.id],
+          );
+          clientId = ins.insertId;
+        }
+        await attachLabelsBySlug(clientId, ["affiliate_referral"]);
+        res.json({ ok: true, client_id: clientId });
+      } catch (err: any) {
+        if (sendFriendlyError(res, err, { duplicateLabel: "email" })) return;
+        throw err;
+      }
+    },
+  );
+
+  app.get(
+    "/api/admin/affiliate/commissions",
+    requireAdmin,
+    requireAffiliatesEnabled,
+    requireAffiliateActor,
+    requireAffiliatePortalAccess,
+    async (req: AffiliateSelfRequest, res) => {
+      const aff = req.affiliateRow!;
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT ac.*, c.first_name AS client_first_name, c.last_name AS client_last_name,
+                sa.first_name AS source_first_name, sa.last_name AS source_last_name
+         FROM affiliate_commissions ac
+         LEFT JOIN clients c ON c.id = ac.client_id
+         LEFT JOIN affiliates sa ON sa.id = ac.source_affiliate_id
+         WHERE ac.affiliate_id = ?
+         ORDER BY ac.created_at DESC`,
+        [aff.id],
+      );
+      res.json({ commissions: rows.map(serializeCommissionRow) });
+    },
+  );
+
+  app.post(
+    "/api/admin/affiliate/subs",
+    requireAdmin,
+    requireAffiliatesEnabled,
+    requireAffiliateActor,
+    requireAffiliatePortalAccess,
+    async (req: AffiliateSelfRequest, res) => {
+      const aff = req.affiliateRow!;
+      if (aff.plan !== "master") {
+        return res
+          .status(403)
+          .json({ error: "Only master affiliates can invite sub-affiliates" });
+      }
+      const b = req.body || {};
+      const firstName = String(b.first_name || "").trim();
+      const lastName = String(b.last_name || "").trim();
+      const email = String(b.email || "").trim().toLowerCase();
+      if (!firstName || !lastName || !email) {
+        return res
+          .status(400)
+          .json({ error: "first_name, last_name and email are required" });
+      }
+      const defaults = suggestedTierDefaults("sub_affiliate");
+      const slug = await generateUniqueAffiliateSlug(
+        slugifyAffiliateName(firstName, lastName),
+      );
+      const referralCode = slug.slice(0, 32);
+
+      const conn = await pool.getConnection();
+      try {
+        await conn.beginTransaction();
+        const [adminIns] = await conn.query<ResultSetHeader>(
+          `INSERT INTO admins (email, first_name, last_name, phone, role)
+           VALUES (?, ?, ?, ?, 'affiliate')`,
+          [email, firstName, lastName, b.phone || null],
+        );
+        const subAdminId = adminIns.insertId;
+        const [affIns] = await conn.query<ResultSetHeader>(
+          `INSERT INTO affiliates
+             (admin_id, email, first_name, last_name, phone, plan, monthly_price_cents,
+              commission_rate_bps, parent_override_rate_bps, parent_affiliate_id,
+              status, subscription_status, referral_code, slug, default_landing)
+           VALUES (?, ?, ?, ?, ?, 'sub_affiliate', ?, ?, 0, ?, 'invited', 'none', ?, ?, 'credit_analysis')`,
+          [
+            subAdminId,
+            email,
+            firstName,
+            lastName,
+            b.phone || null,
+            defaults.monthly_price_cents,
+            defaults.commission_rate_bps,
+            aff.id,
+            referralCode,
+            slug,
+          ],
+        );
+        await conn.commit();
+
+        const welcomeTpl = tplAdminWelcome({
+          firstName,
+          lastName,
+          email,
+          role: "affiliate",
+          loginUrl: `${APP_URL}/admin/login`,
+          invitedByName: `${aff.first_name} ${aff.last_name}`,
+        });
+        sendEmail({
+          to: email,
+          subject: welcomeTpl.subject,
+          html: welcomeTpl.html,
+        }).catch((err) => console.error("[affiliate-sub-welcome-email]:", err));
+
+        res.json({ id: affIns.insertId, admin_id: subAdminId, slug });
+      } catch (err: any) {
+        await conn.rollback();
+        if (sendFriendlyError(res, err, { duplicateLabel: "email" })) return;
+        throw err;
+      } finally {
+        conn.release();
+      }
     },
   );
 
@@ -8536,6 +15608,15 @@ function buildApp() {
   // WEBHOOKS — Twilio inbound SMS / voice
   // ============================================================
   app.post("/api/webhooks/twilio/sms", async (req, res) => {
+    if (!process.env.TWILIO_AUTH_TOKEN && IS_PROD) {
+      res.set("Content-Type", "text/xml");
+      return res.status(503).send("<Response/>");
+    }
+    if (!isValidTwilioWebhookRequest(req)) {
+      console.warn("[twilio:sms] Invalid or missing signature");
+      res.set("Content-Type", "text/xml");
+      return res.status(403).send("<Response/>");
+    }
     const from = String(req.body?.From || "");
     const to = String(req.body?.To || "");
     const body = String(req.body?.Body || "");
@@ -8585,7 +15666,16 @@ function buildApp() {
     res.send("<Response/>");
   });
 
-  app.post("/api/webhooks/twilio/voice", async (_req, res) => {
+  app.post("/api/webhooks/twilio/voice", async (req, res) => {
+    if (!process.env.TWILIO_AUTH_TOKEN && IS_PROD) {
+      res.set("Content-Type", "text/xml");
+      return res.status(503).send("<Response/>");
+    }
+    if (!isValidTwilioWebhookRequest(req)) {
+      console.warn("[twilio:voice] Invalid or missing signature");
+      res.set("Content-Type", "text/xml");
+      return res.status(403).send("<Response/>");
+    }
     res.set("Content-Type", "text/xml");
     res.send(
       `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="alice">Thank you for calling Optimum Credit Repair. Please leave a message after the tone.</Say><Record maxLength="120"/></Response>`,
@@ -8597,9 +15687,10 @@ function buildApp() {
   // ============================================================
 
   // ── List all flows ────────────────────────────────────────────────────────
-  app.get("/api/admin/reminder-flows", requireAdmin, async (_req, res) => {
+  app.get("/api/admin/reminder-flows", requireAdmin, denyAffiliateAccess, async (_req, res) => {
     const [rows] = await pool.query<RowDataPacket[]>(
-      `SELECT rf.id, rf.name, rf.description, rf.trigger_event, rf.is_active, rf.created_at, rf.updated_at,
+      `SELECT rf.id, rf.name, rf.description, rf.trigger_event, rf.is_active,
+              rf.required_label_slugs_json, rf.created_at, rf.updated_at,
               COUNT(rfs.id) AS step_count
        FROM reminder_flows rf
        LEFT JOIN reminder_flow_steps rfs ON rfs.flow_id = rf.id
@@ -8609,18 +15700,32 @@ function buildApp() {
          'round_1_complete','round_2_complete','round_3_complete',
          'round_4_complete','round_5_complete','completed')`,
     );
-    res.json({ flows: rows });
+    const flows = rows.map((r) => ({
+      ...r,
+      required_label_slugs: parseWizardJsonField<string[]>(
+        r.required_label_slugs_json,
+      ),
+    }));
+    res.json({ flows });
   });
 
   // ── Get single flow with steps + recent executions ────────────────────────
-  app.get("/api/admin/reminder-flows/:id", requireAdmin, async (req, res) => {
+  app.get("/api/admin/reminder-flows/:id", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const id = Number(req.params.id);
     const [flowRows] = await pool.query<RowDataPacket[]>(
-      `SELECT id, name, description, trigger_event, is_active, created_at, updated_at FROM reminder_flows WHERE id = ? LIMIT 1`,
+      `SELECT id, name, description, trigger_event, is_active,
+              required_label_slugs_json, created_at, updated_at
+       FROM reminder_flows WHERE id = ? LIMIT 1`,
       [id],
     );
     if (flowRows.length === 0)
       return res.status(404).json({ error: "Not found" });
+    const flowMeta = {
+      ...flowRows[0],
+      required_label_slugs: parseWizardJsonField<string[]>(
+        flowRows[0].required_label_slugs_json,
+      ),
+    };
 
     const [steps] = await pool.query<RowDataPacket[]>(
       `SELECT id, flow_id, step_order, step_type, delay_days, label, subject, body, template_slug, created_at, updated_at
@@ -8647,12 +15752,13 @@ function buildApp() {
       [id],
     );
 
-    res.json({ flow: { ...flowRows[0], steps }, executions });
+    res.json({ flow: { ...flowMeta, steps }, executions });
   });
 
   // ── Create flow ───────────────────────────────────────────────────────────
-  app.post("/api/admin/reminder-flows", requireAdmin, async (req, res) => {
-    const { name, description, trigger_event } = req.body || {};
+  app.post("/api/admin/reminder-flows", requireAdmin, denyAffiliateAccess, async (req, res) => {
+    const { name, description, trigger_event, required_label_slugs } =
+      req.body || {};
     if (!name || !trigger_event)
       return res.status(400).json({ error: "name and trigger_event required" });
     const allowed = [
@@ -8667,21 +15773,35 @@ function buildApp() {
     ];
     if (!allowed.includes(trigger_event))
       return res.status(400).json({ error: "Invalid trigger_event" });
+    const slugsJson =
+      Array.isArray(required_label_slugs) && required_label_slugs.length > 0
+        ? JSON.stringify(required_label_slugs.filter((s) => typeof s === "string"))
+        : null;
     const [r] = await pool.query<ResultSetHeader>(
-      `INSERT INTO reminder_flows (name, description, trigger_event) VALUES (?, ?, ?)`,
-      [name, description || null, trigger_event],
+      `INSERT INTO reminder_flows (name, description, trigger_event, required_label_slugs_json) VALUES (?, ?, ?, ?)`,
+      [name, description || null, trigger_event, slugsJson],
     );
     const [rows] = await pool.query<RowDataPacket[]>(
-      `SELECT id, name, description, trigger_event, is_active, created_at, updated_at FROM reminder_flows WHERE id = ? LIMIT 1`,
+      `SELECT id, name, description, trigger_event, is_active,
+              required_label_slugs_json, created_at, updated_at
+       FROM reminder_flows WHERE id = ? LIMIT 1`,
       [r.insertId],
     );
-    res.status(201).json({ flow: rows[0] });
+    res.status(201).json({
+      flow: {
+        ...rows[0],
+        required_label_slugs: parseWizardJsonField<string[]>(
+          rows[0].required_label_slugs_json,
+        ),
+      },
+    });
   });
 
   // ── Update flow ───────────────────────────────────────────────────────────
-  app.put("/api/admin/reminder-flows/:id", requireAdmin, async (req, res) => {
+  app.put("/api/admin/reminder-flows/:id", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const id = Number(req.params.id);
-    const { name, description, is_active } = req.body || {};
+    const { name, description, is_active, required_label_slugs } =
+      req.body || {};
     const updates: string[] = [];
     const args: any[] = [];
     if (name != null) {
@@ -8696,6 +15816,16 @@ function buildApp() {
       updates.push("is_active = ?");
       args.push(is_active ? 1 : 0);
     }
+    if (required_label_slugs !== undefined) {
+      updates.push("required_label_slugs_json = ?");
+      args.push(
+        Array.isArray(required_label_slugs) && required_label_slugs.length > 0
+          ? JSON.stringify(
+              required_label_slugs.filter((s) => typeof s === "string"),
+            )
+          : null,
+      );
+    }
     if (updates.length === 0)
       return res.status(400).json({ error: "Nothing to update" });
     args.push(id);
@@ -8704,16 +15834,25 @@ function buildApp() {
       args,
     );
     const [rows] = await pool.query<RowDataPacket[]>(
-      `SELECT id, name, description, trigger_event, is_active, created_at, updated_at FROM reminder_flows WHERE id = ? LIMIT 1`,
+      `SELECT id, name, description, trigger_event, is_active,
+              required_label_slugs_json, created_at, updated_at
+       FROM reminder_flows WHERE id = ? LIMIT 1`,
       [id],
     );
-    res.json({ flow: rows[0] });
+    res.json({
+      flow: {
+        ...rows[0],
+        required_label_slugs: parseWizardJsonField<string[]>(
+          rows[0].required_label_slugs_json,
+        ),
+      },
+    });
   });
 
   // ── Toggle active ─────────────────────────────────────────────────────────
   app.post(
     "/api/admin/reminder-flows/:id/toggle",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     async (req, res) => {
       const id = Number(req.params.id);
       await pool.query<ResultSetHeader>(
@@ -8731,7 +15870,7 @@ function buildApp() {
   // ── Delete flow ───────────────────────────────────────────────────────────
   app.delete(
     "/api/admin/reminder-flows/:id",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     async (req, res) => {
       const id = Number(req.params.id);
       await pool.query<ResultSetHeader>(
@@ -8745,7 +15884,7 @@ function buildApp() {
   // ── Add step ──────────────────────────────────────────────────────────────
   app.post(
     "/api/admin/reminder-flows/:id/steps",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     async (req, res) => {
       const flowId = Number(req.params.id);
       const { step_type, delay_days, label, subject, body, template_slug } =
@@ -8781,7 +15920,7 @@ function buildApp() {
   // ── Update step ───────────────────────────────────────────────────────────
   app.put(
     "/api/admin/reminder-flows/:id/steps/:stepId",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     async (req, res) => {
       const flowId = Number(req.params.id);
       const stepId = Number(req.params.stepId);
@@ -8842,7 +15981,7 @@ function buildApp() {
   // ── Delete step ───────────────────────────────────────────────────────────
   app.delete(
     "/api/admin/reminder-flows/:id/steps/:stepId",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     async (req, res) => {
       const flowId = Number(req.params.id);
       const stepId = Number(req.params.stepId);
@@ -8857,10 +15996,10 @@ function buildApp() {
   // ── Manual trigger (fire flow for a specific client) ─────────────────────
   app.post(
     "/api/admin/reminder-flows/:id/trigger",
-    requireAdmin,
-    async (req, res) => {
+    requireAdmin, denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
       const flowId = Number(req.params.id);
-      const { client_id } = req.body || {};
+      const { client_id, deliver_to_admin } = req.body || {};
       if (!client_id)
         return res.status(400).json({ error: "client_id required" });
 
@@ -8871,18 +16010,37 @@ function buildApp() {
       if (flowRows.length === 0)
         return res.status(404).json({ error: "Flow not found" });
 
+      const sandbox =
+        deliver_to_admin === true ||
+        deliver_to_admin === 1 ||
+        deliver_to_admin === "true";
+      const adminEmail = (req.auth?.email || "").trim();
+      if (sandbox && !adminEmail) {
+        return res
+          .status(400)
+          .json({ error: "Admin email unavailable for sandbox delivery" });
+      }
+
       await triggerReminderFlow(
         flowRows[0].trigger_event as string,
         Number(client_id),
+        undefined,
+        sandbox
+          ? { deliverToEmail: adminEmail, skipIdempotency: true }
+          : undefined,
       );
-      res.json({ ok: true });
+      res.json({
+        ok: true,
+        delivered_to: sandbox ? adminEmail : undefined,
+        sandbox: sandbox || undefined,
+      });
     },
   );
 
   // ── List available email templates (for step editor) ─────────────────────
   app.get(
     "/api/admin/reminder-flows/meta/templates",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     async (_req, res) => {
       const [rows] = await pool.query<RowDataPacket[]>(
         `SELECT slug, name, subject FROM communication_templates WHERE channel = 'email' AND slug LIKE 'flow_%' ORDER BY name ASC`,
@@ -8894,7 +16052,7 @@ function buildApp() {
   // ── List executions across all flows ─────────────────────────────────────
   app.get(
     "/api/admin/reminder-flows/meta/executions",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     async (_req, res) => {
       const [rows] = await pool.query<RowDataPacket[]>(
         `SELECT rfe.id, rfe.flow_id, rfe.client_id, rfe.triggered_at, rfe.status,
@@ -8931,7 +16089,7 @@ function buildApp() {
         .json({ error: "CRON_SECRET not configured on server" });
     }
     const provided = req.headers["x-cron-secret"] as string | undefined;
-    if (!provided || provided !== secret) {
+    if (!timingSafeStringEqual(String(provided || ""), secret)) {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
@@ -8978,12 +16136,23 @@ function buildApp() {
           );
           sent++;
         } else {
-          // in_app / sms — mark sent (SMS not yet wired)
+          // in_app / sms / push — this queue processor doesn't actually
+          // deliver these yet (real SMS reminders go out via the dedicated
+          // sendSms() call sites, not this generic queue). Previously this
+          // branch marked them 'sent' unconditionally, which inflated the
+          // "sent" count for messages nobody ever received. Fail them
+          // instead so the count reflects reality and they surface for
+          // manual follow-up rather than being silently dropped.
           await pool.query<ResultSetHeader>(
-            `UPDATE notification_queue SET status='sent', sent_at=NOW(), attempts=attempts+1 WHERE id=?`,
-            [qid],
+            `UPDATE notification_queue SET status='failed', attempts=attempts+1, error_message=? WHERE id=?`,
+            [
+              row.channel === "sms"
+                ? "SMS not configured"
+                : `${String(row.channel)} delivery not implemented`,
+              qid,
+            ],
           );
-          sent++;
+          failed++;
         }
       } catch (e: any) {
         const newAttempts = (row.attempts as number) + 1;
@@ -8996,7 +16165,53 @@ function buildApp() {
       }
     }
 
-    res.json({ ok: true, processed: rows.length, sent, failed });
+    // Work Hub overdue reminders (assignees with due_at in the past, not done)
+    let workDueNotified = 0;
+    try {
+      const [dueRows] = await pool.query<RowDataPacket[]>(
+        `SELECT t.id, t.title, t.due_at, a.email, a.first_name
+         FROM admin_work_tasks t
+         JOIN admins a ON a.id = t.assignee_admin_id
+         WHERE t.status <> 'done'
+           AND t.assignee_admin_id IS NOT NULL
+           AND t.due_at IS NOT NULL
+           AND t.due_at < NOW()
+           AND t.due_notified_at IS NULL
+           AND a.status = 'active'
+         ORDER BY t.due_at ASC
+         LIMIT 40`,
+      );
+      for (const row of dueRows) {
+        try {
+          await sendEmail({
+            to: row.email as string,
+            subject: `Overdue task: ${row.title}`,
+            html: `<p>Hi ${row.first_name || "there"},</p>
+              <p>This work task is overdue: <strong>${row.title}</strong>.</p>
+              <p>Due: ${new Date(row.due_at).toLocaleString()}</p>
+              <p><a href="${APP_URL}/admin/my-tasks">Open My Tasks</a></p>`,
+          });
+          await pool.query(
+            `UPDATE admin_work_tasks SET due_notified_at = NOW() WHERE id = ?`,
+            [row.id],
+          );
+          workDueNotified++;
+        } catch (e: any) {
+          console.error("[cron:work-due]", e?.message ?? e);
+        }
+      }
+    } catch (e: any) {
+      // Column may not exist until migration applied — don't fail the queue cron
+      console.error("[cron:work-due-batch]", e?.message ?? e);
+    }
+
+    res.json({
+      ok: true,
+      processed: rows.length,
+      sent,
+      failed,
+      work_due_notified: workDueNotified,
+    });
   });
 
   // ============================================================================
@@ -9004,7 +16219,7 @@ function buildApp() {
   // ============================================================================
 
   // GET /api/admin/task-templates — list task templates with optional search/filter
-  app.get("/api/admin/task-templates", requireAdmin, async (req, res) => {
+  app.get("/api/admin/task-templates", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const { search, type, active } = req.query as Record<string, string>;
 
     const conditions: string[] = [];
@@ -9042,7 +16257,7 @@ function buildApp() {
   });
 
   // POST /api/admin/task-templates — create a new task template
-  app.post("/api/admin/task-templates", requireAdmin, async (req, res) => {
+  app.post("/api/admin/task-templates", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const {
       slug,
       task_type,
@@ -9070,39 +16285,44 @@ function buildApp() {
       return res.status(400).json({ error: "Invalid task_type" });
     }
 
-    const [result] = await pool.query<ResultSetHeader>(
-      `INSERT INTO onboarding_task_templates
+    try {
+      const [result] = await pool.query<ResultSetHeader>(
+        `INSERT INTO onboarding_task_templates
         (slug, task_type, title_en, title_es, description_en, description_es,
          content_html_en, content_html_es, form_fields_json, upload_config_json,
          is_required, sort_order, is_active, auto_assign)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [
-        slug.toLowerCase().replace(/\s+/g, "_"),
-        task_type,
-        title_en,
-        title_es,
-        description_en || null,
-        description_es || null,
-        content_html_en || null,
-        content_html_es || null,
-        form_fields_json ? JSON.stringify(form_fields_json) : null,
-        upload_config_json ? JSON.stringify(upload_config_json) : null,
-        is_required !== false ? 1 : 0,
-        sort_order ?? 0,
-        is_active !== false ? 1 : 0,
-        auto_assign !== false ? 1 : 0,
-      ],
-    );
+        [
+          slug.toLowerCase().replace(/\s+/g, "_"),
+          task_type,
+          title_en,
+          title_es,
+          description_en || null,
+          description_es || null,
+          content_html_en || null,
+          content_html_es || null,
+          form_fields_json ? JSON.stringify(form_fields_json) : null,
+          upload_config_json ? JSON.stringify(upload_config_json) : null,
+          is_required !== false ? 1 : 0,
+          sort_order ?? 0,
+          is_active !== false ? 1 : 0,
+          auto_assign !== false ? 1 : 0,
+        ],
+      );
 
-    const [rows] = await pool.query<RowDataPacket[]>(
-      `SELECT * FROM onboarding_task_templates WHERE id = ?`,
-      [result.insertId],
-    );
-    res.status(201).json({ task: rows[0] });
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM onboarding_task_templates WHERE id = ?`,
+        [result.insertId],
+      );
+      res.status(201).json({ task: rows[0] });
+    } catch (err: unknown) {
+      if (sendFriendlyError(res, err, { duplicateLabel: "slug" })) return;
+      throw err;
+    }
   });
 
   // PUT /api/admin/task-templates/:id — update a task template
-  app.put("/api/admin/task-templates/:id", requireAdmin, async (req, res) => {
+  app.put("/api/admin/task-templates/:id", requireAdmin, denyAffiliateAccess, async (req, res) => {
     const id = Number(req.params.id);
     if (!id) return res.status(400).json({ error: "Invalid id" });
 
@@ -9179,7 +16399,7 @@ function buildApp() {
   // DELETE /api/admin/task-templates/:id — delete (blocked for system tasks or those with completions)
   app.delete(
     "/api/admin/task-templates/:id",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     async (req, res) => {
       const id = Number(req.params.id);
       if (!id) return res.status(400).json({ error: "Invalid id" });
@@ -9234,10 +16454,762 @@ function buildApp() {
     },
   );
 
+  // ==========================================================================
+  // ADMIN WORK HUB — My Tasks Kanban + HubSpot extract (staff only)
+  // ==========================================================================
+
+  function mapWorkTaskRow(r: RowDataPacket) {
+    let labels: string[] = [];
+    try {
+      const raw = r.labels_json;
+      if (Array.isArray(raw)) labels = raw.map(String);
+      else if (typeof raw === "string" && raw) labels = JSON.parse(raw);
+    } catch {
+      labels = [];
+    }
+    const assigneeName =
+      r.assignee_first_name || r.assignee_last_name
+        ? `${r.assignee_first_name || ""} ${r.assignee_last_name || ""}`.trim()
+        : null;
+    return {
+      id: Number(r.id),
+      title: r.title as string,
+      description: (r.description as string) || null,
+      status: r.status as string,
+      priority: r.priority as string,
+      due_at: r.due_at ? new Date(r.due_at).toISOString() : null,
+      labels,
+      source: r.source as string,
+      hubspot_task_id: (r.hubspot_task_id as string) || null,
+      hubspot_owner_id: (r.hubspot_owner_id as string) || null,
+      assignee_admin_id: r.assignee_admin_id
+        ? Number(r.assignee_admin_id)
+        : null,
+      assignee_name: assigneeName,
+      created_by_admin_id: r.created_by_admin_id
+        ? Number(r.created_by_admin_id)
+        : null,
+      sort_order: Number(r.sort_order || 0),
+      last_synced_at: r.last_synced_at
+        ? new Date(r.last_synced_at).toISOString()
+        : null,
+      sync_error: (r.sync_error as string) || null,
+      pending_push: Boolean(r.pending_push),
+      due_notified_at: r.due_notified_at
+        ? new Date(r.due_notified_at).toISOString()
+        : null,
+      created_at: new Date(r.created_at).toISOString(),
+      updated_at: new Date(r.updated_at).toISOString(),
+    };
+  }
+
+  async function adminCanExtractHubspot(adminId: number): Promise<boolean> {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT role FROM admins WHERE id = ? LIMIT 1`,
+      [adminId],
+    );
+    if (!rows[0]) return false;
+    if (rows[0].role === "super_admin") return true;
+    const [perm] = await pool.query<RowDataPacket[]>(
+      `SELECT can_extract FROM admin_hubspot_permissions WHERE admin_id = ? LIMIT 1`,
+      [adminId],
+    );
+    return Boolean(perm[0]?.can_extract);
+  }
+
+  async function loadHubspotTokens(
+    adminId: number,
+  ): Promise<HubspotTokenBundle | null> {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT token_ciphertext, token_iv, token_tag, revoked_at
+       FROM admin_hubspot_connections WHERE admin_id = ? LIMIT 1`,
+      [adminId],
+    );
+    if (!rows[0] || rows[0].revoked_at) return null;
+    try {
+      const bundle = decryptJsonSecrets(
+        rows[0].token_ciphertext as Buffer,
+        rows[0].token_iv as string,
+        rows[0].token_tag as string,
+      ) as unknown as HubspotTokenBundle;
+      if (!bundle?.access_token || !bundle?.refresh_token) return null;
+      if (bundle.expires_at && Date.now() < bundle.expires_at) return bundle;
+      const refreshed = await refreshHubspotToken(bundle.refresh_token);
+      const enc = encryptJsonSecrets(refreshed as unknown as Record<string, unknown>);
+      await pool.query<ResultSetHeader>(
+        `UPDATE admin_hubspot_connections
+         SET token_ciphertext = ?, token_iv = ?, token_tag = ?, updated_at = NOW()
+         WHERE admin_id = ?`,
+        [enc.ciphertext, enc.iv, enc.tag, adminId],
+      );
+      return refreshed;
+    } catch (e: any) {
+      console.error("[hubspot:load-tokens]", e?.message ?? e);
+      return null;
+    }
+  }
+
+  async function notifyWorkTaskAssignee(opts: {
+    assigneeId: number;
+    title: string;
+    assignerId: number;
+    taskId: number;
+  }) {
+    if (opts.assigneeId === opts.assignerId) return;
+    try {
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT email, first_name FROM admins WHERE id = ? AND status = 'active' LIMIT 1`,
+        [opts.assigneeId],
+      );
+      if (!rows[0]?.email) return;
+      const link = `${APP_URL}/admin/my-tasks`;
+      await sendEmail({
+        to: rows[0].email as string,
+        subject: `Task assigned: ${opts.title}`,
+        html: `<p>Hi ${rows[0].first_name || "there"},</p>
+          <p>You were assigned a work task: <strong>${opts.title}</strong>.</p>
+          <p><a href="${link}">Open My Tasks</a></p>`,
+      });
+    } catch (e: any) {
+      console.error("[work-tasks:notify]", e?.message ?? e);
+    }
+  }
+
+  // List board tasks (Jira-style: unassigned backlog + assigned)
+  app.get(
+    "/api/admin/work-tasks",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (_req, res) => {
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT t.*,
+                a.first_name AS assignee_first_name,
+                a.last_name AS assignee_last_name
+         FROM admin_work_tasks t
+         LEFT JOIN admins a ON a.id = t.assignee_admin_id
+         ORDER BY FIELD(t.status,'backlog','doing','done'), t.sort_order ASC, t.due_at IS NULL, t.due_at ASC, t.id DESC`,
+      );
+      res.json({ tasks: rows.map(mapWorkTaskRow) });
+    },
+  );
+
+  app.get(
+    "/api/admin/work-tasks/assignees",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (_req, res) => {
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, first_name, last_name, email, role
+         FROM admins
+         WHERE status = 'active'
+           AND role IN ('super_admin','admin','agent')
+         ORDER BY first_name ASC, last_name ASC`,
+      );
+      res.json({ assignees: rows });
+    },
+  );
+
+  app.get(
+    "/api/admin/work-tasks/badge",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const adminId = req.auth!.id;
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT
+           SUM(CASE WHEN assignee_admin_id = ? AND status <> 'done' THEN 1 ELSE 0 END) AS mine_open,
+           SUM(CASE WHEN assignee_admin_id = ? AND status <> 'done'
+                     AND due_at IS NOT NULL AND due_at < NOW() THEN 1 ELSE 0 END) AS mine_overdue
+         FROM admin_work_tasks`,
+        [adminId, adminId],
+      );
+      res.json({
+        mine_open: Number(rows[0]?.mine_open || 0),
+        mine_overdue: Number(rows[0]?.mine_overdue || 0),
+      });
+    },
+  );
+
+  app.post(
+    "/api/admin/work-tasks",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const {
+        title,
+        description,
+        status,
+        priority,
+        due_at,
+        labels,
+        assignee_admin_id,
+      } = req.body || {};
+      if (!title || !String(title).trim()) {
+        return res.status(400).json({ error: "title is required" });
+      }
+      const allowedStatus = ["backlog", "doing", "done"];
+      const allowedPriority = ["low", "medium", "high", "urgent"];
+      const st = allowedStatus.includes(status) ? status : "backlog";
+      const pr = allowedPriority.includes(priority) ? priority : "medium";
+      const assigneeId =
+        assignee_admin_id != null && assignee_admin_id !== ""
+          ? Number(assignee_admin_id)
+          : null;
+      const labelsJson = JSON.stringify(
+        Array.isArray(labels) ? labels.map(String).slice(0, 20) : [],
+      );
+
+      const [ins] = await pool.query<ResultSetHeader>(
+        `INSERT INTO admin_work_tasks
+           (title, description, status, priority, due_at, labels_json, source,
+            assignee_admin_id, created_by_admin_id)
+         VALUES (?, ?, ?, ?, ?, ?, 'optimum', ?, ?)`,
+        [
+          String(title).trim().slice(0, 255),
+          description ? String(description) : null,
+          st,
+          pr,
+          due_at || null,
+          labelsJson,
+          assigneeId && !isNaN(assigneeId) ? assigneeId : null,
+          req.auth!.id,
+        ],
+      );
+      const taskId = ins.insertId;
+      if (assigneeId && !isNaN(assigneeId)) {
+        void notifyWorkTaskAssignee({
+          assigneeId,
+          title: String(title).trim(),
+          assignerId: req.auth!.id,
+          taskId,
+        });
+      }
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT t.*, a.first_name AS assignee_first_name, a.last_name AS assignee_last_name
+         FROM admin_work_tasks t
+         LEFT JOIN admins a ON a.id = t.assignee_admin_id
+         WHERE t.id = ? LIMIT 1`,
+        [taskId],
+      );
+      res.status(201).json({ task: mapWorkTaskRow(rows[0]) });
+    },
+  );
+
+  app.put(
+    "/api/admin/work-tasks/:id",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const id = Number(req.params.id);
+      if (!id) return res.status(400).json({ error: "Invalid id" });
+      const [existing] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM admin_work_tasks WHERE id = ? LIMIT 1`,
+        [id],
+      );
+      if (!existing[0]) return res.status(404).json({ error: "Task not found" });
+      const cur = existing[0];
+      const b = req.body || {};
+      const updates: string[] = [];
+      const args: any[] = [];
+      if (b.title != null) {
+        updates.push("title = ?");
+        args.push(String(b.title).trim().slice(0, 255));
+      }
+      if (b.description !== undefined) {
+        updates.push("description = ?");
+        args.push(b.description ? String(b.description) : null);
+      }
+      if (["backlog", "doing", "done"].includes(b.status)) {
+        updates.push("status = ?");
+        args.push(b.status);
+      }
+      if (["low", "medium", "high", "urgent"].includes(b.priority)) {
+        updates.push("priority = ?");
+        args.push(b.priority);
+      }
+      if (b.due_at !== undefined) {
+        updates.push("due_at = ?");
+        args.push(b.due_at || null);
+      }
+      if (b.labels !== undefined) {
+        updates.push("labels_json = ?");
+        args.push(
+          JSON.stringify(
+            Array.isArray(b.labels) ? b.labels.map(String).slice(0, 20) : [],
+          ),
+        );
+      }
+      if (b.assignee_admin_id !== undefined) {
+        updates.push("assignee_admin_id = ?");
+        args.push(
+          b.assignee_admin_id != null && b.assignee_admin_id !== ""
+            ? Number(b.assignee_admin_id)
+            : null,
+        );
+      }
+      if (b.sort_order != null) {
+        updates.push("sort_order = ?");
+        args.push(Number(b.sort_order) || 0);
+      }
+
+      // HubSpot-linked edits need a push
+      if (cur.hubspot_task_id && updates.length > 0) {
+        updates.push("pending_push = 1");
+      }
+      // Reset due reminder when due date moves into the future / changes
+      if (b.due_at !== undefined) {
+        updates.push("due_notified_at = NULL");
+      }
+      if (updates.length === 0) {
+        return res.status(400).json({ error: "No valid fields to update" });
+      }
+      args.push(id);
+      await pool.query(
+        `UPDATE admin_work_tasks SET ${updates.join(", ")} WHERE id = ?`,
+        args,
+      );
+
+      // Immediate push for HubSpot-linked cards
+      if (cur.hubspot_task_id && (await adminCanExtractHubspot(req.auth!.id))) {
+        const tokens = await loadHubspotTokens(req.auth!.id);
+        if (tokens) {
+          try {
+            const [fresh] = await pool.query<RowDataPacket[]>(
+              `SELECT * FROM admin_work_tasks WHERE id = ? LIMIT 1`,
+              [id],
+            );
+            const f = fresh[0];
+            await updateHubspotTask(tokens.access_token, String(cur.hubspot_task_id), {
+              title: f.title as string,
+              description: (f.description as string) || null,
+              status: f.status as any,
+              priority: f.priority as any,
+              due_at: f.due_at ? new Date(f.due_at).toISOString() : null,
+            });
+            await pool.query(
+              `UPDATE admin_work_tasks
+               SET pending_push = 0, last_synced_at = NOW(), sync_error = NULL
+               WHERE id = ?`,
+              [id],
+            );
+          } catch (e: any) {
+            await pool.query(
+              `UPDATE admin_work_tasks SET sync_error = ? WHERE id = ?`,
+              [String(e?.message || "HubSpot push failed").slice(0, 500), id],
+            );
+          }
+        }
+      }
+
+      const prevAssignee = cur.assignee_admin_id
+        ? Number(cur.assignee_admin_id)
+        : null;
+      const nextAssignee =
+        b.assignee_admin_id !== undefined
+          ? b.assignee_admin_id != null && b.assignee_admin_id !== ""
+            ? Number(b.assignee_admin_id)
+            : null
+          : prevAssignee;
+      if (nextAssignee && nextAssignee !== prevAssignee) {
+        void notifyWorkTaskAssignee({
+          assigneeId: nextAssignee,
+          title: String(b.title ?? cur.title),
+          assignerId: req.auth!.id,
+          taskId: id,
+        });
+      }
+
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT t.*, a.first_name AS assignee_first_name, a.last_name AS assignee_last_name
+         FROM admin_work_tasks t
+         LEFT JOIN admins a ON a.id = t.assignee_admin_id
+         WHERE t.id = ? LIMIT 1`,
+        [id],
+      );
+      res.json({ task: mapWorkTaskRow(rows[0]) });
+    },
+  );
+
+  app.delete(
+    "/api/admin/work-tasks/:id",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!id) return res.status(400).json({ error: "Invalid id" });
+      const [existing] = await pool.query<RowDataPacket[]>(
+        `SELECT id, source FROM admin_work_tasks WHERE id = ? LIMIT 1`,
+        [id],
+      );
+      if (!existing[0]) return res.status(404).json({ error: "Task not found" });
+      // Soft-remove from Optimum only (does not delete in HubSpot)
+      await pool.query(`DELETE FROM admin_work_tasks WHERE id = ?`, [id]);
+      res.json({ ok: true });
+    },
+  );
+
+  // HubSpot connection status for current admin
+  app.get(
+    "/api/admin/hubspot/status",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const adminId = req.auth!.id;
+      const canExtract = await adminCanExtractHubspot(adminId);
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT hub_domain, connected_at, revoked_at
+         FROM admin_hubspot_connections WHERE admin_id = ? LIMIT 1`,
+        [adminId],
+      );
+      const connected = Boolean(rows[0] && !rows[0].revoked_at);
+      res.json({
+        connected,
+        can_extract: canExtract,
+        hub_domain: connected ? rows[0].hub_domain || null : null,
+        connected_at:
+          connected && rows[0].connected_at
+            ? new Date(rows[0].connected_at).toISOString()
+            : null,
+        oauth_configured: isHubspotOAuthConfigured(),
+      });
+    },
+  );
+
+  app.get(
+    "/api/admin/hubspot/oauth/start",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const adminId = req.auth!.id;
+      if (!(await adminCanExtractHubspot(adminId))) {
+        return res.status(403).json({
+          error: "HubSpot extract is not enabled for your account. Ask a super admin.",
+        });
+      }
+      if (!isHubspotOAuthConfigured()) {
+        return res.status(503).json({
+          error: "HubSpot OAuth is not configured (HUBSPOT_CLIENT_ID/SECRET).",
+        });
+      }
+      const redirectUri = `${APP_URL}/api/admin/hubspot/oauth/callback`;
+      const state = Buffer.from(
+        JSON.stringify({
+          adminId,
+          nonce: crypto.randomBytes(16).toString("hex"),
+          ts: Date.now(),
+        }),
+      ).toString("base64url");
+      // Short-lived state in sessions-like table: store on admin connection row pending
+      await pool.query(
+        `INSERT INTO admin_hubspot_connections
+           (admin_id, hub_id, token_ciphertext, token_iv, token_tag, scopes, revoked_at)
+         VALUES (?, NULL, ?, ?, ?, ?, NOW())
+         ON DUPLICATE KEY UPDATE
+           token_iv = VALUES(token_iv),
+           token_tag = VALUES(token_tag),
+           scopes = VALUES(scopes),
+           updated_at = NOW()`,
+        [
+          adminId,
+          Buffer.from("pending"),
+          state.slice(0, 64),
+          "oauth-state",
+          "oauth_pending",
+        ],
+      );
+      const url = buildHubspotAuthorizeUrl({ redirectUri, state });
+      if (!url) return res.status(503).json({ error: "OAuth not configured" });
+      res.json({ authorize_url: url });
+    },
+  );
+
+  app.get("/api/admin/hubspot/oauth/callback", async (req, res) => {
+    try {
+      const code = String(req.query.code || "");
+      const stateRaw = String(req.query.state || "");
+      if (!code || !stateRaw) {
+        return res.redirect(
+          `${APP_URL}/admin/my-tasks?hubspot=error&reason=missing_code`,
+        );
+      }
+      let state: { adminId: number; nonce: string; ts: number };
+      try {
+        state = JSON.parse(Buffer.from(stateRaw, "base64url").toString("utf8"));
+      } catch {
+        return res.redirect(
+          `${APP_URL}/admin/my-tasks?hubspot=error&reason=bad_state`,
+        );
+      }
+      if (!state.adminId || Date.now() - state.ts > 15 * 60 * 1000) {
+        return res.redirect(
+          `${APP_URL}/admin/my-tasks?hubspot=error&reason=state_expired`,
+        );
+      }
+      // Verify pending state matches
+      const [pending] = await pool.query<RowDataPacket[]>(
+        `SELECT token_iv FROM admin_hubspot_connections WHERE admin_id = ? LIMIT 1`,
+        [state.adminId],
+      );
+      if (!pending[0] || String(pending[0].token_iv) !== stateRaw.slice(0, 64)) {
+        return res.redirect(
+          `${APP_URL}/admin/my-tasks?hubspot=error&reason=state_mismatch`,
+        );
+      }
+      if (!(await adminCanExtractHubspot(state.adminId))) {
+        return res.redirect(
+          `${APP_URL}/admin/my-tasks?hubspot=error&reason=forbidden`,
+        );
+      }
+      const redirectUri = `${APP_URL}/api/admin/hubspot/oauth/callback`;
+      const tokens = await exchangeHubspotCode({ code, redirectUri });
+      const account = await fetchHubspotAccountInfo(tokens.access_token);
+      const enc = encryptJsonSecrets(tokens as unknown as Record<string, unknown>);
+      await pool.query<ResultSetHeader>(
+        `INSERT INTO admin_hubspot_connections
+           (admin_id, hub_id, hub_domain, token_ciphertext, token_iv, token_tag, scopes, revoked_at, connected_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NOW())
+         ON DUPLICATE KEY UPDATE
+           hub_id = VALUES(hub_id),
+           hub_domain = VALUES(hub_domain),
+           token_ciphertext = VALUES(token_ciphertext),
+           token_iv = VALUES(token_iv),
+           token_tag = VALUES(token_tag),
+           scopes = VALUES(scopes),
+           revoked_at = NULL,
+           connected_at = NOW(),
+           updated_at = NOW()`,
+        [
+          state.adminId,
+          account.hub_id || null,
+          account.hub_domain || null,
+          enc.ciphertext,
+          enc.iv,
+          enc.tag,
+          "crm.objects.tasks.read crm.objects.tasks.write oauth",
+        ],
+      );
+      res.redirect(`${APP_URL}/admin/my-tasks?hubspot=connected`);
+    } catch (e: any) {
+      console.error("[hubspot:oauth-callback]", e?.message ?? e);
+      res.redirect(
+        `${APP_URL}/admin/my-tasks?hubspot=error&reason=${encodeURIComponent(e?.message || "oauth_failed")}`,
+      );
+    }
+  });
+
+  app.post(
+    "/api/admin/hubspot/disconnect",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      await pool.query(
+        `UPDATE admin_hubspot_connections SET revoked_at = NOW() WHERE admin_id = ?`,
+        [req.auth!.id],
+      );
+      res.json({ ok: true });
+    },
+  );
+
+  // Soft sync: pull HubSpot → upsert; push pending Optimum→HubSpot
+  app.post(
+    "/api/admin/hubspot/sync",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const adminId = req.auth!.id;
+      if (!(await adminCanExtractHubspot(adminId))) {
+        return res.status(403).json({ error: "HubSpot extract not permitted" });
+      }
+      const tokens = await loadHubspotTokens(adminId);
+      if (!tokens) {
+        return res.status(400).json({ error: "Connect HubSpot first" });
+      }
+
+      const result = {
+        pulled: 0,
+        updated: 0,
+        created: 0,
+        pushed: 0,
+        errors: [] as string[],
+      };
+
+      try {
+        const remote = await listHubspotTasks(tokens.access_token, 100);
+        result.pulled = remote.length;
+
+        const [locals] = await pool.query<RowDataPacket[]>(
+          `SELECT id, title, due_at, hubspot_task_id, status, pending_push
+           FROM admin_work_tasks WHERE source = 'hubspot' OR hubspot_task_id IS NOT NULL`,
+        );
+        const byHsId = new Map<string, RowDataPacket>();
+        const byMatch = new Map<string, RowDataPacket>();
+        for (const row of locals) {
+          if (row.hubspot_task_id) byHsId.set(String(row.hubspot_task_id), row);
+          byMatch.set(
+            workTaskMatchKey(
+              String(row.title),
+              row.due_at ? new Date(row.due_at).toISOString() : null,
+            ),
+            row,
+          );
+        }
+
+        for (const rt of remote) {
+          const existing =
+            byHsId.get(rt.id) ||
+            byMatch.get(workTaskMatchKey(rt.title, rt.due_at));
+          if (existing) {
+            // Don't clobber local edits waiting to push
+            if (existing.pending_push) continue;
+            await pool.query(
+              `UPDATE admin_work_tasks
+               SET title = ?, description = ?, status = ?, priority = ?, due_at = ?,
+                   hubspot_task_id = ?, hubspot_owner_id = ?, source = 'hubspot',
+                   last_synced_at = NOW(), sync_error = NULL
+               WHERE id = ?`,
+              [
+                rt.title,
+                rt.description,
+                rt.status,
+                rt.priority,
+                rt.due_at ? new Date(rt.due_at) : null,
+                rt.id,
+                rt.owner_id,
+                existing.id,
+              ],
+            );
+            result.updated++;
+          } else {
+            await pool.query(
+              `INSERT INTO admin_work_tasks
+                 (title, description, status, priority, due_at, labels_json, source,
+                  hubspot_task_id, hubspot_owner_id, created_by_admin_id, last_synced_at)
+               VALUES (?, ?, ?, ?, ?, '[]', 'hubspot', ?, ?, ?, NOW())`,
+              [
+                rt.title,
+                rt.description,
+                rt.status,
+                rt.priority,
+                rt.due_at ? new Date(rt.due_at) : null,
+                rt.id,
+                rt.owner_id,
+                adminId,
+              ],
+            );
+            result.created++;
+          }
+        }
+
+        // Push pending local changes
+        const [pending] = await pool.query<RowDataPacket[]>(
+          `SELECT * FROM admin_work_tasks
+           WHERE pending_push = 1 AND hubspot_task_id IS NOT NULL`,
+        );
+        for (const row of pending) {
+          try {
+            await updateHubspotTask(
+              tokens.access_token,
+              String(row.hubspot_task_id),
+              {
+                title: row.title as string,
+                description: (row.description as string) || null,
+                status: row.status as any,
+                priority: row.priority as any,
+                due_at: row.due_at
+                  ? new Date(row.due_at).toISOString()
+                  : null,
+              },
+            );
+            await pool.query(
+              `UPDATE admin_work_tasks
+               SET pending_push = 0, last_synced_at = NOW(), sync_error = NULL
+               WHERE id = ?`,
+              [row.id],
+            );
+            result.pushed++;
+          } catch (e: any) {
+            result.errors.push(String(e?.message || e));
+            await pool.query(
+              `UPDATE admin_work_tasks SET sync_error = ? WHERE id = ?`,
+              [String(e?.message || "push failed").slice(0, 500), row.id],
+            );
+          }
+        }
+      } catch (e: any) {
+        result.errors.push(String(e?.message || e));
+      }
+
+      res.json(result);
+    },
+  );
+
+  // Super-admin: grant/revoke HubSpot extract permission
+  app.get(
+    "/api/admin/hubspot/permissions",
+    requireSuperAdmin,
+    async (_req, res) => {
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT a.id AS admin_id, a.email, a.first_name, a.last_name, a.role,
+                COALESCE(p.can_extract, 0) AS can_extract,
+                p.granted_at,
+                CASE WHEN c.id IS NOT NULL AND c.revoked_at IS NULL THEN 1 ELSE 0 END AS connected
+         FROM admins a
+         LEFT JOIN admin_hubspot_permissions p ON p.admin_id = a.id
+         LEFT JOIN admin_hubspot_connections c ON c.admin_id = a.id
+         WHERE a.status = 'active'
+           AND a.role IN ('super_admin','admin','agent')
+         ORDER BY a.first_name, a.last_name`,
+      );
+      res.json({
+        permissions: rows.map((r) => ({
+          admin_id: Number(r.admin_id),
+          email: r.email,
+          first_name: r.first_name,
+          last_name: r.last_name,
+          role: r.role,
+          can_extract: Boolean(r.can_extract) || r.role === "super_admin",
+          connected: Boolean(r.connected),
+          granted_at: r.granted_at
+            ? new Date(r.granted_at).toISOString()
+            : null,
+        })),
+      });
+    },
+  );
+
+  app.put(
+    "/api/admin/hubspot/permissions/:adminId",
+    requireSuperAdmin,
+    async (req: AuthedRequest, res) => {
+      const targetId = Number(req.params.adminId);
+      if (!targetId) return res.status(400).json({ error: "Invalid admin id" });
+      const canExtract = !!req.body?.can_extract;
+      const [target] = await pool.query<RowDataPacket[]>(
+        `SELECT id, role FROM admins WHERE id = ? LIMIT 1`,
+        [targetId],
+      );
+      if (!target[0]) return res.status(404).json({ error: "Admin not found" });
+      if (target[0].role === "super_admin") {
+        return res.json({ ok: true, can_extract: true });
+      }
+      await pool.query(
+        `INSERT INTO admin_hubspot_permissions
+           (admin_id, can_extract, granted_by_admin_id, granted_at)
+         VALUES (?, ?, ?, IF(? = 1, NOW(), NULL))
+         ON DUPLICATE KEY UPDATE
+           can_extract = VALUES(can_extract),
+           granted_by_admin_id = VALUES(granted_by_admin_id),
+           granted_at = IF(VALUES(can_extract) = 1, NOW(), granted_at)`,
+        [targetId, canExtract ? 1 : 0, req.auth!.id, canExtract ? 1 : 0],
+      );
+      res.json({ ok: true, can_extract: canExtract });
+    },
+  );
+
   // GET /api/admin/cases/:caseId/task-completions — task progress for a case
   app.get(
     "/api/admin/cases/:caseId/task-completions",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     async (req, res) => {
       const caseId = Number(req.params.caseId);
       if (!caseId || isNaN(caseId)) {
@@ -9561,6 +17533,648 @@ function buildApp() {
     },
   );
 
+  // ============================================================
+  // CLIENT INFO REQUESTS
+  // ============================================================
+
+  async function loadInfoRequestFiles(requestId: number) {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, field_key, file_name, mime_type, file_size, created_at
+       FROM client_info_request_files WHERE request_id = ? ORDER BY id ASC`,
+      [requestId],
+    );
+    return rows;
+  }
+
+  function mapInfoRequestRow(
+    row: RowDataPacket,
+    opts: { includeSecrets?: boolean; files?: RowDataPacket[] } = {},
+  ) {
+    const hasSecrets = !!(
+      row.secrets_ciphertext &&
+      row.secrets_iv &&
+      row.secrets_tag
+    );
+    let secrets_json: Record<string, unknown> | null = null;
+    if (opts.includeSecrets && hasSecrets) {
+      try {
+        secrets_json = decryptJsonSecrets(
+          Buffer.isBuffer(row.secrets_ciphertext)
+            ? row.secrets_ciphertext
+            : Buffer.from(row.secrets_ciphertext as any),
+          String(row.secrets_iv),
+          String(row.secrets_tag),
+        );
+      } catch (e) {
+        console.error("[info-request:decrypt]", (e as Error)?.message);
+      }
+    }
+    return {
+      id: row.id,
+      case_id: row.case_id,
+      client_id: row.client_id,
+      created_by_admin_id: row.created_by_admin_id,
+      preset_key: row.preset_key,
+      title_en: row.title_en,
+      title_es: row.title_es,
+      message_en: row.message_en,
+      message_es: row.message_es,
+      fields_json: parseInfoFieldsJson(row.fields_json),
+      status: row.status,
+      due_at: row.due_at,
+      response_json: parseInfoResponseJson(row.response_json),
+      has_secrets: hasSecrets,
+      secrets_json,
+      client_consented_at: row.client_consented_at,
+      submitted_at: row.submitted_at,
+      reviewed_at: row.reviewed_at,
+      reviewed_by_admin_id: row.reviewed_by_admin_id,
+      rejection_reason: row.rejection_reason,
+      case_number: row.case_number ?? null,
+      files: opts.files ?? [],
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    };
+  }
+
+  // Admin: list info requests for a case
+  app.get(
+    "/api/admin/cases/:caseId/info-requests",
+    requireAdmin, denyAffiliateAccess,
+    async (req, res) => {
+      const caseId = Number(req.params.caseId);
+      if (!caseId || isNaN(caseId))
+        return res.status(400).json({ error: "Invalid case id" });
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT r.*, cr.case_number
+         FROM client_info_requests r
+         JOIN credit_repair_cases cr ON cr.id = r.case_id
+         WHERE r.case_id = ?
+         ORDER BY r.created_at DESC`,
+        [caseId],
+      );
+      const requests = [];
+      for (const row of rows) {
+        const files = await loadInfoRequestFiles(row.id as number);
+        requests.push(
+          mapInfoRequestRow(row, { includeSecrets: false, files }),
+        );
+      }
+      res.json({ requests });
+    },
+  );
+
+  // Admin: create info request
+  app.post(
+    "/api/admin/cases/:caseId/info-requests",
+    requireAdmin, denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const caseId = Number(req.params.caseId);
+      if (!caseId || isNaN(caseId))
+        return res.status(400).json({ error: "Invalid case id" });
+
+      const {
+        preset_key,
+        title_en,
+        title_es,
+        message_en,
+        message_es,
+        fields_json,
+        due_at,
+      } = req.body || {};
+
+      const createErr = validateCreateInfoRequestPayload({
+        title_en,
+        title_es,
+        fields_json,
+      });
+      if (createErr)
+        return res.status(400).json({ error: createErr.message });
+
+      const [caseRows] = await pool.query<RowDataPacket[]>(
+        `SELECT cr.id, cr.client_id, cr.case_number,
+                c.first_name, c.email, c.phone, c.preferred_language
+         FROM credit_repair_cases cr
+         JOIN clients c ON c.id = cr.client_id
+         WHERE cr.id = ? LIMIT 1`,
+        [caseId],
+      );
+      if (!caseRows[0])
+        return res.status(404).json({ error: "Case not found" });
+      const kase = caseRows[0];
+
+      const [ins] = await pool.query<ResultSetHeader>(
+        `INSERT INTO client_info_requests
+          (case_id, client_id, created_by_admin_id, preset_key,
+           title_en, title_es, message_en, message_es, fields_json, due_at, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')`,
+        [
+          caseId,
+          kase.client_id,
+          req.auth!.id,
+          preset_key || null,
+          String(title_en).trim(),
+          String(title_es).trim(),
+          message_en?.trim() || null,
+          message_es?.trim() || null,
+          JSON.stringify(fields_json),
+          due_at || null,
+        ],
+      );
+
+      const requestId = ins.insertId;
+      const portalUrl = `${APP_URL}/portal/requests`;
+      const lang = (kase.preferred_language as string) || "en";
+      const { title } = localizeInfoRequestCopy(
+        {
+          title_en: String(title_en).trim(),
+          title_es: String(title_es).trim(),
+        },
+        lang,
+      );
+      const emailTpl = tplInfoRequestCreated({
+        firstName: String(kase.first_name || "there"),
+        title,
+        portalUrl,
+        lang,
+      });
+      sendEmail({
+        to: String(kase.email),
+        subject: emailTpl.subject,
+        html: emailTpl.html,
+      }).catch((e) => console.error("[info-request:email]", e?.message));
+
+      if (kase.phone) {
+        const smsBody =
+          lang === "es"
+            ? `Optimum Credit: necesitamos información adicional (${title}). Completa en: ${portalUrl}`
+            : `Optimum Credit: we need additional information (${title}). Complete at: ${portalUrl}`;
+        sendSms({ to: String(kase.phone), body: smsBody }).catch((e) =>
+          console.error("[info-request:sms]", e?.message),
+        );
+      }
+
+      const [created] = await pool.query<RowDataPacket[]>(
+        `SELECT r.*, cr.case_number FROM client_info_requests r
+         JOIN credit_repair_cases cr ON cr.id = r.case_id
+         WHERE r.id = ? LIMIT 1`,
+        [requestId],
+      );
+      res.status(201).json({
+        request: mapInfoRequestRow(created[0], { files: [] }),
+      });
+    },
+  );
+
+  // Admin: get one request (optionally decrypt secrets)
+  app.get(
+    "/api/admin/info-requests/:id",
+    requireAdmin,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id))
+        return res.status(400).json({ error: "Invalid id" });
+      const includeSecrets = String(req.query.include_secrets || "") === "1";
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT r.*, cr.case_number FROM client_info_requests r
+         JOIN credit_repair_cases cr ON cr.id = r.case_id
+         WHERE r.id = ? LIMIT 1`,
+        [id],
+      );
+      if (!rows[0]) return res.status(404).json({ error: "Not found" });
+      const files = await loadInfoRequestFiles(id);
+      res.json({
+        request: mapInfoRequestRow(rows[0], {
+          includeSecrets,
+          files,
+        }),
+      });
+    },
+  );
+
+  // Admin: cancel
+  app.post(
+    "/api/admin/info-requests/:id/cancel",
+    requireAdmin,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id))
+        return res.status(400).json({ error: "Invalid id" });
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, status FROM client_info_requests WHERE id = ? LIMIT 1`,
+        [id],
+      );
+      if (!rows[0]) return res.status(404).json({ error: "Not found" });
+      if (!canAdminCancelInfoRequest(String(rows[0].status)))
+        return res.status(422).json({ error: "Cannot cancel this request" });
+      await pool.query(
+        `UPDATE client_info_requests SET status = 'cancelled' WHERE id = ?`,
+        [id],
+      );
+      res.json({ ok: true });
+    },
+  );
+
+  // Admin: approve / reject
+  app.post(
+    "/api/admin/info-requests/:id/review",
+    requireAdmin,
+    async (req: AuthedRequest, res) => {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id))
+        return res.status(400).json({ error: "Invalid id" });
+      const { status, rejection_reason } = req.body || {};
+      if (!["approved", "rejected"].includes(status))
+        return res
+          .status(400)
+          .json({ error: "status must be approved or rejected" });
+      if (status === "rejected" && !String(rejection_reason || "").trim())
+        return res.status(400).json({ error: "rejection_reason required" });
+
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT r.*, c.first_name, c.email, c.phone, c.preferred_language
+         FROM client_info_requests r
+         JOIN clients c ON c.id = r.client_id
+         WHERE r.id = ? LIMIT 1`,
+        [id],
+      );
+      if (!rows[0]) return res.status(404).json({ error: "Not found" });
+      if (!canAdminReviewInfoRequest(String(rows[0].status)))
+        return res
+          .status(422)
+          .json({ error: "Only submitted requests can be reviewed" });
+
+      await pool.query(
+        `UPDATE client_info_requests
+         SET status = ?, rejection_reason = ?, reviewed_at = NOW(), reviewed_by_admin_id = ?
+         WHERE id = ?`,
+        [
+          status,
+          status === "rejected" ? String(rejection_reason).trim() : null,
+          req.auth!.id,
+          id,
+        ],
+      );
+
+      // On Smart Credit approval, stamp connected_at
+      if (status === "approved" && rows[0].preset_key === "smart_credit") {
+        await pool.query(
+          `UPDATE clients SET smart_credit_connected_at = COALESCE(smart_credit_connected_at, NOW()) WHERE id = ?`,
+          [rows[0].client_id],
+        );
+      }
+
+      const lang = (rows[0].preferred_language as string) || "en";
+      const { title } = localizeInfoRequestCopy(
+        {
+          title_en: String(rows[0].title_en),
+          title_es: String(rows[0].title_es),
+        },
+        lang,
+      );
+      const portalUrl = `${APP_URL}/portal/requests`;
+      const emailTpl = tplInfoRequestReviewed({
+        firstName: String(rows[0].first_name || "there"),
+        title,
+        approved: status === "approved",
+        reason: rejection_reason,
+        portalUrl,
+        lang,
+      });
+      sendEmail({
+        to: String(rows[0].email),
+        subject: emailTpl.subject,
+        html: emailTpl.html,
+      }).catch((e) =>
+        console.error("[info-request:review:email]", e?.message),
+      );
+
+      if (rows[0].phone) {
+        const smsBody =
+          status === "approved"
+            ? lang === "es"
+              ? `Optimum Credit: tu información para "${title}" fue aprobada.`
+              : `Optimum Credit: your information for "${title}" was approved.`
+            : lang === "es"
+              ? `Optimum Credit: vuelve a enviar "${title}". Motivo: ${String(rejection_reason).trim()}. ${portalUrl}`
+              : `Optimum Credit: please resubmit "${title}". Reason: ${String(rejection_reason).trim()}. ${portalUrl}`;
+        sendSms({ to: String(rows[0].phone), body: smsBody }).catch((e) =>
+          console.error("[info-request:review:sms]", e?.message),
+        );
+      }
+
+      res.json({ ok: true, status });
+    },
+  );
+
+  // Admin: serve uploaded file
+  app.get(
+    "/api/admin/info-requests/:id/files/:fileId",
+    requireAdmin,
+    async (req, res) => {
+      const requestId = Number(req.params.id);
+      const fileId = Number(req.params.fileId);
+      if (!requestId || !fileId)
+        return res.status(400).json({ error: "Invalid id" });
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT file_name, mime_type, storage_provider, storage_key, encrypted, enc_iv, enc_tag
+         FROM client_info_request_files
+         WHERE id = ? AND request_id = ? LIMIT 1`,
+        [fileId, requestId],
+      );
+      if (!rows[0]) return res.status(404).json({ error: "Not found" });
+      const f = rows[0];
+      try {
+        if (f.storage_provider !== "cdn")
+          return res.status(404).json({ error: "Unsupported storage" });
+        const cdnRes = await fetch(f.storage_key as string);
+        if (!cdnRes.ok)
+          return res.status(404).json({ error: "File not available" });
+        const raw = Buffer.from(await cdnRes.arrayBuffer());
+        const buf =
+          f.encrypted && f.enc_iv && f.enc_tag
+            ? decryptFile(raw, f.enc_iv as string, f.enc_tag as string)
+            : raw;
+        res.set(
+          "Content-Type",
+          (f.mime_type as string) || "application/octet-stream",
+        );
+        res.set(
+          "Content-Disposition",
+          `inline; filename="${encodeURIComponent(f.file_name as string)}"`,
+        );
+        res.set("Cache-Control", "no-store");
+        res.send(buf);
+      } catch {
+        res.status(404).json({ error: "File could not be read" });
+      }
+    },
+  );
+
+  // Portal: list all info requests for this client
+  app.get(
+    "/api/portal/info-requests",
+    requireClient,
+    async (req: AuthedRequest, res) => {
+      const clientId = req.auth!.id;
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT r.*, cr.case_number
+         FROM client_info_requests r
+         JOIN credit_repair_cases cr ON cr.id = r.case_id
+         WHERE r.client_id = ?
+         ORDER BY
+           FIELD(r.status, 'rejected', 'open', 'submitted', 'approved', 'cancelled'),
+           r.created_at DESC`,
+        [clientId],
+      );
+      const requests = [];
+      for (const row of rows) {
+        const files = await loadInfoRequestFiles(row.id as number);
+        requests.push(
+          mapInfoRequestRow(row, { includeSecrets: false, files }),
+        );
+      }
+      const actionable = requests.filter((r) =>
+        isInfoRequestActionable(r.status),
+      ).length;
+      res.json({ requests, actionable_count: actionable });
+    },
+  );
+
+  // Portal: get one
+  app.get(
+    "/api/portal/info-requests/:id",
+    requireClient,
+    async (req: AuthedRequest, res) => {
+      const clientId = req.auth!.id;
+      const id = Number(req.params.id);
+      if (!id || isNaN(id))
+        return res.status(400).json({ error: "Invalid id" });
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT r.*, cr.case_number
+         FROM client_info_requests r
+         JOIN credit_repair_cases cr ON cr.id = r.case_id
+         WHERE r.id = ? AND r.client_id = ? LIMIT 1`,
+        [id, clientId],
+      );
+      if (!rows[0]) return res.status(404).json({ error: "Not found" });
+      const files = await loadInfoRequestFiles(id);
+      res.json({
+        request: mapInfoRequestRow(rows[0], {
+          includeSecrets: false,
+          files,
+        }),
+      });
+    },
+  );
+
+  // Portal: submit / resubmit
+  app.post(
+    "/api/portal/info-requests/:id/submit",
+    requireClient,
+    upload.any(),
+    async (req: AuthedRequest, res) => {
+      const clientId = req.auth!.id;
+      const id = Number(req.params.id);
+      if (!id || isNaN(id))
+        return res.status(400).json({ error: "Invalid id" });
+
+      const agreedTerms =
+        req.body?.agreed_terms === true ||
+        req.body?.agreed_terms === "true" ||
+        req.body?.agreed_terms === "1";
+      const agreedSms =
+        req.body?.agreed_sms === true ||
+        req.body?.agreed_sms === "true" ||
+        req.body?.agreed_sms === "1";
+      const consentErr = validateInfoRequestConsent(agreedTerms, agreedSms);
+      if (consentErr)
+        return res.status(400).json({ error: consentErr.message });
+
+      let responses: Record<string, unknown> = {};
+      try {
+        const raw = req.body?.responses;
+        responses =
+          typeof raw === "string"
+            ? (JSON.parse(raw) as Record<string, unknown>)
+            : raw && typeof raw === "object"
+              ? (raw as Record<string, unknown>)
+              : {};
+      } catch {
+        return res.status(400).json({ error: "Invalid responses payload" });
+      }
+
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT r.*, c.first_name, c.last_name, c.email,
+                c.anet_customer_profile_id, c.preferred_language
+         FROM client_info_requests r
+         JOIN clients c ON c.id = r.client_id
+         WHERE r.id = ? AND r.client_id = ? LIMIT 1`,
+        [id, clientId],
+      );
+      if (!rows[0]) return res.status(404).json({ error: "Not found" });
+      const row = rows[0];
+      if (!canClientSubmitInfoRequest(String(row.status)))
+        return res
+          .status(422)
+          .json({ error: "This request cannot be submitted right now" });
+
+      const fields = parseInfoFieldsJson(row.fields_json);
+      const uploadedFiles =
+        (req.files as Express.Multer.File[] | undefined) || [];
+      const uploadedFieldKeys = new Set<string>();
+      for (const f of uploadedFiles) {
+        const name = String(f.fieldname || "");
+        if (name.startsWith("file_")) uploadedFieldKeys.add(name.slice(5));
+        else if (name) uploadedFieldKeys.add(name);
+      }
+      const dataDescriptor = String(req.body?.dataDescriptor || "");
+      const dataValue = String(req.body?.dataValue || "");
+      const hasPaymentOpaque = !!(dataDescriptor && dataValue);
+
+      const partitioned = partitionInfoRequestResponses(fields, responses, {
+        hasPaymentOpaque,
+        uploadedFieldKeys,
+      });
+      if (partitioned.errors.length > 0) {
+        return res.status(400).json({ error: partitioned.errors[0].message });
+      }
+
+      const safeResponses: Record<string, unknown> = {
+        ...partitioned.safeResponses,
+      };
+      const secrets: Record<string, unknown> = { ...partitioned.secrets };
+
+      // Persist Smart Credit email on profile (non-secret)
+      for (const field of fields) {
+        if (field.type !== "smart_credit_block") continue;
+        const sc = secrets[field.key] as { email?: string } | undefined;
+        if (sc?.email) {
+          await pool.query(
+            `UPDATE clients SET smart_credit_email = ? WHERE id = ?`,
+            [sc.email, clientId],
+          );
+        }
+      }
+
+      if (partitioned.requiresPaymentOpaque && hasPaymentOpaque) {
+        try {
+          await createOrUpdatePaymentProfileFromOpaque({
+            dataDescriptor,
+            dataValue,
+            clientId,
+            email: String(row.email),
+            firstName: String(row.first_name || ""),
+            lastName: String(row.last_name || ""),
+            existingCustomerProfileId: row.anet_customer_profile_id
+              ? String(row.anet_customer_profile_id)
+              : null,
+          });
+          for (const field of fields) {
+            if (field.type === "payment_card") {
+              safeResponses[field.key] = {
+                card_updated: true,
+                updated_at: new Date().toISOString(),
+              };
+            }
+          }
+        } catch (e: any) {
+          return res.status(422).json({
+            error: e?.message || "Failed to update payment card",
+          });
+        }
+      }
+
+      await pool.query(
+        `DELETE FROM client_info_request_files WHERE request_id = ?`,
+        [id],
+      );
+      for (const field of fields) {
+        if (field.type !== "upload") continue;
+        const key = String(field.key);
+        const file =
+          uploadedFiles.find((f) => f.fieldname === `file_${key}`) ||
+          uploadedFiles.find((f) => f.fieldname === key);
+        if (!file) continue;
+        const { encrypted, iv, tag } = encryptFile(file.buffer);
+        const storageKey = await uploadToCDN(
+          encrypted,
+          file.originalname,
+          file.mimetype,
+          clientId,
+        );
+        await pool.query(
+          `INSERT INTO client_info_request_files
+            (request_id, field_key, file_name, mime_type, file_size,
+             storage_provider, storage_key, encrypted, enc_iv, enc_tag)
+           VALUES (?, ?, ?, ?, ?, 'cdn', ?, 1, ?, ?)`,
+          [
+            id,
+            key,
+            file.originalname,
+            file.mimetype,
+            file.size,
+            storageKey,
+            iv,
+            tag,
+          ],
+        );
+        safeResponses[key] = {
+          file_name: file.originalname,
+          uploaded: true,
+        };
+      }
+
+      let secretsCipher: Buffer | null = null;
+      let secretsIv: string | null = null;
+      let secretsTag: string | null = null;
+      if (Object.keys(secrets).length > 0) {
+        const enc = encryptJsonSecrets(secrets);
+        secretsCipher = enc.ciphertext;
+        secretsIv = enc.iv;
+        secretsTag = enc.tag;
+      }
+
+      const [legalRows] = await pool.query<RowDataPacket[]>(
+        `SELECT slug, updated_at FROM legal_documents WHERE slug IN ('terms','privacy')`,
+      );
+      const termsUpdated =
+        legalRows.find((l) => l.slug === "terms")?.updated_at ?? null;
+      const privacyUpdated =
+        legalRows.find((l) => l.slug === "privacy")?.updated_at ?? null;
+
+      await pool.query(
+        `UPDATE client_info_requests SET
+           status = 'submitted',
+           response_json = ?,
+           secrets_ciphertext = ?,
+           secrets_iv = ?,
+           secrets_tag = ?,
+           client_consented_at = NOW(),
+           client_consent_ip = ?,
+           terms_doc_updated_at = ?,
+           privacy_doc_updated_at = ?,
+           submitted_at = NOW(),
+           rejection_reason = NULL,
+           reviewed_at = NULL,
+           reviewed_by_admin_id = NULL
+         WHERE id = ?`,
+        [
+          JSON.stringify(safeResponses),
+          secretsCipher,
+          secretsIv,
+          secretsTag,
+          (req.ip || "").slice(0, 45) || null,
+          termsUpdated,
+          privacyUpdated,
+          id,
+        ],
+      );
+
+      res.json({ ok: true, status: "submitted" });
+    },
+  );
+
   app.put(
     "/api/admin/task-completions/:id/review",
     requireAdmin,
@@ -9671,6 +18285,9 @@ function buildApp() {
             `INSERT INTO client_pipeline_history (client_id, from_stage, to_stage, changed_by_admin_id, notes) VALUES (?, 'new_client', 'docs_ready', ?, 'Auto-advanced: all required tasks approved')`,
             [clientId, req.auth!.id],
           );
+          triggerReminderFlow("docs_ready", clientId).catch((e) =>
+            console.error("[flow:docs_ready]", e?.message),
+          );
           // Notify client
           const portalUrl = `${APP_URL}/portal/documents`;
           if (row.email) {
@@ -9742,7 +18359,7 @@ function buildApp() {
   // ── OFG Report Wizard (inline — Vercel serverless) ─────────────────────────
   app.get(
     "/api/admin/cases/:caseId/report-wizard/sessions",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     async (req, res) => {
       const caseId = Number(req.params.caseId);
       if (!caseId || isNaN(caseId)) {
@@ -9761,7 +18378,7 @@ function buildApp() {
 
   app.post(
     "/api/admin/cases/:caseId/report-wizard/sessions",
-    requireAdmin,
+    requireAdmin, denyAffiliateAccess,
     upload.fields([
       { name: "before_pdf", maxCount: 1 },
       { name: "after_pdf", maxCount: 1 },
@@ -10413,11 +19030,25 @@ function buildApp() {
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+    const friendly = mapFriendlyError(err);
+    if (friendly) {
+      console.error(
+        `[Express error handler] ${friendly.status}:`,
+        err?.message ?? err,
+      );
+      return res.status(friendly.status).json({ error: friendly.error });
+    }
     const status = typeof err?.status === "number" ? err.status : 500;
+    // Never leak raw DB / driver messages to clients
+    const raw = String(err?.message ?? err ?? "");
+    const looksInternal =
+      /Duplicate entry|ER_|ECONNREFUSED|PROTOCOL_|SQL|mysql|tidb|UNSIGNED|out of range/i.test(
+        raw,
+      );
     const message =
-      process.env.NODE_ENV === "production"
+      looksInternal || process.env.NODE_ENV === "production"
         ? "An unexpected error occurred."
-        : (err?.message ?? String(err));
+        : raw || "An unexpected error occurred.";
     console.error(`[Express error handler] ${status}:`, err?.message ?? err);
     res.status(status).json({ error: message });
   });
@@ -10453,7 +19084,17 @@ export {
   extractUtilization,
   extractPositiveAccounts,
   toPdfSafeText,
+  createSession,
+  isDuplicateKeyError,
+  mapFriendlyError,
+  classifyNegativeLine,
+  buildNegativeItems,
+  buildProspectAnalysisHtml,
+  tplProspectConvertWelcome,
+  attachLabelsBySlug,
+  buildCorsAllowedOrigins,
 };
+
 
 // ============================================================================
 // EXPORTS — Vercel serverless + dev server

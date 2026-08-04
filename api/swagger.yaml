@@ -27,10 +27,20 @@ tags:
     description: Public legal documents (DB-backed markdown)
   - name: Registration
     description: Public registration & Authorize.net payment flow
+  - name: Credit Analysis
+    description: Public credit-analysis lead capture & prospect conversion
   - name: Portal
     description: Client portal — documents, dashboard
   - name: Admin
     description: Admin-only operations
+  - name: Affiliates
+    description: |
+      Affiliates v1 — public referral-link resolve/click, admin affiliate
+      management (invite, rates, subscription, commissions), and the
+      affiliate self-service portal (own profile, leads, commissions,
+      sub-affiliate invites for `master` plan).
+  - name: Bulk Import
+    description: Admin CSV bulk import (validate → review → commit)
   - name: CRC
     description: Credit Repair Cloud integration — sync & webhooks
 
@@ -176,6 +186,12 @@ paths:
         Creates or updates a pending client record and returns the data needed
         to render the payment step. When Authorize.net is not configured a mock
         `transactionId` is returned (`isMock: true`).
+
+        **Affiliate attribution:** `affiliateCode` also accepts a slug or
+        `ref`/`slug` value (not just the legacy `referral_code`). On first
+        successful payment, an `enrollment` commission (+ `override` for the
+        parent of a `sub_affiliate`) is recorded automatically, guarded by
+        `payment_id` to avoid double-paying on retries.
       requestBody:
         required: true
         content:
@@ -231,6 +247,541 @@ paths:
         "409":
           description: Email already has an active account
 
+  /public/credit-analysis:
+    post:
+      tags: [Credit Analysis]
+      summary: Generate a free credit-analysis (public, no auth)
+      description: |
+        Multipart upload of a credit report (PDF preferred). Runs the Optimum
+        credit-analysis algorithm (FICO bands, goal-based lending conversion,
+        prioritized negatives, utilization, 30/60/90 timeline, dispute rounds,
+        file strength, 6-step action plan, client SMS copy) using SmartCredit
+        heuristic extractors + branded HTML (navy/gold). Creates or reuses a
+        `clients` row:
+        - New email → inserted as `status=prospect`, `pipeline_stage=prospect`.
+        - Existing prospect → stays a prospect, analysis attached.
+        - Existing non-prospect client → analysis attached, status untouched.
+        Attaches a source label (`web_analysis` or `agent_submission` per
+        `mode`) plus inferred analysis labels (e.g. `collections`, `auto`).
+        Optionally emails the analysis when `email_opt_in=true`. The response
+        includes `extraction_status` — when it is not `ok` (report wasn't a
+        parseable text-based PDF), the returned `analysis_html`/`analysis_text`
+        honestly say we couldn't reliably read the report instead of implying
+        no negative items were found.
+
+        **Affiliate attribution (first-touch, 30 days):** accepts
+        `affiliate_code` / `affiliateCode` / `ref` / `slug` (any one) as a
+        form field. If it resolves, `clients.affiliate_id` is set
+        (COALESCE — never overwrites existing attribution) and the
+        `affiliate_referral` source label is attached.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                [
+                  first_name,
+                  last_name,
+                  email,
+                  phone,
+                  text_language,
+                  report_file,
+                ]
+              properties:
+                mode: { type: string, enum: [client, agent], default: client }
+                first_name: { type: string }
+                last_name: { type: string }
+                email: { type: string, format: email }
+                phone: { type: string }
+                client_goal: { type: string }
+                text_language: { type: string, enum: [en, es] }
+                notes: { type: string }
+                agent_phone:
+                  type: string
+                  description: Only used when mode=agent
+                rep_name:
+                  type: string
+                  description: Only used when mode=agent
+                email_opt_in: { type: boolean }
+                lead_source:
+                  type: string
+                  description: When "get_started", also attaches the get_started_wizard label
+                affiliate_code:
+                  type: string
+                  description: Affiliate slug or referral code (also accepts affiliateCode/ref/slug)
+                report_file:
+                  type: string
+                  format: binary
+                  description: Credit report file (PDF is parsed; other types are stored only)
+      responses:
+        "200":
+          description: Analysis generated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreditAnalysisResult"
+        "400":
+          description: Missing/invalid fields or file
+
+  /public/prospect-lead:
+    post:
+      tags: [Credit Analysis]
+      summary: Lightweight lead capture → prospect (no file, public, no auth)
+      description: |
+        Used by the homepage "Get my free analysis" mini-form. Creates a
+        `status=prospect` client (or reuses an existing prospect) and attaches
+        `source_label` (defaults to `web_analysis`). When `lead_source` is
+        `get_started`, also attaches the `get_started_wizard` source label.
+
+        **Affiliate attribution (first-touch, 30 days):** accepts
+        `affiliate_code` / `affiliateCode` / `ref` / `slug` (any one). If it
+        resolves to an active/invited affiliate, `clients.affiliate_id` is
+        set (never overwritten if already attributed) and the
+        `affiliate_referral` source label is attached.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [first_name, last_name, email]
+              properties:
+                first_name: { type: string }
+                last_name: { type: string }
+                email: { type: string, format: email }
+                phone: { type: string }
+                source_label: { type: string, default: web_analysis }
+                lead_source:
+                  type: string
+                  description: When "get_started", also attaches the get_started_wizard label
+                notes: { type: string }
+                affiliate_code:
+                  type: string
+                  description: Affiliate slug or referral code (also accepts affiliateCode/ref/slug)
+      responses:
+        "200":
+          description: Lead captured
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  client_id: { type: integer }
+        "400":
+          description: Missing/invalid fields
+
+  /public/affiliates/{slug}:
+    get:
+      tags: [Affiliates]
+      summary: Resolve a public referral slug (no auth)
+      description: |
+        Used by the client-side `/r/{slug}` route to set the 30-day
+        first-touch attribution cookie and redirect. Accepts either the full
+        `slug` or the legacy `referral_code`. Optional `?to=analysis|pricing`
+        overrides the affiliate's `default_landing`.
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema: { type: string }
+        - name: to
+          in: query
+          schema: { type: string, enum: [analysis, pricing] }
+      responses:
+        "200":
+          description: Resolved affiliate + shareable links
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  slug: { type: string }
+                  first_name: { type: string }
+                  redirect_path:
+                    { type: string, example: /credit-analysis?ref=juan-perez }
+                  links:
+                    type: object
+                    description: short_default, short_analysis, short_pricing, analysis_ref, pricing_ref
+        "404":
+          description: Referral link not found / inactive
+
+  /public/affiliates/{slug}/click:
+    post:
+      tags: [Affiliates]
+      summary: Log a referral link click (no auth, best-effort)
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                landing:
+                  type: string
+                  enum: [credit_analysis, pricing, other]
+                  default: other
+      responses:
+        "200":
+          description: |
+            Always 200 (never blocks the redirect) — `ok:false` on internal
+            logging failure.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  slug: { type: string }
+        "404":
+          description: Referral link not found / inactive
+
+  /admin/affiliates:
+    get:
+      tags: [Affiliates]
+      summary: List affiliates with counts (admin/super_admin only)
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: search
+          in: query
+          schema: { type: string }
+        - name: plan
+          in: query
+          schema: { type: string, enum: [standard, master, sub_affiliate] }
+        - name: status
+          in: query
+          schema: { type: string, enum: [invited, active, inactive, suspended] }
+      responses:
+        "200":
+          description: Affiliates with clients_count, sub_affiliates_count, commissions totals
+        "403":
+          description: Forbidden — affiliates cannot manage other affiliates
+    post:
+      tags: [Affiliates]
+      summary: Invite a new affiliate (creates admins row role=affiliate + affiliates row)
+      description: |
+        Generates a unique `slug` (from provided value or first/last name),
+        derives `referral_code` as `slug.slice(0, 32)`, applies tier defaults
+        (`suggestedTierDefaults`) unless overridden, and sends the welcome
+        email. `comp_subscription: true` sets `status=active`,
+        `subscription_status=comped` immediately (skip billing).
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [first_name, last_name, email]
+              properties:
+                first_name: { type: string }
+                last_name: { type: string }
+                email: { type: string, format: email }
+                phone: { type: string }
+                plan:
+                  {
+                    type: string,
+                    enum: [standard, master, sub_affiliate],
+                    default: standard,
+                  }
+                parent_affiliate_id:
+                  type: integer
+                  description: Required when plan=sub_affiliate; must reference a master affiliate
+                slug: { type: string }
+                default_landing:
+                  { type: string, enum: [credit_analysis, pricing] }
+                monthly_price_cents: { type: integer }
+                commission_rate_bps: { type: integer }
+                parent_override_rate_bps: { type: integer }
+                comp_subscription: { type: boolean }
+                notes: { type: string }
+      responses:
+        "200":
+          description: Created
+        "400":
+          description: Missing/invalid fields
+        "409":
+          description: Email or slug already in use
+
+  /admin/affiliates/meta/suggestions:
+    get:
+      tags: [Affiliates]
+      summary: Tier price + commission-rate suggestions per plan (for the invite form)
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: suggestions (by plan) + features (AFFILIATE_FEATURES_ALL_ON)
+
+  /admin/affiliates/{id}:
+    get:
+      tags: [Affiliates]
+      summary: Affiliate detail — profile, links, sub-affiliates, recent clients
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: Affiliate detail
+        "404":
+          description: Not found
+    patch:
+      tags: [Affiliates]
+      summary: Update an affiliate (slug, plan, rates, landing, status, parent, notes, names/phone)
+      description: Also syncs first_name/last_name/phone onto the linked admins row.
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                slug: { type: string }
+                plan: { type: string, enum: [standard, master, sub_affiliate] }
+                monthly_price_cents: { type: integer }
+                commission_rate_bps: { type: integer }
+                parent_override_rate_bps: { type: integer }
+                parent_affiliate_id: { type: integer, nullable: true }
+                default_landing:
+                  { type: string, enum: [credit_analysis, pricing] }
+                status:
+                  { type: string, enum: [invited, active, inactive, suspended] }
+                first_name: { type: string }
+                last_name: { type: string }
+                phone: { type: string }
+                bio: { type: string }
+                notes: { type: string }
+      responses:
+        "200":
+          description: Updated affiliate
+        "409":
+          description: Slug already in use
+
+  /admin/affiliates/{id}/comp:
+    post:
+      tags: [Affiliates]
+      summary: Comp an affiliate's subscription (subscription_status=comped, status=active)
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: OK
+        "404":
+          description: Not found
+
+  /admin/affiliates/{id}/subscribe:
+    post:
+      tags: [Affiliates]
+      summary: Charge an affiliate's monthly subscription on their behalf (Authorize.net ARB)
+      description: |
+        Accept.js opaque data — amount comes from affiliates.monthly_price_cents.
+        Rejects with `409` if the affiliate already has an active/pending subscription
+        or a linked `anet_subscription_id` — cancel it first before creating a new one.
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [dataDescriptor, dataValue]
+              properties:
+                dataDescriptor: { type: string }
+                dataValue: { type: string }
+      responses:
+        "200":
+          description: Subscribed — subscription_id
+        "402":
+          description: Subscription creation failed
+        "409":
+          description: Affiliate already has an active or pending subscription
+
+  /admin/affiliates/{id}/commissions:
+    get:
+      tags: [Affiliates]
+      summary: List an affiliate's commission ledger rows
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: Commissions
+    post:
+      tags: [Affiliates]
+      summary: Add a manual commission row
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount_cents]
+              properties:
+                amount_cents: { type: integer }
+                client_id: { type: integer, nullable: true }
+                notes: { type: string }
+      responses:
+        "200":
+          description: Created — id
+
+  /admin/affiliates/commissions/{id}:
+    patch:
+      tags: [Affiliates]
+      summary: Update a commission's status
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [approved, paid, void] }
+      responses:
+        "200":
+          description: OK
+        "404":
+          description: Not found
+
+  /admin/affiliate/me:
+    get:
+      tags: [Affiliates]
+      summary: Self-service — own affiliate profile + links + stats
+      description: Requires the caller's admins.role to be `affiliate`.
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: affiliate, links, stats (clicks_total, referred_clients, commissions_pending_cents, commissions_earned_cents)
+        "403":
+          description: Affiliate access required
+    patch:
+      tags: [Affiliates]
+      summary: Self-service — update own limited profile fields
+      description: |
+        Limited surface — `default_landing`, `bio`, `phone`, and social links
+        only. Rates/plan/status remain admin-managed.
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                default_landing:
+                  { type: string, enum: [credit_analysis, pricing] }
+                bio: { type: string }
+                phone: { type: string }
+                social_facebook: { type: string }
+                social_instagram: { type: string }
+                social_tiktok: { type: string }
+                social_linkedin: { type: string }
+      responses:
+        "200":
+          description: Updated affiliate
+
+  /admin/affiliate/me/subscribe:
+    post:
+      tags: [Affiliates]
+      summary: Self-service — pay own monthly subscription (Authorize.net ARB)
+      description: |
+        Does NOT require portal access (needed to bootstrap access). Rejects with
+        `409` if the caller already has an active/pending subscription or a linked
+        `anet_subscription_id` — cancel it first before creating a new one.
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [dataDescriptor, dataValue]
+              properties:
+                dataDescriptor: { type: string }
+                dataValue: { type: string }
+      responses:
+        "200":
+          description: Subscribed — subscription_id
+        "402":
+          description: Subscription creation failed
+        "409":
+          description: You already have an active or pending subscription
+
+  /admin/affiliate/leads:
+    post:
+      tags: [Affiliates]
+      summary: Self-service — manually create a referred lead (requires portal access)
+      description: Creates a `status=prospect` client with `affiliate_id=self` and attaches `affiliate_referral`.
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [first_name, last_name, email]
+              properties:
+                first_name: { type: string }
+                last_name: { type: string }
+                email: { type: string, format: email }
+                phone: { type: string }
+      responses:
+        "200":
+          description: Created — client_id
+        "403":
+          description: Portal access required
+
+  /admin/affiliate/commissions:
+    get:
+      tags: [Affiliates]
+      summary: Self-service — own commission ledger (requires portal access)
+      description: Master affiliates also see `override` rows earned from their sub-affiliates.
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Commissions
+        "403":
+          description: Portal access required
+
+  /admin/affiliate/subs:
+    post:
+      tags: [Affiliates]
+      summary: Self-service — master affiliate invites a sub-affiliate (requires portal access)
+      description: Creates admins(role=affiliate) + affiliates row with `plan=sub_affiliate`, `parent_affiliate_id=self`.
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [first_name, last_name, email]
+              properties:
+                first_name: { type: string }
+                last_name: { type: string }
+                email: { type: string, format: email }
+                phone: { type: string }
+      responses:
+        "200":
+          description: Created — id, admin_id, slug
+        "403":
+          description: Portal access required, or caller is not a master affiliate
+
   /tradeline-products:
     get:
       tags: [Registration]
@@ -256,6 +807,11 @@ paths:
         Accepts an opaque payment nonce from Accept.js when Authorize.net is configured,
         or processes a mock payment when it is not. For `tradeline_picker` packages,
         pass `tradelineProductIds` and the charge amount is the sum of selected lines.
+
+        **Legacy route.** In production this route is disabled (returns `410`) unless
+        `ALLOW_LEGACY_PROCESS_PAYMENT=true` is set — new clients should use the unified
+        `POST /registration` flow instead. Even when enabled, the target client must be
+        in `pending_payment` or `prospect` status. This route is rate-limited per client.
       requestBody:
         required: true
         content:
@@ -288,6 +844,10 @@ paths:
           description: Payment declined
         "404":
           description: Client not found
+        "410":
+          description: Route disabled — client is not eligible (wrong status) or legacy flow disabled in production. Use POST /registration instead.
+        "429":
+          description: Too many attempts — rate limited
         "503":
           description: Payment provider not configured (only when nonce required and ANet missing)
 
@@ -396,13 +956,269 @@ paths:
   /webhooks/authorize-net:
     post:
       tags: [Registration]
-      summary: Authorize.net webhook (ARB subscription events)
+      summary: Authorize.net webhook (ARB subscription + renewal payments)
       description: |
-        Optional signature verification via `ANET_WEBHOOK_SIGNATURE_KEY`.
-        Raw body must be preserved for HMAC validation.
+        Signature verification via `ANET_WEBHOOK_SIGNATURE_KEY`. In production the
+        key is mandatory — the endpoint returns `503` if it isn't configured. When
+        the key is configured, every request must present a valid `X-ANET-Signature`
+        header (missing/invalid is always rejected, not just when the header happens
+        to be present). Raw body must be preserved for HMAC validation.
+
+        Handles subscription cancel/suspend/fail plus successful payment events
+        (`authcapture` / capture) — inserts a `payments` row for client ARB renewals
+        and restores `client_subscriptions` / affiliate `subscription_status` to active.
       responses:
         "200":
           description: Processed
+        "401":
+          description: Missing or invalid signature
+        "503":
+          description: Webhook not configured (production only)
+
+  /webhooks/twilio/sms:
+    post:
+      tags: [CRC]
+      summary: Twilio inbound SMS webhook
+      description: |
+        Validates `X-Twilio-Signature` when `TWILIO_AUTH_TOKEN` is set.
+        Production refuses unsigned requests if the token is missing.
+      responses:
+        "200":
+          description: TwiML / accepted
+        "401":
+          description: Invalid signature
+        "503":
+          description: Twilio not configured (production)
+
+  /webhooks/twilio/voice:
+    post:
+      tags: [CRC]
+      summary: Twilio inbound voice webhook
+      description: Same signature rules as `/webhooks/twilio/sms`.
+      responses:
+        "200":
+          description: TwiML / accepted
+        "401":
+          description: Invalid signature
+
+  /cron/process-queue:
+    post:
+      tags: [Admin]
+      summary: Process pending notification_queue rows
+      description: |
+        Protected by `X-Cron-Secret` (must match `CRON_SECRET`). Claims a batch
+        atomically (`pending` → `processing`). Emails are sent via Resend; SMS /
+        in_app / push channels are marked `failed` until those deliverers are wired
+        (never fake-marked `sent`).
+      parameters:
+        - in: header
+          name: X-Cron-Secret
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Batch processed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  processed: { type: integer }
+                  sent: { type: integer }
+                  failed: { type: integer }
+        "401":
+          description: Unauthorized
+
+  /admin/dashboard:
+    get:
+      tags: [Admin]
+      summary: Admin dashboard stats
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Dashboard aggregates (clients, revenue, tickets, payments)
+        "401":
+          description: Unauthorized
+
+  /admin/work-tasks:
+    get:
+      tags: [Admin]
+      summary: List admin Work Hub tasks (Kanban)
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Task list for Backlog / Doing / Done
+    post:
+      tags: [Admin]
+      summary: Create an Optimum work task
+      security: [{ BearerAuth: [] }]
+      responses:
+        "201":
+          description: Created
+
+  /admin/work-tasks/{id}:
+    put:
+      tags: [Admin]
+      summary: Update work task (pushes to HubSpot when linked)
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Updated
+    delete:
+      tags: [Admin]
+      summary: Delete work task from Optimum (does not delete in HubSpot)
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Deleted
+
+  /admin/hubspot/status:
+    get:
+      tags: [Admin]
+      summary: HubSpot connection + extract permission for current admin
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Status payload
+
+  /admin/hubspot/oauth/start:
+    get:
+      tags: [Admin]
+      summary: Start per-admin HubSpot OAuth
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Returns authorize_url
+        "403":
+          description: Extract not permitted
+
+  /admin/hubspot/sync:
+    post:
+      tags: [Admin]
+      summary: Soft two-way sync (pull HubSpot tasks, push pending edits)
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Sync counts
+        "403":
+          description: Extract not permitted
+
+  /admin/hubspot/disconnect:
+    post:
+      tags: [Admin]
+      summary: Revoke current admin HubSpot OAuth connection
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Disconnected
+
+  /admin/hubspot/oauth/callback:
+    get:
+      tags: [Admin]
+      summary: HubSpot OAuth redirect callback
+      description: Exchanges code for tokens, stores encrypted credentials, redirects to /admin/my-tasks.
+      parameters:
+        - in: query
+          name: code
+          schema: { type: string }
+        - in: query
+          name: state
+          schema: { type: string }
+      responses:
+        "302":
+          description: Redirect to My Tasks
+
+  /admin/work-tasks/assignees:
+    get:
+      tags: [Admin]
+      summary: List staff assignable to work tasks
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Assignee list
+
+  /admin/work-tasks/badge:
+    get:
+      tags: [Admin]
+      summary: Open/overdue counts for current admin (nav badge)
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Badge counts
+
+  /admin/hubspot/permissions:
+    get:
+      tags: [Admin]
+      summary: List HubSpot extract grants (super_admin)
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Permission rows
+        "403":
+          description: Forbidden
+
+  /admin/coupons:
+    get:
+      tags: [Admin]
+      summary: List coupons
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Coupon list
+        "401":
+          description: Unauthorized
+        "403":
+          description: Affiliates denied
+    post:
+      tags: [Admin]
+      summary: Create coupon
+      security: [{ BearerAuth: [] }]
+      responses:
+        "201":
+          description: Created
+        "400":
+          description: Validation error
+        "403":
+          description: Affiliates denied
+
+  /admin/coupons/{id}:
+    put:
+      tags: [Admin]
+      summary: Update coupon
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Updated
+        "404":
+          description: Not found
+    delete:
+      tags: [Admin]
+      summary: Delete / deactivate coupon
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Deleted
 
   /registration/confirm-mock:
     post:
@@ -477,6 +1293,137 @@ paths:
                 error:
                   type: string
                   example: Link expired or already used
+
+  /auth/client/request-otp:
+    post:
+      tags: [Auth]
+      summary: Request a one-time login code (client)
+      description: |
+        Sends a login OTP when a client account exists for the email.
+        Returns `404 ACCOUNT_NOT_FOUND` when no account matches so the UI can
+        show a clear message. Rate-limited per IP+email.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        "200":
+          description: Code sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  message: { type: string }
+        "404":
+          description: No account for that email (`code: ACCOUNT_NOT_FOUND`)
+        "429":
+          description: Too many requests — rate limited
+
+  /auth/client/verify-otp:
+    post:
+      tags: [Auth]
+      summary: Verify a one-time login code and start a client session
+      description: |
+        A code allows at most 5 incorrect attempts before it's invalidated. Rate-limited
+        per IP+email in addition to the attempt cap.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, code]
+              properties:
+                email: { type: string, format: email }
+                code: { type: string }
+      responses:
+        "200":
+          description: Session created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  user: { type: object }
+        "400":
+          description: Invalid or expired code
+        "429":
+          description: Too many attempts — rate limited
+
+  /auth/admin/request-otp:
+    post:
+      tags: [Auth]
+      summary: Request a one-time login code (admin/staff)
+      description: |
+        Sends a login OTP when an active staff account exists for the email.
+        Returns `404 ACCOUNT_NOT_FOUND` when no admin matches, or
+        `403 ACCOUNT_INACTIVE` when the account exists but is not active,
+        so the UI can show a clear message. Rate-limited per IP+email.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        "200":
+          description: Code sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  message: { type: string }
+        "403":
+          description: Staff account exists but is not active (`code: ACCOUNT_INACTIVE`)
+        "404":
+          description: No staff account for that email (`code: ACCOUNT_NOT_FOUND`)
+        "429":
+          description: Too many requests — rate limited
+
+  /auth/admin/verify-otp:
+    post:
+      tags: [Auth]
+      summary: Verify a one-time login code and start an admin session
+      description: |
+        A code allows at most 5 incorrect attempts before it's invalidated. Rate-limited
+        per IP+email in addition to the attempt cap.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, code]
+              properties:
+                email: { type: string, format: email }
+                code: { type: string }
+      responses:
+        "200":
+          description: Session created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  user: { type: object }
+        "400":
+          description: Invalid or expired code
+        "429":
+          description: Too many attempts — rate limited
 
   /portal/payments:
     get:
@@ -677,6 +1624,40 @@ paths:
         "401":
           description: Unauthorized
 
+  /admin/payments/{id}/refund:
+    post:
+      tags: [Admin]
+      summary: Refund a payment (ledger clawback)
+      description: |
+        Marks a `succeeded` payment as `refunded` and voids any `pending`/`approved`
+        affiliate commissions tied to it. This is a soft, internal ledger clawback —
+        it does not call the Authorize.net refund/void API. Idempotent: calling again
+        on an already-refunded payment returns `{ ok: true }` without side effects.
+        Not available to affiliate-manager accounts.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Refunded (or already refunded)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+        "400":
+          description: Only succeeded payments can be refunded
+        "401":
+          description: Unauthorized
+        "404":
+          description: Payment not found
+
   /portal/documents:
     post:
       tags: [Portal]
@@ -742,6 +1723,189 @@ paths:
           description: Unauthorized
         "404":
           description: Document not found or does not belong to this client
+
+  /portal/info-requests:
+    get:
+      tags: [Portal]
+      summary: List client info requests
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Requests list with actionable_count
+        "401":
+          description: Unauthorized
+
+  /portal/info-requests/{id}:
+    get:
+      tags: [Portal]
+      summary: Get one info request
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Request detail
+        "404":
+          description: Not found
+
+  /portal/info-requests/{id}/submit:
+    post:
+      tags: [Portal]
+      summary: Submit or resubmit an info request (multipart)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [agreed_terms, agreed_sms, responses]
+              properties:
+                agreed_terms: { type: string }
+                agreed_sms: { type: string }
+                responses: { type: string, description: JSON object of answers }
+                dataDescriptor: { type: string }
+                dataValue: { type: string }
+      responses:
+        "200":
+          description: Submitted
+        "400":
+          description: Validation error
+        "422":
+          description: Not submittable
+
+  /admin/cases/{caseId}/info-requests:
+    get:
+      tags: [Admin]
+      summary: List info requests for a case
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: caseId
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Requests list
+    post:
+      tags: [Admin]
+      summary: Create an info request for a case
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: caseId
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title_en, title_es, fields_json]
+              properties:
+                preset_key: { type: string }
+                title_en: { type: string }
+                title_es: { type: string }
+                message_en: { type: string }
+                message_es: { type: string }
+                fields_json: { type: array, items: { type: object } }
+                due_at: { type: string, format: date-time, nullable: true }
+      responses:
+        "201":
+          description: Created
+        "400":
+          description: Validation error
+
+  /admin/info-requests/{id}:
+    get:
+      tags: [Admin]
+      summary: Get info request detail (optional secrets decrypt)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+        - in: query
+          name: include_secrets
+          schema: { type: string, enum: ["1"] }
+      responses:
+        "200":
+          description: Request detail
+
+  /admin/info-requests/{id}/review:
+    post:
+      tags: [Admin]
+      summary: Approve or reject a submitted info request
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [approved, rejected] }
+                rejection_reason: { type: string }
+      responses:
+        "200":
+          description: Reviewed
+
+  /admin/info-requests/{id}/cancel:
+    post:
+      tags: [Admin]
+      summary: Cancel an info request
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Cancelled
+
+  /admin/info-requests/{id}/files/{fileId}:
+    get:
+      tags: [Admin]
+      summary: Download encrypted upload from an info request
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+        - in: path
+          name: fileId
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: File bytes
 
   /admin/documents/{id}/file:
     get:
@@ -834,12 +1998,17 @@ paths:
   /admin/pipeline:
     get:
       tags: [Admin]
-      summary: Get all active credit repair cases for the pipeline Kanban board
+      summary: Get all active credit repair cases + prospects for the pipeline Kanban board
+      description: |
+        `prospects` (status='prospect' clients with no case yet — 1C) are
+        returned separately from `cases` since the pipeline board renders
+        them as a distinct lane; dragging a prospect card is only valid
+        prospect → new_client, which should call `/admin/prospects/{id}/convert`.
       security:
         - BearerAuth: []
       responses:
         "200":
-          description: Pipeline cases
+          description: Pipeline cases + prospects
           content:
             application/json:
               schema:
@@ -849,8 +2018,350 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/CreditRepairCase"
+                  prospects:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Prospect"
         "401":
           description: Unauthorized
+
+  /admin/labels:
+    get:
+      tags: [Admin]
+      summary: List labels (source + analysis layers)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: layer
+          schema: { type: string, enum: [source, analysis] }
+          description: Optional filter by label layer
+      responses:
+        "200":
+          description: Labels
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  labels:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Label"
+        "401":
+          description: Unauthorized
+
+  /admin/clients/{id}/labels:
+    post:
+      tags: [Admin]
+      summary: Add/remove labels on a client (merge, by slug)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                add:
+                  type: array
+                  items: { type: string }
+                  description: Label slugs to attach
+                remove:
+                  type: array
+                  items: { type: string }
+                  description: Label slugs to remove
+      responses:
+        "200":
+          description: Client's updated labels
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  labels:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Label"
+        "404":
+          description: Client not found
+
+  /admin/prospects:
+    get:
+      tags: [Admin]
+      summary: List prospects (status='prospect' clients)
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Prospects
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  prospects:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Prospect"
+        "401":
+          description: Unauthorized
+
+  /admin/prospects/{id}/convert:
+    post:
+      tags: [Admin]
+      summary: Convert a prospect into a client + case (5A/7A)
+      description: |
+        Sets `status=onboarding`, `pipeline_stage=new_client`, creates a
+        `credit_repair_cases` row, runs `autoAssignTasksForCase`, and sends
+        the dedicated prospect-welcome email (NOT the payment_confirmed flow —
+        no payment was ever taken).
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                package_id: { type: integer, nullable: true }
+                notes: { type: string, nullable: true }
+      responses:
+        "200":
+          description: Converted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  client:
+                    $ref: "#/components/schemas/AdminClientListItem"
+                  case:
+                    type: object
+                    properties:
+                      id: { type: integer }
+                      case_number: { type: string }
+        "404":
+          description: Prospect not found
+        "409":
+          description: Client is not a prospect
+
+  /admin/reminder-flows:
+    get:
+      tags: [Admin]
+      summary: List all reminder flows with step counts
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Reminder flows
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  flows:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ReminderFlow"
+    post:
+      tags: [Admin]
+      summary: Create a reminder flow
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, trigger_event]
+              properties:
+                name: { type: string }
+                description: { type: string, nullable: true }
+                trigger_event:
+                  type: string
+                  enum:
+                    [
+                      payment_confirmed,
+                      docs_ready,
+                      round_1_complete,
+                      round_2_complete,
+                      round_3_complete,
+                      round_4_complete,
+                      round_5_complete,
+                      completed,
+                    ]
+                required_label_slugs:
+                  type: array
+                  nullable: true
+                  items: { type: string }
+                  description: |
+                    Optional label gate — when set, the flow only fires for
+                    clients that currently have ALL listed label slugs
+                    attached (see `client_labels`).
+      responses:
+        "201":
+          description: Flow created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  flow:
+                    $ref: "#/components/schemas/ReminderFlow"
+        "400":
+          description: Missing/invalid fields
+
+  /admin/reminder-flows/{id}:
+    get:
+      tags: [Admin]
+      summary: Get a single reminder flow with its steps + recent executions
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Flow detail
+        "404":
+          description: Not found
+    put:
+      tags: [Admin]
+      summary: Update a reminder flow
+      description: |
+        Partial update — only fields present in the body are changed.
+        `required_label_slugs` replaces the full label-gate list (send `null`
+        or `[]` to clear it and run the flow unconditionally).
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                description: { type: string, nullable: true }
+                is_active: { type: boolean }
+                required_label_slugs:
+                  type: array
+                  nullable: true
+                  items: { type: string }
+                  description: Optional label gate — flow only fires when client has ALL listed label slugs
+      responses:
+        "200":
+          description: Flow updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  flow:
+                    $ref: "#/components/schemas/ReminderFlow"
+
+  /admin/reminder-flows/{id}/trigger:
+    post:
+      tags: [Admin]
+      summary: Manually run a reminder flow for a client
+      description: |
+        Fires the flow's email/alert steps using the selected client's merge
+        fields. Set `deliver_to_admin: true` to send emails to the authenticated
+        admin instead (sandbox) — subjects are prefixed with `[TEST]` and the
+        10-minute idempotency guard is skipped.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [client_id]
+              properties:
+                client_id: { type: integer }
+                deliver_to_admin:
+                  type: boolean
+                  description: When true, emails go to the admin session email
+      responses:
+        "200":
+          description: Flow triggered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  sandbox: { type: boolean }
+                  delivered_to: { type: string }
+        "400":
+          description: Missing client_id or admin email
+        "404":
+          description: Flow not found
+
+  /admin/admins:
+    get:
+      tags: [Admin]
+      summary: List admin team members
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Admins list
+        "401":
+          description: Unauthorized
+    post:
+      tags: [Admin]
+      summary: Create admin team member (super_admin only)
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Created
+        "409":
+          description: Email already exists
+        "403":
+          description: Forbidden
+
+  /admin/admins/{id}/resend-welcome:
+    post:
+      tags: [Admin]
+      summary: Resend team welcome email (super_admin only)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Email sent
+        "404":
+          description: Admin not found
 
   /admin/task-templates:
     get:
@@ -1019,6 +2530,11 @@ paths:
     post:
       tags: [Admin]
       summary: Move a credit repair case to a new pipeline stage
+      description: |
+        `prospect` is intentionally excluded from the `stage` enum — cases are
+        only ever created at `new_client` via `/admin/prospects/{id}/convert`
+        (1C), so a case can never move to/from `prospect`. Entering
+        `docs_ready` fires the `docs_ready` reminder flow.
       security:
         - BearerAuth: []
       parameters:
@@ -1089,9 +2605,16 @@ paths:
           name: search
           schema:
             type: string
+        - in: query
+          name: labels
+          schema:
+            type: string
+          description: >-
+            Comma-separated label slugs (e.g. `collections,housing`) — returns
+            clients with ANY matching label. `label` (singular) also accepted.
       responses:
         "200":
-          description: List of clients
+          description: List of clients (each includes a `labels` array)
           content:
             application/json:
               schema:
@@ -1104,6 +2627,13 @@ paths:
     post:
       tags: [Admin]
       summary: Create a new client
+      description: >-
+        Affiliate-role callers (`getAffiliateScope`) are always stamped
+        `status='prospect'`, `pipeline_stage='prospect'`, and their own
+        `affiliate_id` — `package_id`, `status`, and `admin_notes` inputs are
+        ignored, no welcome email is sent, and the client is auto-tagged with
+        the `affiliate_referral` label. Requires an active/comped affiliate
+        subscription (403 `affiliate_subscription_required` otherwise).
       security:
         - BearerAuth: []
       requestBody:
@@ -1138,6 +2668,8 @@ paths:
                 properties:
                   client:
                     $ref: "#/components/schemas/AdminClientListItem"
+        "403":
+          description: Affiliate subscription required (code `affiliate_subscription_required`)
         "409":
           description: Email already exists
 
@@ -1145,6 +2677,11 @@ paths:
     put:
       tags: [Admin]
       summary: Update a client
+      description: >-
+        Affiliates may only update `first_name`, `last_name`, `email`, and
+        `phone` on clients within their own referral scope — `package_id`,
+        `status`, and `admin_notes` are silently ignored for affiliate
+        callers, and out-of-scope client ids return 404.
       security:
         - BearerAuth: []
       parameters:
@@ -1184,13 +2721,19 @@ paths:
                 properties:
                   client:
                     $ref: "#/components/schemas/AdminClientListItem"
+        "403":
+          description: Affiliate subscription required (code `affiliate_subscription_required`)
         "404":
-          description: Client not found
+          description: Client not found (or out of the caller's affiliate scope)
         "409":
           description: Email already exists
     delete:
       tags: [Admin]
       summary: Delete a client
+      description: >-
+        Affiliates may only delete their own referred leads while they are
+        still `status='prospect'` — out-of-scope clients return 404, and
+        already-converted clients return 403.
       security:
         - BearerAuth: []
       parameters:
@@ -1209,8 +2752,203 @@ paths:
                 properties:
                   ok:
                     type: boolean
+        "403":
+          description: Affiliate subscription required, or client is past the prospect stage
         "404":
-          description: Client not found
+          description: Client not found (or out of the caller's affiliate scope)
+
+  /admin/bulk-import/templates/clients.csv:
+    get:
+      tags: [Bulk Import]
+      summary: Download the clients CSV import template
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: CSV file with headers + one sample row
+          content:
+            text/csv:
+              schema:
+                type: string
+
+  /admin/bulk-import/validate:
+    post:
+      tags: [Bulk Import]
+      summary: Upload + validate a bulk import CSV (stages a review job, no DB writes yet)
+      description: |
+        Parses and validates the uploaded CSV (max 500 rows, 5MB), resolves
+        `package_slug` to `package_id`, and flags rows whose email already
+        exists in `clients`. The result is staged as a `bulk_import_jobs` row
+        (`status = validated`, TTL 1 hour) that must be reviewed and then
+        committed via `POST /admin/bulk-import/{jobId}/commit`.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                entity:
+                  type: string
+                  enum: [clients]
+                  default: clients
+      responses:
+        "200":
+          description: Validation summary + row-level preview
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  job_id:
+                    type: integer
+                  expires_at:
+                    type: string
+                    format: date-time
+                  row_count:
+                    type: integer
+                  will_create_count:
+                    type: integer
+                  skipped_count:
+                    type: integer
+                  error_count:
+                    type: integer
+                  preview_rows:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/BulkImportPreviewRow"
+                  breakdown:
+                    type: object
+                    properties:
+                      will_create: { type: integer }
+                      skipped: { type: integer }
+                      error: { type: integer }
+        "400":
+          description: Missing/invalid file, unknown or forbidden columns, too many rows
+        "403":
+          description: Bulk CSV import is disabled (see BULK_CSV_IMPORT_ENABLED)
+
+  /admin/bulk-import/{jobId}:
+    get:
+      tags: [Bulk Import]
+      summary: Get a staged/committed bulk import job (status, preview, result)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: jobId
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Job detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job:
+                    type: object
+                    properties:
+                      id: { type: integer }
+                      entity: { type: string, enum: [clients] }
+                      status:
+                        type: string
+                        enum:
+                          [validated, processing, committed, expired, failed]
+                      file_name: { type: string }
+                      row_count: { type: integer }
+                      created_count: { type: integer }
+                      skipped_count: { type: integer }
+                      error_count: { type: integer }
+                      expires_at: { type: string, format: date-time }
+                      created_at: { type: string, format: date-time }
+                      committed_at:
+                        type: string
+                        format: date-time
+                        nullable: true
+                  will_create_count:
+                    type: integer
+                  preview_rows:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/BulkImportPreviewRow"
+                  result:
+                    type: object
+                    nullable: true
+        "404":
+          description: Import job not found
+
+  /admin/bulk-import/{jobId}/commit:
+    post:
+      tags: [Bulk Import]
+      summary: Commit a validated bulk import job — creates clients for `will_create` rows
+      description: |
+        Requires the job to belong to the requesting admin, be unexpired, and
+        have `status = validated` (claimed atomically to `processing`). Rows
+        already marked `skipped`/`error` during validation are not retried;
+        `will_create` rows are re-checked for email conflicts before insert.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: jobId
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                send_welcome_emails:
+                  type: boolean
+                  default: false
+      responses:
+        "200":
+          description: Commit result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  created_count:
+                    type: integer
+                  skipped_count:
+                    type: integer
+                  error_count:
+                    type: integer
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        row_number: { type: integer }
+                        status:
+                          { type: string, enum: [created, skipped, error] }
+                        client_id: { type: integer }
+                        message: { type: string }
+                        external_ref: { type: string, nullable: true }
+        "403":
+          description: Bulk CSV import is disabled
+        "404":
+          description: Import job not found
+        "409":
+          description: Job is not in a committable state (already processing/committed)
+        "410":
+          description: Job has expired
 
   /admin/crc/status:
     get:
@@ -1766,7 +3504,10 @@ paths:
       summary: Receive CRC pipeline stage update (called by Zapier)
       description: |
         Zapier posts here when a client's round/stage changes in Credit Repair Cloud.
-        Optionally secured by a shared `secret` field compared against `CRC_WEBHOOK_SECRET`.
+        Secured by a shared `secret` field compared against `CRC_WEBHOOK_SECRET`
+        (constant-time comparison). In production `CRC_WEBHOOK_SECRET` is mandatory —
+        the endpoint returns `503` if it isn't configured. When configured, the
+        `secret` field must always match.
       requestBody:
         required: true
         content:
@@ -1807,15 +3548,19 @@ paths:
           description: Invalid webhook secret
         "422":
           description: Unknown stage name
+        "503":
+          description: Webhook not configured (production only)
 
   /smoke/token:
     post:
       tags: [Smoke Tests]
       summary: Issue a real session token for smoke testing (requires SMOKE_TEST_SECRET)
       description: |
-        Only available when the `SMOKE_TEST_SECRET` environment variable is set.
+        Only registered when `SMOKE_TEST_SECRET` is set AND the app is not running in
+        production — these routes never exist in production regardless of the secret.
         Returns a fully valid session token for the given actor and email so that
-        smoke tests can authenticate without going through the OTP email flow.
+        smoke tests can authenticate without going through the OTP email flow. Secret
+        comparison is constant-time.
       requestBody:
         required: true
         content:
@@ -2153,7 +3898,15 @@ paths:
                   format: date
                 status:
                   type: string
-                  enum: [pending, paid, cancelled]
+                  enum: [pending, paid, overdue, cancelled]
+                completion_source:
+                  type: string
+                  enum: [manual, authorize_link]
+                send_payment_link:
+                  type: boolean
+                  description: >
+                    When true on an unpaid split, creates a payment_split_tokens
+                    row if one does not already exist.
                 notes:
                   type: string
                   nullable: true
@@ -2327,6 +4080,12 @@ paths:
     post:
       tags: [Public]
       summary: Process a split payment via token
+      description: |
+        Reserves the split under a row lock (status → `processing`) and records a
+        provisional `pending` payment before charging, so two concurrent submissions
+        (e.g. a double-click or a retried request) can't both succeed against the
+        same split. If the split is already reserved/paid, returns `409`. Rate-limited
+        per token.
       parameters:
         - name: token
           in: path
@@ -2364,8 +4123,14 @@ paths:
                     type: string
         "400":
           description: Invalid payment or split already paid
+        "402":
+          description: Card was declined by the payment processor
         "404":
           description: Token not found
+        "409":
+          description: This split is already being processed by another request
+        "429":
+          description: Too many attempts — rate limited
 components:
   securitySchemes:
     BearerAuth:
@@ -2414,6 +4179,7 @@ components:
           type: string
           enum:
             [
+              prospect,
               new_client,
               docs_ready,
               round_1,
@@ -2446,6 +4212,11 @@ components:
           type: integer
         docs_rejected:
           type: integer
+        labels:
+          type: array
+          description: Source + analysis labels attached to the case's client
+          items:
+            $ref: "#/components/schemas/Label"
 
     AdminClientListItem:
       type: object
@@ -2465,6 +4236,7 @@ components:
           type: string
           enum:
             [
+              prospect,
               new_client,
               docs_ready,
               round_1,
@@ -2477,13 +4249,166 @@ components:
             ]
         status:
           type: string
-          enum: [pending_payment, onboarding, active, paused, cancelled]
+          enum:
+            [prospect, pending_payment, onboarding, active, paused, cancelled]
         package_name:
           type: string
           nullable: true
         created_at:
           type: string
           format: date-time
+        labels:
+          type: array
+          items:
+            $ref: "#/components/schemas/Label"
+
+    Label:
+      type: object
+      properties:
+        id: { type: integer }
+        slug: { type: string, example: web_analysis }
+        name_en: { type: string }
+        name_es: { type: string }
+        layer: { type: string, enum: [source, analysis] }
+        color: { type: string }
+        sort_order: { type: integer }
+
+    ReminderFlow:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        trigger_event:
+          type: string
+          enum:
+            [
+              payment_confirmed,
+              docs_ready,
+              round_1_complete,
+              round_2_complete,
+              round_3_complete,
+              round_4_complete,
+              round_5_complete,
+              completed,
+            ]
+        is_active: { type: boolean }
+        required_label_slugs:
+          type: array
+          nullable: true
+          items: { type: string }
+          description: |
+            Optional label gate — when set, the flow only fires for clients
+            that currently have ALL listed label slugs attached. Null/empty
+            means the flow always fires for the trigger_event.
+        step_count:
+          type: integer
+          description: Only present on the list endpoint
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Prospect:
+      type: object
+      description: A clients row with status/pipeline_stage='prospect' — no case yet (1C).
+      properties:
+        id: { type: integer }
+        first_name: { type: string }
+        last_name: { type: string }
+        email: { type: string }
+        phone: { type: string, nullable: true }
+        source_label: { type: string, nullable: true }
+        preferred_language: { type: string, enum: [en, es], nullable: true }
+        client_goal: { type: string, nullable: true }
+        notes: { type: string, nullable: true }
+        agent_phone: { type: string, nullable: true }
+        rep_name: { type: string, nullable: true }
+        credit_analysis_id: { type: integer, nullable: true }
+        labels:
+          type: array
+          items:
+            $ref: "#/components/schemas/Label"
+        created_at: { type: string, format: date-time }
+
+    CreditAnalysisResult:
+      type: object
+      properties:
+        id: { type: integer }
+        client_id: { type: integer }
+        mode: { type: string, enum: [client, agent] }
+        scores:
+          type: object
+          nullable: true
+          properties:
+            transunion: { type: integer, nullable: true }
+            experian: { type: integer, nullable: true }
+            equifax: { type: integer, nullable: true }
+        negatives:
+          type: array
+          items:
+            type: object
+            properties:
+              type: { type: string }
+              creditor: { type: string }
+              bureaus: { type: array, items: { type: string } }
+              detail: { type: string }
+        suggested_labels:
+          type: array
+          items: { type: string }
+        analysis_html: { type: string }
+        analysis_text: { type: string, nullable: true }
+        email_sent: { type: boolean }
+        generated_at: { type: string, format: date-time }
+        extraction_status:
+          type: string
+          enum: [ok, empty, parse_failed, unsupported_type]
+          description: |
+            How well we were able to read text out of the uploaded report.
+            Anything other than `ok` means scores/negatives may be incomplete
+            or absent — `analysis_html`/`analysis_text` will say so honestly
+            instead of implying no negative items were found.
+        chars_extracted:
+          type: integer
+          nullable: true
+          description: Trimmed character count of extracted text (0 for unsupported/failed files)
+        analyst:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: |
+            Flat Optimum analyst JSON (no nested objects/arrays). Includes
+            bureau labels, lending conversion (`fha_status`, `goal_score`,
+            `mortgage_*`), neg_1..5, util_1..3, timeline, dispute rounds,
+            file-strength labels, action_1..6, HTML table fragments, and
+            `client_text_message`. HTML fragments use brand navy `#121829`
+            and gold `#C0A06A`.
+
+    BulkImportPreviewRow:
+      type: object
+      properties:
+        row_number:
+          type: integer
+        status:
+          type: string
+          enum: [will_create, skipped, error]
+        message:
+          type: string
+        external_ref:
+          type: string
+          nullable: true
+        display_name:
+          type: string
+        email:
+          type: string
+          nullable: true
+        phone:
+          type: string
+          nullable: true
+        badge:
+          type: string
+          nullable: true
+        conflict_entity_id:
+          type: integer
+          nullable: true
 
     ClientDocument:
       type: object
@@ -2684,3 +4609,8 @@ components:
         notes:
           type: string
           nullable: true
+        mark_as_paid:
+          type: boolean
+          description: >
+            When true, creates the split already marked paid (manual).
+            Skips payment link generation and reminder scheduling.

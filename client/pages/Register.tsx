@@ -45,6 +45,7 @@ import {
   formatPackageDollars,
   isMonthlyPackage,
 } from "@/lib/packageDisplay";
+import { captureAffiliateRef, getAffiliateRef } from "@/lib/affiliateAttribution";
 import type { RegistrationResponse } from "@shared/api";
 
 const AUTHORIZENET_API_LOGIN_ID = (import.meta as any).env
@@ -101,6 +102,11 @@ export default function Register() {
       dispatch(clearCoupon());
     };
   }, [dispatch]);
+
+  useEffect(() => {
+    const ref = new URLSearchParams(location.search).get("ref");
+    if (ref) captureAffiliateRef(ref);
+  }, [location.search]);
 
   useEffect(() => {
     if (!packages.length) return;
@@ -199,6 +205,39 @@ export default function Register() {
     }
     setConsentError(null);
 
+    const couponCode =
+      couponValidation?.valid && couponInput.trim()
+        ? couponInput.trim().toUpperCase()
+        : undefined;
+
+    // $0 after 100% coupon — skip Accept.js / Authorize.net (processor rejects $0)
+    if (finalPriceCents <= 0) {
+      setPaying(true);
+      setPayError(null);
+      const result = await dispatch(
+        submitRegistration({
+          ...form.values,
+          packageSlug: selectedSlug,
+          tradelineProductIds:
+            selectedSlug === "tradeline" ? selectedTradelineIds : undefined,
+          coupon_code: couponCode,
+          affiliateCode: getAffiliateRef() || undefined,
+        }),
+      );
+      if (!submitRegistration.fulfilled.match(result)) {
+        setPayError(
+          (result.payload as string) || "Registration failed. Please try again.",
+        );
+        setPaying(false);
+        return;
+      }
+      setPaidEmail(form.values.email);
+      setDirection("forward");
+      setStep(3);
+      setPaying(false);
+      return;
+    }
+
     // Validate card fields
     const rawCardCheck = cardNumber.replace(/\s/g, "");
     const partsCheck = expiry.split("/");
@@ -256,10 +295,8 @@ export default function Register() {
               selectedSlug === "tradeline" ? selectedTradelineIds : undefined,
             dataDescriptor: response.opaqueData!.dataDescriptor,
             dataValue: response.opaqueData!.dataValue,
-            coupon_code:
-              couponValidation?.valid && couponInput.trim()
-                ? couponInput.trim().toUpperCase()
-                : undefined,
+            coupon_code: couponCode,
+            affiliateCode: getAffiliateRef() || undefined,
           }),
         );
 
@@ -274,6 +311,7 @@ export default function Register() {
         setPaidEmail(form.values.email);
         setDirection("forward");
         setStep(3);
+        setPaying(false);
       },
     );
   };
@@ -299,6 +337,7 @@ export default function Register() {
     ? couponValidation.discount_cents
     : 0;
   const finalPriceCents = Math.max(0, basePriceCents - appliedDiscount);
+  const isFreeCheckout = finalPriceCents <= 0 && !!couponValidation?.valid;
 
   const infoReady =
     !!form.values.firstName.trim() &&
@@ -317,10 +356,9 @@ export default function Register() {
 
   const canSubmitPayment =
     infoReady &&
-    cardReady &&
+    (isFreeCheckout || (cardReady && scriptLoaded)) &&
     agreedTerms &&
     agreedSms &&
-    scriptLoaded &&
     !isBusy &&
     finalPriceCents >= 0 &&
     (!isTradelineCheckout || selectedTradelineIds.length > 0);
@@ -560,6 +598,17 @@ export default function Register() {
                 </div>
 
                 <div className="space-y-3">
+                  {isFreeCheckout ? (
+                    <div className="rounded-xl border border-accent/30 bg-accent/5 p-4 text-sm text-foreground">
+                      <p className="font-semibold text-accent mb-1">
+                        {t("register.freeCheckoutTitle")}
+                      </p>
+                      <p className="text-muted-foreground">
+                        {t("register.freeCheckoutHint")}
+                      </p>
+                    </div>
+                  ) : (
+                    <>
                   <div>
                     <label className="block text-sm font-medium mb-1.5">
                       Cardholder name
@@ -637,6 +686,8 @@ export default function Register() {
                       />
                     </div>
                   </div>
+                    </>
+                  )}
                 </div>
 
                 {/* ── Coupon code ── */}
@@ -785,7 +836,12 @@ export default function Register() {
                     {isBusy ? (
                       <>
                         <Loader2 className="w-4 h-4 animate-spin" />
-                        Processing…
+                        {t("register.processing")}
+                      </>
+                    ) : isFreeCheckout ? (
+                      <>
+                        {t("register.completeFree")}
+                        <ArrowRight className="w-4 h-4" />
                       </>
                     ) : (
                       <>
@@ -796,7 +852,9 @@ export default function Register() {
                   </button>
                   {!canSubmitPayment && !isBusy && (
                     <p className="text-[11px] text-muted-foreground text-center sm:text-right max-w-xs">
-                      {t("register.payIncompleteHint")}
+                      {isFreeCheckout
+                        ? t("register.payIncompleteHintFree")
+                        : t("register.payIncompleteHint")}
                     </p>
                   )}
                 </div>

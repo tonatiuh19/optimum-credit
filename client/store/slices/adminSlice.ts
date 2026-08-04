@@ -1,11 +1,12 @@
 import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
-import api from "@/lib/api";
+import api, { formatAxiosError } from "@/lib/api";
 import type {
   AdminClientListItem,
   AdminDashboardStats,
   AdminDashboardTicket,
   AdminDashboardPayment,
   AdminPaymentsResponse,
+  AdminPipelineResponse,
   AdminSubscriptionsResponse,
   AdminUserListItem,
   CommunicationTemplate,
@@ -18,6 +19,7 @@ import type {
   EducationalVideo,
   Payment,
   PipelineStage,
+  Prospect,
   SupportFaq,
   SupportTicket,
   SectionLock,
@@ -41,6 +43,7 @@ interface AdminState {
   clients: AdminClientListItem[];
   pipelineClients: AdminClientListItem[];
   pipelineCases: CreditRepairCase[];
+  pipelineProspects: Prospect[];
   selectedClient: any | null;
   panelClient: {
     case_info?: {
@@ -126,6 +129,7 @@ const initialState: AdminState = {
   clients: [],
   pipelineClients: [],
   pipelineCases: [],
+  pipelineProspects: [],
   selectedClient: null,
   panelClient: null,
   panelLoading: false,
@@ -191,6 +195,7 @@ export const fetchAdminClients = createAsyncThunk<
       joined_from?: string;
       joined_to?: string;
       has_notes?: string;
+      labels?: string[];
     }
   | undefined
 >("admin/clients", async (args) => {
@@ -203,6 +208,8 @@ export const fetchAdminClients = createAsyncThunk<
   if (args?.joined_from) params.joined_from = args.joined_from;
   if (args?.joined_to) params.joined_to = args.joined_to;
   if (args?.has_notes) params.has_notes = args.has_notes;
+  if (args?.labels && args.labels.length > 0)
+    params.labels = args.labels.join(",");
   const { data } = await api.get("/admin/clients", { params });
   return data.clients;
 });
@@ -225,10 +232,13 @@ export const fetchAdminClient = createAsyncThunk<any, { id: number }>(
   },
 );
 
-export const fetchPipeline = createAsyncThunk("admin/pipeline", async () => {
-  const { data } = await api.get("/admin/pipeline");
-  return data.cases as CreditRepairCase[];
-});
+export const fetchPipeline = createAsyncThunk(
+  "admin/pipeline",
+  async () => {
+    const { data } = await api.get("/admin/pipeline");
+    return data as AdminPipelineResponse;
+  },
+);
 
 export const updateClientStage = createAsyncThunk<
   void,
@@ -517,9 +527,31 @@ export const createAdminTeamMember = createAsyncThunk<
     last_name: string;
     phone?: string;
     role: string;
+  },
+  { rejectValue: string }
+>("admin/team/create", async (args, { rejectWithValue }) => {
+  try {
+    await api.post("/admin/admins", args);
+  } catch (err: unknown) {
+    return rejectWithValue(
+      formatAxiosError(err, "Failed to add team member"),
+    );
   }
->("admin/team/create", async (args) => {
-  await api.post("/admin/admins", args);
+});
+
+export const resendAdminWelcomeEmail = createAsyncThunk<
+  { emailed: string },
+  { id: number },
+  { rejectValue: string }
+>("admin/team/resendWelcome", async ({ id }, { rejectWithValue }) => {
+  try {
+    const { data } = await api.post(`/admin/admins/${id}/resend-welcome`);
+    return { emailed: data.emailed as string };
+  } catch (err: unknown) {
+    return rejectWithValue(
+      formatAxiosError(err, "Failed to resend welcome email"),
+    );
+  }
 });
 
 export const updateAdminTeamMember = createAsyncThunk<
@@ -552,10 +584,15 @@ export const createAdminClient = createAsyncThunk<
     phone?: string;
     package_id?: number | null;
     status?: string;
+  },
+  { rejectValue: string }
+>("admin/clients/create", async (args, { rejectWithValue }) => {
+  try {
+    const { data } = await api.post("/admin/clients", args);
+    return data.client as AdminClientListItem;
+  } catch (err: unknown) {
+    return rejectWithValue(formatAxiosError(err, "Failed to create client"));
   }
->("admin/clients/create", async (args) => {
-  const { data } = await api.post("/admin/clients", args);
-  return data.client as AdminClientListItem;
 });
 
 export const updateAdminClient = createAsyncThunk<
@@ -568,10 +605,15 @@ export const updateAdminClient = createAsyncThunk<
     phone?: string;
     package_id?: number | null;
     status?: string;
+  },
+  { rejectValue: string }
+>("admin/clients/update", async ({ id, ...rest }, { rejectWithValue }) => {
+  try {
+    const { data } = await api.put(`/admin/clients/${id}`, rest);
+    return data.client as AdminClientListItem;
+  } catch (err: unknown) {
+    return rejectWithValue(formatAxiosError(err, "Failed to update client"));
   }
->("admin/clients/update", async ({ id, ...rest }) => {
-  const { data } = await api.put(`/admin/clients/${id}`, rest);
-  return data.client as AdminClientListItem;
 });
 
 export const deleteAdminClient = createAsyncThunk<void, { id: number }>(
@@ -859,7 +901,8 @@ const slice = createSlice({
     });
     b.addCase(fetchPipeline.fulfilled, (s, a) => {
       s.loading = false;
-      s.pipelineCases = a.payload;
+      s.pipelineCases = a.payload.cases ?? [];
+      s.pipelineProspects = a.payload.prospects ?? [];
     });
     b.addCase(fetchPendingDocuments.fulfilled, (s, a) => {
       s.pendingDocuments = a.payload;
@@ -1046,15 +1089,38 @@ const slice = createSlice({
     b.addCase(updateCaseSplit.fulfilled, (s, a) => {
       const idx = s.caseSplits.findIndex((sp) => sp.id === a.payload.id);
       if (idx !== -1) s.caseSplits[idx] = a.payload;
+      const idx2 = s.paymentSplits.findIndex((sp) => sp.id === a.payload.id);
+      if (idx2 !== -1) s.paymentSplits[idx2] = a.payload as any;
+      const idx3 = s.calendarSplits.findIndex((sp) => sp.id === a.payload.id);
+      if (idx3 !== -1) {
+        s.calendarSplits[idx3] = {
+          ...s.calendarSplits[idx3],
+          label: a.payload.label,
+          amount_cents: a.payload.amount_cents,
+          due_date: a.payload.due_date,
+          status: a.payload.status,
+          completion_source: a.payload.completion_source,
+        };
+      }
     });
     b.addCase(markSplitPaid.fulfilled, (s, a) => {
       const idx = s.caseSplits.findIndex((sp) => sp.id === a.payload.id);
       if (idx !== -1) s.caseSplits[idx] = a.payload;
       const idx2 = s.paymentSplits.findIndex((sp) => sp.id === a.payload.id);
       if (idx2 !== -1) s.paymentSplits[idx2] = a.payload;
+      const idx3 = s.calendarSplits.findIndex((sp) => sp.id === a.payload.id);
+      if (idx3 !== -1) {
+        s.calendarSplits[idx3] = {
+          ...s.calendarSplits[idx3],
+          status: a.payload.status,
+          completion_source: a.payload.completion_source,
+        };
+      }
     });
     b.addCase(deleteCaseSplit.fulfilled, (s, a) => {
       s.caseSplits = s.caseSplits.filter((sp) => sp.id !== a.payload);
+      s.paymentSplits = s.paymentSplits.filter((sp) => sp.id !== a.payload);
+      s.calendarSplits = s.calendarSplits.filter((sp) => sp.id !== a.payload);
     });
     b.addCase(fetchAdminPaymentSplits.pending, (s) => {
       s.paymentSplitsLoading = true;

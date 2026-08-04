@@ -17,6 +17,9 @@ import Index from "./pages/Index";
 import NotFound from "./pages/NotFound";
 import Register from "./pages/Register";
 import PaySplit from "./pages/PaySplit";
+import CreditAnalysis from "./pages/CreditAnalysis";
+import Pricing from "./pages/Pricing";
+import AffiliateRedirect from "./pages/public/AffiliateRedirect";
 
 import ClientLogin from "./pages/auth/ClientLogin";
 import AdminLogin from "./pages/auth/AdminLogin";
@@ -31,6 +34,7 @@ import Support from "./pages/client/Support";
 import Profile from "./pages/client/Profile";
 import ClientPayments from "./pages/client/Payments";
 import Videos from "./pages/client/Videos";
+import InfoRequests from "./pages/client/InfoRequests";
 
 import AdminDashboard from "./pages/admin/Dashboard";
 import AdminClients from "./pages/admin/Clients";
@@ -48,14 +52,20 @@ import AdminReminderFlows from "./pages/admin/ReminderFlows";
 import AdminPayments from "./pages/admin/Payments";
 import AdminCalendar from "./pages/admin/Calendar";
 import AdminTasks from "./pages/admin/Tasks";
+import AdminMyTasks from "./pages/admin/MyTasks";
 import AdminTradelines from "./pages/admin/Tradelines";
 import AdminSubscriptions from "./pages/admin/Subscriptions";
+import AdminAffiliates from "./pages/admin/Affiliates";
+import AdminAffiliatePortal from "./pages/admin/AffiliatePortal";
 import {
   RequireAdmin,
+  RequireStaff,
   RequireClient,
   NoAuthAdmin,
   NoAuthClient,
   RequireSuperAdmin,
+  RequireAffiliateManager,
+  RequireAffiliatePortal,
 } from "./components/guards";
 import AppThemeManager from "./components/AppThemeManager";
 
@@ -79,6 +89,23 @@ function AppShell() {
         <Route path="/register" element={<Register />} />
         {/* Public payment page — no auth */}
         <Route path="/pay/:token" element={<PaySplit />} />
+
+        {/* Free credit analysis — public, no auth */}
+        <Route
+          path="/credit-analysis"
+          element={wrap(Layout, CreditAnalysis)}
+        />
+        {/* Legacy typo redirect */}
+        <Route
+          path="/creditanalisys"
+          element={<Navigate to="/credit-analysis" replace />}
+        />
+
+        {/* Standalone pricing page — default landing for affiliate links */}
+        <Route path="/pricing" element={wrap(Layout, Pricing)} />
+
+        {/* Affiliate short referral link — /r/:slug — public, no layout */}
+        <Route path="/r/:slug" element={<AffiliateRedirect />} />
 
         {/* Legal (DB-backed markdown) */}
         <Route path="/legal/:slug" element={<LegalDocumentPage />} />
@@ -115,6 +142,12 @@ function AppShell() {
           path="/portal/documents"
           element={
             <RequireClient>{wrap(ClientLayout, Documents)}</RequireClient>
+          }
+        />
+        <Route
+          path="/portal/requests"
+          element={
+            <RequireClient>{wrap(ClientLayout, InfoRequests)}</RequireClient>
           }
         />
         <Route
@@ -174,31 +207,31 @@ function AppShell() {
         <Route
           path="/admin/documents"
           element={
-            <RequireAdmin>{wrap(AdminLayout, AdminDocuments)}</RequireAdmin>
+            <RequireStaff>{wrap(AdminLayout, AdminDocuments)}</RequireStaff>
           }
         />
         <Route
           path="/admin/conversations"
           element={
-            <RequireAdmin>{wrap(AdminLayout, AdminConversations)}</RequireAdmin>
+            <RequireStaff>{wrap(AdminLayout, AdminConversations)}</RequireStaff>
           }
         />
         <Route
           path="/admin/tickets"
           element={
-            <RequireAdmin>{wrap(AdminLayout, AdminTickets)}</RequireAdmin>
+            <RequireStaff>{wrap(AdminLayout, AdminTickets)}</RequireStaff>
           }
         />
         <Route
           path="/admin/templates"
           element={
-            <RequireAdmin>{wrap(AdminLayout, AdminTemplates)}</RequireAdmin>
+            <RequireStaff>{wrap(AdminLayout, AdminTemplates)}</RequireStaff>
           }
         />
         <Route
           path="/admin/videos"
           element={
-            <RequireAdmin>{wrap(AdminLayout, AdminVideos)}</RequireAdmin>
+            <RequireStaff>{wrap(AdminLayout, AdminVideos)}</RequireStaff>
           }
         />
         <Route
@@ -228,38 +261,60 @@ function AppShell() {
         <Route
           path="/admin/reminder-flows"
           element={
-            <RequireAdmin>{wrap(AdminLayout, AdminReminderFlows)}</RequireAdmin>
+            <RequireStaff>{wrap(AdminLayout, AdminReminderFlows)}</RequireStaff>
           }
         />
         <Route
           path="/admin/payments"
           element={
-            <RequireAdmin>{wrap(AdminLayout, AdminPayments)}</RequireAdmin>
+            <RequireStaff>{wrap(AdminLayout, AdminPayments)}</RequireStaff>
           }
         />
         <Route
           path="/admin/tradelines"
           element={
-            <RequireAdmin>{wrap(AdminLayout, AdminTradelines)}</RequireAdmin>
+            <RequireStaff>{wrap(AdminLayout, AdminTradelines)}</RequireStaff>
           }
         />
         <Route
           path="/admin/subscriptions"
           element={
-            <RequireAdmin>
+            <RequireStaff>
               {wrap(AdminLayout, AdminSubscriptions)}
-            </RequireAdmin>
+            </RequireStaff>
           }
         />
         <Route
           path="/admin/calendar"
           element={
-            <RequireAdmin>{wrap(AdminLayout, AdminCalendar)}</RequireAdmin>
+            <RequireStaff>{wrap(AdminLayout, AdminCalendar)}</RequireStaff>
           }
         />
         <Route
           path="/admin/tasks"
-          element={<RequireAdmin>{wrap(AdminLayout, AdminTasks)}</RequireAdmin>}
+          element={<RequireStaff>{wrap(AdminLayout, AdminTasks)}</RequireStaff>}
+        />
+        <Route
+          path="/admin/my-tasks"
+          element={
+            <RequireStaff>{wrap(AdminLayout, AdminMyTasks)}</RequireStaff>
+          }
+        />
+        <Route
+          path="/admin/affiliates"
+          element={
+            <RequireAffiliateManager>
+              {wrap(AdminLayout, AdminAffiliates)}
+            </RequireAffiliateManager>
+          }
+        />
+        <Route
+          path="/admin/affiliate"
+          element={
+            <RequireAffiliatePortal>
+              {wrap(AdminLayout, AdminAffiliatePortal)}
+            </RequireAffiliatePortal>
+          }
         />
 
         {/* Portal - Tasks (redirected to Documents) */}

@@ -9,21 +9,27 @@ import {
   Crown,
   Search,
   ChevronDown,
+  Mail,
 } from "lucide-react";
 import { useDebounce } from "@/hooks/use-debounce";
 import { useFormik } from "formik";
 import * as Yup from "yup";
+import { useTranslation } from "react-i18next";
 import AdminPageHeader from "@/components/AdminPageHeader";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { DataGridColumn } from "@/components/ui/data-grid";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import FieldHint from "@/components/admin/FieldHint";
+import EnumLegend from "@/components/admin/EnumLegend";
+import { useToast } from "@/hooks/use-toast";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
   fetchAdminTeam,
   createAdminTeamMember,
   updateAdminTeamMember,
   deleteAdminTeamMember,
+  resendAdminWelcomeEmail,
 } from "@/store/slices/adminSlice";
 import type { AdminUserListItem } from "@shared/api";
 
@@ -109,6 +115,7 @@ function MemberDialog({
   initial?: Partial<MemberForm>;
   isEdit?: boolean;
 }) {
+  const { t } = useTranslation();
   const form = useFormik<MemberForm>({
     enableReinitialize: true,
     initialValues: {
@@ -177,6 +184,9 @@ function MemberDialog({
             {form.touched.email && form.errors.email && (
               <p className={errClass}>{form.errors.email}</p>
             )}
+            {isEdit && (
+              <FieldHint>{t("adminHelpers.emailLockedHint")}</FieldHint>
+            )}
           </div>
           <div>
             <label className="text-xs font-medium text-muted-foreground mb-1 block">
@@ -208,6 +218,26 @@ function MemberDialog({
                 <option value="inactive">Inactive</option>
                 <option value="suspended">Suspended</option>
               </select>
+              <EnumLegend
+                value={form.values.status}
+                items={[
+                  {
+                    value: "active",
+                    label: "Active",
+                    description: t("adminHelpers.teamStatus.active"),
+                  },
+                  {
+                    value: "inactive",
+                    label: "Inactive",
+                    description: t("adminHelpers.teamStatus.inactive"),
+                  },
+                  {
+                    value: "suspended",
+                    label: "Suspended",
+                    description: t("adminHelpers.teamStatus.suspended"),
+                  },
+                ]}
+              />
             </div>
           </div>
 
@@ -272,6 +302,11 @@ function MemberDialog({
               </div>
             ))}
           </div>
+          {!isEdit && (
+            <FieldHint tone="accent">
+              {t("adminHelpers.teamWelcomeEmail")}
+            </FieldHint>
+          )}
           <div className="flex gap-2 pt-1 justify-end">
             <Button type="button" variant="outline" onClick={onClose}>
               Cancel
@@ -334,6 +369,7 @@ function DeleteDialog({
 
 export default function AdminPeople() {
   const dispatch = useAppDispatch();
+  const { toast } = useToast();
   const { team, loading } = useAppSelector((s) => s.admin);
   const me = useAppSelector((s) => s.adminAuth.user);
   const isSuperAdmin = me?.role === "super_admin";
@@ -349,6 +385,7 @@ export default function AdminPeople() {
   const [deleteTarget, setDeleteTarget] = useState<AdminUserListItem | null>(
     null,
   );
+  const [resendingId, setResendingId] = useState<number | null>(null);
 
   const teamParams = {
     search: debouncedSearch || undefined,
@@ -456,6 +493,17 @@ export default function AdminPeople() {
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
+                    void handleResendWelcome(m);
+                  }}
+                  disabled={resendingId === m.id}
+                  className="h-8 w-8 rounded-lg flex items-center justify-center text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors disabled:opacity-50"
+                  title="Resend welcome email"
+                >
+                  <Mail className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
                     setEditTarget(m);
                   }}
                   className="h-8 w-8 rounded-lg flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
@@ -483,8 +531,39 @@ export default function AdminPeople() {
   ];
 
   const handleCreate = async (vals: MemberForm) => {
-    await dispatch(createAdminTeamMember(vals));
-    dispatch(fetchAdminTeam(teamParams));
+    const res = await dispatch(createAdminTeamMember(vals));
+    if (createAdminTeamMember.fulfilled.match(res)) {
+      toast({
+        title: "Team member added",
+        description: `Welcome email sent to ${vals.email}`,
+      });
+      dispatch(fetchAdminTeam(teamParams));
+      return;
+    }
+    toast({
+      title: "Could not add member",
+      description: String(res.payload || "Please try again"),
+      variant: "destructive",
+    });
+    throw new Error(String(res.payload || "create failed"));
+  };
+
+  const handleResendWelcome = async (m: AdminUserListItem) => {
+    setResendingId(m.id);
+    const res = await dispatch(resendAdminWelcomeEmail({ id: m.id }));
+    setResendingId(null);
+    if (resendAdminWelcomeEmail.fulfilled.match(res)) {
+      toast({
+        title: "Welcome email sent",
+        description: `Sent to ${res.payload.emailed}`,
+      });
+    } else {
+      toast({
+        title: "Email failed",
+        description: String(res.payload || "Please try again"),
+        variant: "destructive",
+      });
+    }
   };
 
   const handleUpdate = async (vals: MemberForm) => {

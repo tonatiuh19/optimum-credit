@@ -26,6 +26,17 @@ import {
   updateTicketStatus,
 } from "@/store/slices/adminSlice";
 import type { SupportFaq } from "@shared/api";
+import { useTranslation } from "react-i18next";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 // ── Category label map ──────────────────────────────────────────────────────
 const CAT_LABELS: Record<string, string> = {
@@ -188,6 +199,8 @@ function FaqPanel() {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
+  const [deleteFaqId, setDeleteFaqId] = useState<number | null>(null);
+  const { t } = useTranslation();
 
   useEffect(() => {
     dispatch(fetchAdminFaqs());
@@ -212,13 +225,38 @@ function FaqPanel() {
   };
 
   const handleDelete = async (id: number) => {
-    if (!window.confirm("Delete this FAQ? Clients will no longer see it."))
-      return;
+    setDeleteFaqId(null);
     await dispatch(deleteAdminFaq(id));
   };
 
   return (
     <div className="space-y-4">
+      <AlertDialog
+        open={deleteFaqId != null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteFaqId(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("adminTickets.deleteFaqTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("adminTickets.deleteFaqDesc")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t("adminTickets.cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => {
+                if (deleteFaqId != null) void handleDelete(deleteFaqId);
+              }}
+            >
+              {t("adminTickets.delete")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-base font-semibold">FAQ Management</h2>
@@ -331,7 +369,7 @@ function FaqPanel() {
                           <Pencil className="w-3.5 h-3.5" /> Edit
                         </button>
                         <button
-                          onClick={() => handleDelete(faq.id)}
+                          onClick={() => setDeleteFaqId(faq.id)}
                           className="inline-flex items-center gap-1.5 text-xs px-3 h-8 rounded-lg border border-destructive/30 text-destructive hover:bg-destructive/5 transition-colors"
                         >
                           <Trash2 className="w-3.5 h-3.5" /> Delete

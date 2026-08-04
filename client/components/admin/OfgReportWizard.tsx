@@ -38,6 +38,7 @@ import {
   wizardStepForStatus,
 } from "@/store/slices/reportWizardSlice";
 import type { OfGReportData } from "@shared/api";
+import FieldHint from "@/components/admin/FieldHint";
 
 interface Props {
   open: boolean;
@@ -419,6 +420,11 @@ export default function OfGReportWizard({
                   </option>
                 ))}
               </select>
+              {roundNumber !== suggestedRound && (
+                <FieldHint tone="warning">
+                  {t("adminHelpers.roundOverrideWarn")}
+                </FieldHint>
+              )}
             </div>
             <div className="grid sm:grid-cols-2 gap-4">
               <PdfDrop
@@ -683,6 +689,7 @@ export default function OfGReportWizard({
                   value={reviewData.wins.map((w) => w.itemRemoved).join("\n")}
                   onChange={(e) => updateWinsText(e.target.value)}
                 />
+                <FieldHint>{t("adminHelpers.winsTargetsHint")}</FieldHint>
               </div>
               <div>
                 <Label className="text-xs">{t("reportWizard.targetsLabel")}</Label>
@@ -692,6 +699,7 @@ export default function OfGReportWizard({
                   value={reviewData.targets.map((item) => item.item).join("\n")}
                   onChange={(e) => updateTargetsText(e.target.value)}
                 />
+                <FieldHint>{t("adminHelpers.winsTargetsHint")}</FieldHint>
               </div>
             </div>
             {scoreAnomalyWarnings.length > 0 && (
@@ -763,6 +771,7 @@ export default function OfGReportWizard({
                 </span>
               </label>
             )}
+            <FieldHint>{t("adminHelpers.publishReportHint")}</FieldHint>
             <div className="flex justify-between">
               <Button variant="outline" onClick={() => setStep(3)}>
                 <ChevronLeft className="w-4 h-4 mr-1" />

@@ -1,0 +1,27 @@
+---
+description: Frontend styling, i18n, forms, and UI conventions
+globs: client/**/*.{ts,tsx,css}
+alwaysApply: false
+---
+
+# Frontend Conventions
+
+## Paths
+- `@/*` → `client/`, `@shared/*` → `shared/` — prefer aliases over deep relatives
+
+## Styling
+- Tailwind 3 + tokens from `client/global.css` / `tailwind.config.ts`
+- **Never** arbitrary colors (`text-emerald-500`, `bg-amber-400`, etc.)
+- Use semantic tokens: `primary`, `accent`, `destructive`, `muted`, `secondary`, `foreground`, `background`, `border`, `card`, `input`, `ring`
+- Exception: dark sidebar `bg-[#0b0f1a]` is intentional
+- Prefer existing `client/components/ui/` (Radix + Tailwind); Lucide icons first, `react-icons` if needed
+- Mobile-responsive; keep UX clean and engaging
+
+## i18n
+- New UI strings → EN + ES locale files + `t('key')` via `useTranslation()`
+
+## Forms
+- Formik + Yup; reusable schemas; submit via Redux thunks
+
+## Logging
+- UI: `client/utils/logger.ts` only (not raw `console.*`)

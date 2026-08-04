@@ -1,5 +1,5 @@
 import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
-import api from "@/lib/api";
+import api, { formatAxiosError } from "@/lib/api";
 import type {
   CouponValidateResponse,
   CreditPackage,
@@ -58,8 +58,8 @@ export const submitRegistration = createAsyncThunk<
       payload,
     );
     return data;
-  } catch (e: any) {
-    return rejectWithValue(e?.response?.data?.error || "Registration failed");
+  } catch (e: unknown) {
+    return rejectWithValue(formatAxiosError(e, "Registration failed"));
   }
 });
 
@@ -81,9 +81,9 @@ export const validateCoupon = createAsyncThunk<
       payload,
     );
     return data;
-  } catch (e: any) {
+  } catch (e: unknown) {
     return rejectWithValue(
-      e?.response?.data?.error || "Could not validate coupon",
+      formatAxiosError(e, "Could not validate coupon"),
     );
   }
 });

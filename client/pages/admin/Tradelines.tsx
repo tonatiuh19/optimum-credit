@@ -1,6 +1,17 @@
 import { useEffect, useState } from "react";
 import { Pencil, Plus, Trash2, CreditCard } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import AdminPageHeader from "@/components/AdminPageHeader";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
   createTradelineProduct,
@@ -22,6 +33,7 @@ const emptyForm: TradelineProductInput = {
 };
 
 export default function AdminTradelines() {
+  const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const { tradelineProducts, tradelineProductsSaving } = useAppSelector(
     (s) => s.admin,
@@ -29,6 +41,7 @@ export default function AdminTradelines() {
   const [editing, setEditing] = useState<TradelineProduct | null>(null);
   const [form, setForm] = useState<TradelineProductInput>(emptyForm);
   const [showForm, setShowForm] = useState(false);
+  const [deleteId, setDeleteId] = useState<number | null>(null);
 
   useEffect(() => {
     dispatch(fetchAdminTradelineProducts());
@@ -66,13 +79,41 @@ export default function AdminTradelines() {
   };
 
   const remove = async (id: number) => {
-    if (!confirm("Delete this tradeline product?")) return;
+    setDeleteId(null);
     await dispatch(deleteTradelineProduct(id));
     dispatch(fetchAdminTradelineProducts());
   };
 
   return (
     <div className="space-y-6">
+      <AlertDialog
+        open={deleteId != null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteId(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {t("adminConfirm.deleteTradelineTitle")}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("adminConfirm.deleteTradelineDesc")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t("adminConfirm.cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => {
+                if (deleteId != null) void remove(deleteId);
+              }}
+            >
+              {t("adminConfirm.delete")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       <AdminPageHeader
         icon={CreditCard}
         title="Tradeline catalog"
@@ -240,7 +281,7 @@ export default function AdminTradelines() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => remove(p.id)}
+                    onClick={() => setDeleteId(p.id)}
                     className="p-2 hover:bg-destructive/10 text-destructive rounded-lg"
                   >
                     <Trash2 className="w-4 h-4" />

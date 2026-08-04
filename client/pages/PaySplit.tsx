@@ -13,8 +13,14 @@ import {
   CalendarDays,
   Building,
 } from "lucide-react";
-import axios from "axios";
 import LegalLinks from "@/components/LegalLinks";
+import { useAppDispatch, useAppSelector } from "@/store/hooks";
+import {
+  fetchPaySplit,
+  chargePaySplit,
+  resetPaySplit,
+  clearChargeError,
+} from "@/store/slices/paySplitSlice";
 
 const AUTHORIZENET_API_LOGIN_ID = import.meta.env
   .VITE_AUTHORIZENET_API_LOGIN_ID;
@@ -88,21 +94,21 @@ interface SplitInfo {
   notes: string | null;
 }
 
-interface PaymentInfo {
-  split: SplitInfo;
-  client_first_name: string;
-  client_last_name: string;
-  has_stored_card: boolean;
-  preferred_language: string;
-}
-
 export default function PaySplit() {
   const { token } = useParams<{ token: string }>();
   const navigate = useNavigate();
+  const dispatch = useAppDispatch();
   const acceptLoaded = useAcceptJs();
 
-  const [info, setInfo] = useState<PaymentInfo | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const {
+    info,
+    loading,
+    charging,
+    loadError,
+    chargeError,
+    success,
+  } = useAppSelector((s) => s.paySplit);
+
   const [method, setMethod] = useState<"stored" | "new">("stored");
 
   // Card form state
@@ -110,70 +116,62 @@ export default function PaySplit() {
   const [expiry, setExpiry] = useState("");
   const [cvv, setCvv] = useState("");
   const [cardName, setCardName] = useState("");
+  const [localError, setLocalError] = useState<string | null>(null);
 
-  const [paying, setPaying] = useState(false);
-  const [payError, setPayError] = useState<string | null>(null);
-  const [success, setSuccess] = useState(false);
+  const paying = charging;
+  const payError = localError || chargeError;
 
   // Load payment info
   useEffect(() => {
     if (!token) return;
-    axios
-      .get(`/api/pay/${token}`)
-      .then((r) => {
-        setInfo(r.data);
-        setMethod(r.data.has_stored_card ? "stored" : "new");
-      })
-      .catch((err) => {
-        const msg =
-          err.response?.data?.error || "Payment link not found or expired.";
-        setLoadError(msg);
-      });
-  }, [token]);
+    dispatch(resetPaySplit());
+    dispatch(fetchPaySplit(token));
+    return () => {
+      dispatch(resetPaySplit());
+    };
+  }, [token, dispatch]);
+
+  useEffect(() => {
+    if (!info) return;
+    setMethod(info.has_stored_card ? "stored" : "new");
+  }, [info]);
 
   const payWithStoredCard = useCallback(async () => {
     if (!token) return;
-    setPaying(true);
-    setPayError(null);
-    try {
-      await axios.post(`/api/pay/${token}`, { method: "stored_profile" });
-      setSuccess(true);
-    } catch (err: any) {
-      setPayError(
-        err.response?.data?.error || "Payment failed. Please try again.",
-      );
-    } finally {
-      setPaying(false);
-    }
-  }, [token]);
+    setLocalError(null);
+    dispatch(clearChargeError());
+    await dispatch(
+      chargePaySplit({ token, method: "stored_profile" }),
+    );
+  }, [token, dispatch]);
 
   const payWithNewCard = useCallback(() => {
     if (!token) return;
     if (!acceptLoaded || !window.Accept) {
-      setPayError("Payment library not loaded. Please refresh the page.");
+      setLocalError("Payment library not loaded. Please refresh the page.");
       return;
     }
 
     // Basic validation
     const cleanCard = cardNumber.replace(/\s/g, "");
     if (cleanCard.length < 13 || cleanCard.length > 19) {
-      setPayError("Please enter a valid card number.");
+      setLocalError("Please enter a valid card number.");
       return;
     }
     const parts = expiry.split("/");
     const month = (parts[0] || "").trim();
     const year2d = (parts[1] || "").trim();
     if (!month || !year2d) {
-      setPayError("Please enter a valid expiry date (MM/YY).");
+      setLocalError("Please enter a valid expiry date (MM/YY).");
       return;
     }
     if (cvv.length < 3) {
-      setPayError("Please enter a valid CVV.");
+      setLocalError("Please enter a valid CVV.");
       return;
     }
 
-    setPaying(true);
-    setPayError(null);
+    setLocalError(null);
+    dispatch(clearChargeError());
     const year = year2d.length === 2 ? `20${year2d}` : year2d;
 
     window.Accept.dispatchData(
@@ -192,29 +190,22 @@ export default function PaySplit() {
       },
       async (response: any) => {
         if (response.messages.resultCode !== "Ok") {
-          setPayError(
+          setLocalError(
             response.messages.message[0]?.text || "Card tokenization failed.",
           );
-          setPaying(false);
           return;
         }
-        try {
-          await axios.post(`/api/pay/${token}`, {
+        await dispatch(
+          chargePaySplit({
+            token,
             method: "new_card",
             data_descriptor: response.opaqueData.dataDescriptor,
             data_value: response.opaqueData.dataValue,
-          });
-          setSuccess(true);
-        } catch (err: any) {
-          setPayError(
-            err.response?.data?.error || "Payment failed. Please try again.",
-          );
-        } finally {
-          setPaying(false);
-        }
+          }),
+        );
       },
     );
-  }, [token, acceptLoaded, cardNumber, expiry, cvv, cardName]);
+  }, [token, acceptLoaded, cardNumber, expiry, cvv, cardName, dispatch]);
 
   const inputCls = (err?: boolean) =>
     `w-full h-12 px-4 rounded-xl border bg-background text-foreground placeholder:text-muted-foreground/60 text-[15px] focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary hover:border-primary/40 transition-all ${
@@ -278,7 +269,7 @@ export default function PaySplit() {
   }
 
   // ── Loading ────────────────────────────────────────────────────────────────
-  if (!info) {
+  if (loading || !info) {
     return (
       <div className="min-h-[100dvh] bg-background w-full max-w-[100vw] overflow-x-hidden flex items-center justify-center">
         <Loader2 className="w-8 h-8 animate-spin text-primary" />

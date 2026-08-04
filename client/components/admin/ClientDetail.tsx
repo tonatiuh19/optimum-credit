@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import {
   ArrowLeft,
   FileText,
@@ -24,6 +25,18 @@ import {
 } from "@/store/slices/adminSlice";
 import type { PipelineStage } from "@shared/api";
 import { LangBadge } from "@/components/ui/lang-badge";
+import FieldHint from "@/components/admin/FieldHint";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { buildStageChangeConfirmMessage } from "@/lib/pipelineStage";
 
 const STAGES: PipelineStage[] = [
   "new_client",
@@ -40,7 +53,11 @@ const STAGES: PipelineStage[] = [
 export default function AdminClientDetail() {
   const { id } = useParams<{ id: string }>();
   const dispatch = useAppDispatch();
+  const { t } = useTranslation();
   const { selectedClient } = useAppSelector((s) => s.admin);
+  const [pendingStage, setPendingStage] = useState<PipelineStage | null>(
+    null,
+  );
 
   useEffect(() => {
     if (id) dispatch(fetchAdminClient({ id: Number(id) }));
@@ -72,6 +89,17 @@ export default function AdminClientDetail() {
   const onStage = async (s: PipelineStage) => {
     await dispatch(updateClientStage({ clientId: c.id, stage: s }));
     dispatch(fetchAdminClient({ id: c.id }));
+  };
+
+  const requestStageChange = (s: PipelineStage) => {
+    if (s === c.pipeline_stage) return;
+    setPendingStage(s);
+  };
+
+  const confirmStageChange = async () => {
+    if (!pendingStage) return;
+    await onStage(pendingStage);
+    setPendingStage(null);
   };
 
   return (
@@ -120,7 +148,9 @@ export default function AdminClientDetail() {
             </label>
             <select
               value={c.pipeline_stage}
-              onChange={(e) => onStage(e.target.value as PipelineStage)}
+              onChange={(e) =>
+                requestStageChange(e.target.value as PipelineStage)
+              }
               className="h-10 px-3 rounded-lg border border-input bg-background text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
             >
               {STAGES.map((s) => (
@@ -129,9 +159,37 @@ export default function AdminClientDetail() {
                 </option>
               ))}
             </select>
+            <FieldHint>{t("adminHelpers.stageChangeConfirmHint")}</FieldHint>
           </div>
         </div>
       </div>
+
+      <AlertDialog
+        open={!!pendingStage}
+        onOpenChange={(v) => !v && setPendingStage(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("adminPipeline.stageConfirmTitle")}</AlertDialogTitle>
+            <AlertDialogDescription className="whitespace-pre-line">
+              {pendingStage &&
+                buildStageChangeConfirmMessage({
+                  from: c.pipeline_stage,
+                  to: pendingStage,
+                  clientName: `${c.first_name} ${c.last_name}`,
+                })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => setPendingStage(null)}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction onClick={confirmStageChange}>
+              Confirm
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Stats bar */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">

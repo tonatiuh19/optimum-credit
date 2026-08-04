@@ -8,6 +8,13 @@ import reminderFlows from "./slices/reminderFlowsSlice";
 import adminTasks from "./slices/adminTasksSlice";
 import reportWizard from "./slices/reportWizardSlice";
 import legal from "./slices/legalSlice";
+import infoRequests from "./slices/infoRequestsSlice";
+import bulkImport from "./slices/bulkImportSlice";
+import prospects from "./slices/prospectsSlice";
+import creditAnalysis from "./slices/creditAnalysisSlice";
+import affiliates from "./slices/affiliatesSlice";
+import paySplit from "./slices/paySplitSlice";
+import workTasks from "./slices/workTasksSlice";
 
 export const store = configureStore({
   reducer: {
@@ -20,6 +27,13 @@ export const store = configureStore({
     adminTasks,
     reportWizard,
     legal,
+    infoRequests,
+    bulkImport,
+    prospects,
+    creditAnalysis,
+    affiliates,
+    paySplit,
+    workTasks,
   },
   middleware: (getDefault) => getDefault({ serializableCheck: false }),
 });

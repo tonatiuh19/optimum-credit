@@ -54,6 +54,12 @@ export default function Layout({ children }: LayoutProps) {
               >
                 {t("nav.howItWorks")}
               </a>
+              <Link
+                to="/credit-analysis"
+                className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
+              >
+                {t("nav.creditAnalysis")}
+              </Link>
               <a
                 href="#packages"
                 className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
@@ -114,6 +120,13 @@ export default function Layout({ children }: LayoutProps) {
               >
                 {t("nav.howItWorks")}
               </a>
+              <Link
+                to="/credit-analysis"
+                className="block px-4 py-2 rounded-lg text-foreground hover:bg-secondary transition-colors"
+                onClick={() => setMobileMenuOpen(false)}
+              >
+                {t("nav.creditAnalysis")}
+              </Link>
               <a
                 href="#packages"
                 className="block px-4 py-2 rounded-lg text-foreground hover:bg-secondary transition-colors"
@@ -189,6 +202,14 @@ export default function Layout({ children }: LayoutProps) {
                   </a>
                 </li>
                 <li>
+                  <Link
+                    to="/credit-analysis"
+                    className="hover:text-foreground transition-colors"
+                  >
+                    {t("footer.creditAnalysis")}
+                  </Link>
+                </li>
+                <li>
                   <a
                     href="#packages"
                     className="hover:text-foreground transition-colors"
@@ -197,12 +218,12 @@ export default function Layout({ children }: LayoutProps) {
                   </a>
                 </li>
                 <li>
-                  <a
-                    href="#"
+                  <Link
+                    to="/pricing"
                     className="hover:text-foreground transition-colors"
                   >
                     {t("footer.pricing")}
-                  </a>
+                  </Link>
                 </li>
               </ul>
             </div>
@@ -215,7 +236,7 @@ export default function Layout({ children }: LayoutProps) {
               <ul className="space-y-2 text-sm text-muted-foreground">
                 <li>
                   <a
-                    href="#"
+                    href="#how-it-works"
                     className="hover:text-foreground transition-colors"
                   >
                     {t("footer.aboutUs")}
@@ -223,18 +244,10 @@ export default function Layout({ children }: LayoutProps) {
                 </li>
                 <li>
                   <a
-                    href="#"
+                    href="mailto:support@optimumfinancialgroup.com"
                     className="hover:text-foreground transition-colors"
                   >
-                    Blog
-                  </a>
-                </li>
-                <li>
-                  <a
-                    href="#"
-                    className="hover:text-foreground transition-colors"
-                  >
-                    Contact
+                    {t("footer.contact")}
                   </a>
                 </li>
               </ul>

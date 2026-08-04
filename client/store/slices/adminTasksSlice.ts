@@ -1,5 +1,5 @@
 import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
-import api from "@/lib/api";
+import api, { formatAxiosError } from "@/lib/api";
 import type {
   OnboardingTaskTemplate,
   CreateTaskTemplatePayload,
@@ -45,9 +45,9 @@ export const createTaskTemplate = createAsyncThunk(
     try {
       const { data } = await api.post("/admin/task-templates", payload);
       return data.task as OnboardingTaskTemplate;
-    } catch (err: any) {
+    } catch (err: unknown) {
       return rejectWithValue(
-        err?.response?.data?.error ?? "Failed to create task",
+        formatAxiosError(err, "Failed to create task"),
       );
     }
   },
@@ -71,9 +71,9 @@ export const updateTaskTemplate = createAsyncThunk(
     try {
       const { data } = await api.put(`/admin/task-templates/${id}`, payload);
       return data.task as OnboardingTaskTemplate;
-    } catch (err: any) {
+    } catch (err: unknown) {
       return rejectWithValue(
-        err?.response?.data?.error ?? "Failed to update task",
+        formatAxiosError(err, "Failed to update task"),
       );
     }
   },
@@ -85,9 +85,9 @@ export const deleteTaskTemplate = createAsyncThunk(
     try {
       await api.delete(`/admin/task-templates/${id}`);
       return id;
-    } catch (err: any) {
+    } catch (err: unknown) {
       return rejectWithValue(
-        err?.response?.data?.error ?? "Failed to delete task",
+        formatAxiosError(err, "Failed to delete task"),
       );
     }
   },
@@ -137,9 +137,9 @@ export const reviewTaskCompletion = createAsyncThunk(
       });
       dispatch(fetchCaseTaskCompletions(caseId));
       return { completionId, admin_review_status };
-    } catch (err: any) {
+    } catch (err: unknown) {
       return rejectWithValue(
-        err?.response?.data?.error ?? "Failed to review task",
+        formatAxiosError(err, "Failed to review task"),
       );
     }
   },

@@ -18,11 +18,13 @@ import {
   X,
   Lock,
   CreditCard,
+  ClipboardList,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { clientLogout, fetchClientMe } from "@/store/slices/clientAuthSlice";
 import { fetchPortalSectionLocks } from "@/store/slices/portalSlice";
+import { fetchPortalInfoRequests } from "@/store/slices/infoRequestsSlice";
 import LanguageSwitcher from "@/components/LanguageSwitcher";
 import ThemeToggle from "@/components/ThemeToggle";
 import LegalLinks from "@/components/LegalLinks";
@@ -45,7 +47,16 @@ const NAV: {
     icon: LayoutDashboard,
     sectionKey: "portal_dashboard",
   },
-  { to: "/portal/documents", labelKey: "sidebar.documents", icon: FileText },
+  {
+    to: "/portal/documents",
+    labelKey: "sidebar.documents",
+    icon: FileText,
+  },
+  {
+    to: "/portal/requests",
+    labelKey: "sidebar.requests",
+    icon: ClipboardList,
+  },
   {
     to: "/portal/reports",
     labelKey: "sidebar.reports",
@@ -86,6 +97,7 @@ export default function ClientLayout({ children }: Props) {
   const { sectionLocks, sectionLocksInitialized } = useAppSelector(
     (s) => s.portal,
   );
+  const { actionableCount } = useAppSelector((s) => s.infoRequests);
   const [mobileOpen, setMobileOpen] = useState(false);
 
   useEffect(() => {
@@ -98,6 +110,10 @@ export default function ClientLayout({ children }: Props) {
 
   useEffect(() => {
     if (token) dispatch(fetchPortalSectionLocks());
+  }, [token, dispatch]);
+
+  useEffect(() => {
+    if (token) dispatch(fetchPortalInfoRequests());
   }, [token, dispatch]);
 
   useEffect(() => {
@@ -254,7 +270,12 @@ export default function ClientLayout({ children }: Props) {
                     }
                   >
                     <item.icon className="w-5 h-5" />
-                    {t(item.labelKey)}
+                    <span className="flex-1">{t(item.labelKey)}</span>
+                    {item.to === "/portal/requests" && actionableCount > 0 && (
+                      <span className="text-[10px] font-bold bg-destructive text-destructive-foreground rounded-full min-w-[1.25rem] h-5 px-1.5 flex items-center justify-center">
+                        {actionableCount}
+                      </span>
+                    )}
                   </NavLink>
                 );
               })
@@ -283,9 +304,33 @@ export default function ClientLayout({ children }: Props) {
               <div className="w-6 h-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
             </div>
           ) : (
-            <div className="app-page container max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-5 sm:py-6 md:py-10">
-              {children}
-            </div>
+            <>
+              {actionableCount > 0 &&
+                location.pathname !== "/portal/requests" && (
+                  <div className="border-b border-primary/20 bg-primary/5">
+                    <div className="container max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
+                      <p className="text-sm text-foreground flex-1">
+                        <span className="font-semibold text-primary">
+                          {t("infoRequests.bannerTitle")}
+                        </span>{" "}
+                        {t("infoRequests.bannerBody", {
+                          count: actionableCount,
+                        })}
+                      </p>
+                      <Link
+                        to="/portal/requests"
+                        onClick={() => setMobileOpen(false)}
+                        className="inline-flex items-center justify-center text-sm font-semibold text-primary-foreground bg-primary hover:bg-primary/90 px-3 py-2 rounded-lg shrink-0"
+                      >
+                        {t("infoRequests.bannerCta")}
+                      </Link>
+                    </div>
+                  </div>
+                )}
+              <div className="app-page container max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-5 sm:py-6 md:py-10">
+                {children}
+              </div>
+            </>
           )}
         </main>
       </div>

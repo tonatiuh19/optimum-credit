@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate, useLocation } from "react-router-dom";
 import { useFormik } from "formik";
 import * as Yup from "yup";
@@ -36,6 +36,8 @@ const STATS = [
   { value: "4.9 / 5", label: "Client satisfaction", icon: Star },
 ];
 
+const RESEND_COOLDOWN_SEC = 45;
+
 export default function ClientLogin() {
   const { t } = useTranslation();
   const dispatch = useAppDispatch();
@@ -46,10 +48,17 @@ export default function ClientLogin() {
     expiredOnboarding?: boolean;
     email?: string;
   };
+  const [resendIn, setResendIn] = useState(0);
   const { requestingOtp, verifyingOtp, error, otpSentTo } = useAppSelector(
     (s) => s.clientAuth,
   );
   const [step, setStep] = useState<"email" | "code">("email");
+
+  useEffect(() => {
+    if (resendIn <= 0) return;
+    const id = window.setTimeout(() => setResendIn((s) => s - 1), 1000);
+    return () => window.clearTimeout(id);
+  }, [resendIn]);
 
   const emailForm = useFormik({
     initialValues: { email: locationState.email || "" },
@@ -60,7 +69,10 @@ export default function ClientLogin() {
     }),
     onSubmit: async (values) => {
       const result = await dispatch(requestClientOtp({ email: values.email }));
-      if (requestClientOtp.fulfilled.match(result)) setStep("code");
+      if (requestClientOtp.fulfilled.match(result)) {
+        setStep("code");
+        setResendIn(RESEND_COOLDOWN_SEC);
+      }
     },
   });
 
@@ -81,6 +93,16 @@ export default function ClientLogin() {
       }
     },
   });
+
+  const handleResend = async () => {
+    const email = otpSentTo || emailForm.values.email;
+    if (!email || requestingOtp || resendIn > 0) return;
+    const result = await dispatch(requestClientOtp({ email }));
+    if (requestClientOtp.fulfilled.match(result)) {
+      setResendIn(RESEND_COOLDOWN_SEC);
+      codeForm.setFieldValue("code", "");
+    }
+  };
 
   return (
     <div className="h-[100dvh] overflow-hidden flex w-full max-w-[100vw]">
@@ -294,6 +316,19 @@ export default function ClientLogin() {
                   ) : (
                     t("clientLogin.signIn")
                   )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleResend}
+                  disabled={requestingOtp || resendIn > 0}
+                  className="w-full text-sm font-medium text-primary hover:text-primary/80 disabled:text-muted-foreground disabled:cursor-not-allowed transition-colors py-1"
+                >
+                  {requestingOtp
+                    ? t("clientLogin.resendSending")
+                    : resendIn > 0
+                      ? t("clientLogin.resendIn", { seconds: resendIn })
+                      : t("clientLogin.resendCode")}
                 </button>
 
                 <button

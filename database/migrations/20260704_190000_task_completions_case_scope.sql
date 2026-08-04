@@ -52,15 +52,53 @@ WHERE cr.status = 'active'
 ALTER TABLE `client_task_completions`
   MODIFY `case_id` INT UNSIGNED NOT NULL;
 
-ALTER TABLE `client_task_completions`
-  DROP INDEX `uq_client_task`;
+-- Idempotent: DROP INDEX only if it still exists (already applied DBs won't have it).
+SET @uq_client_exists := (
+  SELECT COUNT(*) FROM information_schema.STATISTICS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'client_task_completions'
+    AND INDEX_NAME = 'uq_client_task'
+);
+SET @sql := IF(
+  @uq_client_exists > 0,
+  'ALTER TABLE `client_task_completions` DROP INDEX `uq_client_task`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
 
-ALTER TABLE `client_task_completions`
-  ADD UNIQUE KEY `uq_case_task` (`case_id`, `task_template_id`);
+SET @uq_case_exists := (
+  SELECT COUNT(*) FROM information_schema.STATISTICS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'client_task_completions'
+    AND INDEX_NAME = 'uq_case_task'
+);
+SET @sql := IF(
+  @uq_case_exists = 0,
+  'ALTER TABLE `client_task_completions` ADD UNIQUE KEY `uq_case_task` (`case_id`, `task_template_id`)',
+  'SELECT 1'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
 
 ALTER TABLE `client_task_completions`
   ADD KEY IF NOT EXISTS `idx_ctc_case` (`case_id`);
 
-ALTER TABLE `client_task_completions`
-  ADD CONSTRAINT `fk_ctc_case`
-    FOREIGN KEY (`case_id`) REFERENCES `credit_repair_cases`(`id`) ON DELETE CASCADE;
+-- FK may already exist on re-run
+SET @fk_exists := (
+  SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'client_task_completions'
+    AND CONSTRAINT_NAME = 'fk_ctc_case'
+    AND CONSTRAINT_TYPE = 'FOREIGN KEY'
+);
+SET @sql := IF(
+  @fk_exists = 0,
+  'ALTER TABLE `client_task_completions` ADD CONSTRAINT `fk_ctc_case` FOREIGN KEY (`case_id`) REFERENCES `credit_repair_cases`(`id`) ON DELETE CASCADE',
+  'SELECT 1'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;

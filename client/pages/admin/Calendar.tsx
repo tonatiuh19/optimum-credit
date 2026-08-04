@@ -16,6 +16,7 @@ import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { fetchAdminCalendar } from "@/store/slices/adminSlice";
 import type { CalendarSplit, PaymentSplitStatus } from "@shared/api";
 import AdminPageHeader from "@/components/AdminPageHeader";
+import AdminSplitActions from "@/components/admin/AdminSplitActions";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function fmt(cents: number) {
@@ -118,6 +119,27 @@ export default function AdminCalendar() {
       setSelectedDate(dateStr);
     }
   };
+
+  const refreshCalendar = () => {
+    const from = `${year}-${String(month + 1).padStart(2, "0")}-01`;
+    const lastDay = new Date(year, month + 1, 0).getDate();
+    const to = `${year}-${String(month + 1).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`;
+    dispatch(fetchAdminCalendar({ from, to }));
+  };
+
+  // Keep the open day panel in sync after mutations (edit due date may move days)
+  useEffect(() => {
+    if (!selectedDate) return;
+    const day = parseInt(selectedDate.slice(8, 10), 10);
+    const daySplits = splitsByDay.get(day) ?? [];
+    if (daySplits.length === 0) {
+      setSelected(null);
+      setSelectedDate(null);
+    } else {
+      setSelected(daySplits);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-sync when calendar data changes
+  }, [calendarSplits, selectedDate]);
 
   const todayDay =
     today.getFullYear() === year && today.getMonth() === month
@@ -268,26 +290,29 @@ export default function AdminCalendar() {
               return (
                 <div
                   key={s.id}
-                  className="flex items-center justify-between bg-muted/40 rounded-xl px-4 py-3"
+                  className="flex items-center justify-between gap-3 bg-muted/40 rounded-xl px-4 py-3"
                 >
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-3 min-w-0">
                     <Icon className="w-4 h-4 text-muted-foreground shrink-0" />
-                    <div>
-                      <p className="text-sm font-semibold text-foreground">
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-foreground truncate">
                         {s.client_first_name} {s.client_last_name}
                       </p>
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-xs text-muted-foreground truncate">
                         {s.case_number ?? "—"} · {s.label}
                       </p>
                     </div>
                   </div>
-                  <div className="text-right">
-                    <p className="text-sm font-bold">{fmt(s.amount_cents)}</p>
-                    <span
-                      className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${ss.badge}`}
-                    >
-                      {effective.charAt(0).toUpperCase() + effective.slice(1)}
-                    </span>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <div className="text-right">
+                      <p className="text-sm font-bold">{fmt(s.amount_cents)}</p>
+                      <span
+                        className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${ss.badge}`}
+                      >
+                        {effective.charAt(0).toUpperCase() + effective.slice(1)}
+                      </span>
+                    </div>
+                    <AdminSplitActions split={s} onDone={refreshCalendar} />
                   </div>
                 </div>
               );

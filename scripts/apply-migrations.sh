@@ -26,8 +26,8 @@ run_migration() {
   if "${MYSQL[@]}" < "$file" 2>&1; then
     echo "✅ $(basename "$file")"
   else
-    echo "⚠️  $(basename "$file") failed — may already be partially applied."
-    echo "   Check errors above; re-run verification below."
+    echo "❌ $(basename "$file") failed — aborting to avoid schema drift."
+    exit 1
   fi
 }
 
@@ -48,6 +48,13 @@ run_migration "database/migrations/20260704_120000_update_standard_complex_featu
 run_migration "database/migrations/20260704_180000_report_wizard.sql"
 run_migration "database/migrations/20260704_190000_task_completions_case_scope.sql"
 run_migration "database/migrations/20260717_120000_legal_documents.sql"
+
+# Payment integrity + affiliate commission uniqueness (idempotent)
+run_migration "database/migrations/20260801_170000_payment_splits_processing_status.sql"
+run_migration "database/migrations/20260801_180000_aff_comm_payment_unique.sql"
+run_migration "database/migrations/20260801_200000_payment_splits_status_due_index.sql"
+run_migration "database/migrations/20260801_210000_admin_work_tasks_hubspot.sql"
+run_migration "database/migrations/20260801_220000_work_tasks_due_notified.sql"
 
 # Optional: remove test/dev client records (edit WHERE clause in file before running)
 if [[ "${1:-}" == "--cleanup" ]]; then

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useDebounce } from "@/hooks/use-debounce";
 import { useFormik } from "formik";
 import * as Yup from "yup";
@@ -71,6 +72,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
+import FieldHint from "@/components/admin/FieldHint";
 
 // ── Type helpers ──────────────────────────────────────────────────────────────
 
@@ -244,6 +246,7 @@ function TaskDialog({
   const dispatch = useAppDispatch();
   const { saving } = useAppSelector((s) => s.adminTasks);
   const { toast } = useToast();
+  const { t } = useTranslation();
 
   const [formFields, setFormFields] = useState<TaskFormField[]>([]);
   const [contentTab, setContentTab] = useState<"en" | "es">("en");
@@ -537,6 +540,7 @@ function TaskDialog({
                   />
                 </TabsContent>
               </Tabs>
+              <FieldHint>{t("adminHelpers.signHtmlHint")}</FieldHint>
             </div>
           )}
 
@@ -585,9 +589,7 @@ function TaskDialog({
                   placeholder="image/*,application/pdf"
                   className="text-sm font-mono"
                 />
-                <p className="text-xs text-muted-foreground">
-                  MIME types or wildcards, comma-separated
-                </p>
+                <FieldHint>{t("adminHelpers.mimeHint")}</FieldHint>
               </div>
               <div className="space-y-1">
                 <Label>Max File Size (MB)</Label>
@@ -649,6 +651,12 @@ function TaskDialog({
                 min={0}
               />
             </div>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <FieldHint>{t("adminHelpers.autoAssignHint")}</FieldHint>
+            <FieldHint className="justify-self-end">
+              {t("adminHelpers.sortOrderHint")}
+            </FieldHint>
           </div>
 
           <DialogFooter className="pt-2">
@@ -809,6 +817,7 @@ function TaskCard({
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function AdminTasks() {
+  const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const { templates, loading } = useAppSelector((s) => s.adminTasks);
   const { toast } = useToast();
@@ -871,13 +880,13 @@ export default function AdminTasks() {
   return (
     <>
       <PageMeta
-        title="Task Templates — Admin"
-        description="Manage onboarding task templates for clients."
+        title={`${t("clientTasksPage.title")} — Admin`}
+        description={t("clientTasksPage.description")}
       />
       <div className="space-y-6">
         <AdminPageHeader
-          title="Task Templates"
-          description="Manage the onboarding checklist clients must complete after payment."
+          title={t("clientTasksPage.title")}
+          description={t("clientTasksPage.description")}
           icon={ClipboardList}
           actions={
             <Button
@@ -888,7 +897,7 @@ export default function AdminTasks() {
               className="gap-2"
             >
               <Plus className="h-4 w-4" />
-              New Task
+              {t("clientTasksPage.newTask")}
             </Button>
           }
         />

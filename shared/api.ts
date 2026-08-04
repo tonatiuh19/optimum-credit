@@ -28,11 +28,16 @@ export interface AdminUser {
   first_name: string;
   last_name: string;
   phone?: string | null;
-  role: "super_admin" | "admin" | "support" | "agent";
-  status: "active" | "suspended" | "invited";
+  role: "super_admin" | "admin" | "support" | "agent" | "affiliate";
+  status: "active" | "suspended" | "invited" | "inactive";
+  /** Present when role=affiliate */
+  affiliate?: AffiliateProfile | null;
+  /** Present when role=affiliate — whether their portal (pipeline/leads) is unlocked */
+  has_portal_access?: boolean;
 }
 
 export type PipelineStage =
+  | "prospect"
   | "new_client"
   | "docs_ready"
   | "round_1"
@@ -44,6 +49,7 @@ export type PipelineStage =
   | "cancelled";
 
 export type ClientStatus =
+  | "prospect"
   | "pending_payment"
   | "onboarding"
   | "active"
@@ -111,9 +117,9 @@ export interface RegistrationPayload {
   phone: string;
   packageSlug: string;
   tradelineProductIds?: number[];
-  // Accept.js nonce — card is tokenized in the browser before this POST is sent
-  dataDescriptor: string;
-  dataValue: string;
+  // Accept.js nonce — required when amount due > 0; omitted for $0 (100% coupon)
+  dataDescriptor?: string;
+  dataValue?: string;
   // Collected later during portal onboarding:
   affiliateCode?: string;
   // Optional promotional coupon code
@@ -326,6 +332,8 @@ export interface AdminClientListItem {
   splits_overdue?: number;
   splits_amount_cents?: number;
   splits_paid_cents?: number;
+  // labels (source + analysis)
+  labels?: Label[];
 }
 
 // ============================================================
@@ -361,6 +369,12 @@ export interface CreditRepairCase {
   /** Other active cases for the same client (duplicate case rows) */
   sibling_active_cases?: number;
   sibling_case_numbers?: string[];
+  /** Open + rejected info requests awaiting client action */
+  info_requests_open?: number;
+  /** Submitted info requests awaiting staff review */
+  info_requests_pending_review?: number;
+  // labels (source + analysis)
+  labels?: Label[];
 }
 
 // ============================================================
@@ -481,10 +495,197 @@ export interface AdminUserListItem {
   first_name: string;
   last_name: string;
   phone?: string | null;
-  role: "super_admin" | "admin" | "agent";
+  role: "super_admin" | "admin" | "agent" | "affiliate";
   status: "active" | "inactive" | "suspended";
   last_login_at?: string | null;
   created_at: string;
+}
+
+// ============================================================
+// AFFILIATES
+// ============================================================
+export type AffiliatePlan = "standard" | "master" | "sub_affiliate";
+export type AffiliateLanding = "credit_analysis" | "pricing";
+export type AffiliateStatus = "invited" | "active" | "inactive" | "suspended";
+export type AffiliateSubscriptionStatus =
+  | "none"
+  | "pending"
+  | "active"
+  | "past_due"
+  | "cancelled"
+  | "comped";
+export type AffiliateCommissionKind = "enrollment" | "override" | "manual";
+export type AffiliateCommissionStatus =
+  | "pending"
+  | "approved"
+  | "paid"
+  | "void";
+
+export interface AffiliateProfile {
+  id: number;
+  admin_id?: number | null;
+  email: string;
+  first_name: string;
+  last_name: string;
+  phone?: string | null;
+  plan: AffiliatePlan;
+  monthly_price_cents: number;
+  commission_rate_bps: number;
+  parent_override_rate_bps: number;
+  parent_affiliate_id?: number | null;
+  status: AffiliateStatus;
+  subscription_status: AffiliateSubscriptionStatus;
+  referral_code: string;
+  slug: string;
+  default_landing: AffiliateLanding;
+  bio?: string | null;
+  notes?: string | null;
+  has_portal_access: boolean;
+  parent_name?: string | null;
+  leads_count?: number;
+  clicks_count?: number;
+  commissions_pending_cents?: number;
+  /** Admin list endpoint aggregates */
+  clients_count?: number;
+  sub_affiliates_count?: number;
+  commissions_total_cents?: number;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface AffiliateLinks {
+  short_default: string;
+  short_analysis: string;
+  short_pricing: string;
+  analysis_ref: string;
+  pricing_ref: string;
+}
+
+export interface AffiliatePublicResolve {
+  slug: string;
+  first_name: string;
+  default_landing: AffiliateLanding;
+  redirect_path: string;
+  links: AffiliateLinks;
+}
+
+export interface AffiliateSubAffiliateSummary {
+  id: number;
+  first_name: string;
+  last_name: string;
+  email: string;
+  slug: string;
+  status: AffiliateStatus;
+  subscription_status: AffiliateSubscriptionStatus;
+}
+
+export interface AffiliateReferredClient {
+  id: number;
+  first_name: string;
+  last_name: string;
+  email: string;
+  status: string;
+  pipeline_stage: string;
+  created_at: string;
+}
+
+export interface AffiliateDetailResponse {
+  affiliate: AffiliateProfile;
+  links: AffiliateLinks;
+  sub_affiliates: AffiliateSubAffiliateSummary[];
+  clients: AffiliateReferredClient[];
+}
+
+export interface AffiliateSelfStats {
+  clicks_total: number;
+  referred_clients: number;
+  commissions_pending_cents: number;
+  commissions_earned_cents: number;
+}
+
+export interface AffiliateMeResponse {
+  affiliate: AffiliateProfile;
+  links: AffiliateLinks;
+  stats: AffiliateSelfStats;
+}
+
+export interface AffiliateTierSuggestion {
+  monthly_price_cents: number;
+  commission_rate_bps: number;
+  parent_override_rate_bps: number;
+}
+
+export interface AffiliateSuggestionsResponse {
+  suggestions: Record<AffiliatePlan, AffiliateTierSuggestion>;
+  features: Record<string, boolean>;
+}
+
+export interface UpdateAffiliatePayload {
+  id: number;
+  slug?: string;
+  plan?: AffiliatePlan;
+  monthly_price_cents?: number;
+  commission_rate_bps?: number;
+  parent_override_rate_bps?: number;
+  parent_affiliate_id?: number | null;
+  default_landing?: AffiliateLanding;
+  status?: AffiliateStatus;
+  first_name?: string;
+  last_name?: string;
+  phone?: string | null;
+  bio?: string | null;
+  notes?: string | null;
+}
+
+export interface AffiliateSelfUpdatePayload {
+  default_landing?: AffiliateLanding;
+  bio?: string | null;
+  phone?: string | null;
+  social_facebook?: string | null;
+  social_instagram?: string | null;
+  social_tiktok?: string | null;
+  social_linkedin?: string | null;
+}
+
+export interface AffiliateLeadPayload {
+  first_name: string;
+  last_name: string;
+  email: string;
+  phone?: string | null;
+}
+
+export interface CreateAffiliatePayload {
+  email: string;
+  first_name: string;
+  last_name: string;
+  phone?: string | null;
+  plan: AffiliatePlan;
+  slug?: string;
+  default_landing?: AffiliateLanding;
+  parent_affiliate_id?: number | null;
+  commission_rate_bps?: number;
+  parent_override_rate_bps?: number;
+  monthly_price_cents?: number;
+  /** Activate without payment */
+  comp_subscription?: boolean;
+  notes?: string | null;
+}
+
+export interface AffiliateCommission {
+  id: number;
+  affiliate_id: number;
+  client_id?: number | null;
+  payment_id?: number | null;
+  source_affiliate_id?: number | null;
+  kind: AffiliateCommissionKind;
+  amount_cents: number;
+  rate_bps?: number | null;
+  base_amount_cents?: number | null;
+  status: AffiliateCommissionStatus;
+  notes?: string | null;
+  paid_at?: string | null;
+  created_at: string;
+  client_name?: string | null;
 }
 
 // ============================================================
@@ -526,6 +727,8 @@ export interface ReminderFlow {
   created_at: string;
   updated_at: string;
   steps?: ReminderFlowStep[];
+  /** Only run this flow when the client has ALL of these label slugs (empty/undefined = all clients) */
+  required_label_slugs?: string[] | null;
 }
 
 export interface ReminderFlowExecution {
@@ -691,6 +894,10 @@ export interface PaymentSplit {
   notes: string | null;
   created_at: string;
   updated_at: string;
+  /** Present when a payment_split_tokens row exists. */
+  payment_token?: string | null;
+  /** Absolute or app-relative public pay URL when a token exists. */
+  payment_link?: string | null;
 }
 
 export interface CreateSplitPayload {
@@ -700,6 +907,8 @@ export interface CreateSplitPayload {
   send_payment_link: boolean;
   reminder_flow_id: number | null;
   notes?: string | null;
+  /** When true, create the split already marked paid (manual). */
+  mark_as_paid?: boolean;
 }
 
 export interface ClientPaymentSplit {
@@ -760,6 +969,9 @@ export interface CalendarSplit {
   due_date: string;
   status: PaymentSplitStatus;
   completion_source: SplitCompletionSource | null;
+  send_payment_link?: boolean;
+  payment_token?: string | null;
+  payment_link?: string | null;
 }
 
 // ============================================================
@@ -830,6 +1042,22 @@ export interface TaskUploadConfig {
   accept: string; // e.g. "image/*,application/pdf"
   max_mb: number;
 }
+
+// ============================================================
+// ADMIN WORK HUB (My Tasks Kanban + HubSpot)
+// ============================================================
+export type {
+  WorkTaskStatus,
+  WorkTaskPriority,
+  WorkTaskSource,
+  AdminWorkTask,
+  WorkTaskAssignee,
+  CreateWorkTaskPayload,
+  UpdateWorkTaskPayload,
+  HubspotConnectionStatus,
+  HubspotPermissionRow,
+  WorkTasksSyncResult,
+} from "./workTasks";
 
 export interface OnboardingTaskTemplate {
   id: number;
@@ -1008,4 +1236,281 @@ export interface LegalDocumentSummary {
   slug: string;
   title: string;
   updated_at: string;
+}
+
+// ============================================================
+// CLIENT INFO REQUESTS (mid-pipeline staff → client data collection)
+// ============================================================
+export type InfoRequestPresetKey =
+  | "smart_credit"
+  | "payment_card"
+  | "payment_billing"
+  | "custom";
+
+export type InfoRequestStatus =
+  | "open"
+  | "submitted"
+  | "approved"
+  | "rejected"
+  | "cancelled";
+
+export type InfoRequestFieldType =
+  | "text"
+  | "email"
+  | "password"
+  | "textarea"
+  | "select"
+  | "upload"
+  | "smart_credit_block"
+  | "payment_card"
+  | "billing_confirm";
+
+export interface InfoRequestFieldDef {
+  id: string;
+  key: string;
+  type: InfoRequestFieldType;
+  label_en: string;
+  label_es: string;
+  required?: boolean;
+  help_en?: string;
+  help_es?: string;
+  options?: Array<{
+    value: string;
+    label_en: string;
+    label_es: string;
+  }>;
+}
+
+export interface InfoRequestFileMeta {
+  id: number;
+  field_key: string;
+  file_name: string;
+  mime_type?: string | null;
+  file_size?: number | null;
+  created_at: string;
+}
+
+export interface ClientInfoRequest {
+  id: number;
+  case_id: number;
+  client_id: number;
+  created_by_admin_id?: number | null;
+  preset_key?: InfoRequestPresetKey | string | null;
+  title_en: string;
+  title_es: string;
+  message_en?: string | null;
+  message_es?: string | null;
+  fields_json: InfoRequestFieldDef[];
+  status: InfoRequestStatus;
+  due_at?: string | null;
+  response_json?: Record<string, unknown> | null;
+  /** Present for admin when secrets were stored (never raw for portal list) */
+  has_secrets?: boolean;
+  /** Admin-only decrypted secrets when explicitly requested */
+  secrets_json?: Record<string, unknown> | null;
+  client_consented_at?: string | null;
+  submitted_at?: string | null;
+  reviewed_at?: string | null;
+  reviewed_by_admin_id?: number | null;
+  rejection_reason?: string | null;
+  files?: InfoRequestFileMeta[];
+  case_number?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateInfoRequestPayload {
+  case_id: number;
+  preset_key?: InfoRequestPresetKey | null;
+  title_en: string;
+  title_es: string;
+  message_en?: string | null;
+  message_es?: string | null;
+  fields_json: InfoRequestFieldDef[];
+  due_at?: string | null;
+}
+
+export interface SubmitInfoRequestPayload {
+  responses: Record<string, unknown>;
+  agreed_terms: boolean;
+  agreed_sms: boolean;
+  /** Accept.js opaque data when a payment_card field is present */
+  dataDescriptor?: string;
+  dataValue?: string;
+}
+
+// ── Bulk CSV import (admin clients) ──────────────────────────────────────────
+
+export type BulkImportEntityType = "clients";
+
+export interface BulkImportPreviewRow {
+  row_number: number;
+  status: "will_create" | "skipped" | "error";
+  message?: string;
+  external_ref?: string | null;
+  display_name: string;
+  email?: string | null;
+  phone?: string | null;
+  badge?: string | null;
+  conflict_entity_id?: number | null;
+}
+
+export interface BulkImportValidateResponse {
+  success: boolean;
+  message?: string;
+  file_error?: string;
+  file_error_code?: string;
+  job_id?: number;
+  expires_at?: string;
+  row_count?: number;
+  will_create_count?: number;
+  skipped_count?: number;
+  error_count?: number;
+  preview_rows?: BulkImportPreviewRow[];
+  breakdown?: Record<string, number>;
+  bulk_csv_import_enabled?: boolean;
+}
+
+export interface BulkImportCommitOptions {
+  send_welcome_emails?: boolean;
+}
+
+export interface BulkImportCommitResultRow {
+  row_number: number;
+  external_ref?: string | null;
+  status: "created" | "skipped" | "error";
+  entity_id?: number | null;
+  message?: string;
+}
+
+export interface BulkImportCommitResponse {
+  success: boolean;
+  message?: string;
+  created_count?: number;
+  skipped_count?: number;
+  error_count?: number;
+  results?: BulkImportCommitResultRow[];
+}
+
+// ============================================================
+// LABELS (source + analysis layers)
+// ============================================================
+export type LabelLayer = "source" | "analysis";
+
+export interface Label {
+  id: number;
+  slug: string;
+  name_en: string;
+  name_es: string;
+  layer: LabelLayer;
+  color: string;
+  is_system?: number | boolean;
+  sort_order: number;
+  created_at?: string;
+}
+
+export interface SetClientLabelsPayload {
+  clientId: number;
+  add?: string[];
+  remove?: string[];
+}
+
+// ============================================================
+// PROSPECTS
+// ============================================================
+export interface Prospect {
+  /** clients.id */
+  id: number;
+  first_name: string;
+  last_name: string;
+  email: string;
+  phone?: string | null;
+  source_label?: string | null;
+  preferred_language?: "en" | "es" | null;
+  client_goal?: string | null;
+  notes?: string | null;
+  agent_phone?: string | null;
+  rep_name?: string | null;
+  labels?: Label[];
+  credit_analysis_id?: number | null;
+  created_at: string;
+}
+
+export interface ConvertProspectPayload {
+  id: number;
+  package_id?: number | null;
+  notes?: string | null;
+}
+
+export interface AdminPipelineResponse {
+  cases: CreditRepairCase[];
+  prospects: Prospect[];
+}
+
+// ============================================================
+// CREDIT ANALYSIS (public landing page)
+// ============================================================
+export type CreditAnalysisMode = "client" | "agent";
+
+/**
+ * How well we were able to read text out of the uploaded report.
+ * `ok` = usable text extracted; anything else means scores/negatives may be
+ * incomplete or absent and the UI/analysis copy should say so honestly
+ * instead of implying "no negatives found".
+ */
+export type CreditAnalysisExtractionStatus =
+  | "ok"
+  | "empty"
+  | "parse_failed"
+  | "unsupported_type";
+
+export interface CreditAnalysisScoreSet {
+  transunion?: number | null;
+  experian?: number | null;
+  equifax?: number | null;
+}
+
+export interface CreditAnalysisNegativeItem {
+  type: string;
+  creditor?: string;
+  bureaus?: string[];
+  detail?: string;
+}
+
+export interface ProspectLeadPayload {
+  first_name: string;
+  last_name: string;
+  email: string;
+  phone?: string;
+  source_label?: string;
+  /** Homepage "Get started" CTA — attaches get_started_wizard label. */
+  lead_source?: "get_started" | string;
+  notes?: string;
+  /** First-touch affiliate referral slug — see `client/lib/affiliateAttribution.ts` */
+  affiliate_code?: string | null;
+}
+
+/**
+ * Flat analyst payload from the Optimum credit-analysis algorithm.
+ * All values are scalars (no nested objects/arrays) for email templates.
+ */
+export type CreditAnalysisAnalystFlat = Record<string, string | number | null>;
+
+export interface CreditAnalysisResult {
+  id: number;
+  client_id: number;
+  mode: CreditAnalysisMode;
+  scores: CreditAnalysisScoreSet | null;
+  negatives: CreditAnalysisNegativeItem[];
+  suggested_labels: string[];
+  analysis_html: string;
+  analysis_text?: string | null;
+  email_sent: boolean;
+  generated_at: string;
+  /** How well we were able to read the uploaded report — see CreditAnalysisExtractionStatus. */
+  extraction_status: CreditAnalysisExtractionStatus;
+  /** Trimmed character count of extracted text (0 for unsupported/failed files). */
+  chars_extracted?: number;
+  /** Full flat analyst JSON (scores, lending conversion, plan, SMS copy, HTML tables). */
+  analyst?: CreditAnalysisAnalystFlat | null;
 }

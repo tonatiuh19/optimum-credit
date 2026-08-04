@@ -17,10 +17,14 @@ import {
   CalendarDays,
   FileText,
   ChevronDown,
+  Upload,
 } from "lucide-react";
 import { useFormik } from "formik";
 import * as Yup from "yup";
+import { useTranslation } from "react-i18next";
 import AdminPageHeader from "@/components/AdminPageHeader";
+import FieldHint from "@/components/admin/FieldHint";
+import EnumLegend from "@/components/admin/EnumLegend";
 import { DataGrid } from "@/components/ui/data-grid";
 import { LangBadge } from "@/components/ui/lang-badge";
 import type { DataGridColumn } from "@/components/ui/data-grid";
@@ -54,7 +58,13 @@ import {
   updateAdminClient,
   deleteAdminClient,
 } from "@/store/slices/adminSlice";
+import { fetchLabels } from "@/store/slices/prospectsSlice";
+import { openBulkImportWizard } from "@/store/slices/bulkImportSlice";
+import BulkImportWizard from "@/components/bulk-import/BulkImportWizard";
+import { LabelMultiSelect } from "@/components/admin/LabelMultiSelect";
+import { LabelChips } from "@/components/admin/LabelChips";
 import { useDebounce } from "@/hooks/use-debounce";
+import { useToast } from "@/hooks/use-toast";
 import type { AdminClientListItem, PipelineStage } from "@shared/api";
 
 function fmt(cents: number) {
@@ -194,7 +204,9 @@ function ClientFormDialog({
   editing: AdminClientListItem | null;
 }) {
   const dispatch = useAppDispatch();
+  const { toast } = useToast();
   const { saving } = useAppSelector((s) => s.admin);
+  const { t } = useTranslation();
 
   const form = useFormik({
     enableReinitialize: true,
@@ -216,10 +228,19 @@ function ClientFormDialog({
         status: values.status as any,
         admin_notes: values.admin_notes.trim() || null,
       };
-      if (editing) {
-        await dispatch(updateAdminClient({ id: editing.id, ...payload }));
-      } else {
-        await dispatch(createAdminClient(payload));
+      const res = editing
+        ? await dispatch(updateAdminClient({ id: editing.id, ...payload }))
+        : await dispatch(createAdminClient(payload));
+      const ok = editing
+        ? updateAdminClient.fulfilled.match(res)
+        : createAdminClient.fulfilled.match(res);
+      if (!ok) {
+        toast({
+          title: editing ? "Could not update client" : "Could not add client",
+          description: String(res.payload || "Please try again"),
+          variant: "destructive",
+        });
+        return;
       }
       helpers.resetForm();
       onClose();
@@ -279,6 +300,9 @@ function ClientFormDialog({
                 {form.errors.email}
               </p>
             )}
+            {editing && (
+              <FieldHint>{t("adminHelpers.emailChangeHint")}</FieldHint>
+            )}
           </div>
           <div>
             <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground block mb-1">
@@ -309,6 +333,18 @@ function ClientFormDialog({
                 </option>
               ))}
             </select>
+            <FieldHint>{t("adminHelpers.clientStatusNote")}</FieldHint>
+            <EnumLegend
+              title={t("adminHelpers.legendTitle")}
+              value={form.values.status}
+              items={CLIENT_STATUSES.map((s) => ({
+                value: s,
+                label: s
+                  .replace(/_/g, " ")
+                  .replace(/\b\w/g, (c) => c.toUpperCase()),
+                description: t(`adminHelpers.clientStatus.${s}`),
+              }))}
+            />
           </div>
           <div>
             <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground block mb-1">
@@ -324,6 +360,11 @@ function ClientFormDialog({
               className="w-full px-3 py-2 rounded-lg border border-input bg-background text-sm resize-none focus:outline-none focus:ring-2 focus:ring-primary/50 placeholder:text-muted-foreground"
             />
           </div>
+          {!editing && (
+            <FieldHint tone="accent">
+              {t("adminHelpers.createClientNoEmail")}
+            </FieldHint>
+          )}
           <div className="flex gap-2 justify-end pt-2">
             <button
               type="button"
@@ -356,7 +397,11 @@ function ClientFormDialog({
 export default function AdminClients() {
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
+  const { t } = useTranslation();
   const { clients, loading } = useAppSelector((s) => s.admin);
+  const { labels } = useAppSelector((s) => s.prospects);
+  const { user } = useAppSelector((s) => s.adminAuth);
+  const isAffiliate = user?.role === "affiliate";
 
   const [search, setSearch] = useState("");
   const [showFilters, setShowFilters] = useState(false);
@@ -368,6 +413,7 @@ export default function AdminClients() {
     joined_from: "",
     joined_to: "",
     has_notes: "all",
+    labels: [] as string[],
   });
   const [sortBy, setSortBy] = useState("created_at");
   const [sortDir, setSortDir] = useState<"ASC" | "DESC">("DESC");
@@ -388,13 +434,22 @@ export default function AdminClients() {
     filters.joined_from !== "",
     filters.joined_to !== "",
     filters.has_notes !== "all",
+    filters.labels.length > 0,
   ].filter(Boolean).length;
 
   const clearFilter = (key: keyof typeof filters) =>
-    setFilters((f) => ({
-      ...f,
-      [key]: key === "joined_from" || key === "joined_to" ? "" : "all",
-    }));
+    setFilters(
+      (f) =>
+        ({
+          ...f,
+          [key]:
+            key === "joined_from" || key === "joined_to"
+              ? ""
+              : key === "labels"
+                ? []
+                : "all",
+        }) as typeof f,
+    );
 
   const clearAllFilters = () =>
     setFilters({
@@ -405,7 +460,12 @@ export default function AdminClients() {
       joined_from: "",
       joined_to: "",
       has_notes: "all",
+      labels: [],
     });
+
+  useEffect(() => {
+    dispatch(fetchLabels());
+  }, [dispatch]);
 
   useEffect(() => {
     dispatch(
@@ -418,6 +478,7 @@ export default function AdminClients() {
         joined_from: filters.joined_from || undefined,
         joined_to: filters.joined_to || undefined,
         has_notes: filters.has_notes === "all" ? undefined : filters.has_notes,
+        labels: filters.labels.length > 0 ? filters.labels : undefined,
       }),
     );
   }, [dispatch, debouncedSearch, filters]);
@@ -477,6 +538,16 @@ export default function AdminClients() {
       render: (c) => (
         <span className="text-muted-foreground">{c.package_name ?? "—"}</span>
       ),
+    },
+    {
+      key: "labels" as any,
+      label: "Labels",
+      render: (c) =>
+        c.labels && c.labels.length > 0 ? (
+          <LabelChips labels={c.labels} max={2} />
+        ) : (
+          <span className="text-muted-foreground text-sm">—</span>
+        ),
     },
     {
       key: "pipeline_stage",
@@ -550,16 +621,20 @@ export default function AdminClients() {
             >
               <Pencil className="w-3.5 h-3.5 mr-2" /> Edit
             </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem
-              className="text-destructive focus:text-destructive"
-              onClick={(e) => {
-                e.stopPropagation();
-                setDeletingClient(c);
-              }}
-            >
-              <Trash2 className="w-3.5 h-3.5 mr-2" /> Delete
-            </DropdownMenuItem>
+            {!isAffiliate && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  className="text-destructive focus:text-destructive"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setDeletingClient(c);
+                  }}
+                >
+                  <Trash2 className="w-3.5 h-3.5 mr-2" /> Delete
+                </DropdownMenuItem>
+              </>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       ),
@@ -570,18 +645,34 @@ export default function AdminClients() {
     <div className="space-y-6">
       <AdminPageHeader
         icon={Users}
-        title="Clients"
-        description="Manage and search all client accounts."
+        title={t("adminClients.title")}
+        description={
+          isAffiliate
+            ? t("affiliates.clientsPageDescription")
+            : t("adminClients.description")
+        }
         actions={
-          <button
-            onClick={() => {
-              setEditingClient(null);
-              setShowForm(true);
-            }}
-            className="inline-flex items-center gap-2 h-9 px-4 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors"
-          >
-            <Plus className="w-4 h-4" /> Add client
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            {!isAffiliate && (
+              <button
+                type="button"
+                onClick={() => dispatch(openBulkImportWizard("clients"))}
+                className="inline-flex items-center gap-2 h-9 px-4 rounded-lg border border-input bg-background text-sm font-medium hover:bg-muted transition-colors"
+              >
+                <Upload className="w-4 h-4" /> {t("adminClients.importCsv")}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                setEditingClient(null);
+                setShowForm(true);
+              }}
+              className="inline-flex items-center gap-2 h-9 px-4 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors"
+            >
+              <Plus className="w-4 h-4" /> {t("adminClients.addClient")}
+            </button>
+          </div>
         }
       />
 
@@ -716,6 +807,36 @@ export default function AdminClients() {
                 </select>
                 <ChevronDown className="w-3.5 h-3.5 absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
               </div>
+              <EnumLegend
+                value={filters.billing !== "all" ? filters.billing : undefined}
+                items={[
+                  {
+                    value: "split_plan",
+                    label: "Split plan",
+                    description: t("adminHelpers.billingFilter.split_plan"),
+                  },
+                  {
+                    value: "overdue",
+                    label: "Has overdue",
+                    description: t("adminHelpers.billingFilter.overdue"),
+                  },
+                  {
+                    value: "paid_full",
+                    label: "Paid in full",
+                    description: t("adminHelpers.billingFilter.paid_full"),
+                  },
+                  {
+                    value: "direct_paid",
+                    label: "Direct paid",
+                    description: t("adminHelpers.billingFilter.direct_paid"),
+                  },
+                  {
+                    value: "no_payment",
+                    label: "No payment",
+                    description: t("adminHelpers.billingFilter.no_payment"),
+                  },
+                ]}
+              />
             </div>
 
             {/* Joined from */}
@@ -767,6 +888,21 @@ export default function AdminClients() {
                 </select>
                 <ChevronDown className="w-3.5 h-3.5 absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
               </div>
+            </div>
+
+            {/* Labels */}
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-muted-foreground">
+                Labels (source / analysis)
+              </label>
+              <LabelMultiSelect
+                labels={labels}
+                selected={filters.labels}
+                onChange={(slugs) =>
+                  setFilters((f) => ({ ...f, labels: slugs }))
+                }
+                placeholder="Any labels"
+              />
             </div>
 
             {/* Clear all */}
@@ -837,6 +973,11 @@ export default function AdminClients() {
             chips.push({
               key: "has_notes",
               label: filters.has_notes === "yes" ? "Has Notes" : "No Notes",
+            });
+          if (filters.labels.length > 0)
+            chips.push({
+              key: "labels",
+              label: `Labels: ${filters.labels.length} selected`,
             });
           return (
             <div className="flex flex-wrap gap-2">
@@ -970,6 +1111,8 @@ export default function AdminClients() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <BulkImportWizard />
     </div>
   );
 }

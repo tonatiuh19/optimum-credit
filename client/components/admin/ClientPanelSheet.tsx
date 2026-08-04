@@ -25,14 +25,22 @@ import {
   clearPanelClient,
   deleteRoundReportPdf,
   fetchCaseSplits,
-  markSplitPaid,
+  createCaseSplit,
 } from "@/store/slices/adminSlice";
 import {
   fetchCaseTaskCompletions,
   fetchClientTaskCompletions,
   reviewTaskCompletion,
 } from "@/store/slices/adminTasksSlice";
-import type { OnboardingTaskType, PaymentSplit } from "@shared/api";
+import type { OnboardingTaskType } from "@shared/api";
+import AdminSplitActions from "@/components/admin/AdminSplitActions";
+import InstallmentDraftFields, {
+  emptyInstallmentDraft,
+  draftToCreateSplitPayload,
+  type InstallmentDraft,
+} from "@/components/admin/InstallmentDraftFields";
+import { useTranslation } from "react-i18next";
+import FieldHint from "@/components/admin/FieldHint";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import {
   Dialog,
@@ -49,6 +57,8 @@ import { useToast } from "@/hooks/use-toast";
 import OfGReportWizard, {
   suggestReportRound,
 } from "@/components/admin/OfgReportWizard";
+import { InfoRequestsTab } from "@/components/admin/InfoRequestsTab";
+import { ClientLabelsEditor } from "@/components/admin/ClientLabelsEditor";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -108,6 +118,7 @@ function TaskCompletionCard({
   onConfirmReject: () => void;
   onPreview?: () => void;
 }) {
+  const { t } = useTranslation();
   const adminStatus: "pending" | "approved" | "rejected" =
     task.admin_review_status ?? "pending";
   const isSubmitted = task.completion_status === "completed";
@@ -229,6 +240,7 @@ function TaskCompletionCard({
             onChange={(e) => onRejectReasonChange(e.target.value)}
             className="bg-border/30 border-input text-xs resize-none"
           />
+          <FieldHint>{t("adminHelpers.rejectTaskNotify")}</FieldHint>
           <div className="flex justify-end gap-2">
             <Button
               onClick={onCancelReject}
@@ -574,6 +586,7 @@ function ReportsTab({
 function OverviewTab({ client, payments }: { client: any; payments: any[] }) {
   return (
     <div className="space-y-4">
+      <ClientLabelsEditor clientId={client.id} initialLabels={client.labels} />
       <div className="bg-muted/40 rounded-xl p-4 space-y-2.5">
         <h3 className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
           Contact
@@ -644,7 +657,10 @@ function OverviewTab({ client, payments }: { client: any; payments: any[] }) {
 function PaymentScheduleTab({ caseId }: { caseId: number }) {
   const dispatch = useAppDispatch();
   const { toast } = useToast();
+  const { t } = useTranslation();
   const { caseSplits, caseSplitsLoading } = useAppSelector((s) => s.admin);
+  const [draft, setDraft] = useState<InstallmentDraft | null>(null);
+  const [adding, setAdding] = useState(false);
 
   useEffect(() => {
     dispatch(fetchCaseSplits(caseId));
@@ -657,33 +673,43 @@ function PaymentScheduleTab({ caseId }: { caseId: number }) {
       minimumFractionDigits: 0,
     }).format(cents / 100);
 
-  const handleMarkPaid = async (split: PaymentSplit) => {
+  const refresh = () => dispatch(fetchCaseSplits(caseId));
+
+  const handleAdd = async () => {
+    if (!draft || !draft.amount || !draft.due_date) {
+      toast({
+        title: "Amount and due date required",
+        variant: "destructive",
+      });
+      return;
+    }
+    setAdding(true);
     try {
-      await dispatch(markSplitPaid({ caseId, splitId: split.id })).unwrap();
-      toast({ title: "Marked as paid" });
-      dispatch(fetchCaseSplits(caseId));
+      await dispatch(
+        createCaseSplit({
+          caseId,
+          split: draftToCreateSplitPayload(draft),
+        }),
+      ).unwrap();
+      toast({ title: "Installment added" });
+      setDraft(null);
+      refresh();
     } catch {
       toast({
         title: "Error",
-        description: "Could not mark split as paid",
+        description: "Could not add installment",
         variant: "destructive",
       });
+    } finally {
+      setAdding(false);
     }
   };
 
-  if (caseSplitsLoading) {
+  if (caseSplitsLoading && caseSplits.length === 0) {
     return (
       <div className="flex justify-center py-10">
         <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
       </div>
-    );
-  }
-
-  if (caseSplits.length === 0) {
-    return (
-      <p className="text-sm text-muted-foreground py-4">
-        No payment schedule for this case.
-      </p>
     );
   }
 
@@ -700,9 +726,16 @@ function PaymentScheduleTab({ caseId }: { caseId: number }) {
           {caseSplits.length} paid
         </span>
         <span className="font-semibold text-foreground">
-          {fmtMoney(paid)} / {fmtMoney(total)}
+          {fmtMoney(paid)} / {fmtMoney(total || 0)}
         </span>
       </div>
+
+      {caseSplits.length === 0 && !draft && (
+        <p className="text-sm text-muted-foreground py-2">
+          No payment schedule for this case.
+        </p>
+      )}
+
       {caseSplits.map((sp) => {
         const isOverdue =
           sp.status === "pending" && new Date(sp.due_date) < new Date();
@@ -714,15 +747,18 @@ function PaymentScheduleTab({ caseId }: { caseId: number }) {
               ? "bg-destructive/10 text-destructive border-destructive/30"
               : eff === "cancelled"
                 ? "bg-muted text-muted-foreground border-border"
-                : "bg-yellow-500/10 text-yellow-700 border-yellow-300";
+                : "bg-secondary text-secondary-foreground border-border";
+        const hasLink = !!(sp.payment_link || sp.payment_token);
 
         return (
           <div
             key={sp.id}
-            className="flex items-center justify-between bg-card border border-border rounded-xl px-3 py-2.5"
+            className="flex items-center justify-between gap-2 bg-card border border-border rounded-xl px-3 py-2.5"
           >
-            <div>
-              <p className="text-sm font-medium text-foreground">{sp.label}</p>
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-foreground truncate">
+                {sp.label}
+              </p>
               <p className="text-xs text-muted-foreground">
                 Due{" "}
                 {new Date(sp.due_date).toLocaleDateString("en-US", {
@@ -730,31 +766,60 @@ function PaymentScheduleTab({ caseId }: { caseId: number }) {
                   day: "numeric",
                   year: "numeric",
                 })}
+                {" · "}
+                {hasLink
+                  ? t("adminPipeline.hasPayLink")
+                  : sp.status === "paid"
+                    ? t("adminPipeline.modePaid")
+                    : t("adminPipeline.modeManual")}
               </p>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 shrink-0">
               <span
                 className={`text-xs font-semibold px-2 py-0.5 rounded-full border ${badgeClass}`}
               >
                 {eff.charAt(0).toUpperCase() + eff.slice(1)}
               </span>
-              <span className="text-sm font-bold">
-                {fmtMoney(sp.amount_cents)}
-              </span>
-              {sp.status === "pending" && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-6 text-[11px] px-2"
-                  onClick={() => handleMarkPaid(sp)}
-                >
-                  Paid
-                </Button>
-              )}
+              <span className="text-sm font-bold">{fmtMoney(sp.amount_cents)}</span>
+              <AdminSplitActions split={sp} onDone={refresh} />
             </div>
           </div>
         );
       })}
+
+      {draft ? (
+        <div className="space-y-2">
+          <InstallmentDraftFields
+            draft={draft}
+            onChange={setDraft}
+            hideRemove
+          />
+          <div className="flex gap-2 justify-end">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setDraft(null)}
+              disabled={adding}
+            >
+              Cancel
+            </Button>
+            <Button size="sm" onClick={handleAdd} disabled={adding}>
+              {adding ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" />
+              ) : null}
+              {t("adminPipeline.addInstallment")}
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setDraft(emptyInstallmentDraft(caseSplits.length + 1))}
+          className="text-xs text-primary hover:underline font-semibold"
+        >
+          + {t("adminPipeline.addInstallment")}
+        </button>
+      )}
     </div>
   );
 }
@@ -831,7 +896,7 @@ export function ClientPanelSheet({
   } = useAppSelector((s) => s.adminTasks);
 
   const [panelTab, setPanelTab] = useState<
-    "overview" | "tasks" | "reports" | "history" | "schedule"
+    "overview" | "tasks" | "requests" | "reports" | "history" | "schedule"
   >("tasks");
   const [rejectingTaskId, setRejectingTaskId] = useState<number | null>(null);
   const [rejectReason, setRejectReason] = useState("");
@@ -1017,11 +1082,12 @@ export function ClientPanelSheet({
               )}
 
               {/* Tabs */}
-              <div className="flex border-b border-border shrink-0 bg-muted/30">
+              <div className="flex border-b border-border shrink-0 bg-muted/30 overflow-x-auto">
                 {(
                   [
                     "overview",
                     "tasks",
+                    "requests",
                     "reports",
                     "history",
                     "schedule",
@@ -1031,7 +1097,7 @@ export function ClientPanelSheet({
                     key={tab}
                     onClick={() => setPanelTab(tab)}
                     className={[
-                      "flex-1 py-3 text-[11px] font-semibold uppercase tracking-wider transition-colors border-b-2",
+                      "flex-1 min-w-[4.5rem] py-3 text-[11px] font-semibold uppercase tracking-wider transition-colors border-b-2",
                       panelTab === tab
                         ? "text-primary border-primary"
                         : "text-muted-foreground border-transparent hover:text-foreground",
@@ -1041,7 +1107,9 @@ export function ClientPanelSheet({
                       ? `Tasks (${approvedCount}/${requiredCount})`
                       : tab === "schedule"
                         ? "Schedule"
-                        : tab.charAt(0).toUpperCase() + tab.slice(1)}
+                        : tab === "requests"
+                          ? "Requests"
+                          : tab.charAt(0).toUpperCase() + tab.slice(1)}
                   </button>
                 ))}
               </div>
@@ -1116,6 +1184,15 @@ export function ClientPanelSheet({
                       tasks are approved.
                     </div>
                   </div>
+                )}
+
+                {panelTab === "requests" && caseId && (
+                  <InfoRequestsTab
+                    caseId={caseId}
+                    onChanged={() => {
+                      onCaseUpdated();
+                    }}
+                  />
                 )}
 
                 {panelTab === "history" && (

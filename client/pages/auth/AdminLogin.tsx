@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import { useFormik } from "formik";
 import * as Yup from "yup";
 import {
@@ -30,7 +31,10 @@ const STATS = [
   { value: "98%", label: "Satisfaction rate", icon: Activity },
 ];
 
+const RESEND_COOLDOWN_SEC = 45;
+
 export default function AdminLogin() {
+  const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
   const { requestingOtp, verifyingOtp, error, otpSentTo } = useAppSelector(
@@ -38,6 +42,13 @@ export default function AdminLogin() {
   );
   const displayError = error ? formatApiError(error, "Something went wrong") : null;
   const [step, setStep] = useState<"email" | "code">("email");
+  const [resendIn, setResendIn] = useState(0);
+
+  useEffect(() => {
+    if (resendIn <= 0) return;
+    const id = window.setTimeout(() => setResendIn((s) => s - 1), 1000);
+    return () => window.clearTimeout(id);
+  }, [resendIn]);
 
   const emailForm = useFormik({
     initialValues: { email: "" },
@@ -46,7 +57,10 @@ export default function AdminLogin() {
     }),
     onSubmit: async (values) => {
       const result = await dispatch(requestAdminOtp({ email: values.email }));
-      if (requestAdminOtp.fulfilled.match(result)) setStep("code");
+      if (requestAdminOtp.fulfilled.match(result)) {
+        setStep("code");
+        setResendIn(RESEND_COOLDOWN_SEC);
+      }
     },
   });
 
@@ -68,6 +82,16 @@ export default function AdminLogin() {
     },
   });
 
+  const handleResend = async () => {
+    const email = otpSentTo || emailForm.values.email;
+    if (!email || requestingOtp || resendIn > 0) return;
+    const result = await dispatch(requestAdminOtp({ email }));
+    if (requestAdminOtp.fulfilled.match(result)) {
+      setResendIn(RESEND_COOLDOWN_SEC);
+      codeForm.setFieldValue("code", "");
+    }
+  };
+
   return (
     <div className="h-[100dvh] overflow-hidden flex w-full max-w-[100vw]">
       <PageMeta
@@ -76,9 +100,7 @@ export default function AdminLogin() {
         canonical="/admin/login"
         noIndex={true}
       />
-      {/* ── Left: Form column ── */}
       <div className="flex-1 lg:max-w-[480px] bg-gradient-to-br from-primary/5 via-background to-accent/5 flex flex-col overflow-y-auto">
-        {/* Header */}
         <header className="sticky top-0 z-20 bg-background/80 backdrop-blur-md border-b border-border/60 shrink-0">
           <div className="px-6 h-16 flex items-center justify-between">
             <Link
@@ -104,16 +126,14 @@ export default function AdminLogin() {
                 className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
               >
                 <ArrowLeft className="w-3.5 h-3.5" />
-                Back
+                {t("adminLogin.back")}
               </Link>
             </div>
           </div>
         </header>
 
-        {/* Form body */}
         <div className="flex-1 flex flex-col justify-center px-5 sm:px-8 py-8 sm:py-10">
           <div className="w-full max-w-sm mx-auto animate-fade-up">
-            {/* Icon + heading */}
             <div className="flex flex-col items-center text-center mb-8">
               <div className="w-14 h-14 bg-gradient-to-br from-primary to-primary-600 rounded-2xl flex items-center justify-center mb-5 shadow-lg shadow-primary/30">
                 <ShieldCheck className="w-7 h-7 text-white" />
@@ -124,13 +144,15 @@ export default function AdminLogin() {
                     Sign in to <span className="gradient-text">Console</span>
                   </>
                 ) : (
-                  "Check your inbox"
+                  t("adminLogin.checkEmail")
                 )}
               </h1>
               <p className="text-sm text-muted-foreground max-w-xs">
                 {step === "email"
-                  ? "Enter your admin email to receive a secure one-time sign-in code."
-                  : `We sent a 6-digit code to ${otpSentTo || emailForm.values.email}`}
+                  ? t("adminLogin.subheading")
+                  : t("adminLogin.codeSentTo", {
+                      email: otpSentTo || emailForm.values.email,
+                    })}
               </p>
             </div>
 
@@ -138,7 +160,7 @@ export default function AdminLogin() {
               <form onSubmit={emailForm.handleSubmit} className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-foreground mb-1.5">
-                    Admin email
+                    {t("adminLogin.emailLabel")}
                   </label>
                   <div className="relative">
                     <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
@@ -146,7 +168,7 @@ export default function AdminLogin() {
                       type="email"
                       {...emailForm.getFieldProps("email")}
                       className="w-full h-12 pl-10 pr-4 rounded-xl border border-input bg-background hover:border-primary/40 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20 text-foreground placeholder:text-muted-foreground/60 transition-all"
-                      placeholder="admin@optimumcreditrepair.com"
+                      placeholder={t("adminLogin.emailPlaceholder")}
                       autoComplete="email"
                       autoFocus
                     />
@@ -171,10 +193,11 @@ export default function AdminLogin() {
                 >
                   {requestingOtp ? (
                     <>
-                      <Loader2 className="w-4 h-4 animate-spin" /> Sending code…
+                      <Loader2 className="w-4 h-4 animate-spin" />{" "}
+                      {t("adminLogin.sendingCode")}
                     </>
                   ) : (
-                    "Continue"
+                    t("adminLogin.continue")
                   )}
                 </button>
               </form>
@@ -182,7 +205,7 @@ export default function AdminLogin() {
               <form onSubmit={codeForm.handleSubmit} className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-foreground mb-3 text-center">
-                    Verification code
+                    {t("adminLogin.verificationCode")}
                   </label>
                   <OtpInput
                     value={codeForm.values.code}
@@ -210,11 +233,25 @@ export default function AdminLogin() {
                 >
                   {verifyingOtp ? (
                     <>
-                      <Loader2 className="w-4 h-4 animate-spin" /> Verifying…
+                      <Loader2 className="w-4 h-4 animate-spin" />{" "}
+                      {t("adminLogin.verifying")}
                     </>
                   ) : (
-                    "Sign in to Console"
+                    t("adminLogin.verifySignIn")
                   )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleResend}
+                  disabled={requestingOtp || resendIn > 0}
+                  className="w-full text-sm font-medium text-primary hover:text-primary/80 disabled:text-muted-foreground disabled:cursor-not-allowed transition-colors py-1"
+                >
+                  {requestingOtp
+                    ? t("adminLogin.resendSending")
+                    : resendIn > 0
+                      ? t("adminLogin.resendIn", { seconds: resendIn })
+                      : t("adminLogin.resendCode")}
                 </button>
 
                 <button
@@ -222,14 +259,13 @@ export default function AdminLogin() {
                   onClick={() => setStep("email")}
                   className="w-full text-sm text-muted-foreground hover:text-foreground transition-colors py-1"
                 >
-                  ← Use a different email
+                  {t("adminLogin.useDifferentEmail")}
                 </button>
               </form>
             )}
           </div>
         </div>
 
-        {/* Footer */}
         <div className="px-5 sm:px-8 pb-6 shrink-0">
           <div className="flex flex-wrap items-center justify-center gap-4 text-xs text-muted-foreground mb-4">
             <div className="flex items-center gap-1.5">
@@ -251,15 +287,11 @@ export default function AdminLogin() {
         </div>
       </div>
 
-      {/* ── Right: Video brand panel ── */}
       <div className="hidden lg:flex flex-1 relative overflow-hidden">
-        {/* Fallback gradient */}
         <div
           className="absolute inset-0 bg-gradient-to-br from-[#0a1628] via-[#0f2444] to-[#051022]"
           style={{ zIndex: 0 }}
         />
-
-        {/* Video background */}
         <video
           autoPlay
           muted
@@ -270,8 +302,6 @@ export default function AdminLogin() {
         >
           <source src={VIDEO_URL} type="video/mp4" />
         </video>
-
-        {/* Gradient overlays */}
         <div
           className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/20 to-black/40"
           style={{ zIndex: 2 }}
@@ -280,17 +310,12 @@ export default function AdminLogin() {
           className="absolute inset-0 bg-gradient-to-r from-black/40 to-transparent"
           style={{ zIndex: 2 }}
         />
-
-        {/* Content */}
         <div className="relative z-10 flex flex-col justify-between h-full p-12 text-white">
-          {/* Top: badge */}
           <div>
             <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white/10 backdrop-blur-sm border border-white/20 text-xs font-medium text-white/90">
               <ShieldCheck className="w-3.5 h-3.5 text-accent" />
             </span>
           </div>
-
-          {/* Middle: headline */}
           <div className="space-y-8">
             <div className="space-y-4 max-w-lg">
               <h2 className="text-4xl xl:text-5xl font-bold leading-tight text-white drop-shadow-md">
@@ -302,8 +327,6 @@ export default function AdminLogin() {
                 and drive real results — all from one place built for your team.
               </p>
             </div>
-
-            {/* Stats */}
             <div className="grid grid-cols-3 gap-4">
               {STATS.map(({ value, label, icon: Icon }) => (
                 <div
@@ -319,8 +342,6 @@ export default function AdminLogin() {
               ))}
             </div>
           </div>
-
-          {/* Bottom: note */}
           <p className="text-[11px] text-white/35">
             Secured with end-to-end encryption · Staff access only
           </p>

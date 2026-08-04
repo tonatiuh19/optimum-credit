@@ -15,8 +15,19 @@ import {
   X,
 } from "lucide-react";
 import AdminPageHeader from "@/components/AdminPageHeader";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { useFormik } from "formik";
 import * as Yup from "yup";
+import { useTranslation } from "react-i18next";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
   createVideo,
@@ -82,6 +93,7 @@ const initialValues = {
 };
 
 export default function AdminVideos() {
+  const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const { videos } = useAppSelector((s) => s.admin);
   const [filter, setFilter] = useState<ContentType | "all">("all");
@@ -90,6 +102,7 @@ export default function AdminVideos() {
   const [uploading, setUploading] = useState(false);
   const [uploadedUrl, setUploadedUrl] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [deleteId, setDeleteId] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -200,7 +213,7 @@ export default function AdminVideos() {
   };
 
   const remove = async (id: number) => {
-    if (!confirm("Delete this content item?")) return;
+    setDeleteId(null);
     await dispatch(deleteVideo({ id }));
     dispatch(fetchAdminVideos());
   };
@@ -214,6 +227,34 @@ export default function AdminVideos() {
 
   return (
     <div className="space-y-6">
+      <AlertDialog
+        open={deleteId != null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteId(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {t("adminConfirm.deleteVideoTitle")}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("adminConfirm.deleteVideoDesc")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t("adminConfirm.cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => {
+                if (deleteId != null) void remove(deleteId);
+              }}
+            >
+              {t("adminConfirm.delete")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       <AdminPageHeader
         icon={BookOpen}
         title="Education Center"
@@ -366,7 +407,7 @@ export default function AdminVideos() {
                     </button>
                     {/* Delete */}
                     <button
-                      onClick={() => remove(v.id)}
+                      onClick={() => setDeleteId(v.id)}
                       className="h-8 px-2.5 rounded-lg bg-muted hover:bg-destructive/10 hover:text-destructive text-muted-foreground transition-colors"
                       title="Delete"
                     >

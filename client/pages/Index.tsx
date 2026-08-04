@@ -8,9 +8,10 @@ import {
   MessageSquare,
   Lock,
   Loader2,
+  Sparkles,
 } from "lucide-react";
 import { useEffect } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import CreditImprovementCard from "@/components/CreditImprovementCard";
 import PageMeta, {
   organizationSchema,
@@ -20,11 +21,14 @@ import { useTranslation } from "react-i18next";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { fetchPackages } from "@/store/slices/packagesSlice";
 import PackagesPlanGrid from "@/components/PackagesPlanGrid";
+import CreditAnalysisLeadForm from "@/components/CreditAnalysisLeadForm";
+import { captureAffiliateRef } from "@/lib/affiliateAttribution";
 
 export default function Index() {
   const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { packages, loading: packagesLoading } = useAppSelector(
     (s) => s.packages,
   );
@@ -32,6 +36,11 @@ export default function Index() {
   useEffect(() => {
     dispatch(fetchPackages());
   }, [dispatch]);
+
+  useEffect(() => {
+    const ref = searchParams.get("ref");
+    if (ref) captureAffiliateRef(ref);
+  }, [searchParams]);
 
   return (
     <div className="w-full max-w-[100vw] overflow-x-hidden">
@@ -556,6 +565,37 @@ export default function Index() {
               encryption, FDIC-grade security protocols, and strict privacy
               compliance with CCPA and GDPR regulations.
             </p>
+          </div>
+        </div>
+      </section>
+
+      {/* Free Credit Analysis CTA */}
+      <section className="section-container">
+        <div className="section-inner">
+          <div className="max-w-3xl mx-auto text-center card-base p-8 md:p-12 bg-gradient-to-br from-primary/5 to-accent/5">
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-primary bg-primary/10 border border-primary/20 px-3 py-1.5 rounded-full mb-4">
+              <Sparkles className="w-3.5 h-3.5" /> {t("creditAnalysisCta.badge")}
+            </span>
+            <h2 className="text-2xl md:text-4xl font-bold text-foreground mb-3">
+              {t("creditAnalysisCta.heading")}
+            </h2>
+            <p className="text-muted-foreground mb-6 max-w-xl mx-auto">
+              {t("creditAnalysisCta.body")}
+            </p>
+            <Link
+              to="/credit-analysis"
+              className="btn-primary inline-flex items-center justify-center gap-2 h-12 px-8 mb-8 group hover:gap-3 transition-all"
+            >
+              {t("creditAnalysisCta.button")}
+              <ArrowRight className="w-5 h-5 group-hover:translate-x-0.5 transition-transform" />
+            </Link>
+
+            <div className="border-t border-border pt-6 max-w-lg mx-auto">
+              <p className="text-sm text-muted-foreground mb-3">
+                {t("creditAnalysisCta.leadHeading")}
+              </p>
+              <CreditAnalysisLeadForm />
+            </div>
           </div>
         </div>
       </section>

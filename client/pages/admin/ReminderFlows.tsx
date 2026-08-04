@@ -7,6 +7,7 @@ import {
   useCallback,
 } from "react";
 import React from "react";
+import { useTranslation } from "react-i18next";
 import {
   Bell,
   Mail,
@@ -51,7 +52,15 @@ import {
   fetchAllExecutions,
   clearSelectedFlow,
 } from "@/store/slices/reminderFlowsSlice";
-import type { ReminderFlowTriggerEvent, ReminderFlowStep } from "@shared/api";
+import { fetchLabels } from "@/store/slices/prospectsSlice";
+import { LabelMultiSelect } from "@/components/admin/LabelMultiSelect";
+import FieldHint from "@/components/admin/FieldHint";
+import { ClientSearchPicker } from "@/components/ui/client-search-picker";
+import type {
+  ReminderFlowTriggerEvent,
+  ReminderFlowStep,
+  AdminClientListItem,
+} from "@shared/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -636,22 +645,42 @@ function ManualTriggerDialog({
 }) {
   const dispatch = useAppDispatch();
   const { toast } = useToast();
-  const [clientId, setClientId] = useState("");
+  const { t } = useTranslation();
+  const adminEmail = useAppSelector((s) => s.adminAuth.user?.email) || "";
+  const [selectedClient, setSelectedClient] =
+    useState<AdminClientListItem | null>(null);
+  const [deliverToAdmin, setDeliverToAdmin] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const [running, setRunning] = useState(false);
 
-  const handleTrigger = async () => {
-    const id = Number(clientId);
-    if (!id) {
-      toast({ title: "Valid client ID required", variant: "destructive" });
-      return;
+  useEffect(() => {
+    if (open) {
+      setSelectedClient(null);
+      setDeliverToAdmin(false);
+      setConfirmOpen(false);
     }
+  }, [open]);
+
+  const runTrigger = async () => {
+    if (!selectedClient) return;
     setRunning(true);
     try {
-      await dispatch(triggerFlowForClient({ flowId, clientId: id })).unwrap();
+      const result = await dispatch(
+        triggerFlowForClient({
+          flowId,
+          clientId: selectedClient.id,
+          deliverToAdmin,
+        }),
+      ).unwrap();
       toast({
-        title: "Flow triggered successfully",
-        description: `Emails scheduled for client #${id}`,
+        title: deliverToAdmin
+          ? "Sandbox emails queued"
+          : "Flow triggered successfully",
+        description: deliverToAdmin
+          ? `Test delivery to ${result?.delivered_to || adminEmail}`
+          : `Emails scheduled for ${selectedClient.first_name} ${selectedClient.last_name}`,
       });
+      setConfirmOpen(false);
       onClose();
     } catch {
       toast({ title: "Trigger failed", variant: "destructive" });
@@ -661,49 +690,118 @@ function ManualTriggerDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="sm:max-w-sm">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Play className="h-4 w-4 text-accent" /> Manual Trigger
-          </DialogTitle>
-          <DialogDescription>
-            Run <strong>{flowName}</strong> for a specific client right now.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-3 py-2">
-          <div className="space-y-1.5">
-            <Label className="text-xs font-medium">Client ID</Label>
-            <Input
-              type="number"
-              value={clientId}
-              onChange={(e) => setClientId(e.target.value)}
-              placeholder="Enter client ID..."
-              className="h-9"
-            />
-          </div>
-          <div className="rounded-lg border border-amber-500/25 bg-amber-500/10 p-3 text-xs text-amber-400">
-            <AlertTriangle className="h-3.5 w-3.5 inline mr-1" />
-            This will immediately send Day-0 emails and queue future-day emails
-            for the specified client.
-          </div>
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={running}>
-            Cancel
-          </Button>
-          <Button onClick={handleTrigger} disabled={running}>
-            {running ? (
-              "Triggering..."
+    <>
+      <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Play className="h-4 w-4 text-accent" />{" "}
+              {t("adminHelpers.manualTriggerTitle")}
+            </DialogTitle>
+            <DialogDescription>
+              Run <strong>{flowName}</strong> for a specific client right now.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <div className="space-y-1.5">
+              <Label className="text-xs font-medium">Client</Label>
+              <ClientSearchPicker
+                value={selectedClient}
+                onChange={setSelectedClient}
+                disabled={running}
+              />
+            </div>
+            <label className="flex items-start gap-2 text-xs cursor-pointer">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={deliverToAdmin}
+                disabled={running || !adminEmail}
+                onChange={(e) => setDeliverToAdmin(e.target.checked)}
+              />
+              <span>
+                <span className="font-medium">
+                  {t("adminHelpers.manualTriggerSandbox")}
+                </span>
+                {adminEmail ? (
+                  <span className="text-muted-foreground block mt-0.5">
+                    {adminEmail}
+                  </span>
+                ) : null}
+              </span>
+            </label>
+            {deliverToAdmin ? (
+              <FieldHint tone="accent">
+                {t("adminHelpers.manualTriggerSandboxHint")}
+              </FieldHint>
             ) : (
+              <FieldHint tone="warning">
+                {t("adminHelpers.manualTriggerWarn")}
+              </FieldHint>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={onClose} disabled={running}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                if (!selectedClient) {
+                  toast({
+                    title: "Select a client first",
+                    variant: "destructive",
+                  });
+                  return;
+                }
+                setConfirmOpen(true);
+              }}
+              disabled={running || !selectedClient}
+            >
               <>
                 <Play className="h-3.5 w-3.5 mr-1.5" /> Run Flow
               </>
-            )}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {t("adminHelpers.manualTriggerConfirmTitle")}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {deliverToAdmin
+                ? t("adminHelpers.manualTriggerSandboxConfirm", {
+                    name: selectedClient
+                      ? `${selectedClient.first_name} ${selectedClient.last_name}`
+                      : "",
+                    adminEmail,
+                  })
+                : t("adminHelpers.manualTriggerConfirm", {
+                    name: selectedClient
+                      ? `${selectedClient.first_name} ${selectedClient.last_name}`
+                      : "",
+                    email: selectedClient?.email || "",
+                  })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={running}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                void runTrigger();
+              }}
+              disabled={running}
+            >
+              {running ? "Triggering..." : "Confirm"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }
 
@@ -970,9 +1068,11 @@ function FlowCanvas({
 function FlowDetail() {
   const dispatch = useAppDispatch();
   const { toast } = useToast();
+  const { t } = useTranslation();
   const { selectedFlow, flowExecutions, flowTemplates } = useAppSelector(
     (s) => s.reminderFlows,
   );
+  const { labels } = useAppSelector((s) => s.prospects);
 
   const [editingStep, setEditingStep] = useState<ReminderFlowStep | null>(null);
   const [addingStep, setAddingStep] = useState(false);
@@ -982,13 +1082,39 @@ function FlowDetail() {
   const [nameVal, setNameVal] = useState(selectedFlow?.name ?? "");
   const [descVal, setDescVal] = useState(selectedFlow?.description ?? "");
   const [savingMeta, setSavingMeta] = useState(false);
+  const [requiredLabels, setRequiredLabels] = useState<string[]>(
+    selectedFlow?.required_label_slugs ?? [],
+  );
+  const [savingAudience, setSavingAudience] = useState(false);
 
   useEffect(() => {
     setNameVal(selectedFlow?.name ?? "");
     setDescVal(selectedFlow?.description ?? "");
+    setRequiredLabels(selectedFlow?.required_label_slugs ?? []);
   }, [selectedFlow?.id]);
 
   if (!selectedFlow) return null;
+
+  const audienceDirty =
+    JSON.stringify([...requiredLabels].sort()) !==
+    JSON.stringify([...(selectedFlow.required_label_slugs ?? [])].sort());
+
+  const handleSaveAudience = async () => {
+    setSavingAudience(true);
+    try {
+      await dispatch(
+        updateReminderFlow({
+          id: selectedFlow.id,
+          required_label_slugs: requiredLabels.length > 0 ? requiredLabels : null,
+        }),
+      ).unwrap();
+      toast({ title: "Audience updated" });
+    } catch {
+      toast({ title: "Error saving audience", variant: "destructive" });
+    } finally {
+      setSavingAudience(false);
+    }
+  };
 
   const triggerMeta =
     TRIGGER_EVENT_META[selectedFlow.trigger_event as ReminderFlowTriggerEvent];
@@ -1095,9 +1221,10 @@ function FlowDetail() {
             variant="outline"
             className="h-8 gap-1.5"
             onClick={() => setTriggerOpen(true)}
+            title={t("adminHelpers.manualTriggerTitle")}
           >
             <Play className="h-3.5 w-3.5" />
-            <span className="hidden sm:inline">Test</span>
+            <span className="hidden sm:inline">Run</span>
           </Button>
           <div
             className="flex items-center gap-2 cursor-pointer"
@@ -1124,6 +1251,36 @@ function FlowDetail() {
       >
         <TriggerIcon className="h-3.5 w-3.5" />
         Trigger: {triggerMeta?.label}
+      </div>
+
+      {/* Audience — label requirements */}
+      <div className="rounded-xl border border-border p-4 space-y-3">
+        <div>
+          <h3 className="text-sm font-semibold text-foreground">Audience</h3>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Only run this flow if the client has ALL of the selected labels.
+            Leave empty to run for every client.
+          </p>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <LabelMultiSelect
+            labels={labels}
+            selected={requiredLabels}
+            onChange={setRequiredLabels}
+            placeholder="Only clients with these labels"
+          />
+          {audienceDirty && (
+            <Button
+              size="sm"
+              className="h-8 gap-1.5"
+              onClick={handleSaveAudience}
+              disabled={savingAudience}
+            >
+              <Save className="h-3 w-3" />
+              {savingAudience ? "Saving..." : "Save"}
+            </Button>
+          )}
+        </div>
       </div>
 
       {/* Steps canvas */}
@@ -1501,6 +1658,7 @@ export default function AdminReminderFlows() {
     dispatch(fetchReminderFlows());
     dispatch(fetchFlowTemplates());
     dispatch(fetchAllExecutions());
+    dispatch(fetchLabels());
   }, [dispatch]);
 
   const handleSelectFlow = async (id: number) => {
