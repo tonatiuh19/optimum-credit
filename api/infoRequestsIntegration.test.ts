@@ -330,7 +330,7 @@ describe("info requests — HTTP integration", () => {
         JSON.stringify({
           smart_credit: {
             email: "sc-user@example.com",
-            password: "SuperSecret!99",
+            password: "fixture-smartcredit-pw",
             security_question: "First pet?",
             security_answer: "Mochi",
           },
@@ -346,7 +346,7 @@ describe("info requests — HTTP integration", () => {
     expect(detailNoSecrets.body.request.secrets_json).toBeNull();
     expect(
       JSON.stringify(detailNoSecrets.body.request.response_json),
-    ).not.toContain("SuperSecret!99");
+    ).not.toContain("fixture-smartcredit-pw");
 
     const detailWithSecrets = await request(app)
       .get(`/api/admin/info-requests/${scRequestId}?include_secrets=1`)
@@ -354,7 +354,7 @@ describe("info requests — HTTP integration", () => {
     expect(detailWithSecrets.status).toBe(200);
     expect(detailWithSecrets.body.request.secrets_json?.smart_credit).toMatchObject({
       email: "sc-user@example.com",
-      password: "SuperSecret!99",
+      password: "fixture-smartcredit-pw",
       security_answer: "Mochi",
     });
 
@@ -363,7 +363,7 @@ describe("info requests — HTTP integration", () => {
       .get(`/api/portal/info-requests/${scRequestId}`)
       .set("Authorization", `Bearer ${clientToken}`);
     expect(portalDetail.body.request.secrets_json).toBeNull();
-    expect(JSON.stringify(portalDetail.body)).not.toContain("SuperSecret!99");
+    expect(JSON.stringify(portalDetail.body)).not.toContain("fixture-smartcredit-pw");
   });
 
   it("approving Smart Credit stamps smart_credit_connected_at", async () => {

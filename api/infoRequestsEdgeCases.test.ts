@@ -192,7 +192,7 @@ describe("partitionInfoRequestResponses — edge cases", () => {
     const result = partitionInfoRequestResponses(fields, {
       smart_credit: {
         email: "alex@example.com",
-        password: "Secret123!",
+        password: "fixture-smartcredit-pw",
         security_question: "Pet name?",
         security_answer: "Mochi",
       },
@@ -200,14 +200,16 @@ describe("partitionInfoRequestResponses — edge cases", () => {
     expect(result.errors).toHaveLength(0);
     expect(result.secrets.smart_credit).toMatchObject({
       email: "alex@example.com",
-      password: "Secret123!",
+      password: "fixture-smartcredit-pw",
       security_answer: "Mochi",
     });
     expect(result.safeResponses.smart_credit).toEqual({
       email: "alex@example.com",
       credentials_received: true,
     });
-    expect(JSON.stringify(result.safeResponses)).not.toContain("Secret123!");
+    expect(JSON.stringify(result.safeResponses)).not.toContain(
+      "fixture-smartcredit-pw",
+    );
     expect(JSON.stringify(result.safeResponses)).not.toContain("Mochi");
   });
 
@@ -333,10 +335,12 @@ describe("partitionInfoRequestResponses — edge cases", () => {
     ];
     const result = partitionInfoRequestResponses(fields, {
       notes: "hello",
-      portal_password: "super-secret",
+      portal_password: "fixture-portal-pw",
     });
-    expect(JSON.stringify(result.safeResponses)).not.toContain("super-secret");
-    expect(result.secrets.portal_password).toBe("super-secret");
+    expect(JSON.stringify(result.safeResponses)).not.toContain(
+      "fixture-portal-pw",
+    );
+    expect(result.secrets.portal_password).toBe("fixture-portal-pw");
   });
 });
 
