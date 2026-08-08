@@ -16,6 +16,30 @@ function normalizeVersion(value: string): string {
   return value.trim();
 }
 
+function dbConfig() {
+  return {
+    host: requireEnv("DB_HOST"),
+    port: Number(requireEnv("DB_PORT")),
+    user: requireEnv("DB_USER"),
+    password: requireEnv("DB_PASSWORD"),
+    database: requireEnv("DB_NAME"),
+    ssl:
+      process.env.DB_SSL === "false" ? undefined : { minVersion: "TLSv1.2" as const },
+    // TiDB Serverless drops idle sockets; never hold a conn across vercel --prod.
+    enableKeepAlive: true,
+    connectTimeout: 20_000,
+  };
+}
+
+async function withDb<T>(fn: (conn: mysql.Connection) => Promise<T>): Promise<T> {
+  const conn = await mysql.createConnection(dbConfig());
+  try {
+    return await fn(conn);
+  } finally {
+    await conn.end().catch(() => undefined);
+  }
+}
+
 async function runCommand(command: string, args: string[]) {
   await new Promise<void>((resolve, reject) => {
     const child = spawn(command, args, {
@@ -85,12 +109,39 @@ async function promptForVersion(
   }
 }
 
+async function readAppVersion(): Promise<string | null> {
+  return withDb(async (conn) => {
+    const [rows] = await conn.query<mysql.RowDataPacket[]>(
+      `SELECT setting_value
+         FROM system_settings
+        WHERE setting_key = 'app_version'
+        LIMIT 1`,
+    );
+    return (rows as mysql.RowDataPacket[])[0]?.setting_value ?? null;
+  });
+}
+
+async function writeAppVersion(deployVersion: string): Promise<void> {
+  await withDb(async (conn) => {
+    await conn.execute(
+      `INSERT INTO system_settings (
+         setting_key,
+         setting_value,
+         description,
+         updated_at
+       ) VALUES ('app_version', ?, 'Current deployed application version shown in the admin settings page.', NOW())
+       ON DUPLICATE KEY UPDATE
+         setting_value = VALUES(setting_value),
+         description = VALUES(description),
+         updated_at = NOW()`,
+      [deployVersion],
+    );
+  });
+}
+
 async function main() {
-  const dbHost = requireEnv("DB_HOST");
-  const dbPort = Number(requireEnv("DB_PORT"));
-  const dbUser = requireEnv("DB_USER");
-  const dbPassword = requireEnv("DB_PASSWORD");
-  const dbName = requireEnv("DB_NAME");
+  // Validate DB env early (before long typecheck/deploy).
+  dbConfig();
 
   const cliArgs = process.argv.slice(2);
   const skipChecks =
@@ -114,58 +165,27 @@ async function main() {
     );
   }
 
-  const conn = await mysql.createConnection({
-    host: dbHost,
-    port: dbPort,
-    user: dbUser,
-    password: dbPassword,
-    database: dbName,
-    ssl: process.env.DB_SSL === "false" ? undefined : { minVersion: "TLSv1.2" },
-  });
+  // Short-lived connection — do not hold open across vercel --prod
+  // (TiDB Serverless closes idle sockets → "connection is in closed state").
+  const currentVersion = await readAppVersion();
+  const deployVersion = explicitVersion
+    ? normalizeVersion(explicitVersion)
+    : await promptForVersion(currentVersion);
 
-  try {
-    const [rows] = await conn.query<mysql.RowDataPacket[]>(
-      `SELECT setting_value
-         FROM system_settings
-        WHERE setting_key = 'app_version'
-        LIMIT 1`,
-    );
-
-    const currentVersion =
-      (rows as mysql.RowDataPacket[])[0]?.setting_value ?? null;
-    const deployVersion = explicitVersion
-      ? normalizeVersion(explicitVersion)
-      : await promptForVersion(currentVersion);
-
-    if (!deployVersion) {
-      throw new Error("Deploy version cannot be empty.");
-    }
-
-    console.log(
-      `\n🚀 Starting Vercel production deploy for version ${deployVersion}...\n`,
-    );
-    await runCommand("npx", ["vercel", "--prod", ...vercelArgs]);
-
-    await conn.execute(
-      `INSERT INTO system_settings (
-         setting_key,
-         setting_value,
-         description,
-         updated_at
-       ) VALUES ('app_version', ?, 'Current deployed application version shown in the admin settings page.', NOW())
-       ON DUPLICATE KEY UPDATE
-         setting_value = VALUES(setting_value),
-         description = VALUES(description),
-         updated_at = NOW()`,
-      [deployVersion],
-    );
-
-    console.log(
-      `\n🎉 Production deploy succeeded! app_version updated to ${deployVersion}.`,
-    );
-  } finally {
-    await conn.end();
+  if (!deployVersion) {
+    throw new Error("Deploy version cannot be empty.");
   }
+
+  console.log(
+    `\n🚀 Starting Vercel production deploy for version ${deployVersion}...\n`,
+  );
+  await runCommand("npx", ["vercel", "--prod", ...vercelArgs]);
+
+  await writeAppVersion(deployVersion);
+
+  console.log(
+    `\n🎉 Production deploy succeeded! app_version updated to ${deployVersion}.`,
+  );
 }
 
 main().catch((error) => {

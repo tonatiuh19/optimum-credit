@@ -133,9 +133,9 @@ export default function Reports() {
           {/* Score progression bar chart */}
           {sortedReports.some((r: any) => r.score_before || r.score_after) && (
             <div className="bg-card rounded-2xl border border-border p-6 shadow-sm">
-              <h2 className="font-semibold mb-5">Credit Score Progression</h2>
+              <h2 className="font-semibold mb-5">{t("reports.chartTitle")}</h2>
               <div className="flex items-end gap-3 h-28 overflow-x-auto pb-1">
-                {sortedReports.map((r: any, i: number) => {
+                {sortedReports.map((r: any) => {
                   const max = Math.max(
                     ...sortedReports.flatMap((x: any) => [
                       x.score_before || 0,
@@ -167,19 +167,19 @@ export default function Reports() {
                           <div
                             className="flex-1 rounded-t-md bg-primary/30 transition-all"
                             style={{ height: `${beforeH}%` }}
-                            title={`Before: ${r.score_before}`}
+                            title={`${t("reports.before")}: ${r.score_before}`}
                           />
                         ) : null}
                         {r.score_after ? (
                           <div
                             className="flex-1 rounded-t-md bg-accent transition-all"
                             style={{ height: `${afterH}%` }}
-                            title={`After: ${r.score_after}`}
+                            title={`${t("reports.after")}: ${r.score_after}`}
                           />
                         ) : null}
                       </div>
                       <span className="text-[10px] text-muted-foreground font-medium whitespace-nowrap">
-                        Rd {r.round_number}
+                        {t("reports.roundLabel", { n: r.round_number })}
                       </span>
                     </div>
                   );
@@ -188,11 +188,11 @@ export default function Reports() {
               <div className="flex items-center gap-4 mt-3 text-xs text-muted-foreground">
                 <span className="flex items-center gap-1.5">
                   <span className="w-3 h-3 rounded-sm bg-primary/30 inline-block" />
-                  Before
+                  {t("reports.before")}
                 </span>
                 <span className="flex items-center gap-1.5">
                   <span className="w-3 h-3 rounded-sm bg-accent inline-block" />
-                  After
+                  {t("reports.after")}
                 </span>
               </div>
             </div>
@@ -216,21 +216,32 @@ export default function Reports() {
                       </div>
                       <div>
                         <h3 className="font-semibold">
-                          Round {r.round_number}
+                          {t("reports.roundLabel", { n: r.round_number })}
                         </h3>
                         <p className="text-xs text-muted-foreground">
-                          {new Date(r.created_at).toLocaleDateString("en-US", {
+                          {new Date(r.created_at).toLocaleDateString(undefined, {
                             month: "long",
                             day: "numeric",
                             year: "numeric",
                           })}
                         </p>
+                        {(() => {
+                          const m = String(r.summary_md || "").match(
+                            /Report dates:\s*\*?\*?([0-9]{4}-[0-9]{2}-[0-9]{2})\*?\*?\s*→\s*\*?\*?([0-9]{4}-[0-9]{2}-[0-9]{2})/i,
+                          );
+                          if (!m) return null;
+                          return (
+                            <p className="text-[11px] text-muted-foreground mt-0.5">
+                              {t("reports.reportPeriod")}: {m[1]} → {m[2]}
+                            </p>
+                          );
+                        })()}
                       </div>
                     </div>
                     {r.score_before && r.score_after && (
                       <div className="text-right">
                         <div className="text-xs text-muted-foreground">
-                          Score
+                          {t("reports.score")}
                         </div>
                         <div className="font-semibold text-sm">
                           <span className="text-muted-foreground">
@@ -275,7 +286,7 @@ export default function Reports() {
 
                   {r.file_strength_score != null && (
                     <p className="text-xs text-muted-foreground mb-3">
-                      File strength:{" "}
+                      {t("reports.fileStrength")}:{" "}
                       <span className="font-semibold text-foreground">
                         {r.file_strength_score}/100
                       </span>
@@ -285,13 +296,38 @@ export default function Reports() {
                   {parseJsonList(r.wins_json)?.length ? (
                     <div className="mb-4">
                       <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
-                        Wins
+                        {t("reports.wins")}
                       </p>
-                      <ul className="text-sm space-y-1">
+                      <ul className="text-sm space-y-1.5">
                         {parseJsonList(r.wins_json)!.map(
-                          (w: { itemRemoved?: string }, i: number) => (
-                            <li key={i} className="text-accent">
-                              ✓ {w.itemRemoved || "Item removed"}
+                          (
+                            w: {
+                              itemRemoved?: string;
+                              bureaus?: string[];
+                            },
+                            i: number,
+                          ) => (
+                            <li
+                              key={i}
+                              className="flex flex-wrap items-center gap-2 text-accent"
+                            >
+                              <span>
+                                ✓{" "}
+                                {w.itemRemoved ||
+                                  t("reports.itemRemovedFallback")}
+                              </span>
+                              {Array.isArray(w.bureaus) && w.bureaus.length > 0 && (
+                                <span className="inline-flex gap-0.5">
+                                  {w.bureaus.map((b) => (
+                                    <span
+                                      key={b}
+                                      className="text-[9px] font-bold px-1 py-0.5 rounded bg-accent/15 text-accent"
+                                    >
+                                      {b}
+                                    </span>
+                                  ))}
+                                </span>
+                              )}
                             </li>
                           ),
                         )}
@@ -302,12 +338,14 @@ export default function Reports() {
                   {parseJsonList(r.targets_json)?.length ? (
                     <div className="mb-4">
                       <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
-                        Still working on
+                        {t("reports.stillWorking")}
                       </p>
                       <ul className="text-sm space-y-1 text-muted-foreground">
                         {parseJsonList(r.targets_json)!.map(
-                          (t: { item?: string }, i: number) => (
-                            <li key={i}>• {t.item || "Target item"}</li>
+                          (tgt: { item?: string }, i: number) => (
+                            <li key={i}>
+                              • {tgt.item || t("reports.targetFallback")}
+                            </li>
                           ),
                         )}
                       </ul>
@@ -316,20 +354,20 @@ export default function Reports() {
 
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-4">
                     <RoundStat
-                      label="Items Removed"
+                      label={t("reports.itemsRemoved")}
                       value={r.items_removed || 0}
                       accent
                     />
                     <RoundStat
-                      label="Items Disputed"
+                      label={t("reports.itemsDisputed")}
                       value={r.items_disputed || 0}
                     />
                     <RoundStat
-                      label="Score Before"
+                      label={t("reports.scoreBefore")}
                       value={r.score_before || "—"}
                     />
                     <RoundStat
-                      label="Score After"
+                      label={t("reports.scoreAfter")}
                       value={r.score_after || "—"}
                       accent
                     />

@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import {
   Archive,
   X,
@@ -16,8 +17,10 @@ import {
   Clock,
   ChevronDown,
   Hash,
+  Upload,
 } from "lucide-react";
 import AdminPageHeader from "@/components/AdminPageHeader";
+import AdminCaseDocUploadDialog from "@/components/admin/AdminCaseDocUploadDialog";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { DataGridColumn } from "@/components/ui/data-grid";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
@@ -30,6 +33,7 @@ import {
 } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 import api from "@/lib/api";
 import { useDebounce } from "@/hooks/use-debounce";
 import { LangBadge } from "@/components/ui/lang-badge";
@@ -105,10 +109,12 @@ function formatDate(s: string) {
 }
 
 export default function AdminDocuments() {
+  const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
   const { allDocuments, loading } = useAppSelector((s) => s.admin);
 
+  const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const [search, setSearch] = useState("");
   const debouncedSearch = useDebounce(search, 350);
   const [statusFilter, setStatusFilter] = useState<
@@ -334,6 +340,17 @@ export default function AdminDocuments() {
             <ShieldCheck className="w-3.5 h-3.5" /> AES-256
           </span>
         }
+        actions={
+          <Button
+            type="button"
+            size="sm"
+            className="gap-2 w-full sm:w-auto"
+            onClick={() => setUploadDialogOpen(true)}
+          >
+            <Upload className="w-4 h-4" />
+            {t("adminHelpers.uploadToCase")}
+          </Button>
+        }
       />
 
       {/* Filter bar */}
@@ -509,6 +526,14 @@ export default function AdminDocuments() {
           )}
         </DialogContent>
       </Dialog>
+
+      <AdminCaseDocUploadDialog
+        open={uploadDialogOpen}
+        onOpenChange={setUploadDialogOpen}
+        onSuccess={() => {
+          dispatch(fetchAllDocuments({ search: debouncedSearch || undefined }));
+        }}
+      />
     </div>
   );
 }

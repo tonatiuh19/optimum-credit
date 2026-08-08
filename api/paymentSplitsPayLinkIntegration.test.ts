@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import request from "supertest";
 import mysql, { type Pool, type ResultSetHeader, type RowDataPacket } from "mysql2/promise";
 import { createServer, createSession } from "./index";
+import { cleanupIntegrationTestClients } from "./testDbCleanup";
 
 const RUN_ID = `split-pay-${Date.now()}`;
 const CLIENT_EMAIL = `${RUN_ID}@example.test`;
@@ -87,6 +88,10 @@ describe(
       ]);
       await pool.query(`DELETE FROM clients WHERE id = ?`, [clientId]);
     }
+    await cleanupIntegrationTestClients(pool, {
+      runId: RUN_ID,
+      clientIds: [clientId],
+    });
     await pool?.end();
   });
 

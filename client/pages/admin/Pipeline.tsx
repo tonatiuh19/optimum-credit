@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 import type { LucideIcon } from "lucide-react";
 import {
@@ -14,7 +14,6 @@ import {
   RefreshCw,
   Plus,
   UserPlus,
-  Sparkles,
 } from "lucide-react";
 import AdminPageHeader from "@/components/AdminPageHeader";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
@@ -22,18 +21,19 @@ import {
   fetchPipeline,
   updateCaseStage,
   createAdminCase,
+  fetchAdminTeam,
 } from "@/store/slices/adminSlice";
-import { convertProspect } from "@/store/slices/prospectsSlice";
+import { fetchLabels } from "@/store/slices/prospectsSlice";
 import type {
   CreditRepairCase,
   PipelineStage,
   AdminClientListItem,
   Prospect,
+  RoundScheduleInput,
 } from "@shared/api";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -60,11 +60,24 @@ import InstallmentDraftFields, {
   draftToCreateSplitPayload,
   type InstallmentDraft,
 } from "@/components/admin/InstallmentDraftFields";
+import RoundCalendarScheduleFields, {
+  emptyRoundScheduleInput,
+} from "@/components/admin/RoundCalendarScheduleFields";
+import ConvertProspectDialog from "@/components/admin/ConvertProspectDialog";
 import { useToast } from "@/hooks/use-toast";
 import { useTranslation } from "react-i18next";
 import { ClientPanelSheet } from "@/components/admin/ClientPanelSheet";
 import { buildStageChangeConfirmMessage } from "@/lib/pipelineStage";
 import { fetchPackages } from "@/store/slices/packagesSlice";
+import { useDebounce } from "@/hooks/use-debounce";
+import {
+  EMPTY_PIPELINE_FILTERS,
+  buildAdminPipelineQuery,
+  countActivePipelineFilters,
+} from "@/lib/pipelineFilters";
+import { buildNewCaseCreatePayload } from "@/lib/newCasePayload";
+import PipelineFilterBar from "@/components/admin/PipelineFilterBar";
+import PipelineBoardSkeleton from "@/components/admin/PipelineBoardSkeleton";
 
 // ─── Column definitions ───────────────────────────────────────────────────────
 
@@ -354,6 +367,7 @@ function ProspectKanbanCard({
       draggable
       onDragStart={(e) => {
         e.dataTransfer.setData("text/plain", `prospect:${prospect.id}`);
+        e.dataTransfer.effectAllowed = "move";
         onDragStart();
       }}
       onDragEnd={onDragEnd}
@@ -392,134 +406,16 @@ function ProspectKanbanCard({
 
         <div className="flex items-center justify-between text-[10px] text-muted-foreground">
           <span className="uppercase tracking-wide font-semibold text-accent/80">
-            {(prospect.source_label ?? "prospect").replace(/_/g, " ")}
+            {prospect.case_number
+              ? prospect.case_number
+              : (prospect.source_label ?? "prospect").replace(/_/g, " ")}
           </span>
           <span className="opacity-0 group-hover:opacity-100 transition-opacity text-accent font-semibold flex items-center gap-0.5">
-            Drag to convert <ArrowRight className="w-2.5 h-2.5" />
+            Open <ArrowRight className="w-2.5 h-2.5" />
           </span>
         </div>
       </div>
     </div>
-  );
-}
-
-// ─── ConvertProspectDialog ────────────────────────────────────────────────────
-
-function ConvertProspectDialog({
-  prospect,
-  onClose,
-  onConverted,
-}: {
-  prospect: Prospect | null;
-  onClose: () => void;
-  onConverted: () => void;
-}) {
-  const dispatch = useAppDispatch();
-  const { toast } = useToast();
-  const { packages } = useAppSelector((s) => s.packages);
-  const [packageId, setPackageId] = useState<string>("__none__");
-  const [notes, setNotes] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    if (prospect) {
-      setPackageId("__none__");
-      setNotes("");
-    }
-  }, [prospect]);
-
-  if (!prospect) return null;
-
-  const handleConfirm = async () => {
-    setLoading(true);
-    try {
-      await dispatch(
-        convertProspect({
-          id: prospect.id,
-          package_id: packageId === "__none__" ? null : Number(packageId),
-          notes: notes.trim() || undefined,
-        }),
-      ).unwrap();
-      toast({
-        title: "Prospect converted!",
-        description: `${prospect.first_name} ${prospect.last_name} is now a client case. Tasks assigned and welcome email sent.`,
-      });
-      onConverted();
-    } catch (e: any) {
-      toast({
-        title: "Error",
-        description: e?.message ?? e ?? "Could not convert prospect",
-        variant: "destructive",
-      });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <Dialog open={!!prospect} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-md w-full bg-card border-border p-0 gap-0 overflow-hidden [&>button:last-child]:hidden">
-        <DialogTitle className="px-6 pt-6 pb-4 text-base font-bold text-foreground border-b border-border flex items-center gap-2">
-          <UserPlus className="w-4 h-4 text-accent" /> Convert Prospect
-        </DialogTitle>
-        <div className="p-6 space-y-4">
-          <p className="text-sm text-muted-foreground">
-            Convert{" "}
-            <strong className="text-foreground">
-              {prospect.first_name} {prospect.last_name}
-            </strong>{" "}
-            into a full client case in <strong>New Client</strong>? This will
-            create their case, assign Get Started tasks, and email a portal
-            invite.
-          </p>
-
-          <div className="space-y-1.5">
-            <label className="text-xs font-semibold text-muted-foreground">
-              Package (optional)
-            </label>
-            <Select value={packageId} onValueChange={setPackageId}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__none__">— No package yet —</SelectItem>
-                {packages.map((p) => (
-                  <SelectItem key={p.id} value={String(p.id)}>
-                    {p.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs font-semibold text-muted-foreground">
-              Notes (optional)
-            </label>
-            <Textarea
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              rows={2}
-              placeholder="Internal note about this conversion…"
-              className="resize-none text-sm"
-            />
-          </div>
-        </div>
-        <div className="flex justify-end gap-2 px-6 py-4 border-t border-border">
-          <Button variant="outline" onClick={onClose} disabled={loading}>
-            Cancel
-          </Button>
-          <Button onClick={handleConfirm} disabled={loading}>
-            {loading ? (
-              <Loader2 className="w-4 h-4 animate-spin mr-2" />
-            ) : (
-              <Sparkles className="w-4 h-4 mr-2" />
-            )}
-            Convert to Client
-          </Button>
-        </div>
-      </DialogContent>
-    </Dialog>
   );
 }
 
@@ -528,9 +424,11 @@ function ConvertProspectDialog({
 function NewCaseModal({
   open,
   onClose,
+  onCreated,
 }: {
   open: boolean;
   onClose: () => void;
+  onCreated?: () => void;
 }) {
   const dispatch = useAppDispatch();
   const { toast } = useToast();
@@ -542,6 +440,11 @@ function NewCaseModal({
   const [stage, setStage] = useState<PipelineStage>("new_client");
   const [splits, setSplits] = useState<InstallmentDraft[]>([]);
   const [loading, setLoading] = useState(false);
+  const [roundSchedule, setRoundSchedule] = useState<RoundScheduleInput>(
+    emptyRoundScheduleInput(),
+  );
+
+  const isProspectStage = stage === "prospect";
 
   const addSplit = () =>
     setSplits((prev) => [...prev, emptyInstallmentDraft(prev.length + 1)]);
@@ -553,34 +456,102 @@ function NewCaseModal({
     (s) => (!!s.amount.trim()) !== (!!s.due_date.trim()),
   );
 
+  const resetForm = () => {
+    setSelectedClient(null);
+    setPackageName("");
+    setStage("new_client");
+    setSplits([]);
+    setRoundSchedule(emptyRoundScheduleInput());
+  };
+
+  const handleStageChange = (next: PipelineStage) => {
+    setStage(next);
+    // Clear picker when switching between prospect-only and clients-only modes
+    if (next === "prospect" && selectedClient?.status !== "prospect") {
+      setSelectedClient(null);
+    }
+    if (next !== "prospect" && selectedClient?.status === "prospect") {
+      setSelectedClient(null);
+    }
+  };
+
+  const handleClientChange = (client: AdminClientListItem | null) => {
+    if (!client) {
+      setSelectedClient(null);
+      return;
+    }
+    if (isProspectStage && client.status !== "prospect") {
+      toast({
+        title: t("adminPipeline.newCaseNeedProspectTitle"),
+        description: t("adminPipeline.newCaseNeedProspectBody"),
+        variant: "destructive",
+      });
+      return;
+    }
+    if (!isProspectStage && client.status === "prospect") {
+      toast({
+        title: t("adminPipeline.newCaseProspectBlockedTitle"),
+        description: t("adminPipeline.newCaseProspectBlockedBody"),
+        variant: "destructive",
+      });
+      return;
+    }
+    setSelectedClient(client);
+  };
+
   const handleSubmit = async () => {
     if (!selectedClient) {
-      toast({ title: "Select a client", variant: "destructive" });
+      toast({
+        title: isProspectStage
+          ? t("adminPipeline.selectProspectRequired")
+          : t("adminPipeline.selectClientRequired"),
+        variant: "destructive",
+      });
+      return;
+    }
+    if (isProspectStage && selectedClient.status !== "prospect") {
+      toast({
+        title: t("adminPipeline.newCaseNeedProspectTitle"),
+        description: t("adminPipeline.newCaseNeedProspectBody"),
+        variant: "destructive",
+      });
+      return;
+    }
+    if (!isProspectStage && selectedClient.status === "prospect") {
+      toast({
+        title: t("adminPipeline.newCaseProspectBlockedTitle"),
+        description: t("adminPipeline.newCaseProspectBlockedBody"),
+        variant: "destructive",
+      });
       return;
     }
     setLoading(true);
     try {
       await dispatch(
-        createAdminCase({
-          client_id: selectedClient.id,
-          notes: packageName || undefined,
-          pipeline_stage: stage,
-          splits: splits
-            .filter((s) => s.amount && s.due_date)
-            .map((s) => draftToCreateSplitPayload(s)),
-        }),
+        createAdminCase(
+          buildNewCaseCreatePayload({
+            stage,
+            clientId: selectedClient.id,
+            packageName,
+            splits,
+            roundSchedule,
+          }),
+        ),
       ).unwrap();
-      toast({ title: "Case created!" });
-      dispatch(fetchPipeline());
+      toast({
+        title: isProspectStage
+          ? t("adminPipeline.prospectCaseCreatedTitle")
+          : t("adminPipeline.caseCreatedTitle"),
+      });
+      onCreated?.();
       onClose();
-      setSelectedClient(null);
-      setPackageName("");
-      setStage("new_client");
-      setSplits([]);
+      resetForm();
     } catch (e: any) {
       toast({
-        title: "Error",
-        description: e?.message ?? "Could not create case",
+        title: t("adminPipeline.convertErrorTitle"),
+        description:
+          (typeof e === "string" ? e : e?.message) ??
+          t("adminPipeline.convertErrorBody"),
         variant: "destructive",
       });
     } finally {
@@ -588,131 +559,177 @@ function NewCaseModal({
     }
   };
 
-  const STAGES: PipelineStage[] = [
-    "new_client",
-    "docs_ready",
-    "round_1",
-    "round_2",
-    "round_3",
-    "completed",
-    "cancelled",
-  ];
+  // Match API: New Case may only start at Prospect or New Client.
+  const STAGES: PipelineStage[] = ["prospect", "new_client"];
+
+  const stageLabel = (s: PipelineStage) =>
+    s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
   return (
-    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-lg w-full bg-card border-border p-0 gap-0 overflow-hidden [&>button:last-child]:hidden">
+    <Dialog
+      open={open}
+      onOpenChange={(o) => {
+        if (!o) {
+          resetForm();
+          onClose();
+        }
+      }}
+    >
+      <DialogContent
+        className="max-w-lg w-full bg-card border-border p-0 gap-0 overflow-hidden [&>button:last-child]:hidden"
+        data-testid="new-case-modal"
+      >
         <DialogTitle className="px-6 pt-6 pb-4 text-base font-bold text-foreground border-b border-border">
-          New Case
+          {t("adminPipeline.newCase")}
         </DialogTitle>
         <div className="p-6 space-y-4 overflow-y-auto max-h-[75vh]">
-          {/* Client picker */}
           <div className="space-y-1.5">
             <label className="text-xs font-semibold text-muted-foreground">
-              Client
-            </label>
-            <ClientSearchPicker
-              value={selectedClient}
-              onChange={setSelectedClient}
-            />
-          </div>
-
-          {/* Package */}
-          <div className="space-y-1.5">
-            <label className="text-xs font-semibold text-muted-foreground">
-              Package / Notes (optional)
-            </label>
-            <Input
-              placeholder="e.g. Credit Repair — 6 month"
-              value={packageName}
-              onChange={(e) => setPackageName(e.target.value)}
-            />
-            <FieldHint>{t("adminPipeline.newCasePackageNote")}</FieldHint>
-          </div>
-
-          {/* Stage */}
-          <div className="space-y-1.5">
-            <label className="text-xs font-semibold text-muted-foreground">
-              Pipeline Stage
+              {t("adminPipeline.pipelineStage")}
             </label>
             <Select
               value={stage}
-              onValueChange={(v) => setStage(v as PipelineStage)}
+              onValueChange={(v) => handleStageChange(v as PipelineStage)}
             >
-              <SelectTrigger>
+              <SelectTrigger data-testid="new-case-stage">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 {STAGES.map((s) => (
                   <SelectItem key={s} value={s}>
-                    {s
-                      .replace(/_/g, " ")
-                      .replace(/\b\w/g, (c) => c.toUpperCase())}
+                    {stageLabel(s)}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
-            {stage !== "new_client" && (
-              <FieldHint tone="warning">
-                {t("adminPipeline.newCaseStageWarn")}
-              </FieldHint>
+            {isProspectStage ? (
+              <FieldHint>{t("adminPipeline.newCaseProspectStageHint")}</FieldHint>
+            ) : (
+              <FieldHint>{t("adminPipeline.newCaseNewClientHint")}</FieldHint>
             )}
           </div>
 
-          {/* Splits */}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <label className="text-xs font-semibold text-muted-foreground">
-                Payment Schedule (optional)
-              </label>
-              <button
-                type="button"
-                onClick={addSplit}
-                className="text-xs text-primary hover:underline flex items-center gap-1"
-              >
-                <Plus className="w-3 h-3" /> {t("adminPipeline.addInstallment")}
-              </button>
+          <div className="space-y-1.5">
+            <label className="text-xs font-semibold text-muted-foreground">
+              {isProspectStage
+                ? t("adminPipeline.prospectLabel")
+                : t("adminPipeline.clientLabel")}
+            </label>
+            <ClientSearchPicker
+              key={isProspectStage ? "prospects" : "clients"}
+              value={selectedClient}
+              onChange={handleClientChange}
+              excludeProspects={!isProspectStage}
+              prospectsOnly={isProspectStage}
+              placeholder={
+                isProspectStage
+                  ? t("adminPipeline.prospectSearchPlaceholder")
+                  : t("adminPipeline.clientSearchPlaceholder")
+              }
+            />
+            <FieldHint>
+              {isProspectStage
+                ? t("adminPipeline.newCaseProspectClientHint")
+                : t("adminPipeline.newCaseClientHint")}
+            </FieldHint>
+          </div>
+
+          {/* Prospect stage: only pick the lead — package, calendar, splits on convert */}
+          {!isProspectStage && (
+            <div data-testid="new-case-full-fields">
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-muted-foreground">
+                  {t("adminPipeline.packageNotesLabel")}
+                </label>
+                <Input
+                  placeholder={t("adminPipeline.packageNotesPlaceholder")}
+                  value={packageName}
+                  onChange={(e) => setPackageName(e.target.value)}
+                />
+                <FieldHint>{t("adminPipeline.newCasePackageNote")}</FieldHint>
+              </div>
+
+              <div className="space-y-2 mt-4">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-semibold text-muted-foreground">
+                    {t("adminPipeline.paymentScheduleOptional")}
+                  </label>
+                  <button
+                    type="button"
+                    onClick={addSplit}
+                    className="text-xs text-primary hover:underline flex items-center gap-1"
+                  >
+                    <Plus className="w-3 h-3" />{" "}
+                    {t("adminPipeline.addInstallment")}
+                  </button>
+                </div>
+                {splits.map((s, i) => (
+                  <InstallmentDraftFields
+                    key={i}
+                    draft={s}
+                    onChange={(next) =>
+                      setSplits((prev) =>
+                        prev.map((row, idx) => (idx === i ? next : row)),
+                      )
+                    }
+                    onRemove={() => removeSplit(i)}
+                  />
+                ))}
+                {hasIncompleteSplit && (
+                  <FieldHint tone="warning">
+                    {t("adminPipeline.splitIncomplete")}
+                  </FieldHint>
+                )}
+              </div>
+
+              <div className="mt-4">
+                <RoundCalendarScheduleFields
+                  value={roundSchedule}
+                  onChange={setRoundSchedule}
+                  disabled={loading}
+                  compact
+                />
+              </div>
+
+              <div className="mt-4">
+                <FieldHint>{t("adminPipeline.newCaseNoEmail")}</FieldHint>
+              </div>
             </div>
-            {splits.map((s, i) => (
-              <InstallmentDraftFields
-                key={i}
-                draft={s}
-                onChange={(next) =>
-                  setSplits((prev) =>
-                    prev.map((row, idx) => (idx === i ? next : row)),
-                  )
-                }
-                onRemove={() => removeSplit(i)}
-              />
-            ))}
-            {hasIncompleteSplit && (
-              <FieldHint tone="warning">
-                {t("adminPipeline.splitIncomplete")}
-              </FieldHint>
-            )}
-          </div>
-
-          <FieldHint>{t("adminPipeline.newCaseNoEmail")}</FieldHint>
+          )}
+          {isProspectStage && (
+            <div data-testid="new-case-prospect-minimal" className="hidden" />
+          )}
         </div>
         <div className="flex justify-end gap-2 px-6 py-4 border-t border-border">
-          <Button variant="outline" onClick={onClose}>
-            Cancel
+          <Button
+            variant="outline"
+            onClick={() => {
+              resetForm();
+              onClose();
+            }}
+            disabled={loading}
+          >
+            {t("adminPipeline.convertCancel")}
           </Button>
-          <Button onClick={handleSubmit} disabled={loading}>
+          <Button onClick={handleSubmit} disabled={loading || !selectedClient}>
             {loading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
-            Create Case
+            {isProspectStage
+              ? t("adminPipeline.createProspectCase")
+              : t("adminPipeline.createCase")}
           </Button>
         </div>
       </DialogContent>
     </Dialog>
   );
 }
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export default function AdminPipeline() {
   const dispatch = useAppDispatch();
   const { t } = useTranslation();
-  const { pipelineCases } = useAppSelector((s) => s.admin);
-  const { prospects } = useAppSelector((s) => s.prospects);
+  const { pipelineCases, team, pipelineLoading } = useAppSelector((s) => s.admin);
+  const { prospects, labels } = useAppSelector((s) => s.prospects);
   const { packages } = useAppSelector((s) => s.packages);
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -724,6 +741,11 @@ export default function AdminPipeline() {
   const [convertingProspect, setConvertingProspect] = useState<Prospect | null>(
     null,
   );
+
+  const [search, setSearch] = useState("");
+  const [showFilters, setShowFilters] = useState(false);
+  const [filters, setFilters] = useState(EMPTY_PIPELINE_FILTERS);
+  const debouncedSearch = useDebounce(search, 300);
 
   const [dragging, setDragging] = useState<
     { type: "case"; id: number } | { type: "prospect"; id: number } | null
@@ -738,27 +760,51 @@ export default function AdminPipeline() {
     openInfoRequests: number;
   } | null>(null);
 
+  const pipelineQuery = useMemo(
+    () => buildAdminPipelineQuery(debouncedSearch, filters),
+    [debouncedSearch, filters],
+  );
+
+  const reloadPipeline = useCallback(() => {
+    dispatch(fetchPipeline(pipelineQuery));
+  }, [dispatch, pipelineQuery]);
+
+  const activeFilterCount = countActivePipelineFilters(filters);
+
   useEffect(() => {
-    dispatch(fetchPipeline());
+    dispatch(fetchLabels());
+    dispatch(fetchAdminTeam({}));
     if (packages.length === 0) dispatch(fetchPackages());
   }, [dispatch]);
+
+  useEffect(() => {
+    reloadPipeline();
+  }, [reloadPipeline]);
 
   // Auto-open panel when navigated from another page with ?client=ID
   useEffect(() => {
     const clientParam = searchParams.get("client");
-    if (clientParam && pipelineCases.length > 0) {
-      const clientId = Number(clientParam);
-      if (!isNaN(clientId) && clientId > 0) {
-        const matchedCase = pipelineCases.find((c) => c.client_id === clientId);
-        if (matchedCase) {
-          setPanelCaseId(matchedCase.id);
-          setPanelClientId(matchedCase.client_id);
-          setPanelOpen(true);
-          setSearchParams({}, { replace: true });
-        }
-      }
+    if (!clientParam) return;
+    const clientId = Number(clientParam);
+    if (isNaN(clientId) || clientId <= 0) return;
+
+    const matchedCase = pipelineCases.find((c) => c.client_id === clientId);
+    if (matchedCase) {
+      setPanelCaseId(matchedCase.id);
+      setPanelClientId(matchedCase.client_id);
+      setPanelOpen(true);
+      setSearchParams({}, { replace: true });
+      return;
     }
-  }, [searchParams, pipelineCases, setSearchParams]);
+
+    const matchedProspect = prospects.find((p) => p.id === clientId);
+    if (matchedProspect) {
+      setPanelCaseId(matchedProspect.case_id ?? null);
+      setPanelClientId(matchedProspect.id);
+      setPanelOpen(true);
+      setSearchParams({}, { replace: true });
+    }
+  }, [searchParams, pipelineCases, prospects, setSearchParams]);
 
   // Panel
   const openPanel = (caseId: number, clientId: number) => {
@@ -844,7 +890,7 @@ export default function AdminPipeline() {
     await dispatch(
       updateCaseStage({ caseId: pendingDrop.caseId, stage: pendingDrop.to }),
     );
-    dispatch(fetchPipeline());
+    reloadPipeline();
     setPendingDrop(null);
   };
 
@@ -863,8 +909,8 @@ export default function AdminPipeline() {
     <div className="flex flex-col space-y-5">
       <AdminPageHeader
         icon={Workflow}
-        title="Pipeline"
-        description="Click a card to review client details and documents. Drag to move between stages."
+        title={t("adminPipeline.title")}
+        description={t("adminPipeline.description")}
         badge={
           <span className="inline-flex items-center gap-1.5 text-xs font-medium text-accent bg-accent/10 border border-accent/20 px-2.5 py-1 rounded-full">
             <ShieldCheck className="w-3.5 h-3.5" /> AES-256
@@ -876,15 +922,40 @@ export default function AdminPipeline() {
               onClick={() => setShowNewCase(true)}
               className="inline-flex items-center gap-1.5 text-xs font-medium text-white bg-primary hover:bg-primary/90 px-3 py-2 rounded-lg transition-colors"
             >
-              <Plus className="w-3.5 h-3.5" /> New Case
+              <Plus className="w-3.5 h-3.5" /> {t("adminPipeline.newCase")}
             </button>
             <button
-              onClick={() => dispatch(fetchPipeline())}
-              className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-card border border-border hover:border-border/80 px-3 py-2 rounded-lg transition-colors"
+              onClick={reloadPipeline}
+              disabled={pipelineLoading}
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-card border border-border hover:border-border/80 px-3 py-2 rounded-lg transition-colors disabled:opacity-60"
             >
-              <RefreshCw className="w-3.5 h-3.5" /> Refresh
+              <RefreshCw
+                className={`w-3.5 h-3.5 ${pipelineLoading ? "animate-spin" : ""}`}
+              />{" "}
+              {t("adminPipeline.refresh")}
             </button>
           </div>
+        }
+      />
+
+      <PipelineFilterBar
+        search={search}
+        onSearchChange={setSearch}
+        debouncedSearch={debouncedSearch}
+        showFilters={showFilters}
+        onToggleFilters={() => setShowFilters((v) => !v)}
+        filters={filters}
+        onFiltersChange={setFilters}
+        activeFilterCount={activeFilterCount}
+        caseCount={pipelineCases.length}
+        prospectCount={prospects.length}
+        packages={packages}
+        team={team}
+        labels={labels}
+        showEmptyState={
+          (activeFilterCount > 0 || !!debouncedSearch) &&
+          pipelineCases.length === 0 &&
+          prospects.length === 0
         }
       />
 
@@ -901,7 +972,10 @@ export default function AdminPipeline() {
         </div>
       )}
 
-      {/* Kanban */}
+      {/* Kanban — skeleton on initial load and Refresh */}
+      {pipelineLoading ? (
+        <PipelineBoardSkeleton />
+      ) : (
       <div className="table-scroll pb-4 -mx-1 px-1 max-w-full">
         <div className="flex gap-3 w-max min-w-full pr-2">
           {/* ── Prospect column (virtual — pre-conversion leads) ── */}
@@ -949,7 +1023,16 @@ export default function AdminPipeline() {
                       prospect={p}
                       onDragStart={() => onProspectDragStart(p.id)}
                       onDragEnd={onDragEnd}
-                      onClick={() => setConvertingProspect(p)}
+                      onClick={() => {
+                        if (p.case_id) {
+                          openPanel(p.case_id, p.id);
+                          return;
+                        }
+                        // Lead without a prospect-stage case yet — open client panel
+                        setPanelCaseId(null);
+                        setPanelClientId(p.id);
+                        setPanelOpen(true);
+                      }}
                     />
                   ))}
                   {prospects.length === 0 && (
@@ -977,6 +1060,8 @@ export default function AdminPipeline() {
             const colCases = grouped[col.stage] ?? [];
             const isDragTarget = dragOverStage === col.stage;
             const canDrop = canDropOnStage(col.stage);
+            const prospectDropTarget =
+              col.stage === "new_client" && dragging?.type === "prospect";
             return (
               <div
                 key={col.stage}
@@ -987,7 +1072,9 @@ export default function AdminPipeline() {
                   "w-[min(280px,calc(100vw-2.5rem))] sm:w-[270px] shrink-0 flex flex-col rounded-2xl border-t-[3px] overflow-hidden transition-all duration-200",
                   col.topBorder,
                   isDragTarget && canDrop
-                    ? "shadow-xl shadow-primary/15 md:scale-[1.015] ring-1 ring-primary/30"
+                    ? prospectDropTarget
+                      ? "shadow-xl shadow-accent/20 md:scale-[1.015] ring-1 ring-accent/40"
+                      : "shadow-xl shadow-primary/15 md:scale-[1.015] ring-1 ring-primary/30"
                     : isDragTarget && !canDrop
                       ? "ring-1 ring-destructive/40 shadow-lg shadow-destructive/10"
                       : "shadow-sm",
@@ -1023,6 +1110,13 @@ export default function AdminPipeline() {
 
                 {/* Cards */}
                 <div className="flex-1 p-2 space-y-2 overflow-y-auto max-h-[calc(100vh-230px)] min-h-[120px] bg-muted/30">
+                  {prospectDropTarget && (
+                    <div className="rounded-xl border border-dashed border-accent/50 bg-accent/5 px-3 py-2.5 text-center">
+                      <p className="text-[11px] font-semibold text-accent">
+                        {t("adminPipeline.dropProspectToConvert")}
+                      </p>
+                    </div>
+                  )}
                   {colCases.map((c) => (
                     <KanbanCard
                       key={c.id}
@@ -1032,7 +1126,7 @@ export default function AdminPipeline() {
                       onClick={() => openPanel(c.id, c.client_id)}
                     />
                   ))}
-                  {colCases.length === 0 && (
+                  {colCases.length === 0 && !prospectDropTarget && (
                     <div className="h-20 flex flex-col items-center justify-center gap-1.5 rounded-xl border-2 border-dashed border-border/40">
                       {isDragTarget && canDrop ? (
                         <>
@@ -1054,17 +1148,25 @@ export default function AdminPipeline() {
           })}
         </div>
       </div>
+      )}
 
       <ClientPanelSheet
         open={panelOpen}
         caseId={panelCaseId}
         clientId={panelClientId}
         onClose={closePanel}
-        onCaseUpdated={() => dispatch(fetchPipeline())}
+        onCaseUpdated={reloadPipeline}
+        onConvertProspect={(prospect) => {
+          setConvertingProspect(prospect);
+        }}
       />
 
       {/* New Case Modal */}
-      <NewCaseModal open={showNewCase} onClose={() => setShowNewCase(false)} />
+      <NewCaseModal
+        open={showNewCase}
+        onClose={() => setShowNewCase(false)}
+        onCreated={reloadPipeline}
+      />
 
       {/* Convert Prospect Modal */}
       <ConvertProspectDialog
@@ -1072,7 +1174,8 @@ export default function AdminPipeline() {
         onClose={() => setConvertingProspect(null)}
         onConverted={() => {
           setConvertingProspect(null);
-          dispatch(fetchPipeline());
+          closePanel();
+          reloadPipeline();
         }}
       />
 

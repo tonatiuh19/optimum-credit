@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import AdminPageHeader from "@/components/AdminPageHeader";
 import FieldHint from "@/components/admin/FieldHint";
+import NoEmailWarning from "@/components/admin/NoEmailWarning";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -208,8 +209,28 @@ export default function AdminAffiliatePortal() {
   const leadSchema = Yup.object({
     first_name: Yup.string().trim().required(t("common.required")),
     last_name: Yup.string().trim().required(t("common.required")),
-    email: Yup.string().email(t("common.invalidEmail")).required(t("common.required")),
-    phone: Yup.string(),
+    email: Yup.string()
+      .trim()
+      .transform((v, orig) => {
+        const raw =
+          typeof orig === "string" ? orig.trim() : String(v ?? "").trim();
+        return raw === "" ? null : raw;
+      })
+      .nullable()
+      .notRequired()
+      .test("email-format", t("common.invalidEmail"), (v) => {
+        if (v == null || v === "") return true;
+        return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+      }),
+    phone: Yup.string().trim().nullable(),
+  }).test("contact-required", function (values) {
+    const email = String(values?.email ?? "").trim();
+    const phone = String(values?.phone ?? "").trim();
+    if (email || phone) return true;
+    return this.createError({
+      path: "email",
+      message: t("adminHelpers.contactRequired"),
+    });
   });
 
   const leadForm = useFormik({
@@ -220,8 +241,8 @@ export default function AdminAffiliatePortal() {
         createAffiliateLead({
           first_name: vals.first_name.trim(),
           last_name: vals.last_name.trim(),
-          email: vals.email.trim().toLowerCase(),
-          phone: vals.phone.trim() || null,
+          email: String(vals.email ?? "").trim().toLowerCase() || null,
+          phone: String(vals.phone ?? "").trim() || null,
         }),
       );
       if (createAffiliateLead.fulfilled.match(res)) {
@@ -233,9 +254,18 @@ export default function AdminAffiliatePortal() {
     },
   });
 
+  const inviteSchema = Yup.object({
+    first_name: Yup.string().trim().required(t("common.required")),
+    last_name: Yup.string().trim().required(t("common.required")),
+    email: Yup.string()
+      .email(t("common.invalidEmail"))
+      .required(t("common.required")),
+    phone: Yup.string().trim(),
+  });
+
   const inviteForm = useFormik({
     initialValues: { first_name: "", last_name: "", email: "", phone: "" },
-    validationSchema: leadSchema,
+    validationSchema: inviteSchema,
     onSubmit: async (vals, { resetForm }) => {
       const res = await dispatch(
         inviteSubAffiliate({
@@ -452,14 +482,24 @@ export default function AdminAffiliatePortal() {
                 </div>
                 <Input
                   type="email"
-                  placeholder={t("affiliates.admin.fieldEmail")}
+                  placeholder={`${t("affiliates.admin.fieldEmail")} (${t("common.optional")})`}
                   {...leadForm.getFieldProps("email")}
                 />
+                {leadForm.touched.email && leadForm.errors.email && (
+                  <p className="text-xs text-destructive">
+                    {leadForm.errors.email}
+                  </p>
+                )}
                 <Input
                   type="tel"
-                  placeholder={t("affiliates.admin.fieldPhone")}
+                  placeholder={`${t("affiliates.admin.fieldPhone")} (${t("common.optional")})`}
                   {...leadForm.getFieldProps("phone")}
                 />
+                {!String(leadForm.values.email ?? "").trim() && (
+                  <NoEmailWarning
+                    hasPhone={!!String(leadForm.values.phone ?? "").trim()}
+                  />
+                )}
                 <Button type="submit" size="sm" className="gap-1.5" disabled={leadSubmitting}>
                   {leadSubmitting ? (
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />

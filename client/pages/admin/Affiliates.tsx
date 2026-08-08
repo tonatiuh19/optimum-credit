@@ -24,9 +24,15 @@ import {
 } from "lucide-react";
 import AdminPageHeader from "@/components/AdminPageHeader";
 import FieldHint from "@/components/admin/FieldHint";
+import AffiliateInviteLinksPanel from "@/components/admin/AffiliateInviteLinksPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select,
@@ -133,14 +139,77 @@ const COMMISSION_STATUS_CLASS: Record<AffiliateCommissionStatus, string> = {
   void: "bg-muted text-muted-foreground border-border",
 };
 
-function useCopy() {
-  const { toast } = useToast();
+/** Copy control with “Copied!” tooltip feedback. */
+function CopyLinkButton({
+  text,
+  label,
+  iconOnly = false,
+}: {
+  text: string;
+  label?: string;
+  iconOnly?: boolean;
+}) {
   const { t } = useTranslation();
-  return (text: string) => {
-    navigator.clipboard.writeText(text).then(() =>
-      toast({ description: t("affiliates.admin.linkCopied") }),
+  const { toast } = useToast();
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    void navigator.clipboard.writeText(text).then(
+      () => {
+        setCopied(true);
+        toast({ description: t("affiliates.admin.linkCopied") });
+        setTimeout(() => setCopied(false), 1600);
+      },
+      () => {
+        toast({
+          title: t("affiliates.inviteLinks.copyFailed", {
+            defaultValue: "Could not copy link",
+          }),
+          variant: "destructive",
+        });
+      },
     );
   };
+
+  return (
+    <Tooltip open={copied}>
+      <TooltipTrigger asChild>
+        {iconOnly ? (
+          <Button
+            size="icon"
+            variant="ghost"
+            className="h-7 w-7"
+            onClick={handleCopy}
+            aria-label={label || t("affiliates.admin.copyLink")}
+          >
+            {copied ? (
+              <Check className="w-3.5 h-3.5 text-accent" />
+            ) : (
+              <Link2 className="w-3.5 h-3.5" />
+            )}
+          </Button>
+        ) : (
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            className="h-8 w-8 shrink-0"
+            onClick={handleCopy}
+            aria-label={label || t("affiliates.admin.copyLink")}
+          >
+            {copied ? (
+              <Check className="w-3.5 h-3.5 text-accent" />
+            ) : (
+              <Copy className="w-3.5 h-3.5" />
+            )}
+          </Button>
+        )}
+      </TooltipTrigger>
+      <TooltipContent side="top" className="text-xs font-semibold">
+        {t("affiliates.portal.copied")}
+      </TooltipContent>
+    </Tooltip>
+  );
 }
 
 // ─── Create affiliate dialog ────────────────────────────────────────────────
@@ -167,18 +236,16 @@ const EMPTY_CREATE: CreateForm = {
   slug: "",
   default_landing: "credit_analysis",
   parent_affiliate_id: "",
-  comp_subscription: false,
+  comp_subscription: true,
   notes: "",
 };
 
 function CreateAffiliateDialog({
   open,
   onClose,
-  masters,
 }: {
   open: boolean;
   onClose: () => void;
-  masters: AffiliateProfile[];
 }) {
   const { t } = useTranslation();
   const dispatch = useAppDispatch();
@@ -193,16 +260,13 @@ function CreateAffiliateDialog({
         last_name: Yup.string().trim().required(t("common.required")),
         email: Yup.string().email(t("common.invalidEmail")).required(t("common.required")),
         phone: Yup.string(),
-        plan: Yup.string().oneOf(["standard", "master", "sub_affiliate"]).required(),
+        plan: Yup.string().oneOf(["standard"]).required(),
         slug: Yup.string()
           .matches(/^[a-z0-9]+(-[a-z0-9]+)*$/, "Lowercase letters, numbers, hyphens")
           .min(2)
           .max(64),
         default_landing: Yup.string().oneOf(["credit_analysis", "pricing"]).required(),
-        parent_affiliate_id: Yup.string().when("plan", {
-          is: "sub_affiliate",
-          then: (s) => s.required(t("common.required")),
-        }),
+        parent_affiliate_id: Yup.string(),
         comp_subscription: Yup.boolean(),
         notes: Yup.string(),
       }),
@@ -219,11 +283,10 @@ function CreateAffiliateDialog({
           first_name: vals.first_name.trim(),
           last_name: vals.last_name.trim(),
           phone: vals.phone.trim() || undefined,
-          plan: vals.plan,
+          plan: "standard",
           slug: vals.slug.trim() || undefined,
           default_landing: vals.default_landing,
-          parent_affiliate_id:
-            vals.plan === "sub_affiliate" ? Number(vals.parent_affiliate_id) : undefined,
+          parent_affiliate_id: undefined,
           comp_subscription: vals.comp_subscription,
           notes: vals.notes.trim() || undefined,
         }),
@@ -271,6 +334,7 @@ function CreateAffiliateDialog({
         <p className="text-sm text-muted-foreground -mt-1">
           {t("affiliates.admin.createSubtitle")}
         </p>
+        <FieldHint tone="accent">{t("affiliates.admin.createIntro")}</FieldHint>
 
         <form onSubmit={form.handleSubmit} className="space-y-4 mt-2">
           <div className="grid grid-cols-2 gap-3">
@@ -315,66 +379,23 @@ function CreateAffiliateDialog({
             <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
               {t("affiliates.admin.fieldPlan")}
             </label>
-            <Select
-              value={form.values.plan}
-              onValueChange={(v) => form.setFieldValue("plan", v as AffiliatePlan)}
-            >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="standard">{t("affiliates.admin.planStandard")}</SelectItem>
-                <SelectItem value="master">{t("affiliates.admin.planMaster")}</SelectItem>
-                <SelectItem value="sub_affiliate">
-                  {t("affiliates.admin.planSubAffiliate")}
-                </SelectItem>
-              </SelectContent>
-            </Select>
+            <div className="flex items-start gap-2.5 rounded-xl border border-border bg-muted/30 px-3 py-2.5">
+              <span className="text-sm font-semibold text-foreground">
+                {t("affiliates.admin.planStandard")}
+              </span>
+            </div>
+            <FieldHint tone="accent">{t("affiliates.plans.standardOnlyNote")}</FieldHint>
+            <FieldHint>{t("affiliates.plans.standardHelp")}</FieldHint>
             {planSuggestion && (
-              <FieldHint tone="accent">
-                {t("affiliates.admin.suggestionHint", {
-                  plan: form.values.plan,
+              <FieldHint>
+                {t("affiliates.admin.suggestionHintFuture", {
+                  plan: t("affiliates.admin.planStandard"),
                   price: (planSuggestion.monthly_price_cents / 100).toFixed(0),
                   rate: (planSuggestion.commission_rate_bps / 100).toFixed(0),
                 })}
-                {form.values.plan === "master" &&
-                  planSuggestion.parent_override_rate_bps > 0 &&
-                  t("affiliates.admin.suggestionOverride", {
-                    rate: (planSuggestion.parent_override_rate_bps / 100).toFixed(0),
-                  })}
               </FieldHint>
             )}
           </div>
-
-          {form.values.plan === "sub_affiliate" && (
-            <div className="space-y-1">
-              <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                {t("affiliates.admin.fieldParent")} *
-              </label>
-              <Select
-                value={form.values.parent_affiliate_id}
-                onValueChange={(v) => form.setFieldValue("parent_affiliate_id", v)}
-              >
-                <SelectTrigger
-                  className={
-                    form.touched.parent_affiliate_id && form.errors.parent_affiliate_id
-                      ? "border-destructive"
-                      : ""
-                  }
-                >
-                  <SelectValue placeholder="—" />
-                </SelectTrigger>
-                <SelectContent>
-                  {masters.map((m) => (
-                    <SelectItem key={m.id} value={String(m.id)}>
-                      {m.first_name} {m.last_name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <FieldHint>{t("affiliates.admin.fieldParentHint")}</FieldHint>
-            </div>
-          )}
 
           <div className="space-y-1">
             <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
@@ -417,6 +438,7 @@ function CreateAffiliateDialog({
                 <SelectItem value="pricing">{t("affiliates.admin.landingPricing")}</SelectItem>
               </SelectContent>
             </Select>
+            <FieldHint>{t("affiliates.admin.landingHint")}</FieldHint>
           </div>
 
           <label className="flex items-start gap-2.5 cursor-pointer rounded-xl border border-border bg-muted/30 p-3">
@@ -434,6 +456,7 @@ function CreateAffiliateDialog({
               </span>
             </span>
           </label>
+          <FieldHint tone="accent">{t("affiliates.admin.compFreeNowHint")}</FieldHint>
 
           <div className="space-y-1">
             <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
@@ -479,7 +502,6 @@ function LinksPanel({
   };
 }) {
   const { t } = useTranslation();
-  const copy = useCopy();
   const rows: Array<{ label: string; value: string }> = [
     { label: t("affiliates.admin.copyDefault"), value: links.short_default },
     { label: t("affiliates.admin.copyAnalysis"), value: links.short_analysis },
@@ -500,16 +522,7 @@ function LinksPanel({
               <p className="text-xs font-semibold text-foreground">{row.label}</p>
               <p className="text-xs text-muted-foreground truncate font-mono">{abs}</p>
             </div>
-            <Button
-              type="button"
-              size="icon"
-              variant="ghost"
-              className="h-8 w-8 shrink-0"
-              onClick={() => copy(abs)}
-              title={t("affiliates.admin.copyLink")}
-            >
-              <Copy className="w-3.5 h-3.5" />
-            </Button>
+            <CopyLinkButton text={abs} label={t("affiliates.admin.copyLink")} />
           </div>
         );
       })}
@@ -640,16 +653,13 @@ interface EditForm {
 function AffiliateDetailSheet({
   id,
   onClose,
-  masters,
 }: {
   id: number | null;
   onClose: () => void;
-  masters: AffiliateProfile[];
 }) {
   const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const { toast } = useToast();
-  const copy = useCopy();
   const { selected, selectedLoading, saving } = useAppSelector((s) => s.affiliates);
   const [compTarget, setCompTarget] = useState(false);
   const [commissionUpdating, setCommissionUpdating] = useState(false);
@@ -835,29 +845,22 @@ function AffiliateDetailSheet({
                       <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
                         {t("affiliates.admin.fieldPlan")}
                       </label>
-                      <Select
-                        value={form.values.plan}
-                        onValueChange={(v) => form.setFieldValue("plan", v as AffiliatePlan)}
-                      >
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="standard">
-                            {t("affiliates.admin.planStandard")}
-                          </SelectItem>
-                          <SelectItem value="master">
-                            {t("affiliates.admin.planMaster")}
-                          </SelectItem>
-                          <SelectItem value="sub_affiliate">
-                            {t("affiliates.admin.planSubAffiliate")}
-                          </SelectItem>
-                        </SelectContent>
-                      </Select>
+                      <div className="flex h-10 items-center rounded-md border border-input bg-muted/40 px-3 text-sm font-medium">
+                        {t(
+                          `affiliates.admin.plan${
+                            form.values.plan === "sub_affiliate"
+                              ? "SubAffiliate"
+                              : form.values.plan === "master"
+                                ? "Master"
+                                : "Standard"
+                          }`,
+                        )}
+                      </div>
+                      <FieldHint>{t("affiliates.plans.standardOnlyNote")}</FieldHint>
                     </div>
                     <div className="space-y-1">
                       <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                        Status
+                        {t("affiliates.admin.colStatus")}
                       </label>
                       <Select
                         value={form.values.status}
@@ -883,31 +886,6 @@ function AffiliateDetailSheet({
                       </Select>
                     </div>
                   </div>
-
-                  {form.values.plan === "sub_affiliate" && (
-                    <div className="space-y-1">
-                      <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                        {t("affiliates.admin.fieldParent")}
-                      </label>
-                      <Select
-                        value={form.values.parent_affiliate_id}
-                        onValueChange={(v) => form.setFieldValue("parent_affiliate_id", v)}
-                      >
-                        <SelectTrigger>
-                          <SelectValue placeholder="—" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {masters
-                            .filter((m) => m.id !== aff.id)
-                            .map((m) => (
-                              <SelectItem key={m.id} value={String(m.id)}>
-                                {m.first_name} {m.last_name}
-                              </SelectItem>
-                            ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  )}
 
                   <div className="space-y-1">
                     <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
@@ -1054,6 +1032,9 @@ function AffiliateDetailSheet({
             <AlertDialogDescription>
               {t("affiliates.admin.compConfirmBody")}
             </AlertDialogDescription>
+            <FieldHint tone="accent" className="mt-3">
+              {t("affiliates.admin.compFreeNowHint")}
+            </FieldHint>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>
@@ -1079,7 +1060,6 @@ function AffiliateRow({
   onView: (id: number) => void;
 }) {
   const { t } = useTranslation();
-  const copy = useCopy();
   const PlanIcon = PLAN_ICON[affiliate.plan];
 
   return (
@@ -1145,15 +1125,11 @@ function AffiliateRow({
         <span className="text-[11px] text-muted-foreground ml-1">pending</span>
       </td>
       <td className="px-4 py-3.5 text-right" onClick={(e) => e.stopPropagation()}>
-        <Button
-          size="icon"
-          variant="ghost"
-          className="h-7 w-7"
-          onClick={() => copy(toAbsoluteUrl(`/r/${affiliate.slug}`))}
-          title={t("affiliates.admin.copyLink")}
-        >
-          <Link2 className="w-3.5 h-3.5" />
-        </Button>
+        <CopyLinkButton
+          text={toAbsoluteUrl(`/r/${affiliate.slug}`)}
+          label={t("affiliates.admin.copyLink")}
+          iconOnly
+        />
       </td>
     </tr>
   );
@@ -1188,8 +1164,6 @@ export default function AdminAffiliates() {
     );
   }, [dispatch, search, planFilter, statusFilter]);
 
-  const masters = useMemo(() => list.filter((a) => a.plan === "master"), [list]);
-
   return (
     <div className="space-y-6">
       <AdminPageHeader
@@ -1203,6 +1177,8 @@ export default function AdminAffiliates() {
           </Button>
         }
       />
+
+      <AffiliateInviteLinksPanel />
 
       <div className="bg-card border border-border rounded-2xl overflow-hidden">
         <div className="flex flex-col sm:flex-row gap-3 p-4 border-b border-border/60">
@@ -1224,10 +1200,6 @@ export default function AdminAffiliates() {
               <SelectContent>
                 <SelectItem value="all">{t("affiliates.admin.allPlans")}</SelectItem>
                 <SelectItem value="standard">{t("affiliates.admin.planStandard")}</SelectItem>
-                <SelectItem value="master">{t("affiliates.admin.planMaster")}</SelectItem>
-                <SelectItem value="sub_affiliate">
-                  {t("affiliates.admin.planSubAffiliate")}
-                </SelectItem>
               </SelectContent>
             </Select>
             <Select value={statusFilter} onValueChange={setStatusFilter}>
@@ -1312,13 +1284,11 @@ export default function AdminAffiliates() {
       <CreateAffiliateDialog
         open={createOpen}
         onClose={() => setCreateOpen(false)}
-        masters={masters}
       />
 
       <AffiliateDetailSheet
         id={detailId}
         onClose={() => setDetailId(null)}
-        masters={masters}
       />
     </div>
   );

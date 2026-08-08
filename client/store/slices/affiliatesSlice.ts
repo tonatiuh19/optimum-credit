@@ -4,13 +4,19 @@ import api, { formatAxiosError } from "@/lib/api";
 import type {
   AffiliateCommission,
   AffiliateDetailResponse,
+  AffiliateInviteJoinPayload,
+  AffiliateInviteJoinResponse,
+  AffiliateInviteLink,
+  AffiliateInvitePublicResolve,
   AffiliateLeadPayload,
   AffiliateMeResponse,
   AffiliateProfile,
   AffiliatePublicResolve,
   AffiliateSelfUpdatePayload,
   AffiliateSuggestionsResponse,
+  CreateAffiliateInviteLinkPayload,
   CreateAffiliatePayload,
+  UpdateAffiliateInviteLinkPayload,
   UpdateAffiliatePayload,
 } from "@shared/api";
 
@@ -37,12 +43,20 @@ interface AffiliatesState {
   myCommissionsLoading: boolean;
   leadSubmitting: boolean;
   inviteSubmitting: boolean;
+  inviteLinks: AffiliateInviteLink[];
+  inviteLinksLoading: boolean;
+  inviteLinkSaving: boolean;
+  inviteParentMasters: AffiliateProfile[];
   loading: boolean;
   saving: boolean;
   error: string | null;
   publicResolve: AffiliatePublicResolve | null;
   publicResolving: boolean;
   publicError: string | null;
+  publicInvite: AffiliateInvitePublicResolve | null;
+  publicInviteLoading: boolean;
+  publicInviteError: string | null;
+  publicJoinSubmitting: boolean;
 }
 
 const initialState: AffiliatesState = {
@@ -61,12 +75,20 @@ const initialState: AffiliatesState = {
   myCommissionsLoading: false,
   leadSubmitting: false,
   inviteSubmitting: false,
+  inviteLinks: [],
+  inviteLinksLoading: false,
+  inviteLinkSaving: false,
+  inviteParentMasters: [],
   loading: false,
   saving: false,
   error: null,
   publicResolve: null,
   publicResolving: false,
   publicError: null,
+  publicInvite: null,
+  publicInviteLoading: false,
+  publicInviteError: null,
+  publicJoinSubmitting: false,
 };
 
 // ── Public: /r/:slug resolve + click logging ─────────────────────────────
@@ -96,6 +118,106 @@ export const logAffiliateClick = createAsyncThunk<
     { landing: landing || "other" },
   );
   return data;
+});
+
+export const resolveAffiliateInvite = createAsyncThunk<
+  AffiliateInvitePublicResolve,
+  { token: string },
+  { rejectValue: string }
+>("affiliates/resolveInvite", async ({ token }, { rejectWithValue }) => {
+  try {
+    const { data } = await publicApi.get<AffiliateInvitePublicResolve>(
+      `/public/affiliate-invite/${encodeURIComponent(token)}`,
+    );
+    return data;
+  } catch (e: unknown) {
+    return rejectWithValue(
+      formatAxiosError(e, "This invite link is invalid or expired."),
+    );
+  }
+});
+
+export const joinAffiliateInvite = createAsyncThunk<
+  AffiliateInviteJoinResponse,
+  { token: string } & AffiliateInviteJoinPayload,
+  { rejectValue: string }
+>("affiliates/joinInvite", async ({ token, ...payload }, { rejectWithValue }) => {
+  try {
+    const { data } = await publicApi.post<AffiliateInviteJoinResponse>(
+      `/public/affiliate-invite/${encodeURIComponent(token)}/join`,
+      payload,
+    );
+    return data;
+  } catch (e: unknown) {
+    return rejectWithValue(formatAxiosError(e, "Could not complete signup"));
+  }
+});
+
+export const fetchAffiliateInviteLinks = createAsyncThunk<
+  { links: AffiliateInviteLink[] },
+  void,
+  { rejectValue: string }
+>("affiliates/fetchInviteLinks", async (_arg, { rejectWithValue }) => {
+  try {
+    const { data } = await api.get("/admin/affiliate-invite-links");
+    return data;
+  } catch (e: unknown) {
+    return rejectWithValue(formatAxiosError(e, "Could not load invite links"));
+  }
+});
+
+export const createAffiliateInviteLink = createAsyncThunk<
+  { link: AffiliateInviteLink },
+  CreateAffiliateInviteLinkPayload,
+  { rejectValue: string }
+>("affiliates/createInviteLink", async (payload, { rejectWithValue }) => {
+  try {
+    const { data } = await api.post("/admin/affiliate-invite-links", payload);
+    return data;
+  } catch (e: unknown) {
+    return rejectWithValue(formatAxiosError(e, "Could not create invite link"));
+  }
+});
+
+export const fetchInviteParentMasters = createAsyncThunk<
+  { affiliates: AffiliateProfile[] },
+  void,
+  { rejectValue: string }
+>("affiliates/fetchInviteParentMasters", async (_arg, { rejectWithValue }) => {
+  try {
+    const { data } = await api.get("/admin/affiliates", {
+      params: { plan: "master", status: "active" },
+    });
+    return data;
+  } catch (e: unknown) {
+    return rejectWithValue(formatAxiosError(e, "Could not load masters"));
+  }
+});
+
+export const updateAffiliateInviteLink = createAsyncThunk<
+  { link: AffiliateInviteLink },
+  { id: number } & UpdateAffiliateInviteLinkPayload,
+  { rejectValue: string }
+>("affiliates/updateInviteLink", async ({ id, ...rest }, { rejectWithValue }) => {
+  try {
+    const { data } = await api.patch(`/admin/affiliate-invite-links/${id}`, rest);
+    return data;
+  } catch (e: unknown) {
+    return rejectWithValue(formatAxiosError(e, "Could not update invite link"));
+  }
+});
+
+export const deleteAffiliateInviteLink = createAsyncThunk<
+  { id: number },
+  number,
+  { rejectValue: string }
+>("affiliates/deleteInviteLink", async (id, { rejectWithValue }) => {
+  try {
+    await api.delete(`/admin/affiliate-invite-links/${id}`);
+    return { id };
+  } catch (e: unknown) {
+    return rejectWithValue(formatAxiosError(e, "Could not delete invite link"));
+  }
 });
 
 // ── Admin: manage affiliates ─────────────────────────────────────────────
@@ -469,6 +591,68 @@ const slice = createSlice({
     b.addCase(resolvePublicAffiliate.rejected, (s, a) => {
       s.publicResolving = false;
       s.publicError = a.payload || "This referral link is invalid or expired.";
+    });
+
+    b.addCase(resolveAffiliateInvite.pending, (s) => {
+      s.publicInviteLoading = true;
+      s.publicInviteError = null;
+      s.publicInvite = null;
+    });
+    b.addCase(resolveAffiliateInvite.fulfilled, (s, a) => {
+      s.publicInviteLoading = false;
+      s.publicInvite = a.payload;
+    });
+    b.addCase(resolveAffiliateInvite.rejected, (s, a) => {
+      s.publicInviteLoading = false;
+      s.publicInviteError = a.payload || "Invite not found";
+    });
+
+    b.addCase(joinAffiliateInvite.pending, (s) => {
+      s.publicJoinSubmitting = true;
+      s.publicInviteError = null;
+    });
+    b.addCase(joinAffiliateInvite.fulfilled, (s) => {
+      s.publicJoinSubmitting = false;
+    });
+    b.addCase(joinAffiliateInvite.rejected, (s, a) => {
+      s.publicJoinSubmitting = false;
+      s.publicInviteError = a.payload || "Signup failed";
+    });
+
+    b.addCase(fetchAffiliateInviteLinks.pending, (s) => {
+      s.inviteLinksLoading = true;
+    });
+    b.addCase(fetchAffiliateInviteLinks.fulfilled, (s, a) => {
+      s.inviteLinksLoading = false;
+      s.inviteLinks = a.payload.links;
+    });
+    b.addCase(fetchAffiliateInviteLinks.rejected, (s) => {
+      s.inviteLinksLoading = false;
+    });
+
+    b.addCase(fetchInviteParentMasters.fulfilled, (s, a) => {
+      s.inviteParentMasters = a.payload.affiliates;
+    });
+
+    b.addCase(createAffiliateInviteLink.pending, (s) => {
+      s.inviteLinkSaving = true;
+    });
+    b.addCase(createAffiliateInviteLink.fulfilled, (s, a) => {
+      s.inviteLinkSaving = false;
+      s.inviteLinks = [a.payload.link, ...s.inviteLinks];
+    });
+    b.addCase(createAffiliateInviteLink.rejected, (s, a) => {
+      s.inviteLinkSaving = false;
+      s.error = a.payload || "Failed";
+    });
+
+    b.addCase(updateAffiliateInviteLink.fulfilled, (s, a) => {
+      s.inviteLinks = s.inviteLinks.map((l) =>
+        l.id === a.payload.link.id ? a.payload.link : l,
+      );
+    });
+    b.addCase(deleteAffiliateInviteLink.fulfilled, (s, a) => {
+      s.inviteLinks = s.inviteLinks.filter((l) => l.id !== a.payload.id);
     });
   },
 });

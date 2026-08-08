@@ -428,6 +428,21 @@ describe("validateReportCompliance — hard vs soft matrix", () => {
     expect(validateReportCompliance(data).errors.join(" ")).toMatch(/Invalid round/);
   });
 
+  it("soft-warns missing or inverted report dates", () => {
+    const missing = sampleData({
+      reportDate: { before: "", after: "2026-06-01" },
+    });
+    expect(validateReportCompliance(missing).warnings.join(" ")).toMatch(
+      /Before report date/i,
+    );
+    const inverted = sampleData({
+      reportDate: { before: "2026-06-01", after: "2026-01-01" },
+    });
+    expect(validateReportCompliance(inverted).warnings.join(" ")).toMatch(
+      /earlier than Before/i,
+    );
+  });
+
   it("hard-blocks out-of-range bureau scores", () => {
     const data = sampleData();
     data.bureauScores.experian.after = 900;

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import {
   CheckSquare,
   Loader2,
@@ -14,6 +14,7 @@ import {
   X,
   Sparkles,
   Lock,
+  Briefcase,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import AdminPageHeader from "@/components/AdminPageHeader";
@@ -34,6 +35,7 @@ import {
 } from "@/store/slices/workTasksSlice";
 import type {
   AdminWorkTask,
+  WorkTaskCaseOption,
   WorkTaskPriority,
   WorkTaskStatus,
 } from "@shared/api";
@@ -55,6 +57,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
+import { CaseSearchPicker } from "@/components/ui/case-search-picker";
 
 const COLUMNS: {
   status: WorkTaskStatus;
@@ -126,6 +129,7 @@ export default function AdminMyTasks() {
     assignee_admin_id: "" as string,
     labels: "",
   });
+  const [linkedCase, setLinkedCase] = useState<WorkTaskCaseOption | null>(null);
 
   useEffect(() => {
     dispatch(fetchWorkTasks());
@@ -186,6 +190,7 @@ export default function AdminMyTasks() {
       assignee_admin_id: "",
       labels: "",
     });
+    setLinkedCase(null);
   };
 
   const openCreate = (status: WorkTaskStatus = "backlog") => {
@@ -207,6 +212,20 @@ export default function AdminMyTasks() {
         : "",
       labels: task.labels.join(", "),
     });
+    setLinkedCase(
+      task.case_id
+        ? {
+            case_id: task.case_id,
+            case_number: task.case_number,
+            client_id: task.client_id ?? 0,
+            client_first_name: task.client_name?.trim() || "",
+            client_last_name: "",
+            client_email: null,
+            pipeline_stage: "",
+            case_status: "active",
+          }
+        : null,
+    );
     setCreateOpen(true);
   };
 
@@ -225,6 +244,7 @@ export default function AdminMyTasks() {
       assignee_admin_id: form.assignee_admin_id
         ? Number(form.assignee_admin_id)
         : null,
+      case_id: linkedCase?.case_id ?? null,
       labels,
     };
     if (editTask) {
@@ -331,15 +351,18 @@ export default function AdminMyTasks() {
                           )}
                           {t("myTasks.hubspot.syncNow")}
                         </Button>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => void dispatch(disconnectHubspot())}
-                        >
-                          <Unlink className="w-4 h-4 mr-1.5" />
-                          {t("myTasks.hubspot.disconnect")}
-                        </Button>
+                        {hubspot.auth_mode !== "service_key" &&
+                          hubspot.auth_mode !== "private_app" && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => void dispatch(disconnectHubspot())}
+                          >
+                            <Unlink className="w-4 h-4 mr-1.5" />
+                            {t("myTasks.hubspot.disconnect")}
+                          </Button>
+                        )}
                       </>
                     ) : (
                       <Button
@@ -467,6 +490,21 @@ export default function AdminMyTasks() {
                               {t("myTasks.unassigned")}
                             </span>
                           )}
+                          {task.case_id && (
+                            <Link
+                              to={
+                                task.client_id
+                                  ? `/admin/pipeline?client=${task.client_id}`
+                                  : "/admin/pipeline"
+                              }
+                              onClick={(e) => e.stopPropagation()}
+                              className="inline-flex items-center gap-1 text-[10px] font-medium text-primary hover:underline"
+                            >
+                              <Briefcase className="w-3 h-3" />
+                              {task.case_number ||
+                                t("myTasks.linkedCaseFallback")}
+                            </Link>
+                          )}
                         </div>
                         {task.labels.length > 0 && (
                           <div className="flex flex-wrap gap-1">
@@ -584,6 +622,12 @@ export default function AdminMyTasks() {
                   ))}
                 </SelectContent>
               </Select>
+            </div>
+            <div className="space-y-1.5">
+              <p className="text-xs font-medium text-muted-foreground">
+                {t("myTasks.form.linkCase")}
+              </p>
+              <CaseSearchPicker value={linkedCase} onChange={setLinkedCase} />
             </div>
             <Input
               placeholder={t("myTasks.form.labels")}

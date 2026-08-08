@@ -15,6 +15,7 @@ import creditAnalysis from "./slices/creditAnalysisSlice";
 import affiliates from "./slices/affiliatesSlice";
 import paySplit from "./slices/paySplitSlice";
 import workTasks from "./slices/workTasksSlice";
+import adminNotifications from "./slices/adminNotificationsSlice";
 
 export const store = configureStore({
   reducer: {
@@ -34,6 +35,7 @@ export const store = configureStore({
     affiliates,
     paySplit,
     workTasks,
+    adminNotifications,
   },
   middleware: (getDefault) => getDefault({ serializableCheck: false }),
 });

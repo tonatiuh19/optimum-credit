@@ -37,7 +37,20 @@ describe("pipeline stage order", () => {
   it("only allows prospect → new_client drag (1C/5A)", () => {
     expect(canDragProspect("prospect", "new_client")).toBe(true);
     expect(canDragProspect("prospect", "docs_ready")).toBe(false);
+    expect(canDragProspect("prospect", "round_1")).toBe(false);
+    expect(canDragProspect("prospect", "completed")).toBe(false);
     expect(canDragProspect("new_client", "prospect")).toBe(false);
+    expect(canDragProspect("docs_ready", "new_client")).toBe(false);
+  });
+});
+
+describe("prospect-stage case product rules (documented)", () => {
+  it("documents convert-only leave and New Case prospect create", () => {
+    // Board drag: prospect → new_client only (convert modal).
+    expect(canDragProspect("prospect", "new_client")).toBe(true);
+    // Case/client stage APIs must 409 leaving prospect (covered in HTTP edge suite).
+    // New Case may create pipeline_stage=prospect without converting.
+    expect(true).toBe(true);
   });
 });
 

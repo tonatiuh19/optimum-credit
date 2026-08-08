@@ -20,6 +20,7 @@ import PaySplit from "./pages/PaySplit";
 import CreditAnalysis from "./pages/CreditAnalysis";
 import Pricing from "./pages/Pricing";
 import AffiliateRedirect from "./pages/public/AffiliateRedirect";
+import AffiliateJoin from "./pages/public/AffiliateJoin";
 
 import ClientLogin from "./pages/auth/ClientLogin";
 import AdminLogin from "./pages/auth/AdminLogin";
@@ -47,6 +48,7 @@ import AdminTemplates from "./pages/admin/Templates";
 import AdminVideos from "./pages/admin/Videos";
 import AdminReports from "./pages/admin/Reports";
 import AdminSettings from "./pages/admin/Settings";
+import AdminProfile from "./pages/admin/Profile";
 import AdminPeople from "./pages/admin/People";
 import AdminReminderFlows from "./pages/admin/ReminderFlows";
 import AdminPayments from "./pages/admin/Payments";
@@ -106,6 +108,7 @@ function AppShell() {
 
         {/* Affiliate short referral link — /r/:slug — public, no layout */}
         <Route path="/r/:slug" element={<AffiliateRedirect />} />
+        <Route path="/affiliate/join/:token" element={<AffiliateJoin />} />
 
         {/* Legal (DB-backed markdown) */}
         <Route path="/legal/:slug" element={<LegalDocumentPage />} />
@@ -248,6 +251,12 @@ function AppShell() {
             <RequireSuperAdmin>
               {wrap(AdminLayout, AdminSettings)}
             </RequireSuperAdmin>
+          }
+        />
+        <Route
+          path="/admin/profile"
+          element={
+            <RequireStaff>{wrap(AdminLayout, AdminProfile)}</RequireStaff>
           }
         />
         <Route

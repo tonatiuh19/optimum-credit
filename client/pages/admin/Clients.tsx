@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   Search,
@@ -24,6 +24,7 @@ import * as Yup from "yup";
 import { useTranslation } from "react-i18next";
 import AdminPageHeader from "@/components/AdminPageHeader";
 import FieldHint from "@/components/admin/FieldHint";
+import NoEmailWarning from "@/components/admin/NoEmailWarning";
 import EnumLegend from "@/components/admin/EnumLegend";
 import { DataGrid } from "@/components/ui/data-grid";
 import { LangBadge } from "@/components/ui/lang-badge";
@@ -57,15 +58,26 @@ import {
   createAdminClient,
   updateAdminClient,
   deleteAdminClient,
+  fetchReferrers,
 } from "@/store/slices/adminSlice";
 import { fetchLabels } from "@/store/slices/prospectsSlice";
 import { openBulkImportWizard } from "@/store/slices/bulkImportSlice";
 import BulkImportWizard from "@/components/bulk-import/BulkImportWizard";
 import { LabelMultiSelect } from "@/components/admin/LabelMultiSelect";
 import { LabelChips } from "@/components/admin/LabelChips";
+import RoundCalendarScheduleFields, {
+  emptyRoundScheduleInput,
+} from "@/components/admin/RoundCalendarScheduleFields";
+import { ToastAction } from "@/components/ui/toast";
 import { useDebounce } from "@/hooks/use-debounce";
 import { useToast } from "@/hooks/use-toast";
-import type { AdminClientListItem, PipelineStage } from "@shared/api";
+import type {
+  AdminClientListItem,
+  ClientStatus,
+  PipelineStage,
+  ReferralCategory,
+  RoundScheduleInput,
+} from "@shared/api";
 
 function fmt(cents: number) {
   return new Intl.NumberFormat("en-US", {
@@ -185,49 +197,139 @@ const STATUS_COLORS: Record<string, string> = {
   cancelled: "bg-destructive/10 text-destructive border-destructive/20",
 };
 
-const clientSchema = Yup.object({
-  first_name: Yup.string().trim().required("First name is required"),
-  last_name: Yup.string().trim().required("Last name is required"),
-  email: Yup.string().email("Invalid email").required("Email is required"),
-  phone: Yup.string().trim(),
-  status: Yup.string().oneOf(CLIENT_STATUSES),
-  admin_notes: Yup.string().trim(),
-});
+type LeadType = "prospect" | "client";
+
+const REFERRAL_CATEGORIES: ReferralCategory[] = [
+  "realtor_broker",
+  "one_off",
+  "affiliate_partner",
+];
+
+function buildClientSchema(isEditing: boolean) {
+  return Yup.object({
+    lead_type: Yup.string().oneOf(["prospect", "client"]),
+    first_name: Yup.string().trim().required("First name is required"),
+    last_name: Yup.string().trim().required("Last name is required"),
+    email: Yup.string()
+      .trim()
+      .transform((v, orig) => {
+        const raw = typeof orig === "string" ? orig.trim() : String(v ?? "").trim();
+        return raw === "" ? null : raw;
+      })
+      .nullable()
+      .notRequired()
+      .test("email-format", "Invalid email", (v) => {
+        if (v == null || v === "") return true;
+        return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+      }),
+    phone: Yup.string().trim().nullable(),
+    preferred_language: Yup.string()
+      .oneOf(["en", "es"])
+      .required("Language is required"),
+    referral_category: Yup.string(),
+    referrer_id: Yup.mixed(),
+    status: isEditing
+      ? Yup.string()
+      : Yup.string().when("lead_type", {
+          is: "client",
+          then: (schema) => schema.oneOf(CLIENT_STATUSES).required(),
+          otherwise: (schema) => schema.notRequired(),
+        }),
+    admin_notes: Yup.string().trim(),
+  }).test("contact-required", function (values) {
+    const email = String(values?.email ?? "").trim();
+    const phone = String(values?.phone ?? "").trim();
+    if (email || phone) return true;
+    return this.createError({
+      path: "email",
+      message: "Email or phone is required",
+    });
+  });
+}
 
 function ClientFormDialog({
   open,
   onClose,
   editing,
+  isAffiliate,
 }: {
   open: boolean;
   onClose: () => void;
   editing: AdminClientListItem | null;
+  isAffiliate: boolean;
 }) {
   const dispatch = useAppDispatch();
+  const navigate = useNavigate();
   const { toast } = useToast();
-  const { saving } = useAppSelector((s) => s.admin);
+  const { saving, referrers, referrersLoading } = useAppSelector((s) => s.admin);
   const { t } = useTranslation();
+  const [roundSchedule, setRoundSchedule] = useState<RoundScheduleInput>(
+    emptyRoundScheduleInput(),
+  );
+
+  const isProspectEdit = editing?.status === "prospect";
+  const showStatusDropdown =
+    !!editing && !isProspectEdit && !isAffiliate;
+  const showLeadTypeToggle = !editing && !isAffiliate;
+  const showReferralFields = !isAffiliate;
 
   const form = useFormik({
     enableReinitialize: true,
     initialValues: {
+      lead_type: (editing
+        ? isProspectEdit
+          ? "prospect"
+          : "client"
+        : "prospect") as LeadType,
       first_name: editing?.first_name ?? "",
       last_name: editing?.last_name ?? "",
       email: editing?.email ?? "",
       phone: editing?.phone ?? "",
-      status: editing?.status ?? "pending_payment",
+      status: (editing?.status ?? "pending_payment") as ClientStatus,
+      preferred_language: editing?.preferred_language ?? "en",
+      referral_category: editing?.referral_category ?? "",
+      referrer_id: editing?.referrer_id ? String(editing.referrer_id) : "",
       admin_notes: editing?.admin_notes ?? "",
     },
-    validationSchema: clientSchema,
+    validationSchema: buildClientSchema(!!editing),
     onSubmit: async (values, helpers) => {
+      const isProspectCreate =
+        !editing && (isAffiliate || values.lead_type === "prospect");
+
       const payload = {
         first_name: values.first_name,
         last_name: values.last_name,
-        email: values.email,
-        phone: values.phone || undefined,
-        status: values.status as any,
+        email: String(values.email ?? "").trim() || null,
+        phone: String(values.phone ?? "").trim() || null,
+        preferred_language: values.preferred_language as "en" | "es",
         admin_notes: values.admin_notes.trim() || null,
+        ...(showReferralFields
+          ? {
+              referral_category: values.referral_category
+                ? (values.referral_category as ReferralCategory)
+                : null,
+              referrer_id: values.referrer_id
+                ? Number(values.referrer_id)
+                : null,
+            }
+          : {}),
+        ...(!editing
+          ? {
+              status: isProspectCreate
+                ? ("prospect" as const)
+                : (values.status as ClientStatus),
+            }
+          : showStatusDropdown
+            ? { status: values.status as ClientStatus }
+            : {}),
+        ...(!editing && !isProspectCreate
+          ? {
+              create_case: true,
+              round_schedule: roundSchedule,
+            }
+          : {}),
       };
+
       const res = editing
         ? await dispatch(updateAdminClient({ id: editing.id, ...payload }))
         : await dispatch(createAdminClient(payload));
@@ -242,20 +344,85 @@ function ClientFormDialog({
         });
         return;
       }
+
+      if (isProspectCreate) {
+        toast({
+          title: t("adminHelpers.createProspectToast"),
+          action: (
+            <ToastAction
+              altText={t("adminHelpers.viewInPipeline")}
+              onClick={() => navigate("/admin/pipeline")}
+            >
+              {t("adminHelpers.viewInPipeline")}
+            </ToastAction>
+          ),
+        });
+      }
+
       helpers.resetForm();
+      setRoundSchedule(emptyRoundScheduleInput());
       onClose();
     },
   });
 
+  useEffect(() => {
+    if (open) {
+      setRoundSchedule(emptyRoundScheduleInput());
+    }
+  }, [open, editing]);
+
+  useEffect(() => {
+    if (open && showReferralFields) {
+      dispatch(
+        fetchReferrers(
+          form.values.referral_category
+            ? { category: form.values.referral_category }
+            : undefined,
+        ),
+      );
+    }
+  }, [open, showReferralFields, form.values.referral_category, dispatch]);
+
+  const filteredReferrers = useMemo(() => {
+    if (!form.values.referral_category) return referrers;
+    return referrers.filter(
+      (r) => r.category === form.values.referral_category,
+    );
+  }, [referrers, form.values.referral_category]);
+
+  const isProspectMode =
+    isProspectEdit ||
+    isAffiliate ||
+    (!editing && form.values.lead_type === "prospect");
+
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>
             {editing ? "Edit client" : "Add new client"}
           </DialogTitle>
         </DialogHeader>
         <form onSubmit={form.handleSubmit} className="space-y-4 mt-2">
+          {showLeadTypeToggle && (
+            <div>
+              <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground block mb-1">
+                {t("adminHelpers.leadTypeLabel")}
+              </label>
+              <select
+                {...form.getFieldProps("lead_type")}
+                className="w-full h-10 px-3 rounded-lg border border-input bg-background text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+              >
+                <option value="prospect">
+                  {t("adminHelpers.leadTypeProspect")}
+                </option>
+                <option value="client">
+                  {t("adminHelpers.leadTypeClient")}
+                </option>
+              </select>
+            </div>
+          )}
+
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground block mb-1">
@@ -288,11 +455,15 @@ function ClientFormDialog({
           </div>
           <div>
             <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground block mb-1">
-              Email
+              {t("adminHelpers.emailLabel")}{" "}
+              <span className="text-muted-foreground font-normal normal-case">
+                ({t("common.optional")})
+              </span>
             </label>
             <input
               type="email"
               {...form.getFieldProps("email")}
+              placeholder={t("adminHelpers.emailOptionalPlaceholder")}
               className="w-full h-10 px-3 rounded-lg border border-input bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
             />
             {form.touched.email && form.errors.email && (
@@ -306,9 +477,9 @@ function ClientFormDialog({
           </div>
           <div>
             <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground block mb-1">
-              Phone{" "}
+              {t("adminHelpers.phoneLabel")}{" "}
               <span className="text-muted-foreground font-normal normal-case">
-                (optional)
+                ({t("common.optional")})
               </span>
             </label>
             <input
@@ -317,35 +488,154 @@ function ClientFormDialog({
               className="w-full h-10 px-3 rounded-lg border border-input bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
             />
           </div>
+
+          {!String(form.values.email ?? "").trim() && (
+            <NoEmailWarning
+              hasPhone={!!String(form.values.phone ?? "").trim()}
+            />
+          )}
+
           <div>
             <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground block mb-1">
-              Status
+              {t("adminHelpers.languageLabel")}
             </label>
             <select
-              {...form.getFieldProps("status")}
+              {...form.getFieldProps("preferred_language")}
               className="w-full h-10 px-3 rounded-lg border border-input bg-background text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
             >
-              {CLIENT_STATUSES.map((s) => (
-                <option key={s} value={s}>
-                  {s
-                    .replace(/_/g, " ")
-                    .replace(/\b\w/g, (c) => c.toUpperCase())}
-                </option>
-              ))}
+              <option value="en">{t("adminHelpers.teamLanguageEn")}</option>
+              <option value="es">{t("adminHelpers.teamLanguageEs")}</option>
             </select>
-            <FieldHint>{t("adminHelpers.clientStatusNote")}</FieldHint>
-            <EnumLegend
-              title={t("adminHelpers.legendTitle")}
-              value={form.values.status}
-              items={CLIENT_STATUSES.map((s) => ({
-                value: s,
-                label: s
-                  .replace(/_/g, " ")
-                  .replace(/\b\w/g, (c) => c.toUpperCase()),
-                description: t(`adminHelpers.clientStatus.${s}`),
-              }))}
-            />
+            <FieldHint>{t("adminHelpers.languageHint")}</FieldHint>
+            {form.touched.preferred_language &&
+              form.errors.preferred_language && (
+                <p className="text-xs text-destructive mt-1">
+                  {form.errors.preferred_language}
+                </p>
+              )}
           </div>
+
+          {showReferralFields && (
+            <>
+              <div>
+                <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground block mb-1">
+                  {t("adminHelpers.referralCategoryLabel")}
+                </label>
+                <select
+                  {...form.getFieldProps("referral_category")}
+                  onChange={(e) => {
+                    form.handleChange(e);
+                    form.setFieldValue("referrer_id", "");
+                  }}
+                  className="w-full h-10 px-3 rounded-lg border border-input bg-background text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+                >
+                  <option value="">
+                    {t("adminHelpers.referralCategoryNone")}
+                  </option>
+                  {REFERRAL_CATEGORIES.map((cat) => (
+                    <option key={cat} value={cat}>
+                      {cat === "realtor_broker"
+                        ? t("adminHelpers.referralCategoryRealtor")
+                        : cat === "one_off"
+                          ? t("adminHelpers.referralCategoryOneOff")
+                          : t("adminHelpers.referralCategoryAffiliate")}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground block mb-1">
+                  {t("adminHelpers.referrerLabel")}{" "}
+                  <span className="text-muted-foreground font-normal normal-case">
+                    (optional)
+                  </span>
+                </label>
+                <select
+                  {...form.getFieldProps("referrer_id")}
+                  disabled={referrersLoading}
+                  className="w-full h-10 px-3 rounded-lg border border-input bg-background text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 disabled:opacity-50"
+                >
+                  <option value="">—</option>
+                  {filteredReferrers.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.first_name} {r.last_name}
+                      {r.company ? ` · ${r.company}` : ""}
+                    </option>
+                  ))}
+                </select>
+                <FieldHint>{t("adminHelpers.referrerHint")}</FieldHint>
+              </div>
+            </>
+          )}
+
+          {showStatusDropdown && (
+            <div>
+              <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground block mb-1">
+                Status
+              </label>
+              <select
+                {...form.getFieldProps("status")}
+                className="w-full h-10 px-3 rounded-lg border border-input bg-background text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+              >
+                {CLIENT_STATUSES.map((s) => (
+                  <option key={s} value={s}>
+                    {s
+                      .replace(/_/g, " ")
+                      .replace(/\b\w/g, (c) => c.toUpperCase())}
+                  </option>
+                ))}
+              </select>
+              <FieldHint>{t("adminHelpers.clientStatusNote")}</FieldHint>
+              <EnumLegend
+                title={t("adminHelpers.legendTitle")}
+                value={form.values.status}
+                items={CLIENT_STATUSES.map((s) => ({
+                  value: s,
+                  label: s
+                    .replace(/_/g, " ")
+                    .replace(/\b\w/g, (c) => c.toUpperCase()),
+                  description: t(`adminHelpers.clientStatus.${s}`),
+                }))}
+              />
+            </div>
+          )}
+
+          {!editing && !isProspectMode && !isAffiliate && (
+            <div>
+              <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground block mb-1">
+                Status
+              </label>
+              <select
+                {...form.getFieldProps("status")}
+                className="w-full h-10 px-3 rounded-lg border border-input bg-background text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+              >
+                {CLIENT_STATUSES.map((s) => (
+                  <option key={s} value={s}>
+                    {s
+                      .replace(/_/g, " ")
+                      .replace(/\b\w/g, (c) => c.toUpperCase())}
+                  </option>
+                ))}
+              </select>
+              <FieldHint>{t("adminHelpers.clientStatusNote")}</FieldHint>
+              <EnumLegend
+                title={t("adminHelpers.legendTitle")}
+                value={form.values.status}
+                items={CLIENT_STATUSES.map((s) => ({
+                  value: s,
+                  label: s
+                    .replace(/_/g, " ")
+                    .replace(/\b\w/g, (c) => c.toUpperCase()),
+                  description: t(`adminHelpers.clientStatus.${s}`),
+                }))}
+              />
+            </div>
+          )}
+
+          {isProspectEdit && (
+            <FieldHint>{t("adminHelpers.clientStatus.prospect")}</FieldHint>
+          )}
+
           <div>
             <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground block mb-1">
               Internal notes{" "}
@@ -360,7 +650,21 @@ function ClientFormDialog({
               className="w-full px-3 py-2 rounded-lg border border-input bg-background text-sm resize-none focus:outline-none focus:ring-2 focus:ring-primary/50 placeholder:text-muted-foreground"
             />
           </div>
-          {!editing && (
+          {!editing && !isProspectMode && !isAffiliate && (
+            <RoundCalendarScheduleFields
+              value={roundSchedule}
+              onChange={setRoundSchedule}
+              disabled={form.isSubmitting || saving}
+              compact
+            />
+          )}
+
+          {!editing && isProspectMode && (
+            <FieldHint tone="accent">
+              {t("adminHelpers.createProspectHint")}
+            </FieldHint>
+          )}
+          {!editing && !isProspectMode && (
             <FieldHint tone="accent">
               {t("adminHelpers.createClientNoEmail")}
             </FieldHint>
@@ -370,6 +674,7 @@ function ClientFormDialog({
               type="button"
               onClick={() => {
                 form.resetForm();
+                setRoundSchedule(emptyRoundScheduleInput());
                 onClose();
               }}
               className="h-9 px-4 rounded-lg border border-input bg-background text-sm font-medium text-foreground hover:bg-muted transition-colors"
@@ -385,7 +690,9 @@ function ClientFormDialog({
                 ? "Saving…"
                 : editing
                   ? "Save changes"
-                  : "Create client"}
+                  : isProspectMode
+                    ? "Create prospect"
+                    : "Create client"}
             </button>
           </div>
         </form>
@@ -529,7 +836,15 @@ export default function AdminClients() {
       key: "email",
       label: "Email",
       sortable: true,
-      render: (c) => <span className="text-muted-foreground">{c.email}</span>,
+      render: (c) => (
+        <span className="text-muted-foreground">
+          {c.email || (
+            <span className="italic text-muted-foreground/70">
+              {t("adminHelpers.noEmailShort")}
+            </span>
+          )}
+        </span>
+      ),
     },
     {
       key: "package_name",
@@ -1021,6 +1336,7 @@ export default function AdminClients() {
           setEditingClient(null);
         }}
         editing={editingClient}
+        isAffiliate={isAffiliate}
       />
 
       <AlertDialog
@@ -1042,7 +1358,7 @@ export default function AdminClients() {
                   <strong>
                     {deletingClient?.first_name} {deletingClient?.last_name}
                   </strong>{" "}
-                  ({deletingClient?.email}). This cannot be undone.
+                  ({deletingClient?.email || t("adminHelpers.noEmailShort")}). This cannot be undone.
                 </p>
 
                 <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-destructive space-y-1">

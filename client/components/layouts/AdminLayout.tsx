@@ -35,6 +35,7 @@ import {
   Handshake,
 } from "lucide-react";
 import AdminThemeToggle from "@/components/AdminThemeToggle";
+import AdminNotificationBell from "@/components/admin/AdminNotificationBell";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { adminLogout, fetchAdminMe } from "@/store/slices/adminAuthSlice";
 import { fetchSectionLocks } from "@/store/slices/adminSlice";
@@ -499,17 +500,43 @@ export default function AdminLayout({ children }: Props) {
             <div className="rounded-xl bg-white/[0.06] border border-white/[0.10] overflow-hidden">
               {/* User info */}
               <div className="flex items-center gap-2.5 px-3 py-2.5">
-                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-primary to-primary-600 border border-primary/50 flex items-center justify-center text-[11px] font-bold text-white shrink-0 shadow-md shadow-primary/30">
-                  {initials}
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="text-[12px] font-semibold text-white truncate leading-tight">
-                    {fullName || "Admin"}
+                {isAffiliate ? (
+                  <div className="w-8 h-8 rounded-full bg-gradient-to-br from-primary to-primary-600 border border-primary/50 flex items-center justify-center text-[11px] font-bold text-white shrink-0 shadow-md shadow-primary/30">
+                    {initials}
                   </div>
-                  <div className="text-[10px] text-primary font-semibold uppercase tracking-wider mt-0.5">
-                    {user?.role ?? "admin"}
+                ) : (
+                  <Link
+                    to="/admin/profile"
+                    className="w-8 h-8 rounded-full bg-gradient-to-br from-primary to-primary-600 border border-primary/50 flex items-center justify-center text-[11px] font-bold text-white shrink-0 shadow-md shadow-primary/30 hover:opacity-90 transition-opacity"
+                    title={t("adminNav.profile")}
+                  >
+                    {initials}
+                  </Link>
+                )}
+                {isAffiliate ? (
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[12px] font-semibold text-white truncate leading-tight">
+                      {fullName || "Admin"}
+                    </div>
+                    <div className="text-[10px] text-slate-400 font-semibold tracking-wide mt-0.5">
+                      {t(`adminNav.roles.${user?.role ?? "admin"}`, {
+                        defaultValue: user?.role ?? "admin",
+                      })}
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  <Link to="/admin/profile" className="min-w-0 flex-1 group">
+                    <div className="text-[12px] font-semibold text-white truncate leading-tight group-hover:text-primary transition-colors">
+                      {fullName || "Admin"}
+                    </div>
+                    <div className="text-[10px] text-slate-400 font-semibold tracking-wide mt-0.5">
+                      {t(`adminNav.roles.${user?.role ?? "admin"}`, {
+                        defaultValue: user?.role ?? "admin",
+                      })}
+                    </div>
+                  </Link>
+                )}
+                {!isAffiliate && <AdminNotificationBell />}
               </div>
               {/* Divider */}
               <div className="h-px bg-white/[0.07] mx-3" />
@@ -525,13 +552,20 @@ export default function AdminLayout({ children }: Props) {
             </div>
           ) : (
             <div className="flex flex-col items-center gap-1.5 w-full">
-              <div
-                title={`${fullName} — ${t("adminNav.signOut")}`}
-                onClick={handleLogout}
-                className="w-8 h-8 rounded-full bg-gradient-to-br from-primary to-primary-600 border border-primary/50 flex items-center justify-center text-[11px] font-bold text-white shadow-md shadow-primary/30 cursor-pointer hover:opacity-80 transition-opacity"
-              >
-                {initials}
-              </div>
+              {isAffiliate ? (
+                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-primary to-primary-600 border border-primary/50 flex items-center justify-center text-[11px] font-bold text-white shadow-md shadow-primary/30">
+                  {initials}
+                </div>
+              ) : (
+                <Link
+                  to="/admin/profile"
+                  title={`${fullName} — ${t("adminNav.profile")}`}
+                  className="w-8 h-8 rounded-full bg-gradient-to-br from-primary to-primary-600 border border-primary/50 flex items-center justify-center text-[11px] font-bold text-white shadow-md shadow-primary/30 hover:opacity-80 transition-opacity"
+                >
+                  {initials}
+                </Link>
+              )}
+              {!isAffiliate && <AdminNotificationBell compact />}
               <AdminThemeToggle collapsed />
               <button
                 onClick={handleLogout}
@@ -558,6 +592,7 @@ export default function AdminLayout({ children }: Props) {
             </span>
           </Link>
           <div className="flex items-center gap-1">
+            <AdminNotificationBell compact />
             <AdminThemeToggle compact className="!w-auto" />
             <button
               onClick={() => setMobileOpen(!mobileOpen)}

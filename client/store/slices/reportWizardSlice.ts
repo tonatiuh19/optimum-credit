@@ -3,6 +3,7 @@ import api from "@/lib/api";
 import type {
   OfGReportData,
   OfGReportWizardOptions,
+  ReportWizardBeforeContext,
   ReportWizardDraftSummary,
   ReportWizardSession,
 } from "@shared/api";
@@ -10,9 +11,12 @@ import type {
 interface ReportWizardState {
   session: ReportWizardSession | null;
   drafts: ReportWizardDraftSummary[];
+  beforeContext: ReportWizardBeforeContext | null;
+  beforeContextKey: string | null;
   loading: boolean;
   loadingDrafts: boolean;
   loadingSession: boolean;
+  loadingBeforeContext: boolean;
   downloadingSource: "before" | "after" | null;
   publishing: boolean;
   previewing: boolean;
@@ -24,9 +28,12 @@ interface ReportWizardState {
 const initialState: ReportWizardState = {
   session: null,
   drafts: [],
+  beforeContext: null,
+  beforeContextKey: null,
   loading: false,
   loadingDrafts: false,
   loadingSession: false,
+  loadingBeforeContext: false,
   downloadingSource: null,
   publishing: false,
   previewing: false,
@@ -106,21 +113,43 @@ export const downloadReportWizardSourcePdf = createAsyncThunk<
   }
 });
 
+export const fetchReportWizardBeforeContext = createAsyncThunk<
+  ReportWizardBeforeContext,
+  { caseId: number; roundNumber: number },
+  { rejectValue: string }
+>("reportWizard/fetchBeforeContext", async (args, { rejectWithValue }) => {
+  try {
+    const { data } = await api.get<{ context: ReportWizardBeforeContext }>(
+      `/admin/cases/${args.caseId}/report-wizard/before-context`,
+      { params: { round_number: args.roundNumber } },
+    );
+    return data.context;
+  } catch (e: any) {
+    return rejectWithValue(
+      e?.response?.data?.error || "Failed to load before-report context",
+    );
+  }
+});
+
 export const createReportWizardSession = createAsyncThunk<
   ReportWizardSession,
   {
     caseId: number;
     roundNumber: number;
-    beforePdf: File;
+    beforePdf?: File | null;
     afterPdf: File;
+    reuseBeforeSessionId?: number | null;
     options?: OfGReportWizardOptions;
   },
   { rejectValue: string }
 >("reportWizard/createSession", async (args, { rejectWithValue }) => {
   const fd = new FormData();
-  fd.append("before_pdf", args.beforePdf);
+  if (args.beforePdf) fd.append("before_pdf", args.beforePdf);
   fd.append("after_pdf", args.afterPdf);
   fd.append("round_number", String(args.roundNumber));
+  if (args.reuseBeforeSessionId) {
+    fd.append("reuse_before_session_id", String(args.reuseBeforeSessionId));
+  }
   if (args.options?.highlight_win) {
     fd.append("highlight_win", args.options.highlight_win);
   }
@@ -239,8 +268,10 @@ export const finalizeReportWizard = createAsyncThunk<
 });
 
 function wizardStepForStatus(status: ReportWizardSession["status"]): number {
-  if (status === "review" || status === "failed") return 3;
-  if (status === "generating") return 4;
+  // generating without a live previewUrl → land on review so user can re-preview
+  if (status === "review" || status === "failed" || status === "generating") {
+    return 3;
+  }
   return 1;
 }
 
@@ -254,15 +285,30 @@ const reportWizardSlice = createSlice({
       if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
       state.session = null;
       state.drafts = [];
+      state.beforeContext = null;
+      state.beforeContextKey = null;
       state.error = null;
       state.loading = false;
       state.loadingDrafts = false;
       state.loadingSession = false;
+      state.loadingBeforeContext = false;
       state.downloadingSource = null;
       state.publishing = false;
       state.previewing = false;
       state.reExtracting = false;
       state.previewUrl = null;
+    },
+    /** Start-over: drop active session/preview but keep draft list + beforeContext. */
+    clearWizardSession(state) {
+      if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
+      state.session = null;
+      state.previewUrl = null;
+      state.error = null;
+      state.loading = false;
+      state.publishing = false;
+      state.previewing = false;
+      state.reExtracting = false;
+      state.downloadingSource = null;
     },
     setReviewedData(state, action: { payload: OfGReportData }) {
       if (state.session) {
@@ -275,6 +321,24 @@ const reportWizardSlice = createSlice({
   },
   extraReducers: (builder) => {
     builder
+      .addCase(fetchReportWizardBeforeContext.pending, (state, action) => {
+        state.loadingBeforeContext = true;
+        state.beforeContext = null;
+        state.beforeContextKey = `${action.meta.arg.caseId}:${action.meta.arg.roundNumber}`;
+      })
+      .addCase(fetchReportWizardBeforeContext.fulfilled, (state, action) => {
+        const key = `${action.meta.arg.caseId}:${action.meta.arg.roundNumber}`;
+        if (state.beforeContextKey !== key) return;
+        state.loadingBeforeContext = false;
+        state.beforeContext = action.payload;
+      })
+      .addCase(fetchReportWizardBeforeContext.rejected, (state, action) => {
+        const key = `${action.meta.arg.caseId}:${action.meta.arg.roundNumber}`;
+        if (state.beforeContextKey !== key) return;
+        state.loadingBeforeContext = false;
+        state.beforeContext = null;
+        state.error = action.payload || "Failed to load before context";
+      })
       .addCase(fetchReportWizardDrafts.pending, (state) => {
         state.loadingDrafts = true;
         state.error = null;
@@ -366,5 +430,6 @@ const reportWizardSlice = createSlice({
   },
 });
 
-export const { clearReportWizard, setReviewedData } = reportWizardSlice.actions;
+export const { clearReportWizard, clearWizardSession, setReviewedData } =
+  reportWizardSlice.actions;
 export default reportWizardSlice.reducer;

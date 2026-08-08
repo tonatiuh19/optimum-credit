@@ -1,0 +1,28 @@
+---
+description: Mandatory deep review + tests after any implementation work
+alwaysApply: true
+---
+
+# Deep Review Gate (after code changes)
+
+When a turn **implements, fixes, refactors, or changes API/DB/UI behavior**, do **not** end until this gate passes. Skip only for pure Q&A with no repo changes.
+
+## Required checklist
+
+1. **Gaps** — missing wires (API → Redux → UI), i18n (EN+ES), swagger, DESIGN_SYSTEM, migrations + `schema.sql`, env/docs
+2. **Issues** — null/auth/role edge cases, timezone/date, race conditions, clutter/flood, stale field names, security
+3. **Breaking changes** — confirm none, or call out explicitly with migration path
+4. **Tests** — run related unit + integration suites (including edge cases). Prefer a regression test for any bug found in review
+5. **Missed** — chat history + prior review notes; do not reintroduce fixed issues
+
+## Close gaps before finishing
+
+- Fix root causes found in the review in the **same turn** when safe and in scope
+- If something needs prod credentials, live writes, or product decision: state it clearly and still close everything else
+- Summarize: what was verified, what was fixed, what remains blocked
+
+## Anti-patterns
+
+- ❌ “LGTM” without running tests after non-trivial changes
+- ❌ Shipping UI that drops API fields in Redux thunks/mappers
+- ❌ Leaving known gaps as “follow-up” when they can be closed now

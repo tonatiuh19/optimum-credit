@@ -15,6 +15,10 @@ import mysql, {
   type ResultSetHeader,
   type RowDataPacket,
 } from "mysql2/promise";
+import {
+  cleanupIntegrationTestAffiliates,
+  cleanupIntegrationTestClients,
+} from "./testDbCleanup";
 
 // Must run before `./index` is loaded — imports below would hoist after this
 // in some runners; also re-set in beforeAll for safety.
@@ -152,6 +156,19 @@ describe("affiliates — HTTP integration", () => {
         MASTER_EMAIL,
         SUB_EMAIL,
       ]);
+      await cleanupIntegrationTestClients(pool, {
+        runId: RUN_ID,
+        clientIds: [attributedClientId, foreignClientId],
+      });
+      await cleanupIntegrationTestAffiliates(pool, {
+        runId: RUN_ID,
+        affiliateIds: [
+          affiliateId,
+          otherAffiliateId,
+          masterAffiliateId,
+          subAffiliateId,
+        ],
+      });
     } finally {
       await pool?.end();
     }

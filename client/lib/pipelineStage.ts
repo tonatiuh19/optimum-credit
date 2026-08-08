@@ -6,7 +6,8 @@
  */
 import type { PipelineStage } from "@shared/api";
 
-/** Ordered left-to-right as shown on the Pipeline board (prospect is virtual — not a real case stage). */
+/** Ordered left-to-right as shown on the Pipeline board case columns
+ * (Prospect is a virtual lead column; cases may also use pipeline_stage=prospect). */
 export const STAGE_ORDER: PipelineStage[] = [
   "new_client",
   "docs_ready",

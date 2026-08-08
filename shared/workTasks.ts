@@ -17,6 +17,11 @@ export interface AdminWorkTask {
   hubspot_owner_id: string | null;
   assignee_admin_id: number | null;
   assignee_name: string | null;
+  /** Optional credit_repair_cases.id */
+  case_id: number | null;
+  case_number: string | null;
+  client_id: number | null;
+  client_name: string | null;
   created_by_admin_id: number | null;
   sort_order: number;
   last_synced_at: string | null;
@@ -35,6 +40,19 @@ export interface WorkTaskAssignee {
   role: string;
 }
 
+/** Case option for linking a work task (search results). */
+export interface WorkTaskCaseOption {
+  case_id: number;
+  case_number: string | null;
+  client_id: number;
+  client_first_name: string;
+  client_last_name: string;
+  client_email: string | null;
+  pipeline_stage: string;
+  /** credit_repair_cases.status */
+  case_status: "active" | "completed" | "cancelled" | "on_hold" | string;
+}
+
 export interface CreateWorkTaskPayload {
   title: string;
   description?: string | null;
@@ -43,6 +61,7 @@ export interface CreateWorkTaskPayload {
   due_at?: string | null;
   labels?: string[];
   assignee_admin_id?: number | null;
+  case_id?: number | null;
 }
 
 export interface UpdateWorkTaskPayload {
@@ -53,6 +72,7 @@ export interface UpdateWorkTaskPayload {
   due_at?: string | null;
   labels?: string[];
   assignee_admin_id?: number | null;
+  case_id?: number | null;
   sort_order?: number;
 }
 
@@ -62,6 +82,8 @@ export interface HubspotConnectionStatus {
   hub_domain: string | null;
   connected_at: string | null;
   oauth_configured: boolean;
+  /** service_key = HUBSPOT_SERVICE_KEY; oauth = client id/secret; private_app = legacy alias */
+  auth_mode?: "service_key" | "private_app" | "oauth" | null;
 }
 
 export interface HubspotPermissionRow {
@@ -83,8 +105,25 @@ export interface WorkTasksSyncResult {
   errors: string[];
 }
 
+export interface AdminDashboardWorkTask {
+  id: number;
+  title: string;
+  status: WorkTaskStatus;
+  priority: WorkTaskPriority;
+  due_at: string | null;
+  case_id: number | null;
+  case_number: string | null;
+  client_id: number | null;
+  client_first_name: string | null;
+  client_last_name: string | null;
+  days_until: number | null;
+  overdue: boolean;
+}
+
 /** Map HubSpot task status → Work Hub column. */
-export function hubspotStatusToWork(status: string | null | undefined): WorkTaskStatus {
+export function hubspotStatusToWork(
+  status: string | null | undefined,
+): WorkTaskStatus {
   const s = String(status || "").toUpperCase();
   if (s === "COMPLETED") return "done";
   if (s === "IN_PROGRESS") return "doing";

@@ -1,0 +1,93 @@
+OFG PROGRESS REPORTS — HOW TO USE THEM IN THE PIPELINE
+======================================================
+
+CONFIDENTIAL — for internal team use only.
+
+
+Think of every round as a “before → after” snapshot.
+
+  Round 1 Before  =  enrollment credit report (day they started)
+  Round 1 After   =  report after Round 1 work
+  Round 2 Before  =  Round 1 After   ← auto-filled for you
+  Round 2 After   =  report after Round 2 work
+  …and so on through Round 5.
+
+The wizard chains the story so each round’s “After” becomes the next
+round’s “Before.” You only re-upload Before if something is wrong.
+
+
+WHERE TO OPEN IT
+----------------
+1. Pipeline → open the client panel
+2. Reports tab
+3. Tap Generate (OFG Progress Report Wizard)
+
+You can generate once the case is in Docs Ready or any Round stage.
+
+
+ROUND-BY-ROUND CHEAT SHEET
+--------------------------
+
+ROUND 1
+  • Upload Before = enrollment / first baseline PDF (SmartCredit, etc.)
+  • Upload After  = latest report for this round
+  • Review scores, wins, targets, bureau tags (TU / EX / EQ)
+  • Fix dates if the PDF date looks wrong
+  • Preview → Publish
+  • Client sees the report in their portal; pipeline advances
+
+ROUND 2–5
+  • Wizard offers: “Using Round N−1 After as Before” — leave that ON
+  • Upload only the new After PDF
+  • Override Before only if you must replace the prior file
+  • If there is no published prior round: upload both Before and After
+  • Review → Preview → Publish
+
+The timeline strip on Reports shows each round’s score and report date
+so you can see the chain at a glance.
+
+
+GOLDEN RULES
+------------
+✓ Always publish Round N before starting Round N+1 (reuse needs a
+  published prior After).
+
+✓ Compare the review screen against the source PDFs (open Before / After
+  with the buttons). Low-confidence scores are flagged — fix them.
+
+✓ Wins = items that disappeared. Targets = still on the report.
+  Tap TU / EX / EQ badges to correct which bureau(s) apply.
+
+✓ Report dates come from the PDF when possible; edit them if needed.
+  They print on page 1 of the branded PDF.
+
+✓ Check the CROA attestation before publish. Large score drops need an
+  extra acknowledgment (usually a mis-read PDF — fix first).
+
+✗ Don’t upload enrollment as Before for every round — that breaks the
+  round-to-round story Cesar wants.
+
+✗ Don’t publish if Before and After look swapped (After date earlier,
+  or scores collapsed for no reason).
+
+
+QUICK FLOW (30 SECONDS)
+-----------------------
+  Open client → Reports → Generate
+  → pick round
+  → Round 1: two PDFs  |  Round 2+: reuse prior + one new After
+  → Continue → Run extraction
+  → sanity-check scores / wins / dates
+  → Preview → Publish
+
+
+IF SOMETHING LOOKS OFF
+----------------------
+  • Wrong Before? Uncheck reuse and upload a different Before PDF.
+  • Bad extract? Re-extract, or Start over and try again.
+  • Resume a draft from the list at the top of the wizard.
+  • Affiliates cannot run this — staff only.
+
+
+That’s it: one enrollment baseline, then each round’s After feeds the
+next. The wizard does the chaining; you verify and publish.

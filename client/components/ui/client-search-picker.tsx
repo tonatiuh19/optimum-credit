@@ -2,7 +2,7 @@
  * ClientSearchPicker — server-side search combobox for selecting a client.
  * Scales to 10k+ clients by querying on-demand (debounced, limit 10).
  */
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { Search, X, Loader2, User } from "lucide-react";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { searchClients } from "@/store/slices/adminSlice";
@@ -14,6 +14,10 @@ interface ClientSearchPickerProps {
   onChange: (client: AdminClientListItem | null) => void;
   placeholder?: string;
   disabled?: boolean;
+  /** Hide prospect leads (e.g. New Case for real clients) */
+  excludeProspects?: boolean;
+  /** Only show prospect leads (New Case → Prospect stage) */
+  prospectsOnly?: boolean;
 }
 
 function Initials({ first, last }: { first: string; last: string }) {
@@ -30,6 +34,8 @@ export function ClientSearchPicker({
   onChange,
   placeholder = "Search by name or email…",
   disabled = false,
+  excludeProspects = false,
+  prospectsOnly = false,
 }: ClientSearchPickerProps) {
   const dispatch = useAppDispatch();
   const { clientSearchResults, clientSearchLoading } = useAppSelector(
@@ -48,9 +54,15 @@ export function ClientSearchPicker({
   // Fetch whenever debounced query changes
   useEffect(() => {
     if (debouncedQuery.trim().length >= 1) {
-      dispatch(searchClients(debouncedQuery.trim()));
+      dispatch(
+        searchClients(
+          prospectsOnly
+            ? { query: debouncedQuery.trim(), status: "prospect" }
+            : debouncedQuery.trim(),
+        ),
+      );
     }
-  }, [debouncedQuery, dispatch]);
+  }, [debouncedQuery, dispatch, prospectsOnly]);
 
   // Close on outside click
   useEffect(() => {
@@ -83,9 +95,19 @@ export function ClientSearchPicker({
     setTimeout(() => inputRef.current?.focus(), 0);
   }, [onChange]);
 
+  const results = useMemo(() => {
+    if (prospectsOnly) {
+      return clientSearchResults.filter((c) => c.status === "prospect");
+    }
+    if (excludeProspects) {
+      return clientSearchResults.filter((c) => c.status !== "prospect");
+    }
+    return clientSearchResults;
+  }, [clientSearchResults, excludeProspects, prospectsOnly]);
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (!open) return;
-    const count = clientSearchResults.length;
+    const count = results.length;
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setActiveIdx((i) => Math.min(i + 1, count - 1));
@@ -94,8 +116,8 @@ export function ClientSearchPicker({
       setActiveIdx((i) => Math.max(i - 1, 0));
     } else if (e.key === "Enter") {
       e.preventDefault();
-      if (activeIdx >= 0 && clientSearchResults[activeIdx]) {
-        selectClient(clientSearchResults[activeIdx]);
+      if (activeIdx >= 0 && results[activeIdx]) {
+        selectClient(results[activeIdx]);
       }
     } else if (e.key === "Escape") {
       setOpen(false);
@@ -126,6 +148,11 @@ export function ClientSearchPicker({
             {value.email}
           </p>
         </div>
+        {value.status === "prospect" && (
+          <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full border border-accent/30 text-accent bg-accent/10 shrink-0">
+            prospect
+          </span>
+        )}
         {!disabled && (
           <button
             type="button"
@@ -189,14 +216,14 @@ export function ClientSearchPicker({
 
       {showDropdown && (
         <div className="absolute z-50 mt-1 w-full bg-card border border-border rounded-xl shadow-lg overflow-hidden">
-          {clientSearchResults.length === 0 && !clientSearchLoading ? (
+          {results.length === 0 && !clientSearchLoading ? (
             <div className="flex items-center gap-2 px-4 py-3 text-sm text-muted-foreground">
               <User className="w-4 h-4" />
               No clients found for &ldquo;{query}&rdquo;
             </div>
           ) : (
             <ul ref={listRef} className="max-h-56 overflow-y-auto py-1">
-              {clientSearchResults.map((c, i) => (
+              {results.map((c, i) => (
                 <li key={c.id}>
                   <button
                     type="button"

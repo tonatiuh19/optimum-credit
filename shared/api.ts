@@ -30,10 +30,61 @@ export interface AdminUser {
   phone?: string | null;
   role: "super_admin" | "admin" | "support" | "agent" | "affiliate";
   status: "active" | "suspended" | "invited" | "inactive";
+  /** Client language this admin owns/handles (EN/ES routing) */
+  preferred_language?: "en" | "es" | null;
   /** Present when role=affiliate */
   affiliate?: AffiliateProfile | null;
   /** Present when role=affiliate — whether their portal (pipeline/leads) is unlocked */
   has_portal_access?: boolean;
+}
+
+/** Operational alert types admins can mute per channel (OTP/welcome never included). */
+export type AdminNotifyEventKey =
+  | "purchase_enrollment"
+  | "payment_installment"
+  | "submission_ready_review"
+  | "submission_doc_upload"
+  | "submission_info_request"
+  | "doc_upload_link"
+  | "round_calendar"
+  | "work_task_assigned"
+  | "work_task_overdue";
+
+export type AdminNotifyChannel = "email" | "in_app" | "sms";
+
+export type AdminNotifyEventToggles = Record<AdminNotifyEventKey, boolean>;
+
+export interface AdminNotificationPrefs {
+  email: AdminNotifyEventToggles;
+  in_app: AdminNotifyEventToggles;
+  sms: AdminNotifyEventToggles;
+}
+
+export interface AdminNotificationChannelMeta {
+  available: boolean;
+  /** Why toggles are locked (e.g. Twilio not configured). */
+  disabled_reason?: string | null;
+}
+
+export interface AdminNotificationPrefsResponse {
+  prefs: AdminNotificationPrefs;
+  channels: Record<AdminNotifyChannel, AdminNotificationChannelMeta>;
+  events: AdminNotifyEventKey[];
+}
+
+export interface AdminInAppNotification {
+  id: number;
+  event_key: string;
+  title: string;
+  body: string | null;
+  link_url: string | null;
+  read_at: string | null;
+  created_at: string;
+}
+
+export interface AdminInAppNotificationsResponse {
+  notifications: AdminInAppNotification[];
+  unread_count: number;
 }
 
 export type PipelineStage =
@@ -302,7 +353,7 @@ export interface AdminClientListItem {
   id: number;
   first_name: string;
   last_name: string;
-  email: string;
+  email: string | null;
   phone?: string | null;
   pipeline_stage: PipelineStage;
   pipeline_stage_changed_at?: string | null;
@@ -323,6 +374,13 @@ export interface AdminClientListItem {
   tasks_rejected?: number;
   // admin notes
   admin_notes?: string | null;
+  // referral attribution
+  referral_category?:
+    | "realtor_broker"
+    | "one_off"
+    | "affiliate_partner"
+    | null;
+  referrer_id?: number | null;
   // payment summary (from clients list endpoint)
   total_paid_cents?: number;
   payment_count?: number;
@@ -334,6 +392,26 @@ export interface AdminClientListItem {
   splits_paid_cents?: number;
   // labels (source + analysis)
   labels?: Label[];
+}
+
+export type ReferralCategory =
+  | "realtor_broker"
+  | "one_off"
+  | "affiliate_partner";
+
+export interface AdminReferrer {
+  id: number;
+  category: ReferralCategory;
+  first_name: string;
+  last_name: string;
+  email?: string | null;
+  phone?: string | null;
+  company?: string | null;
+  affiliate_id?: number | null;
+  preferred_language?: "en" | "es" | null;
+  notes?: string | null;
+  status: string;
+  created_at?: string;
 }
 
 // ============================================================
@@ -373,6 +451,8 @@ export interface CreditRepairCase {
   info_requests_open?: number;
   /** Submitted info requests awaiting staff review */
   info_requests_pending_review?: number;
+  /** True when client has a succeeded payment or paid split */
+  is_payment_received?: boolean | number;
   // labels (source + analysis)
   labels?: Label[];
 }
@@ -407,8 +487,8 @@ export interface CrcSyncResponse {
 export interface AdminClientFormPayload {
   first_name: string;
   last_name: string;
-  email: string;
-  phone?: string;
+  email?: string | null;
+  phone?: string | null;
   package_id?: number | null;
   status?: ClientStatus;
 }
@@ -445,6 +525,18 @@ export interface AdminDashboardPayment {
   first_name: string;
   last_name: string;
   client_id: number;
+}
+
+export interface AdminDashboardUpcomingRound {
+  id: string;
+  case_id: number;
+  case_number: string | null;
+  client_id: number;
+  first_name: string;
+  last_name: string;
+  round_number: number;
+  target_date: string;
+  days_until: number;
 }
 
 export interface CommunicationTemplate {
@@ -497,6 +589,8 @@ export interface AdminUserListItem {
   phone?: string | null;
   role: "super_admin" | "admin" | "agent" | "affiliate";
   status: "active" | "inactive" | "suspended";
+  /** Client language this admin owns/handles */
+  preferred_language?: "en" | "es" | null;
   last_login_at?: string | null;
   created_at: string;
 }
@@ -650,7 +744,7 @@ export interface AffiliateSelfUpdatePayload {
 export interface AffiliateLeadPayload {
   first_name: string;
   last_name: string;
-  email: string;
+  email?: string | null;
   phone?: string | null;
 }
 
@@ -669,6 +763,73 @@ export interface CreateAffiliatePayload {
   /** Activate without payment */
   comp_subscription?: boolean;
   notes?: string | null;
+}
+
+export type AffiliateInviteLinkKind = "evergreen" | "one_time";
+export type AffiliateInvitePathMode = "token" | "auto" | "custom";
+
+export interface AffiliateInviteLink {
+  id: number;
+  token: string;
+  /** Human-readable path segment when set; join_url uses slug || token */
+  slug: string | null;
+  kind: AffiliateInviteLinkKind;
+  label: string | null;
+  plan: AffiliatePlan;
+  parent_affiliate_id: number | null;
+  parent_name?: string | null;
+  is_enabled: boolean;
+  max_uses: number | null;
+  use_count: number;
+  expires_at: string | null;
+  created_by_admin_id: number;
+  last_used_at: string | null;
+  created_at: string;
+  /** Absolute public join URL */
+  join_url: string;
+}
+
+export interface CreateAffiliateInviteLinkPayload {
+  kind: AffiliateInviteLinkKind;
+  label?: string | null;
+  plan: AffiliatePlan;
+  parent_affiliate_id?: number | null;
+  expires_at?: string | null;
+  /** token = opaque URL; auto = from admin name; custom = provided slug */
+  path_mode?: AffiliateInvitePathMode;
+  slug?: string | null;
+}
+
+export interface UpdateAffiliateInviteLinkPayload {
+  is_enabled?: boolean;
+  label?: string | null;
+  path_mode?: AffiliateInvitePathMode;
+  slug?: string | null;
+}
+
+export interface AffiliateInvitePublicResolve {
+  /** Opaque token is intentionally omitted from public resolve (join uses the URL path key). */
+  slug: string | null;
+  plan: AffiliatePlan;
+  label: string | null;
+  parent_name: string | null;
+  is_open: boolean;
+}
+
+export interface AffiliateInviteJoinPayload {
+  first_name: string;
+  last_name: string;
+  email: string;
+  phone?: string | null;
+  agreed_terms: boolean;
+  agreed_sms: boolean;
+}
+
+export interface AffiliateInviteJoinResponse {
+  ok: boolean;
+  login_url: string;
+  email: string;
+  affiliate_id?: number;
 }
 
 export interface AffiliateCommission {
@@ -935,6 +1096,34 @@ export interface CreateCasePayload {
   notes?: string | null;
   send_case_email?: boolean;
   splits?: CreateSplitPayload[];
+  /** Optional round-completion calendar schedule (persisted on the case). */
+  round_schedule?: RoundScheduleInput | null;
+}
+
+/** Five expected round-completion dates (YYYY-MM-DD), all-day calendar targets. */
+export interface RoundScheduleDates {
+  round_1_date: string;
+  round_2_date: string;
+  round_3_date: string;
+  round_4_date: string;
+  round_5_date: string;
+}
+
+export interface RoundScheduleInput extends RoundScheduleDates {
+  interval_days?: number;
+  /** When true, email .ics to client + referrer (if any) + assigned admin. Default false. */
+  send_calendar?: boolean;
+}
+
+export interface CaseRoundSchedule extends RoundScheduleDates {
+  case_id: number;
+  interval_days: number;
+  calendar_uid_ns: string;
+  /** Successful .ics email sends; drives ICS SEQUENCE on the next send. */
+  calendar_send_count?: number;
+  last_sent_at: string | null;
+  last_sent_recipients: string[] | null;
+  updated_at: string;
 }
 
 export interface AdminCase {
@@ -972,6 +1161,41 @@ export interface CalendarSplit {
   send_payment_link?: boolean;
   payment_token?: string | null;
   payment_link?: string | null;
+}
+
+/** Planned round-completion target on the admin calendar. */
+export interface CalendarRoundEvent {
+  id: string;
+  case_id: number;
+  case_number: string | null;
+  client_id: number;
+  client_first_name: string | null;
+  client_last_name: string | null;
+  round_number: number;
+  target_date: string;
+}
+
+/** Open Work Hub task with a due date on the admin calendar. */
+export interface CalendarWorkTaskEvent {
+  id: number;
+  title: string;
+  status: "backlog" | "doing";
+  priority: "low" | "medium" | "high" | "urgent";
+  due_date: string;
+  assignee_admin_id: number | null;
+  assignee_name: string | null;
+  case_id: number | null;
+  case_number: string | null;
+  client_id: number | null;
+  client_first_name: string | null;
+  client_last_name: string | null;
+  source: "optimum" | "hubspot";
+}
+
+export interface AdminCalendarResponse {
+  splits: CalendarSplit[];
+  round_events: CalendarRoundEvent[];
+  work_tasks: CalendarWorkTaskEvent[];
 }
 
 // ============================================================
@@ -1052,11 +1276,13 @@ export type {
   WorkTaskSource,
   AdminWorkTask,
   WorkTaskAssignee,
+  WorkTaskCaseOption,
   CreateWorkTaskPayload,
   UpdateWorkTaskPayload,
   HubspotConnectionStatus,
   HubspotPermissionRow,
   WorkTasksSyncResult,
+  AdminDashboardWorkTask,
 } from "./workTasks";
 
 export interface OnboardingTaskTemplate {
@@ -1208,6 +1434,8 @@ export interface ReportWizardSession {
   client_id: number;
   round_number: number;
   status: ReportWizardSessionStatus;
+  before_source?: "upload" | "prior_round" | "enrollment";
+  before_reused_from_session_id?: number | null;
   options_json?: OfGReportWizardOptions | null;
   extracted_json?: OfGReportData | null;
   reviewed_json?: OfGReportData | null;
@@ -1217,6 +1445,17 @@ export interface ReportWizardSession {
   error_message?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface ReportWizardBeforeContext {
+  source: "enrollment" | "prior_round" | "none";
+  can_reuse: boolean;
+  prior_session_id: number | null;
+  prior_round: number | null;
+  file_name: string | null;
+  report_date_after: string | null;
+  score_after: number | null;
+  middle_score_after: number | null;
 }
 
 // ============================================================
@@ -1433,6 +1672,9 @@ export interface Prospect {
   rep_name?: string | null;
   labels?: Label[];
   credit_analysis_id?: number | null;
+  /** Active prospect-stage case, if New Case → Prospect already ran */
+  case_id?: number | null;
+  case_number?: string | null;
   created_at: string;
 }
 
@@ -1440,6 +1682,24 @@ export interface ConvertProspectPayload {
   id: number;
   package_id?: number | null;
   notes?: string | null;
+  round_schedule?: RoundScheduleInput | null;
+}
+
+export interface AdminPipelineQuery {
+  search?: string;
+  language?: string;
+  billing?: string;
+  package_id?: string;
+  assigned_admin_id?: string;
+  referral_category?: string;
+  client_status?: string;
+  case_status?: string;
+  stage?: string;
+  payment_badge?: string;
+  tasks?: string;
+  info_requests?: string;
+  has_notes?: string;
+  labels?: string[];
 }
 
 export interface AdminPipelineResponse {

@@ -11,6 +11,7 @@ import mysql, {
   type RowDataPacket,
 } from "mysql2/promise";
 import { createServer, createSession } from "./index";
+import { cleanupIntegrationTestClients } from "./testDbCleanup";
 
 const RUN_ID = `dash-test-${Date.now()}`;
 
@@ -78,6 +79,10 @@ describe("admin dashboard — score drop regression", () => {
         ]);
       if (clientId)
         await pool.query(`DELETE FROM clients WHERE id = ?`, [clientId]);
+      await cleanupIntegrationTestClients(pool, {
+        runId: RUN_ID,
+        clientIds: [clientId],
+      });
     } finally {
       await pool?.end();
     }

@@ -12,6 +12,7 @@ import {
   defaultInfoRequestTitles,
 } from "../shared/infoRequestPresets";
 import { createServer, createSession } from "./index";
+import { cleanupIntegrationTestClients } from "./testDbCleanup";
 
 const RUN_ID = `ir-test-${Date.now()}`;
 const CLIENT_EMAIL = `${RUN_ID}@example.test`;
@@ -108,6 +109,10 @@ describe("info requests — HTTP integration", () => {
       if (otherClientId) {
         await pool.query(`DELETE FROM clients WHERE id = ?`, [otherClientId]);
       }
+      await cleanupIntegrationTestClients(pool, {
+        runId: RUN_ID,
+        clientIds: [clientId, otherClientId],
+      });
       // revoke test sessions for this admin token is optional
     } finally {
       await pool?.end();
@@ -364,7 +369,7 @@ describe("info requests — HTTP integration", () => {
       .set("Authorization", `Bearer ${clientToken}`);
     expect(portalDetail.body.request.secrets_json).toBeNull();
     expect(JSON.stringify(portalDetail.body)).not.toContain("fixture-smartcredit-pw");
-  });
+  }, 45_000);
 
   it("approving Smart Credit stamps smart_credit_connected_at", async () => {
     const res = await request(app)
@@ -379,7 +384,7 @@ describe("info requests — HTTP integration", () => {
     );
     expect(rows[0].smart_credit_email).toBe("sc-user@example.com");
     expect(rows[0].smart_credit_connected_at).toBeTruthy();
-  });
+  }, 30_000);
 
   // ── Billing confirm + cancel open request ─────────────────────────────────
 

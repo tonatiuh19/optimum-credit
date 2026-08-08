@@ -1,12 +1,21 @@
 import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
 import api, { formatAxiosError } from "@/lib/api";
+import { normalizeAdminCalendarResponse } from "@/lib/adminCalendarPayload";
 import type {
   AdminClientListItem,
+  AdminReferrer,
   AdminDashboardStats,
   AdminDashboardTicket,
   AdminDashboardPayment,
+  AdminDashboardUpcomingRound,
+  AdminDashboardWorkTask,
+  AdminCalendarResponse,
+  CalendarSplit,
+  CalendarRoundEvent,
+  CalendarWorkTaskEvent,
   AdminPaymentsResponse,
   AdminPipelineResponse,
+  AdminPipelineQuery,
   AdminSubscriptionsResponse,
   AdminUserListItem,
   CommunicationTemplate,
@@ -27,9 +36,10 @@ import type {
   UpdateCouponPayload,
   PaymentSplit,
   CreateCasePayload,
-  CalendarSplit,
   TradelineProduct,
   TradelineProductInput,
+  ReferralCategory,
+  RoundScheduleInput,
 } from "@shared/api";
 
 interface AdminState {
@@ -39,11 +49,14 @@ interface AdminState {
     recent_clients: AdminClientListItem[];
     recent_tickets: AdminDashboardTicket[];
     recent_payments: AdminDashboardPayment[];
+    upcoming_rounds: AdminDashboardUpcomingRound[];
+    my_work_tasks: AdminDashboardWorkTask[];
   };
   clients: AdminClientListItem[];
   pipelineClients: AdminClientListItem[];
   pipelineCases: CreditRepairCase[];
   pipelineProspects: Prospect[];
+  pipelineLoading: boolean;
   selectedClient: any | null;
   panelClient: {
     case_info?: {
@@ -109,9 +122,16 @@ interface AdminState {
   caseSplits: PaymentSplit[];
   caseSplitsLoading: boolean;
   calendarSplits: CalendarSplit[];
+  calendarRoundEvents: CalendarRoundEvent[];
+  calendarWorkTasks: CalendarWorkTaskEvent[];
   calendarLoading: boolean;
   clientSearchResults: AdminClientListItem[];
   clientSearchLoading: boolean;
+  referrers: AdminReferrer[];
+  referrersLoading: boolean;
+  caseDocuments: any[];
+  caseDocumentsLoading: boolean;
+  caseDocumentsUploading: boolean;
   tradelineProducts: TradelineProduct[];
   tradelineProductsSaving: boolean;
   loading: boolean;
@@ -125,11 +145,14 @@ const initialState: AdminState = {
     recent_clients: [],
     recent_tickets: [],
     recent_payments: [],
+    upcoming_rounds: [],
+    my_work_tasks: [],
   },
   clients: [],
   pipelineClients: [],
   pipelineCases: [],
   pipelineProspects: [],
+  pipelineLoading: false,
   selectedClient: null,
   panelClient: null,
   panelLoading: false,
@@ -167,9 +190,16 @@ const initialState: AdminState = {
   caseSplits: [],
   caseSplitsLoading: false,
   calendarSplits: [],
+  calendarRoundEvents: [],
+  calendarWorkTasks: [],
   calendarLoading: false,
   clientSearchResults: [],
   clientSearchLoading: false,
+  referrers: [],
+  referrersLoading: false,
+  caseDocuments: [],
+  caseDocumentsLoading: false,
+  caseDocumentsUploading: false,
   tradelineProducts: [],
   tradelineProductsSaving: false,
   loading: false,
@@ -214,15 +244,21 @@ export const fetchAdminClients = createAsyncThunk<
   return data.clients;
 });
 
-export const searchClients = createAsyncThunk<AdminClientListItem[], string>(
-  "admin/clients/search",
-  async (query) => {
-    const { data } = await api.get("/admin/clients", {
-      params: { search: query, limit: 10 },
-    });
-    return data.clients as AdminClientListItem[];
-  },
-);
+export const searchClients = createAsyncThunk<
+  AdminClientListItem[],
+  string | { query: string; status?: string }
+>("admin/clients/search", async (args) => {
+  const query = typeof args === "string" ? args : args.query;
+  const status = typeof args === "string" ? undefined : args.status;
+  const { data } = await api.get("/admin/clients", {
+    params: {
+      search: query,
+      limit: 10,
+      ...(status ? { status } : {}),
+    },
+  });
+  return data.clients as AdminClientListItem[];
+});
 
 export const fetchAdminClient = createAsyncThunk<any, { id: number }>(
   "admin/client",
@@ -234,8 +270,26 @@ export const fetchAdminClient = createAsyncThunk<any, { id: number }>(
 
 export const fetchPipeline = createAsyncThunk(
   "admin/pipeline",
-  async () => {
-    const { data } = await api.get("/admin/pipeline");
+  async (args?: AdminPipelineQuery) => {
+    const params: Record<string, string> = {};
+    if (args?.search) params.search = args.search;
+    if (args?.language) params.language = args.language;
+    if (args?.billing) params.billing = args.billing;
+    if (args?.package_id) params.package_id = args.package_id;
+    if (args?.assigned_admin_id)
+      params.assigned_admin_id = args.assigned_admin_id;
+    if (args?.referral_category)
+      params.referral_category = args.referral_category;
+    if (args?.client_status) params.client_status = args.client_status;
+    if (args?.case_status) params.case_status = args.case_status;
+    if (args?.stage) params.stage = args.stage;
+    if (args?.payment_badge) params.payment_badge = args.payment_badge;
+    if (args?.tasks) params.tasks = args.tasks;
+    if (args?.info_requests) params.info_requests = args.info_requests;
+    if (args?.has_notes) params.has_notes = args.has_notes;
+    if (args?.labels && args.labels.length > 0)
+      params.labels = args.labels.join(",");
+    const { data } = await api.get("/admin/pipeline", { params });
     return data as AdminPipelineResponse;
   },
 );
@@ -296,6 +350,27 @@ export const fetchAllDocuments = createAsyncThunk(
     return data.documents;
   },
 );
+
+export const fetchCaseDocuments = createAsyncThunk<
+  { caseId: number; documents: any[] },
+  number
+>("admin/fetchCaseDocuments", async (caseId) => {
+  const { data } = await api.get(`/admin/cases/${caseId}/documents`);
+  return { caseId, documents: data.documents };
+});
+
+export const uploadCaseDocuments = createAsyncThunk<
+  { caseId: number; documents: any[] },
+  { caseId: number; doc_type: string; files: File[] }
+>("admin/uploadCaseDocuments", async ({ caseId, doc_type, files }) => {
+  const fd = new FormData();
+  fd.append("doc_type", doc_type);
+  files.forEach((f) => fd.append("files", f));
+  const { data } = await api.post(`/admin/cases/${caseId}/documents`, fd, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return { caseId, documents: data.documents };
+});
 
 export const deleteRoundReportPdf = createAsyncThunk<
   { pdfId: number; roundNumber: number },
@@ -527,6 +602,7 @@ export const createAdminTeamMember = createAsyncThunk<
     last_name: string;
     phone?: string;
     role: string;
+    preferred_language?: "en" | "es";
   },
   { rejectValue: string }
 >("admin/team/create", async (args, { rejectWithValue }) => {
@@ -563,7 +639,9 @@ export const updateAdminTeamMember = createAsyncThunk<
     phone?: string;
     role?: string;
     status?: string;
-  }
+    preferred_language?: "en" | "es";
+  },
+  { rejectValue: string }
 >("admin/team/update", async ({ id, ...rest }) => {
   await api.put(`/admin/admins/${id}`, rest);
 });
@@ -575,15 +653,41 @@ export const deleteAdminTeamMember = createAsyncThunk<void, { id: number }>(
   },
 );
 
+export const fetchReferrers = createAsyncThunk<
+  AdminReferrer[],
+  { category?: string } | void,
+  { rejectValue: string }
+>("admin/referrers/fetch", async (args, { rejectWithValue }) => {
+  try {
+    const params: Record<string, string> = {};
+    if (args && "category" in args && args.category) {
+      params.category = args.category;
+    }
+    const { data } = await api.get("/admin/referrers", { params });
+    return data.referrers as AdminReferrer[];
+  } catch (err: unknown) {
+    return rejectWithValue(
+      formatAxiosError(err, "Failed to load referrers"),
+    );
+  }
+});
+
 export const createAdminClient = createAsyncThunk<
   AdminClientListItem,
   {
     first_name: string;
     last_name: string;
-    email: string;
-    phone?: string;
+    email?: string | null;
+    phone?: string | null;
     package_id?: number | null;
     status?: string;
+    admin_notes?: string | null;
+    preferred_language?: "en" | "es";
+    referral_category?: ReferralCategory | null;
+    referrer_id?: number | null;
+    /** When true (or when round_schedule has dates), create a credit repair case. */
+    create_case?: boolean;
+    round_schedule?: RoundScheduleInput | null;
   },
   { rejectValue: string }
 >("admin/clients/create", async (args, { rejectWithValue }) => {
@@ -601,10 +705,14 @@ export const updateAdminClient = createAsyncThunk<
     id: number;
     first_name?: string;
     last_name?: string;
-    email?: string;
-    phone?: string;
+    email?: string | null;
+    phone?: string | null;
     package_id?: number | null;
     status?: string;
+    admin_notes?: string | null;
+    preferred_language?: "en" | "es";
+    referral_category?: ReferralCategory | null;
+    referrer_id?: number | null;
   },
   { rejectValue: string }
 >("admin/clients/update", async ({ id, ...rest }, { rejectWithValue }) => {
@@ -739,9 +847,51 @@ export const fetchAdminSubscriptions = createAsyncThunk<
 // ── Cases ──────────────────────────────────────────────────────────────────
 export const createAdminCase = createAsyncThunk(
   "admin/createAdminCase",
-  async (payload: CreateCasePayload) => {
-    const { data } = await api.post("/admin/cases", payload);
-    return data.case;
+  async (payload: CreateCasePayload, { rejectWithValue }) => {
+    try {
+      const { data } = await api.post("/admin/cases", payload);
+      return data.case;
+    } catch (e: any) {
+      return rejectWithValue(
+        e?.response?.data?.error ?? e?.message ?? "Failed to create case",
+      );
+    }
+  },
+);
+
+export const fetchCaseRoundSchedule = createAsyncThunk(
+  "admin/fetchCaseRoundSchedule",
+  async (caseId: number) => {
+    const { data } = await api.get(`/admin/cases/${caseId}/round-schedule`);
+    return data.schedule as import("@shared/api").CaseRoundSchedule | null;
+  },
+);
+
+export const saveCaseRoundSchedule = createAsyncThunk(
+  "admin/saveCaseRoundSchedule",
+  async ({
+    caseId,
+    schedule,
+  }: {
+    caseId: number;
+    schedule: import("@shared/api").RoundScheduleInput;
+  }) => {
+    const { data } = await api.put(`/admin/cases/${caseId}/round-schedule`, schedule);
+    return data as {
+      schedule: import("@shared/api").CaseRoundSchedule;
+      sent_to: string[];
+      send_errors: string[];
+    };
+  },
+);
+
+export const sendCaseRoundCalendar = createAsyncThunk(
+  "admin/sendCaseRoundCalendar",
+  async (caseId: number) => {
+    const { data } = await api.post(
+      `/admin/cases/${caseId}/round-schedule/send`,
+    );
+    return data as { sent_to: string[]; send_errors: string[] };
   },
 );
 
@@ -817,8 +967,10 @@ export const fetchAdminPaymentSplits = createAsyncThunk(
 export const fetchAdminCalendar = createAsyncThunk(
   "admin/fetchAdminCalendar",
   async ({ from, to }: { from: string; to: string }) => {
-    const { data } = await api.get("/admin/calendar", { params: { from, to } });
-    return data.splits as CalendarSplit[];
+    const { data } = await api.get<AdminCalendarResponse>("/admin/calendar", {
+      params: { from, to },
+    });
+    return normalizeAdminCalendarResponse(data);
   },
 );
 
@@ -828,6 +980,7 @@ const slice = createSlice({
   reducers: {
     clearPanelClient(s) {
       s.panelClient = null;
+      s.caseDocuments = [];
     },
     clearCouponPreview(s) {
       s.couponPreview = null;
@@ -846,7 +999,6 @@ const slice = createSlice({
       fetchAdminClients,
       fetchAllDocuments,
       fetchAdminTeam,
-      fetchPipeline,
       fetchAdminDashboard,
       fetchAdminReports,
       fetchSettings,
@@ -858,9 +1010,25 @@ const slice = createSlice({
       b.addCase(thunk.rejected, clearLoading);
     });
 
+    b.addCase(fetchPipeline.pending, (s) => {
+      s.pipelineLoading = true;
+    });
+    b.addCase(fetchPipeline.rejected, (s) => {
+      s.pipelineLoading = false;
+    });
+    b.addCase(fetchPipeline.fulfilled, (s, a) => {
+      s.pipelineLoading = false;
+      s.pipelineCases = a.payload.cases ?? [];
+      s.pipelineProspects = a.payload.prospects ?? [];
+    });
+
     b.addCase(fetchAdminDashboard.fulfilled, (s, a) => {
       s.loading = false;
-      s.dashboard = a.payload;
+      s.dashboard = {
+        ...a.payload,
+        upcoming_rounds: a.payload.upcoming_rounds ?? [],
+        my_work_tasks: a.payload.my_work_tasks ?? [],
+      };
     });
     b.addCase(fetchAdminClients.fulfilled, (s, a) => {
       s.loading = false;
@@ -875,6 +1043,16 @@ const slice = createSlice({
     b.addCase(searchClients.fulfilled, (s, a) => {
       s.clientSearchLoading = false;
       s.clientSearchResults = a.payload;
+    });
+    b.addCase(fetchReferrers.pending, (s) => {
+      s.referrersLoading = true;
+    });
+    b.addCase(fetchReferrers.rejected, (s) => {
+      s.referrersLoading = false;
+    });
+    b.addCase(fetchReferrers.fulfilled, (s, a) => {
+      s.referrersLoading = false;
+      s.referrers = a.payload;
     });
     b.addCase(fetchAdminClient.fulfilled, (s, a) => {
       s.selectedClient = a.payload;
@@ -899,17 +1077,38 @@ const slice = createSlice({
     b.addCase(fetchPanelCase.rejected, (s) => {
       s.panelLoading = false;
     });
-    b.addCase(fetchPipeline.fulfilled, (s, a) => {
-      s.loading = false;
-      s.pipelineCases = a.payload.cases ?? [];
-      s.pipelineProspects = a.payload.prospects ?? [];
-    });
     b.addCase(fetchPendingDocuments.fulfilled, (s, a) => {
       s.pendingDocuments = a.payload;
     });
     b.addCase(fetchAllDocuments.fulfilled, (s, a) => {
       s.loading = false;
       s.allDocuments = a.payload;
+    });
+    b.addCase(fetchCaseDocuments.pending, (s) => {
+      s.caseDocumentsLoading = true;
+    });
+    b.addCase(fetchCaseDocuments.rejected, (s) => {
+      s.caseDocumentsLoading = false;
+    });
+    b.addCase(fetchCaseDocuments.fulfilled, (s, a) => {
+      s.caseDocumentsLoading = false;
+      s.caseDocuments = a.payload.documents;
+    });
+    b.addCase(uploadCaseDocuments.pending, (s) => {
+      s.caseDocumentsUploading = true;
+    });
+    b.addCase(uploadCaseDocuments.rejected, (s) => {
+      s.caseDocumentsUploading = false;
+    });
+    b.addCase(uploadCaseDocuments.fulfilled, (s, a) => {
+      s.caseDocumentsUploading = false;
+      const incoming = a.payload.documents ?? [];
+      const existingIds = new Set(s.caseDocuments.map((d) => d.id));
+      const merged = [
+        ...incoming.filter((d: { id: number }) => !existingIds.has(d.id)),
+        ...s.caseDocuments,
+      ];
+      s.caseDocuments = merged;
     });
     b.addCase(fetchConversations.fulfilled, (s, a) => {
       s.conversations = a.payload;
@@ -1141,7 +1340,9 @@ const slice = createSlice({
     });
     b.addCase(fetchAdminCalendar.fulfilled, (s, a) => {
       s.calendarLoading = false;
-      s.calendarSplits = a.payload;
+      s.calendarSplits = a.payload.splits;
+      s.calendarRoundEvents = a.payload.round_events ?? [];
+      s.calendarWorkTasks = a.payload.work_tasks ?? [];
     });
     b.addCase(fetchAdminTradelineProducts.fulfilled, (s, a) => {
       s.tradelineProducts = a.payload;

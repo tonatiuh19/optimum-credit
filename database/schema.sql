@@ -20,13 +20,16 @@ CREATE TABLE IF NOT EXISTS `admins` (
   `phone` VARCHAR(20) DEFAULT NULL,
   `role` ENUM('super_admin','admin','agent','affiliate') NOT NULL DEFAULT 'admin',
   `status` ENUM('active','inactive','suspended') NOT NULL DEFAULT 'active',
+  `preferred_language` ENUM('en','es') NOT NULL DEFAULT 'en' COMMENT 'Client language this admin owns/handles',
   `avatar_url` VARCHAR(500) DEFAULT NULL,
+  `notification_prefs_json` JSON DEFAULT NULL COMMENT 'Per-admin channel×event toggles: { email|in_app|sms: { event_key: bool } }',
   `last_login_at` DATETIME DEFAULT NULL,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_admins_status` (`status`),
-  KEY `idx_admins_role` (`role`)
+  KEY `idx_admins_role` (`role`),
+  KEY `idx_admins_preferred_language` (`preferred_language`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `admin_otp_codes` (
@@ -107,6 +110,37 @@ CREATE TABLE IF NOT EXISTS `affiliates` (
   KEY `idx_affiliates_subscription` (`subscription_status`),
   CONSTRAINT `fk_affiliates_admin` FOREIGN KEY (`admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL,
   CONSTRAINT `fk_affiliates_parent` FOREIGN KEY (`parent_affiliate_id`) REFERENCES `affiliates`(`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `affiliate_invite_links` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `token` VARCHAR(64) NOT NULL,
+  `slug` VARCHAR(64) DEFAULT NULL
+    COMMENT 'Optional public path segment; NULL = use token in URL',
+  `kind` ENUM('evergreen','one_time') NOT NULL DEFAULT 'evergreen',
+  `label` VARCHAR(120) DEFAULT NULL,
+  `plan` ENUM('standard','master','sub_affiliate') NOT NULL DEFAULT 'standard',
+  `parent_affiliate_id` INT UNSIGNED DEFAULT NULL
+    COMMENT 'Required when plan=sub_affiliate — master parent',
+  `is_enabled` TINYINT(1) NOT NULL DEFAULT 1,
+  `max_uses` INT UNSIGNED DEFAULT NULL
+    COMMENT 'NULL = unlimited (evergreen); typically 1 for one_time',
+  `use_count` INT UNSIGNED NOT NULL DEFAULT 0,
+  `expires_at` DATETIME DEFAULT NULL,
+  `created_by_admin_id` INT UNSIGNED NOT NULL,
+  `last_used_at` DATETIME DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_aff_invite_token` (`token`),
+  UNIQUE KEY `uq_aff_invite_slug` (`slug`),
+  KEY `idx_aff_invite_enabled` (`is_enabled`),
+  KEY `idx_aff_invite_creator` (`created_by_admin_id`),
+  KEY `idx_aff_invite_parent` (`parent_affiliate_id`),
+  CONSTRAINT `fk_aff_invite_creator`
+    FOREIGN KEY (`created_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_aff_invite_parent`
+    FOREIGN KEY (`parent_affiliate_id`) REFERENCES `affiliates`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `affiliate_link_clicks` (
@@ -251,11 +285,37 @@ CREATE TABLE IF NOT EXISTS `client_subscriptions` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================================
+-- REFERRERS / PARTNERS (Realtor-Broker, one-off, affiliate-linked)
+-- Applied by: 20260804_170000_referral_owners_admin_docs.sql
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `referrers` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `category` ENUM('realtor_broker','one_off','affiliate_partner') NOT NULL,
+  `first_name` VARCHAR(100) NOT NULL,
+  `last_name` VARCHAR(100) NOT NULL,
+  `email` VARCHAR(255) DEFAULT NULL,
+  `phone` VARCHAR(20) DEFAULT NULL,
+  `company` VARCHAR(255) DEFAULT NULL,
+  `affiliate_id` INT UNSIGNED DEFAULT NULL COMMENT 'Optional link when category=affiliate_partner',
+  `preferred_language` ENUM('en','es') NOT NULL DEFAULT 'en',
+  `notes` TEXT DEFAULT NULL,
+  `status` ENUM('active','inactive') NOT NULL DEFAULT 'active',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_referrers_category` (`category`),
+  KEY `idx_referrers_email` (`email`),
+  KEY `idx_referrers_affiliate` (`affiliate_id`),
+  KEY `idx_referrers_status` (`status`),
+  CONSTRAINT `fk_referrers_affiliate` FOREIGN KEY (`affiliate_id`) REFERENCES `affiliates`(`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================================
 -- CLIENTS (replaces placeholder `users`)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS `clients` (
   `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
-  `email` VARCHAR(255) NOT NULL UNIQUE,
+  `email` VARCHAR(255) DEFAULT NULL,
   `first_name` VARCHAR(100) NOT NULL,
   `last_name` VARCHAR(100) NOT NULL,
   `phone` VARCHAR(20) DEFAULT NULL,
@@ -267,14 +327,18 @@ CREATE TABLE IF NOT EXISTS `clients` (
   `ssn_last4` CHAR(4) DEFAULT NULL,
   `date_of_birth` DATE DEFAULT NULL,
   `preferred_language` ENUM('en','es') NOT NULL DEFAULT 'en',
+  `assigned_admin_id` INT UNSIGNED DEFAULT NULL COMMENT 'Language-owner admin resolved from admins.preferred_language',
   -- Pipeline / process
   `package_id` INT UNSIGNED DEFAULT NULL,
   `pipeline_stage` ENUM(
     'prospect','new_client','docs_ready','round_1','round_2','round_3','round_4','round_5','completed','cancelled'
   ) NOT NULL DEFAULT 'new_client',
   `pipeline_stage_changed_at` DATETIME DEFAULT NULL,
-  -- Affiliate referral
+  -- Affiliate / referral routing
   `affiliate_id` INT UNSIGNED DEFAULT NULL,
+  `referral_category` ENUM('realtor_broker','one_off','affiliate_partner') DEFAULT NULL
+    COMMENT 'How this lead was referred; drives round-update routing',
+  `referrer_id` INT UNSIGNED DEFAULT NULL COMMENT 'Partner who referred this client',
   -- Smart Credit
   `smart_credit_email` VARCHAR(255) DEFAULT NULL,
   `smart_credit_connected_at` DATETIME DEFAULT NULL,
@@ -297,13 +361,19 @@ CREATE TABLE IF NOT EXISTS `clients` (
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_clients_email` (`email`),
   KEY `idx_clients_status` (`status`),
   KEY `idx_clients_pipeline_stage` (`pipeline_stage`),
   KEY `idx_clients_package` (`package_id`),
   KEY `idx_clients_affiliate` (`affiliate_id`),
+  KEY `idx_clients_assigned_admin` (`assigned_admin_id`),
+  KEY `idx_clients_referral_category` (`referral_category`),
+  KEY `idx_clients_referrer` (`referrer_id`),
   KEY `idx_clients_crc_id` (`crc_client_id`),
   CONSTRAINT `fk_clients_package` FOREIGN KEY (`package_id`) REFERENCES `packages`(`id`) ON DELETE SET NULL,
-  CONSTRAINT `fk_clients_affiliate` FOREIGN KEY (`affiliate_id`) REFERENCES `affiliates`(`id`) ON DELETE SET NULL
+  CONSTRAINT `fk_clients_affiliate` FOREIGN KEY (`affiliate_id`) REFERENCES `affiliates`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_clients_assigned_admin` FOREIGN KEY (`assigned_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_clients_referrer` FOREIGN KEY (`referrer_id`) REFERENCES `referrers`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `client_otp_codes` (
@@ -396,6 +466,28 @@ CREATE TABLE IF NOT EXISTS `credit_repair_cases` (
   CONSTRAINT `fk_cases_package` FOREIGN KEY (`package_id`) REFERENCES `packages`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Expected round-completion dates for calendar invites (iCal)
+CREATE TABLE IF NOT EXISTS `case_round_schedules` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `case_id` INT UNSIGNED NOT NULL,
+  `round_1_date` DATE NOT NULL,
+  `round_2_date` DATE NOT NULL,
+  `round_3_date` DATE NOT NULL,
+  `round_4_date` DATE NOT NULL,
+  `round_5_date` DATE NOT NULL,
+  `interval_days` INT UNSIGNED NOT NULL DEFAULT 35 COMMENT 'Days between rounds used when prefilling',
+  `calendar_uid_ns` VARCHAR(64) NOT NULL COMMENT 'Stable ICS UID namespace for update invites',
+  `last_sent_at` DATETIME DEFAULT NULL,
+  `last_sent_recipients` JSON DEFAULT NULL COMMENT 'Array of email addresses last notified',
+  `calendar_send_count` INT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Number of successful calendar email sends (drives ICS SEQUENCE)',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_case_round_schedules_case` (`case_id`),
+  CONSTRAINT `fk_case_round_schedules_case`
+    FOREIGN KEY (`case_id`) REFERENCES `credit_repair_cases`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- ============================================================================
 -- DOCUMENTS (ID, SSN card, proof of address)
 -- ============================================================================
@@ -416,6 +508,7 @@ CREATE TABLE IF NOT EXISTS `client_documents` (
   `review_status` ENUM('pending','approved','rejected') NOT NULL DEFAULT 'pending',
   `rejection_reason` TEXT DEFAULT NULL,
   `reviewed_by_admin_id` INT UNSIGNED DEFAULT NULL,
+  `uploaded_by_admin_id` INT UNSIGNED DEFAULT NULL COMMENT 'Set when staff uploads docs manually on a case',
   `reviewed_at` DATETIME DEFAULT NULL,
   `uploaded_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -424,8 +517,10 @@ CREATE TABLE IF NOT EXISTS `client_documents` (
   KEY `idx_client_docs_case` (`case_id`),
   KEY `idx_client_docs_status` (`review_status`),
   KEY `idx_client_docs_type` (`doc_type`),
+  KEY `idx_client_docs_uploaded_by` (`uploaded_by_admin_id`),
   CONSTRAINT `fk_client_docs_client` FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_client_docs_admin` FOREIGN KEY (`reviewed_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_client_docs_uploaded_by` FOREIGN KEY (`uploaded_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL,
   CONSTRAINT `fk_docs_case` FOREIGN KEY (`case_id`) REFERENCES `credit_repair_cases`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -538,6 +633,8 @@ CREATE TABLE IF NOT EXISTS `report_wizard_sessions` (
   `round_number` TINYINT UNSIGNED NOT NULL,
   `status` ENUM('draft','extracting','review','generating','published','failed') NOT NULL DEFAULT 'draft',
   `before_pdf_id` INT UNSIGNED DEFAULT NULL,
+  `before_source` ENUM('upload','prior_round','enrollment') NOT NULL DEFAULT 'upload' COMMENT 'How before PDF was obtained for this session',
+  `before_reused_from_session_id` INT UNSIGNED DEFAULT NULL COMMENT 'Published session whose after PDF was reused as before',
   `after_pdf_id` INT UNSIGNED DEFAULT NULL,
   `options_json` JSON DEFAULT NULL,
   `extracted_json` JSON DEFAULT NULL,
@@ -555,6 +652,7 @@ CREATE TABLE IF NOT EXISTS `report_wizard_sessions` (
   KEY `idx_rws_case` (`case_id`),
   KEY `idx_rws_client` (`client_id`),
   KEY `idx_rws_status` (`status`),
+  KEY `idx_rws_before_reused` (`before_reused_from_session_id`),
   CONSTRAINT `fk_rws_case` FOREIGN KEY (`case_id`) REFERENCES `credit_repair_cases`(`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_rws_client` FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_rws_admin` FOREIGN KEY (`created_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE RESTRICT
@@ -800,7 +898,7 @@ INSERT INTO `communication_templates` (`slug`,`name`,`channel`,`subject`,`body`,
   ('flow_round_3_complete','[Flow] Round 3 Progress Report','email','Your Round 3 progress report is ready, {{first_name}}','',JSON_ARRAY('first_name','portal_url','items_removed','score_change')),
   ('flow_round_4_complete','[Flow] Round 4 Progress Report','email','Your Round 4 progress report is ready, {{first_name}}','',JSON_ARRAY('first_name','portal_url','items_removed','score_change')),
   ('flow_round_5_complete','[Flow] Round 5 Final Report','email','Your final progress report is ready, {{first_name}}!','',JSON_ARRAY('first_name','portal_url','items_removed','score_change')),
-  ('flow_completed','[Flow] Credit Repair Complete','email','Your credit repair journey is complete, {{first_name}}!','',JSON_ARRAY('first_name','portal_url')),
+  ('flow_completed','[Flow] Graduating Client — Credit File Clean','email','Congratulations — Your Credit File Is Clean!','',JSON_ARRAY('first_name','portal_url')),
   -- Flow templates (ES) — seeded by 20260520_000000_reminder_flow_spanish_templates.sql
   ('flow_new_client_day1_es','[Flow] Nuevo Cliente — Día 1 Bienvenida (ES)','email','¡Bienvenido a Optimum Credit, {{first_name}}! Sube tus documentos para comenzar.','',JSON_ARRAY('first_name','portal_url')),
   ('flow_new_client_day2_es','[Flow] Nuevo Cliente — Día 2 Recordatorio (ES)','email','Recordatorio: Estamos esperando tus documentos, {{first_name}}','',JSON_ARRAY('first_name','portal_url')),
@@ -810,8 +908,8 @@ INSERT INTO `communication_templates` (`slug`,`name`,`channel`,`subject`,`body`,
   ('flow_round_3_complete_es','[Flow] Informe de Progreso Ronda 3 (ES)','email','Tu informe de progreso de la Ronda 3 está listo, {{first_name}}','',JSON_ARRAY('first_name','portal_url','items_removed','score_change')),
   ('flow_round_4_complete_es','[Flow] Informe de Progreso Ronda 4 (ES)','email','Tu informe de progreso de la Ronda 4 está listo, {{first_name}}','',JSON_ARRAY('first_name','portal_url','items_removed','score_change')),
   ('flow_round_5_complete_es','[Flow] Informe Final Ronda 5 (ES)','email','¡Tu informe final de progreso está listo, {{first_name}}!','',JSON_ARRAY('first_name','portal_url','items_removed','score_change')),
-  ('flow_completed_es','[Flow] Reparación de Crédito Completada (ES)','email','¡Tu proceso de reparación de crédito está completo, {{first_name}}!','',JSON_ARRAY('first_name','portal_url'))
-ON DUPLICATE KEY UPDATE `name`=VALUES(`name`);
+  ('flow_completed_es','[Flow] Cliente graduado — Archivo limpio (ES)','email','¡Felicidades — Su archivo de crédito está limpio!','',JSON_ARRAY('first_name','portal_url'))
+ON DUPLICATE KEY UPDATE `name`=VALUES(`name`), `subject`=VALUES(`subject`);
 
 -- ============================================================================
 -- NOTIFICATIONS QUEUE (scheduled SMS/Email automations)
@@ -838,6 +936,26 @@ CREATE TABLE IF NOT EXISTS `notification_queue` (
   KEY `idx_notif_client` (`client_id`),
   CONSTRAINT `fk_notif_client` FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_notif_admin` FOREIGN KEY (`admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================================
+-- ADMIN IN-APP NOTIFICATIONS (profile bell)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `admin_notifications` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `admin_id` INT UNSIGNED NOT NULL,
+  `event_key` VARCHAR(64) NOT NULL,
+  `title` VARCHAR(255) NOT NULL,
+  `body` TEXT DEFAULT NULL,
+  `link_url` VARCHAR(500) DEFAULT NULL,
+  `payload_json` JSON DEFAULT NULL,
+  `read_at` DATETIME DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_admin_notif_admin_created` (`admin_id`, `created_at`),
+  KEY `idx_admin_notif_admin_unread` (`admin_id`, `read_at`),
+  CONSTRAINT `fk_admin_notif_admin`
+    FOREIGN KEY (`admin_id`) REFERENCES `admins`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================================
@@ -1304,6 +1422,8 @@ INSERT INTO `labels` (`slug`, `name_en`, `name_es`, `layer`, `color`, `is_system
   ('get_started_wizard', 'Get started lead', 'Lead inicio', 'source', 'secondary', 1, 20),
   ('agent_submission', 'Agent submission', 'Envío de agente', 'source', 'accent', 1, 30),
   ('referral', 'Referral', 'Referido', 'source', 'muted', 1, 40),
+  ('realtor_broker', 'Realtor / Mortgage Broker', 'Agente inmobiliario / Broker hipotecario', 'source', 'accent', 1, 41),
+  ('one_off_referral', 'One-off referral', 'Referido único', 'source', 'muted', 1, 42),
   ('affiliate_referral', 'Affiliate referral', 'Referido de afiliado', 'source', 'primary', 1, 50),
   ('housing', 'Housing / Mortgage', 'Vivienda / Hipoteca', 'analysis', 'primary', 1, 100),
   ('auto', 'Auto loan', 'Préstamo de auto', 'analysis', 'accent', 1, 110),
@@ -1335,6 +1455,7 @@ CREATE TABLE IF NOT EXISTS `admin_work_tasks` (
   `hubspot_task_id` VARCHAR(64) DEFAULT NULL,
   `hubspot_owner_id` VARCHAR(64) DEFAULT NULL,
   `assignee_admin_id` INT UNSIGNED DEFAULT NULL,
+  `case_id` INT UNSIGNED DEFAULT NULL COMMENT 'Optional link to credit_repair_cases.id',
   `created_by_admin_id` INT UNSIGNED DEFAULT NULL,
   `sort_order` INT NOT NULL DEFAULT 0,
   `last_synced_at` DATETIME DEFAULT NULL,
@@ -1347,10 +1468,13 @@ CREATE TABLE IF NOT EXISTS `admin_work_tasks` (
   UNIQUE KEY `uq_work_tasks_hubspot` (`hubspot_task_id`),
   KEY `idx_work_tasks_status` (`status`),
   KEY `idx_work_tasks_assignee` (`assignee_admin_id`),
+  KEY `idx_work_tasks_case` (`case_id`),
   KEY `idx_work_tasks_due` (`due_at`),
   KEY `idx_work_tasks_source` (`source`),
   CONSTRAINT `fk_work_tasks_assignee`
     FOREIGN KEY (`assignee_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_work_tasks_case`
+    FOREIGN KEY (`case_id`) REFERENCES `credit_repair_cases`(`id`) ON DELETE SET NULL,
   CONSTRAINT `fk_work_tasks_creator`
     FOREIGN KEY (`created_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

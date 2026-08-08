@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { redeemOnboardingToken } from "@/store/slices/clientAuthSlice";
@@ -8,9 +8,11 @@ import { Loader2, AlertCircle, CheckCircle2 } from "lucide-react";
 export default function Onboarding() {
   const { t } = useTranslation();
   const { token } = useParams<{ token: string }>();
+  const [searchParams] = useSearchParams();
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
   const { loading, error, user } = useAppSelector((s) => s.clientAuth);
+  const taskSlug = (searchParams.get("task") || "").trim();
 
   useEffect(() => {
     if (!token) {
@@ -23,13 +25,13 @@ export default function Onboarding() {
   useEffect(() => {
     if (user && !loading && !error) {
       // Small delay so the success state is visible
-      const t = setTimeout(
-        () => navigate("/portal/documents", { replace: true }),
-        1200,
-      );
-      return () => clearTimeout(t);
+      const dest = taskSlug
+        ? `/portal/documents?task=${encodeURIComponent(taskSlug)}`
+        : "/portal/documents";
+      const timer = setTimeout(() => navigate(dest, { replace: true }), 1200);
+      return () => clearTimeout(timer);
     }
-  }, [user, loading, error, navigate]);
+  }, [user, loading, error, navigate, taskSlug]);
 
   return (
     <div className="min-h-screen bg-background flex items-center justify-center p-4">

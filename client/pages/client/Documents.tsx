@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   AlertCircle,
   CheckCircle2,
@@ -650,6 +651,8 @@ function SignTaskCard({
 export default function Documents() {
   const { t } = useTranslation();
   const dispatch = useAppDispatch();
+  const [searchParams] = useSearchParams();
+  const focusTask = (searchParams.get("task") || "").trim();
   const { tasks, tasksLoading } = useAppSelector((s) => s.portal);
   const { dashboard } = useAppSelector((s) => s.portal);
   const lang = (dashboard?.preferred_language ?? "en") as "en" | "es";
@@ -657,6 +660,13 @@ export default function Documents() {
   useEffect(() => {
     dispatch(fetchPortalTasks());
   }, [dispatch]);
+
+  useEffect(() => {
+    if (!focusTask || tasks.length === 0) return;
+    const el = document.getElementById(`portal-task-${focusTask}`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [focusTask, tasks]);
 
   const requiredTasks = tasks.filter((t) => Number(t.is_required) === 1);
   const approvedCount = requiredTasks.filter(
@@ -722,11 +732,31 @@ export default function Documents() {
       {/* Task cards */}
       <div className="grid sm:grid-cols-2 gap-4">
         {tasks.map((task) => {
+          const highlight = focusTask && task.slug === focusTask;
+          const wrapClass = highlight
+            ? "rounded-2xl ring-2 ring-primary ring-offset-2 ring-offset-background transition-shadow"
+            : undefined;
           if (task.task_type === "upload") {
-            return <UploadTaskCard key={task.id} task={task} lang={lang} />;
+            return (
+              <div
+                key={task.id}
+                id={`portal-task-${task.slug}`}
+                className={wrapClass}
+              >
+                <UploadTaskCard task={task} lang={lang} />
+              </div>
+            );
           }
           if (task.task_type === "sign_document") {
-            return <SignTaskCard key={task.id} task={task} lang={lang} />;
+            return (
+              <div
+                key={task.id}
+                id={`portal-task-${task.slug}`}
+                className={wrapClass}
+              >
+                <SignTaskCard task={task} lang={lang} />
+              </div>
+            );
           }
           return null;
         })}

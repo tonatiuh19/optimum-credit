@@ -26,8 +26,10 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
   clearReportWizard,
+  clearWizardSession,
   createReportWizardSession,
   downloadReportWizardSourcePdf,
+  fetchReportWizardBeforeContext,
   fetchReportWizardDrafts,
   fetchReportWizardSession,
   finalizeReportWizard,
@@ -39,6 +41,9 @@ import {
 } from "@/store/slices/reportWizardSlice";
 import type { OfGReportData } from "@shared/api";
 import FieldHint from "@/components/admin/FieldHint";
+
+type BureauCode = "TU" | "EX" | "EQ";
+const ALL_BUREAUS: BureauCode[] = ["TU", "EX", "EQ"];
 
 interface Props {
   open: boolean;
@@ -101,9 +106,11 @@ export default function OfGReportWizard({
   const {
     session,
     drafts,
+    beforeContext,
     loading,
     loadingDrafts,
     loadingSession,
+    loadingBeforeContext,
     downloadingSource,
     publishing,
     previewing,
@@ -116,6 +123,8 @@ export default function OfGReportWizard({
   const [roundNumber, setRoundNumber] = useState(suggestedRound);
   const [beforePdf, setBeforePdf] = useState<File | null>(null);
   const [afterPdf, setAfterPdf] = useState<File | null>(null);
+  const [reusePriorBefore, setReusePriorBefore] = useState(true);
+  const [overrideBeforeUpload, setOverrideBeforeUpload] = useState(false);
   const [highlightWin, setHighlightWin] = useState("");
   const [tradelineRec, setTradelineRec] = useState(false);
   const [fundingNote, setFundingNote] = useState(false);
@@ -159,14 +168,58 @@ export default function OfGReportWizard({
     setRoundNumber(suggestedRound);
     setStep(1);
     setComplianceOk(false);
+    setScoreAnomalyOk(false);
     setBeforePdf(null);
     setAfterPdf(null);
+    setReusePriorBefore(true);
+    setOverrideBeforeUpload(false);
+    setHighlightWin("");
+    setTradelineRec(false);
+    setFundingNote(false);
+    setSpanish(false);
     dispatch(fetchReportWizardDrafts(caseId));
   }, [open, suggestedRound, caseId, dispatch]);
 
   useEffect(() => {
-    if (session?.status === "review" && step === 1) setStep(3);
-  }, [session?.status, step]);
+    if (!open) return;
+    dispatch(fetchReportWizardBeforeContext({ caseId, roundNumber }));
+    setReusePriorBefore(true);
+    setOverrideBeforeUpload(false);
+    setBeforePdf(null);
+  }, [open, caseId, roundNumber, dispatch]);
+
+  const canReusePrior =
+    !loadingBeforeContext &&
+    !!beforeContext?.can_reuse &&
+    !!beforeContext.prior_session_id &&
+    reusePriorBefore &&
+    !overrideBeforeUpload;
+
+  const beforeReady = canReusePrior || !!beforePdf;
+  const canContinueUpload =
+    !loadingBeforeContext && beforeReady && !!afterPdf;
+
+  // After a fresh extract lands in review, advance from upload/extract steps.
+  // Do not bounce Start-over (step 1 with cleared session).
+  useEffect(() => {
+    if (!session) return;
+    if (session.status === "review" && (step === 1 || step === 2)) {
+      setStep(3);
+    }
+  }, [session?.id, session?.status, step]);
+
+  const handleStartOver = () => {
+    dispatch(clearWizardSession());
+    setStep(1);
+    setComplianceOk(false);
+    setScoreAnomalyOk(false);
+    setBeforePdf(null);
+    setAfterPdf(null);
+    setReusePriorBefore(true);
+    setOverrideBeforeUpload(false);
+    dispatch(fetchReportWizardDrafts(caseId));
+    dispatch(fetchReportWizardBeforeContext({ caseId, roundNumber }));
+  };
 
   const applySessionOptions = (s: typeof session) => {
     if (!s?.options_json) return;
@@ -188,13 +241,18 @@ export default function OfGReportWizard({
   };
 
   const handleExtract = async () => {
-    if (!beforePdf || !afterPdf) return;
+    if (loadingBeforeContext) return;
+    if (!afterPdf) return;
+    if (!canReusePrior && !beforePdf) return;
     const result = await dispatch(
       createReportWizardSession({
         caseId,
         roundNumber,
-        beforePdf,
+        beforePdf: canReusePrior ? null : beforePdf,
         afterPdf,
+        reuseBeforeSessionId: canReusePrior
+          ? beforeContext?.prior_session_id
+          : null,
         options: {
           highlight_win: highlightWin.trim() || undefined,
           tradeline_rec: tradelineRec,
@@ -304,15 +362,22 @@ export default function OfGReportWizard({
   const updateWinsText = (text: string) => {
     if (!reviewData) return;
     const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+    const byLabel = new Map(
+      reviewData.wins.map((w) => [w.itemRemoved.toLowerCase(), w]),
+    );
     dispatch(
       setReviewedData({
         ...reviewData,
-        wins: lines.map((itemRemoved) => ({
-          itemRemoved,
-          bureaus: ["TU", "EX", "EQ"] as const,
-          impact: "",
-          status: "Removed",
-        })),
+        wins: lines.map((itemRemoved) => {
+          const prev = byLabel.get(itemRemoved.toLowerCase());
+          return {
+            itemRemoved,
+            bureaus: prev?.bureaus?.length ? prev.bureaus : [],
+            impact: prev?.impact ?? "",
+            status: prev?.status ?? "Removed",
+            highlighted: prev?.highlighted,
+          };
+        }),
       }),
     );
   };
@@ -320,15 +385,61 @@ export default function OfGReportWizard({
   const updateTargetsText = (text: string) => {
     if (!reviewData) return;
     const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+    const byLabel = new Map(
+      reviewData.targets.map((t) => [t.item.toLowerCase(), t]),
+    );
     dispatch(
       setReviewedData({
         ...reviewData,
-        targets: lines.map((item) => ({
-          item,
-          bureaus: ["TU", "EX", "EQ"] as const,
-          detail: "",
-          priority: "medium" as const,
-        })),
+        targets: lines.map((item) => {
+          const prev = byLabel.get(item.toLowerCase());
+          return {
+            item,
+            bureaus: prev?.bureaus?.length ? prev.bureaus : [],
+            detail: prev?.detail ?? "",
+            priority: prev?.priority ?? ("medium" as const),
+          };
+        }),
+      }),
+    );
+  };
+
+  const toggleWinBureau = (index: number, bureau: BureauCode) => {
+    if (!reviewData) return;
+    const wins = reviewData.wins.map((w, i) => {
+      if (i !== index) return w;
+      const has = w.bureaus?.includes(bureau);
+      const next = has
+        ? (w.bureaus || []).filter((b) => b !== bureau)
+        : [...(w.bureaus || []), bureau];
+      return { ...w, bureaus: next as BureauCode[] };
+    });
+    dispatch(setReviewedData({ ...reviewData, wins }));
+  };
+
+  const toggleTargetBureau = (index: number, bureau: BureauCode) => {
+    if (!reviewData) return;
+    const targets = reviewData.targets.map((tgt, i) => {
+      if (i !== index) return tgt;
+      const has = tgt.bureaus?.includes(bureau);
+      const next = has
+        ? (tgt.bureaus || []).filter((b) => b !== bureau)
+        : [...(tgt.bureaus || []), bureau];
+      return { ...tgt, bureaus: next as BureauCode[] };
+    });
+    dispatch(setReviewedData({ ...reviewData, targets }));
+  };
+
+  const updateReportDate = (field: "before" | "after", value: string) => {
+    if (!reviewData) return;
+    dispatch(
+      setReviewedData({
+        ...reviewData,
+        reportDate: {
+          before: reviewData.reportDate?.before ?? "",
+          after: reviewData.reportDate?.after ?? "",
+          [field]: value,
+        },
       }),
     );
   };
@@ -426,14 +537,93 @@ export default function OfGReportWizard({
                 </FieldHint>
               )}
             </div>
+
+            {loadingBeforeContext ? (
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                {t("reportWizard.loadingBeforeContext")}
+              </div>
+            ) : beforeContext?.source === "prior_round" &&
+              beforeContext.can_reuse ? (
+              <div className="rounded-xl border border-accent/25 bg-accent/[0.06] p-3 space-y-3">
+                <div className="flex items-start gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-accent shrink-0 mt-0.5" />
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-foreground">
+                      {t("reportWizard.reusePriorTitle", {
+                        round: beforeContext.prior_round,
+                      })}
+                    </p>
+                    <p className="text-[11px] text-muted-foreground mt-0.5 leading-snug">
+                      {t("reportWizard.reusePriorBody", {
+                        file: beforeContext.file_name || t("reportWizard.afterPdf"),
+                        date: beforeContext.report_date_after || "—",
+                        score:
+                          beforeContext.score_after ??
+                          beforeContext.middle_score_after ??
+                          "—",
+                      })}
+                    </p>
+                  </div>
+                </div>
+                <label className="flex items-start gap-2.5 text-sm cursor-pointer">
+                  <Checkbox
+                    className="mt-0.5"
+                    checked={reusePriorBefore && !overrideBeforeUpload}
+                    onCheckedChange={(v) => {
+                      const on = !!v;
+                      setReusePriorBefore(on);
+                      setOverrideBeforeUpload(!on);
+                      if (on) setBeforePdf(null);
+                    }}
+                  />
+                  <span className="text-foreground">
+                    {t("reportWizard.reusePriorCheckbox")}
+                  </span>
+                </label>
+                {(overrideBeforeUpload || !reusePriorBefore) && (
+                  <PdfDrop
+                    label={t("reportWizard.beforeReportOverride")}
+                    hint={t("reportWizard.beforeReportOverrideHint")}
+                    chooseLabel={t("reportWizard.choosePdf")}
+                    file={beforePdf}
+                    onFile={setBeforePdf}
+                  />
+                )}
+              </div>
+            ) : beforeContext?.source === "none" ? (
+              <FieldHint tone="warning">
+                {t("reportWizard.noPriorRound", {
+                  round: beforeContext.prior_round ?? roundNumber - 1,
+                })}
+              </FieldHint>
+            ) : (
+              <FieldHint>{t("reportWizard.round1EnrollmentHint")}</FieldHint>
+            )}
+
             <div className="grid sm:grid-cols-2 gap-4">
-              <PdfDrop
-                label={t("reportWizard.beforeReport")}
-                hint={t("reportWizard.beforeReportHint")}
-                chooseLabel={t("reportWizard.choosePdf")}
-                file={beforePdf}
-                onFile={setBeforePdf}
-              />
+              {!(
+                beforeContext?.can_reuse &&
+                reusePriorBefore &&
+                !overrideBeforeUpload
+              ) &&
+                beforeContext?.source !== "prior_round" && (
+                  <PdfDrop
+                    label={
+                      roundNumber === 1
+                        ? t("reportWizard.beforeReportEnrollment")
+                        : t("reportWizard.beforeReport")
+                    }
+                    hint={
+                      roundNumber === 1
+                        ? t("reportWizard.beforeReportEnrollmentHint")
+                        : t("reportWizard.beforeReportHint")
+                    }
+                    chooseLabel={t("reportWizard.choosePdf")}
+                    file={beforePdf}
+                    onFile={setBeforePdf}
+                  />
+                )}
               <PdfDrop
                 label={t("reportWizard.afterReport")}
                 hint={t("reportWizard.afterReportHint")}
@@ -543,7 +733,7 @@ export default function OfGReportWizard({
             <div className="flex justify-end">
               <Button
                 onClick={() => setStep(2)}
-                disabled={!beforePdf || !afterPdf}
+                disabled={!canContinueUpload}
               >
                 {t("reportWizard.continue")}
                 <ChevronRight className="w-4 h-4 ml-1" />
@@ -565,10 +755,15 @@ export default function OfGReportWizard({
               <>
                 <FileText className="w-10 h-10 mx-auto text-primary" />
                 <p className="text-sm">
-                  {t("reportWizard.readyExtract", {
-                    before: beforePdf?.name,
-                    after: afterPdf?.name,
-                  })}
+                  {canReusePrior
+                    ? t("reportWizard.readyExtractReuse", {
+                        prior: beforeContext?.prior_round,
+                        after: afterPdf?.name,
+                      })
+                    : t("reportWizard.readyExtract", {
+                        before: beforePdf?.name,
+                        after: afterPdf?.name,
+                      })}
                 </p>
                 <div className="flex justify-center gap-2">
                   <Button variant="outline" onClick={() => setStep(1)}>
@@ -581,6 +776,33 @@ export default function OfGReportWizard({
                 </div>
               </>
             )}
+          </div>
+        )}
+
+        {step === 3 && !reviewData && (
+          <div className="space-y-4 text-center py-8">
+            <p className="text-sm text-muted-foreground">
+              {session?.error_message || t("reportWizard.reviewEmpty")}
+            </p>
+            <div className="flex justify-center gap-2">
+              {session?.id ? (
+                <Button
+                  variant="outline"
+                  onClick={handleReExtract}
+                  disabled={reExtracting}
+                >
+                  {reExtracting ? (
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  ) : (
+                    <RefreshCw className="w-4 h-4 mr-2" />
+                  )}
+                  {t("reportWizard.reExtract")}
+                </Button>
+              ) : null}
+              <Button variant="outline" onClick={handleStartOver}>
+                {t("reportWizard.startOver")}
+              </Button>
+            </div>
           </div>
         )}
 
@@ -633,6 +855,26 @@ export default function OfGReportWizard({
             <p className="text-sm text-muted-foreground">
               {t("reportWizard.reviewIntro")}
             </p>
+            <div className="grid sm:grid-cols-2 gap-3">
+              <div>
+                <Label className="text-xs">{t("reportWizard.reportDateBefore")}</Label>
+                <Input
+                  type="date"
+                  className="mt-1 h-9 text-xs"
+                  value={reviewData.reportDate?.before ?? ""}
+                  onChange={(e) => updateReportDate("before", e.target.value)}
+                />
+              </div>
+              <div>
+                <Label className="text-xs">{t("reportWizard.reportDateAfter")}</Label>
+                <Input
+                  type="date"
+                  className="mt-1 h-9 text-xs"
+                  value={reviewData.reportDate?.after ?? ""}
+                  onChange={(e) => updateReportDate("after", e.target.value)}
+                />
+              </div>
+            </div>
             <div className="grid grid-cols-3 gap-2 text-xs">
               {bureauLabels.map(([labelKey, key]) => {
                 const badge = confidenceBadge(confidence?.[key]);
@@ -689,6 +931,38 @@ export default function OfGReportWizard({
                   value={reviewData.wins.map((w) => w.itemRemoved).join("\n")}
                   onChange={(e) => updateWinsText(e.target.value)}
                 />
+                {reviewData.wins.length > 0 && (
+                  <ul className="mt-2 space-y-1.5">
+                    {reviewData.wins.map((w, i) => (
+                      <li
+                        key={`${w.itemRemoved}-${i}`}
+                        className="flex flex-wrap items-center gap-1.5 text-[11px]"
+                      >
+                        <span className="text-foreground truncate max-w-[70%]">
+                          {w.itemRemoved}
+                        </span>
+                        <span className="inline-flex gap-0.5">
+                          {ALL_BUREAUS.map((b) => (
+                            <button
+                              key={b}
+                              type="button"
+                              title={t("reportWizard.toggleBureau", { bureau: b })}
+                              onClick={() => toggleWinBureau(i, b)}
+                              className={[
+                                "px-1 py-0.5 rounded font-semibold transition-colors",
+                                w.bureaus?.includes(b)
+                                  ? "bg-accent/15 text-accent"
+                                  : "bg-muted text-muted-foreground/50",
+                              ].join(" ")}
+                            >
+                              {b}
+                            </button>
+                          ))}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
                 <FieldHint>{t("adminHelpers.winsTargetsHint")}</FieldHint>
               </div>
               <div>
@@ -699,6 +973,38 @@ export default function OfGReportWizard({
                   value={reviewData.targets.map((item) => item.item).join("\n")}
                   onChange={(e) => updateTargetsText(e.target.value)}
                 />
+                {reviewData.targets.length > 0 && (
+                  <ul className="mt-2 space-y-1.5">
+                    {reviewData.targets.map((tgt, i) => (
+                      <li
+                        key={`${tgt.item}-${i}`}
+                        className="flex flex-wrap items-center gap-1.5 text-[11px]"
+                      >
+                        <span className="text-muted-foreground truncate max-w-[70%]">
+                          {tgt.item}
+                        </span>
+                        <span className="inline-flex gap-0.5">
+                          {ALL_BUREAUS.map((b) => (
+                            <button
+                              key={b}
+                              type="button"
+                              title={t("reportWizard.toggleBureau", { bureau: b })}
+                              onClick={() => toggleTargetBureau(i, b)}
+                              className={[
+                                "px-1 py-0.5 rounded font-semibold transition-colors",
+                                tgt.bureaus?.includes(b)
+                                  ? "bg-primary/15 text-primary"
+                                  : "bg-muted text-muted-foreground/50",
+                              ].join(" ")}
+                            >
+                              {b}
+                            </button>
+                          ))}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
                 <FieldHint>{t("adminHelpers.winsTargetsHint")}</FieldHint>
               </div>
             </div>
@@ -726,7 +1032,7 @@ export default function OfGReportWizard({
               <span>{t("reportWizard.complianceAttestation")}</span>
             </label>
             <div className="flex justify-between">
-              <Button variant="outline" onClick={() => setStep(1)}>
+              <Button variant="outline" onClick={handleStartOver}>
                 {t("reportWizard.startOver")}
               </Button>
               <Button
@@ -820,6 +1126,7 @@ function PdfDrop({
   file: File | null;
   onFile: (f: File | null) => void;
 }) {
+  const { t } = useTranslation();
   return (
     <div
       className="border-2 border-dashed border-border rounded-xl p-4 text-center hover:border-primary/40 transition-colors"
@@ -838,7 +1145,27 @@ function PdfDrop({
         </p>
       )}
       {file ? (
-        <p className="text-[10px] text-accent truncate">{file.name}</p>
+        <div className="space-y-1.5">
+          <p className="text-[10px] text-accent truncate">{file.name}</p>
+          <div className="flex items-center justify-center gap-2">
+            <label className="text-[10px] text-primary cursor-pointer underline">
+              {t("reportWizard.replacePdf")}
+              <input
+                type="file"
+                accept="application/pdf"
+                className="hidden"
+                onChange={(e) => onFile(e.target.files?.[0] ?? null)}
+              />
+            </label>
+            <button
+              type="button"
+              className="text-[10px] text-muted-foreground underline"
+              onClick={() => onFile(null)}
+            >
+              {t("reportWizard.clearPdf")}
+            </button>
+          </div>
+        </div>
       ) : (
         <label className="text-[10px] text-primary cursor-pointer underline">
           {chooseLabel}

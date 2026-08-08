@@ -7,6 +7,7 @@ import type {
   HubspotPermissionRow,
   UpdateWorkTaskPayload,
   WorkTaskAssignee,
+  WorkTaskCaseOption,
   WorkTasksSyncResult,
 } from "@shared/api";
 
@@ -46,6 +47,20 @@ export const fetchWorkBadge = createAsyncThunk(
       mine_overdue: number;
     }>("/api/admin/work-tasks/badge", { headers: authHeaders(getState) });
     return data;
+  },
+);
+
+export const searchWorkTaskCases = createAsyncThunk(
+  "workTasks/caseSearch",
+  async (query: string, { getState }) => {
+    const { data } = await axios.get<{ cases: WorkTaskCaseOption[] }>(
+      "/api/admin/work-tasks/case-search",
+      {
+        params: { q: query },
+        headers: authHeaders(getState),
+      },
+    );
+    return data.cases;
   },
 );
 
@@ -195,6 +210,8 @@ interface WorkTasksState {
   hubspot: HubspotConnectionStatus | null;
   permissions: HubspotPermissionRow[];
   lastSync: WorkTasksSyncResult | null;
+  caseSearchResults: WorkTaskCaseOption[];
+  caseSearchLoading: boolean;
 }
 
 const initialState: WorkTasksState = {
@@ -208,6 +225,8 @@ const initialState: WorkTasksState = {
   hubspot: null,
   permissions: [],
   lastSync: null,
+  caseSearchResults: [],
+  caseSearchLoading: false,
 };
 
 const workTasksSlice = createSlice({
@@ -237,6 +256,17 @@ const workTasksSlice = createSlice({
       })
       .addCase(fetchWorkBadge.fulfilled, (state, action) => {
         state.badge = action.payload;
+      })
+      .addCase(searchWorkTaskCases.pending, (state) => {
+        state.caseSearchLoading = true;
+      })
+      .addCase(searchWorkTaskCases.fulfilled, (state, action) => {
+        state.caseSearchLoading = false;
+        state.caseSearchResults = action.payload;
+      })
+      .addCase(searchWorkTaskCases.rejected, (state) => {
+        state.caseSearchLoading = false;
+        state.caseSearchResults = [];
       })
       .addCase(createWorkTask.pending, (state) => {
         state.saving = true;

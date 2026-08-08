@@ -89,6 +89,7 @@ const memberSchema = Yup.object({
   phone: Yup.string(),
   role: Yup.string().required("Required"),
   status: Yup.string().required("Required"),
+  preferred_language: Yup.string().oneOf(["en", "es"]).required("Required"),
 });
 
 type MemberForm = {
@@ -98,6 +99,7 @@ type MemberForm = {
   phone: string;
   role: string;
   status: string;
+  preferred_language: "en" | "es";
 };
 
 // ─── Member dialog ────────────────────────────────────────────────────────────
@@ -125,6 +127,7 @@ function MemberDialog({
       phone: initial?.phone ?? "",
       role: initial?.role ?? "admin",
       status: initial?.status ?? "active",
+      preferred_language: initial?.preferred_language ?? "en",
     },
     validationSchema: memberSchema,
     onSubmit: async (vals, { resetForm }) => {
@@ -239,6 +242,20 @@ function MemberDialog({
                 ]}
               />
             </div>
+          </div>
+
+          <div>
+            <label className="text-xs font-medium text-muted-foreground mb-1 block">
+              {t("adminHelpers.teamLanguageLabel")}
+            </label>
+            <select
+              className={inputClass}
+              {...form.getFieldProps("preferred_language")}
+            >
+              <option value="en">{t("adminHelpers.teamLanguageEn")}</option>
+              <option value="es">{t("adminHelpers.teamLanguageEs")}</option>
+            </select>
+            <FieldHint>{t("adminHelpers.teamLanguageHint")}</FieldHint>
           </div>
 
           {/* Role permission legend */}
@@ -461,6 +478,17 @@ export default function AdminPeople() {
       },
     },
     {
+      key: "preferred_language",
+      label: "Language",
+      sortable: true,
+      shrink: true,
+      render: (m) => (
+        <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full border border-border bg-muted/40 text-foreground">
+          {m.preferred_language === "es" ? "ES" : "EN"}
+        </span>
+      ),
+    },
+    {
       key: "last_login_at",
       label: "Last login",
       sortable: true,
@@ -576,6 +604,7 @@ export default function AdminPeople() {
         phone: vals.phone,
         role: vals.role,
         status: vals.status,
+        preferred_language: vals.preferred_language,
       }),
     );
     dispatch(fetchAdminTeam(teamParams));

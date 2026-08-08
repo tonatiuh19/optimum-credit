@@ -145,6 +145,75 @@ export const reviewTaskCompletion = createAsyncThunk(
   },
 );
 
+export const sendTaskReminder = createAsyncThunk<
+  {
+    emailed: string;
+    sms_sent: boolean;
+    task_title: string;
+    expires_at: string;
+    expires_hours: number;
+  },
+  { caseId: number; templateId: number },
+  { rejectValue: string }
+>("adminTasks/sendReminder", async ({ caseId, templateId }, { rejectWithValue }) => {
+  try {
+    const { data } = await api.post(
+      `/admin/cases/${caseId}/tasks/${templateId}/remind`,
+    );
+    return {
+      emailed: data.emailed as string,
+      sms_sent: !!data.sms_sent,
+      task_title: data.task_title as string,
+      expires_at: data.expires_at as string,
+      expires_hours: Number(data.expires_hours || 72),
+    };
+  } catch (err: unknown) {
+    return rejectWithValue(
+      formatAxiosError(err, "Failed to send task reminder"),
+    );
+  }
+});
+
+export const reopenTaskCompletion = createAsyncThunk<
+  {
+    notified: boolean;
+    emailed: string | null;
+    stage_rolled_back: boolean;
+    notify_error: string | null;
+    task_slug: string;
+  },
+  {
+    completionId: number;
+    caseId: number;
+    notify_client: boolean;
+    reason?: string;
+  },
+  { rejectValue: string }
+>(
+  "adminTasks/reopenCompletion",
+  async (
+    { completionId, caseId, notify_client, reason },
+    { rejectWithValue, dispatch },
+  ) => {
+    try {
+      const { data } = await api.post(
+        `/admin/task-completions/${completionId}/reopen`,
+        { notify_client, reason: reason || null },
+      );
+      dispatch(fetchCaseTaskCompletions(caseId));
+      return {
+        notified: !!data.notified,
+        emailed: (data.emailed as string) || null,
+        stage_rolled_back: !!data.stage_rolled_back,
+        notify_error: (data.notify_error as string) || null,
+        task_slug: String(data.task_slug || ""),
+      };
+    } catch (err: unknown) {
+      return rejectWithValue(formatAxiosError(err, "Failed to reopen task"));
+    }
+  },
+);
+
 const adminTasksSlice = createSlice({
   name: "adminTasks",
   initialState,

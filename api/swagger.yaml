@@ -408,6 +408,120 @@ paths:
         "404":
           description: Referral link not found / inactive
 
+  /public/affiliate-invite/{token}:
+    get:
+      tags: [Affiliates]
+      summary: Resolve a staff affiliate invite link (no auth)
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Invite metadata + is_open
+        "404":
+          description: Invite not found
+        "503":
+          description: Affiliates feature disabled
+
+  /public/affiliate-invite/{token}/join:
+    post:
+      tags: [Affiliates]
+      summary: Sign up as affiliate via invite link (auto-comped)
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [first_name, last_name, email, agreed_terms, agreed_sms]
+              properties:
+                first_name: { type: string }
+                last_name: { type: string }
+                email: { type: string, format: email }
+                phone: { type: string }
+                agreed_terms: { type: boolean }
+                agreed_sms: { type: boolean }
+      responses:
+        "201":
+          description: Affiliate created (comped) + login_url
+        "400":
+          description: Validation / consent required
+        "410":
+          description: Invite closed / exhausted
+        "429":
+          description: Rate limited
+
+  /admin/affiliate-invite-links:
+    get:
+      tags: [Affiliates]
+      summary: List staff invite links
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: links[]
+    post:
+      tags: [Affiliates]
+      summary: Create staff invite link (evergreen or one-time)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                kind: { type: string, enum: [evergreen, one_time] }
+                plan: { type: string, enum: [standard], description: "Standard only for now; master/sub reserved" }
+                label: { type: string }
+                path_mode: { type: string, enum: [token, auto, custom], description: "URL path: opaque token, auto from admin name, or custom slug" }
+                slug: { type: string, description: "Required when path_mode=custom" }
+                expires_at: { type: string, format: date-time }
+      responses:
+        "201":
+          description: Created link with join_url
+
+  /admin/affiliate-invite-links/{id}:
+    patch:
+      tags: [Affiliates]
+      summary: Enable/disable, relabel, or change path slug on an invite link
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                is_enabled: { type: boolean }
+                label: { type: string, nullable: true }
+                path_mode: { type: string, enum: [token, auto, custom] }
+                slug: { type: string, nullable: true }
+      responses:
+        "200":
+          description: Updated link
+    delete:
+      tags: [Affiliates]
+      summary: Permanently delete an invite link
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Deleted
+
   /public/affiliates/{slug}/click:
     post:
       tags: [Affiliates]
@@ -726,7 +840,9 @@ paths:
     post:
       tags: [Affiliates]
       summary: Self-service — manually create a referred lead (requires portal access)
-      description: Creates a `status=prospect` client with `affiliate_id=self` and attaches `affiliate_referral`.
+      description: >
+        Creates a `status=prospect` client with `affiliate_id=self` and attaches
+        `affiliate_referral`. Email is optional when phone is provided (and vice versa).
       security: [{ BearerAuth: [] }]
       requestBody:
         required: true
@@ -734,15 +850,17 @@ paths:
           application/json:
             schema:
               type: object
-              required: [first_name, last_name, email]
+              required: [first_name, last_name]
               properties:
                 first_name: { type: string }
                 last_name: { type: string }
-                email: { type: string, format: email }
-                phone: { type: string }
+                email: { type: string, format: email, nullable: true }
+                phone: { type: string, nullable: true }
       responses:
         "200":
           description: Created — client_id
+        "400":
+          description: Missing contact (email or phone)
         "403":
           description: Portal access required
 
@@ -967,6 +1085,8 @@ paths:
         Handles subscription cancel/suspend/fail plus successful payment events
         (`authcapture` / capture) — inserts a `payments` row for client ARB renewals
         and restores `client_subscriptions` / affiliate `subscription_status` to active.
+        First successful enrollment payment also emails every active team admin
+        (`super_admin` / `admin` / `agent`) a "New purchase" alert with a pipeline deep link.
       responses:
         "200":
           description: Processed
@@ -1037,7 +1157,10 @@ paths:
       security: [{ BearerAuth: [] }]
       responses:
         "200":
-          description: Dashboard aggregates (clients, revenue, tickets, payments)
+          description: |
+            Dashboard aggregates (clients, revenue, tickets, payments) plus
+            `upcoming_rounds` and `my_work_tasks` (open tasks assigned to the
+            current admin, max 8).
         "401":
           description: Unauthorized
 
@@ -1048,19 +1171,37 @@ paths:
       security: [{ BearerAuth: [] }]
       responses:
         "200":
-          description: Task list for Backlog / Doing / Done
+          description: Task list for Backlog / Doing / Done (includes optional case link fields)
     post:
       tags: [Admin]
       summary: Create an Optimum work task
+      description: Optional `case_id` links the task to a credit repair case.
       security: [{ BearerAuth: [] }]
       responses:
         "201":
           description: Created
 
+  /admin/work-tasks/case-search:
+    get:
+      tags: [Admin]
+      summary: Search cases to link on a work task
+      description: |
+        Returns non-cancelled cases (active first). Each row includes `case_status`.
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - in: query
+          name: q
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Matching cases (max 10)
+
   /admin/work-tasks/{id}:
     put:
       tags: [Admin]
       summary: Update work task (pushes to HubSpot when linked)
+      description: Pass `case_id` to link/change case, or `null` to unlink.
       security: [{ BearerAuth: [] }]
       parameters:
         - in: path
@@ -1087,10 +1228,29 @@ paths:
     get:
       tags: [Admin]
       summary: HubSpot connection + extract permission for current admin
+      description: |
+        `oauth_configured` is true when either `HUBSPOT_SERVICE_KEY` or
+        OAuth client credentials are set. `auth_mode` is `service_key` | `oauth` | null.
+        With a Service Key, permitted admins are treated as `connected`
+        (no per-admin OAuth).
       security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: Status payload
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  connected: { type: boolean }
+                  can_extract: { type: boolean }
+                  hub_domain: { type: string, nullable: true }
+                  connected_at: { type: string, nullable: true }
+                  oauth_configured: { type: boolean }
+                  auth_mode:
+                    type: string
+                    nullable: true
+                    enum: [service_key, oauth, private_app, null]
 
   /admin/hubspot/oauth/start:
     get:
@@ -1357,6 +1517,72 @@ paths:
           description: Invalid or expired code
         "429":
           description: Too many attempts — rate limited
+
+  /admin/me/notification-prefs:
+    get:
+      tags: [Admin]
+      summary: Get my notification preferences
+      description: |
+        Per-admin mute toggles for operational alerts (email / in-app / SMS).
+        Null stored prefs mean all ON. SMS channel is unavailable until Twilio
+        env keys are configured. OTP / welcome emails are never included.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Prefs + channel availability
+        "403":
+          description: Affiliate role denied
+    put:
+      tags: [Admin]
+      summary: Update my notification preferences
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email: { type: object, additionalProperties: { type: boolean } }
+                in_app: { type: object, additionalProperties: { type: boolean } }
+                sms: { type: object, additionalProperties: { type: boolean } }
+      responses:
+        "200":
+          description: Updated prefs
+        "403":
+          description: Affiliate role denied
+
+  /admin/me/notifications:
+    get:
+      tags: [Admin]
+      summary: List my in-app notifications
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 50 }
+      responses:
+        "200":
+          description: Inbox + unread_count
+
+  /admin/me/notifications/read:
+    post:
+      tags: [Admin]
+      summary: Mark in-app notifications read
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ids:
+                  type: array
+                  items: { type: integer }
+                all: { type: boolean }
+      responses:
+        "200":
+          description: ok + unread_count
 
   /auth/admin/request-otp:
     post:
@@ -1668,6 +1894,8 @@ paths:
         Accepts a multipart form upload. The file is encrypted with AES-256-GCM
         before being stored on disk. `enc_iv` and `enc_tag` are persisted in the
         database to enable decryption during admin review.
+        On success, emails every active team admin (`super_admin` / `admin` /
+        `agent`) with a submission alert linking to the pipeline case.
       requestBody:
         required: true
         content:
@@ -1759,6 +1987,9 @@ paths:
       summary: Submit or resubmit an info request (multipart)
       security:
         - BearerAuth: []
+      description: |
+        On success, emails every active team admin (`super_admin` / `admin` /
+        `agent`) a submission alert with a pipeline case deep link.
       parameters:
         - in: path
           name: id
@@ -1998,14 +2229,74 @@ paths:
   /admin/pipeline:
     get:
       tags: [Admin]
-      summary: Get all active credit repair cases + prospects for the pipeline Kanban board
+      summary: Get credit repair cases + prospects for the pipeline Kanban (server-side filters)
       description: |
-        `prospects` (status='prospect' clients with no case yet — 1C) are
-        returned separately from `cases` since the pipeline board renders
-        them as a distinct lane; dragging a prospect card is only valid
-        prospect → new_client, which should call `/admin/prospects/{id}/convert`.
+        Cases and prospects on the Kanban board. Prospect cards are clients
+        with `status=prospect` and may include `case_id` / `case_number` when a
+        Prospect-stage case already exists (New Case → Prospect). Cases with
+        `pipeline_stage=prospect` are excluded from `cases` (shown via the
+        Prospect column). Convert prospect → new_client via
+        `/admin/prospects/{id}/convert`.
+
+        Filters apply server-side so column counts stay accurate. Case-only
+        filters (package, case status, tasks, info requests, non-prospect stage)
+        hide the prospect column results.
       security:
         - BearerAuth: []
+      parameters:
+        - in: query
+          name: search
+          schema: { type: string }
+          description: Name, email, phone, or case number
+        - in: query
+          name: language
+          schema: { type: string, enum: [en, es] }
+        - in: query
+          name: billing
+          schema:
+            type: string
+            enum: [overdue, split_plan, paid_full, direct_paid, no_payment]
+        - in: query
+          name: package_id
+          schema: { type: string }
+          description: Package id, or "none" for no package
+        - in: query
+          name: assigned_admin_id
+          schema: { type: string }
+          description: Admin id, or "unassigned"
+        - in: query
+          name: referral_category
+          schema:
+            type: string
+            enum: [realtor_broker, one_off, affiliate_partner]
+        - in: query
+          name: client_status
+          schema: { type: string }
+        - in: query
+          name: case_status
+          schema: { type: string, enum: [active, completed, on_hold] }
+        - in: query
+          name: stage
+          schema: { type: string }
+          description: Pipeline stage or "prospect"
+        - in: query
+          name: payment_badge
+          schema: { type: string, enum: [paid, unpaid] }
+        - in: query
+          name: tasks
+          schema:
+            type: string
+            enum: [incomplete, complete, pending_review, rejected]
+        - in: query
+          name: info_requests
+          schema: { type: string, enum: [open, none] }
+        - in: query
+          name: has_notes
+          schema: { type: string, enum: [yes, no] }
+        - in: query
+          name: labels
+          schema: { type: string }
+          description: Comma-separated label slugs (ANY match)
       responses:
         "200":
           description: Pipeline cases + prospects
@@ -2024,6 +2315,8 @@ paths:
                       $ref: "#/components/schemas/Prospect"
         "401":
           description: Unauthorized
+        "403":
+          description: Affiliate without portal access
 
   /admin/labels:
     get:
@@ -2117,10 +2410,15 @@ paths:
       tags: [Admin]
       summary: Convert a prospect into a client + case (5A/7A)
       description: |
-        Sets `status=onboarding`, `pipeline_stage=new_client`, creates a
-        `credit_repair_cases` row, runs `autoAssignTasksForCase`, and sends
-        the dedicated prospect-welcome email (NOT the payment_confirmed flow —
-        no payment was ever taken).
+        Sets `status=onboarding`, `pipeline_stage=new_client`. If the prospect
+        already has an active case at `pipeline_stage=prospect` (from New Case),
+        that case is promoted to `new_client`; otherwise a new
+        `credit_repair_cases` row is created. Runs `autoAssignTasksForCase`,
+        sends the dedicated prospect-welcome email (portal onboarding link),
+        optionally persists/sends round calendar `.ics`, and schedules the
+        `payment_confirmed` reminder flow with Day-0 steps skipped (Day 2/3
+        upload nudges + team alert still run — avoids duplicate/wrong
+        "payment confirmed" Day-1 copy).
       security:
         - BearerAuth: []
       parameters:
@@ -2136,6 +2434,8 @@ paths:
               properties:
                 package_id: { type: integer, nullable: true }
                 notes: { type: string, nullable: true }
+                round_schedule:
+                  $ref: "#/components/schemas/RoundScheduleInput"
       responses:
         "200":
           description: Converted
@@ -2151,6 +2451,9 @@ paths:
                     properties:
                       id: { type: integer }
                       case_number: { type: string }
+                  round_calendar:
+                    type: object
+                    nullable: true
         "404":
           description: Prospect not found
         "409":
@@ -2326,6 +2629,7 @@ paths:
     get:
       tags: [Admin]
       summary: List admin team members
+      description: Includes preferred_language (client language each admin owns).
       security:
         - BearerAuth: []
       responses:
@@ -2338,6 +2642,22 @@ paths:
       summary: Create admin team member (super_admin only)
       security:
         - BearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, first_name, last_name]
+              properties:
+                email: { type: string }
+                first_name: { type: string }
+                last_name: { type: string }
+                phone: { type: string }
+                role: { type: string }
+                preferred_language:
+                  type: string
+                  enum: [en, es]
+                  description: Client language this admin owns/handles
       responses:
         "200":
           description: Created
@@ -2345,6 +2665,208 @@ paths:
           description: Email already exists
         "403":
           description: Forbidden
+
+  /admin/referrers:
+    get:
+      tags: [Admin]
+      summary: List referral partners
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: category
+          schema:
+            type: string
+            enum: [realtor_broker, one_off, affiliate_partner]
+        - in: query
+          name: search
+          schema: { type: string }
+      responses:
+        "200":
+          description: Referrers list
+    post:
+      tags: [Admin]
+      summary: Create a referral partner
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [category, first_name, last_name]
+              properties:
+                category:
+                  type: string
+                  enum: [realtor_broker, one_off, affiliate_partner]
+                first_name: { type: string }
+                last_name: { type: string }
+                email: { type: string }
+                phone: { type: string }
+                company: { type: string }
+                affiliate_id: { type: integer }
+                preferred_language:
+                  type: string
+                  enum: [en, es]
+                notes: { type: string }
+      responses:
+        "201":
+          description: Referrer created
+
+  /admin/cases/{id}/documents:
+    get:
+      tags: [Admin]
+      summary: List encrypted case documents (client_documents)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Case documents
+    post:
+      tags: [Admin]
+      summary: Admin upload documents to a case (AES-256-GCM)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [doc_type, files]
+              properties:
+                doc_type:
+                  type: string
+                  enum: [id_front, id_back, ssn_card, proof_of_address, other]
+                files:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+      responses:
+        "201":
+          description: Documents uploaded and encrypted
+
+  /admin/cases/{caseId}/tasks/{templateId}/remind:
+    post:
+      tags: [Admin]
+      summary: Email a secure one-time link reminder for a specific onboarding task (email only)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: caseId
+          required: true
+          schema: { type: integer }
+        - in: path
+          name: templateId
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Reminder sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  emailed: { type: string }
+                  sms_sent: { type: boolean }
+                  task_slug: { type: string }
+                  task_title: { type: string }
+                  expires_at: { type: string, format: date-time }
+                  expires_hours: { type: integer }
+        "404":
+          description: Case or task not found
+        "422":
+          description: Client has no email
+
+  /admin/task-completions/{id}/reopen:
+    post:
+      tags: [Admin]
+      summary: Reopen an approved task (optional client email); restores admin upload path
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+          description: Task completion id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [notify_client]
+              properties:
+                notify_client:
+                  type: boolean
+                  description: When true, email the client a secure one-time re-submit link
+                reason:
+                  type: string
+                  maxLength: 1000
+                  nullable: true
+      responses:
+        "200":
+          description: Task reopened (email failures still return 200 with notified=false)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  reopened: { type: boolean }
+                  notified: { type: boolean }
+                  notify_requested: { type: boolean }
+                  notify_skipped_reason: { type: string, nullable: true }
+                  notify_error: { type: string, nullable: true }
+                  emailed: { type: string, nullable: true }
+                  expires_at: { type: string, format: date-time, nullable: true }
+                  stage_rolled_back: { type: boolean }
+                  pipeline_stage: { type: string }
+                  task_slug: { type: string }
+                  task_type: { type: string }
+                  template_id: { type: integer }
+                  is_required: { type: boolean }
+        "401":
+          description: Unauthorized
+        "404":
+          description: Task completion not found
+        "409":
+          description: Concurrent change — task no longer approved
+        "422":
+          description: Not approved, or case is not active
+
+  /admin/client-documents/{id}/file:
+    get:
+      tags: [Admin]
+      summary: Decrypt and serve a client_documents file
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: File bytes
+        "404":
+          description: Not found
 
   /admin/admins/{id}/resend-welcome:
     post:
@@ -2532,9 +3054,9 @@ paths:
       summary: Move a credit repair case to a new pipeline stage
       description: |
         `prospect` is intentionally excluded from the `stage` enum — cases are
-        only ever created at `new_client` via `/admin/prospects/{id}/convert`
-        (1C), so a case can never move to/from `prospect`. Entering
-        `docs_ready` fires the `docs_ready` reminder flow.
+        only ever leave via `/admin/prospects/{id}/convert` (1C). Cases at
+        `pipeline_stage=prospect` cannot use this endpoint — convert is required.
+        Entering `docs_ready` fires the `docs_ready` reminder flow.
       security:
         - BearerAuth: []
       parameters:
@@ -2626,14 +3148,23 @@ paths:
                       $ref: "#/components/schemas/AdminClientListItem"
     post:
       tags: [Admin]
-      summary: Create a new client
+      summary: Create a new client or prospect lead
       description: >-
-        Affiliate-role callers (`getAffiliateScope`) are always stamped
-        `status='prospect'`, `pipeline_stage='prospect'`, and their own
-        `affiliate_id` — `package_id`, `status`, and `admin_notes` inputs are
-        ignored, no welcome email is sent, and the client is auto-tagged with
-        the `affiliate_referral` label. Requires an active/comped affiliate
-        subscription (403 `affiliate_subscription_required` otherwise).
+        Staff may set `status=prospect` to create a CRM lead without credit
+        analysis (`pipeline_stage=prospect`). Language assigns
+        `assigned_admin_id` from active admins matching `preferred_language`.
+        Optional `referral_category` + `referrer_id` drive round-update routing.
+        For non-prospect creates, optional `create_case` (or `round_schedule`
+        with dates / `send_calendar`) opens a credit repair case and may persist
+        / email the round calendar .ics.
+        Affiliate-role callers are always stamped `status='prospect'`,
+        `pipeline_stage='prospect'`, and their own `affiliate_id` —
+        `package_id`, `status`, and `admin_notes` inputs are ignored, no welcome
+        email is sent, and the client is auto-tagged with `affiliate_referral`.
+        Requires an active/comped affiliate subscription
+        (403 `affiliate_subscription_required` otherwise).
+        `email` is optional when `phone` is provided (and vice versa). Empty
+        email stores NULL; outbound client emails are skipped safely.
       security:
         - BearerAuth: []
       requestBody:
@@ -2642,7 +3173,7 @@ paths:
           application/json:
             schema:
               type: object
-              required: [first_name, last_name, email]
+              required: [first_name, last_name]
               properties:
                 first_name:
                   type: string
@@ -2651,13 +3182,38 @@ paths:
                 email:
                   type: string
                   format: email
+                  nullable: true
+                  description: Optional when phone is set
                 phone:
                   type: string
+                  nullable: true
+                  description: Optional when email is set; required if email is empty
                 package_id:
                   type: integer
                 status:
                   type: string
-                  enum: [pending_payment, onboarding, active, paused, cancelled]
+                  enum: [prospect, pending_payment, onboarding, active, paused, cancelled]
+                preferred_language:
+                  type: string
+                  enum: [en, es]
+                referral_category:
+                  type: string
+                  enum: [realtor_broker, one_off, affiliate_partner]
+                referrer_id:
+                  type: integer
+                  nullable: true
+                assigned_admin_id:
+                  type: integer
+                  nullable: true
+                admin_notes:
+                  type: string
+                send_welcome_email:
+                  type: boolean
+                create_case:
+                  type: boolean
+                  description: Create a credit_repair_cases row (staff non-prospect only)
+                round_schedule:
+                  $ref: "#/components/schemas/RoundScheduleInput"
       responses:
         "201":
           description: Client created
@@ -2668,6 +3224,15 @@ paths:
                 properties:
                   client:
                     $ref: "#/components/schemas/AdminClientListItem"
+                  case:
+                    type: object
+                    nullable: true
+                    properties:
+                      id: { type: integer }
+                      case_number: { type: string }
+                  round_calendar:
+                    type: object
+                    nullable: true
         "403":
           description: Affiliate subscription required (code `affiliate_subscription_required`)
         "409":
@@ -3206,6 +3771,43 @@ paths:
         "404":
           description: PDF not found
 
+  /admin/cases/{caseId}/report-wizard/before-context:
+    get:
+      tags: [Admin]
+      summary: Resolve Before PDF context for a round (prior-round reuse vs enrollment)
+      description: >
+        For Round 1 returns enrollment guidance. For Round N>1, returns the published
+        Round N−1 after PDF metadata when available so the wizard can reuse it as Before.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: caseId
+          required: true
+          schema:
+            type: integer
+        - in: query
+          name: round_number
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 5
+      responses:
+        "200":
+          description: Before-context for the requested round
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  context:
+                    $ref: "#/components/schemas/ReportWizardBeforeContext"
+        "400":
+          description: Invalid case id or round_number
+        "404":
+          description: Case not found
+
   /admin/cases/{caseId}/report-wizard/sessions:
     get:
       tags: [Admin]
@@ -3234,7 +3836,7 @@ paths:
           description: Invalid case id
     post:
       tags: [Admin]
-      summary: Create OFG report wizard session (upload before/after PDFs + extract)
+      summary: Create OFG report wizard session (upload after PDF + before upload or prior reuse)
       security:
         - BearerAuth: []
       parameters:
@@ -3249,14 +3851,18 @@ paths:
           multipart/form-data:
             schema:
               type: object
-              required: [before_pdf, after_pdf]
+              required: [after_pdf]
               properties:
                 before_pdf:
                   type: string
                   format: binary
+                  description: Required unless reuse_before_session_id is set
                 after_pdf:
                   type: string
                   format: binary
+                reuse_before_session_id:
+                  type: integer
+                  description: Published prior-round session whose after PDF becomes Before
                 round_number:
                   type: integer
                   minimum: 1
@@ -3276,6 +3882,8 @@ paths:
           description: Invalid input
         "404":
           description: Case not found
+        "422":
+          description: Round validation or reuse constraints failed
 
   /admin/report-wizard/sessions/{id}:
     get:
@@ -3762,10 +4370,72 @@ paths:
         "401":
           description: Unauthorized
 
+  /admin/cases/{id}/round-schedule:
+    get:
+      tags: [Admin - Cases]
+      summary: Get persisted round-completion calendar schedule
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Schedule or null
+    put:
+      tags: [Admin - Cases]
+      summary: Upsert round schedule; optionally email .ics (METHOD:PUBLISH)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoundScheduleInput"
+      responses:
+        "200":
+          description: Saved (and optionally sent)
+
+  /admin/cases/{id}/round-schedule/send:
+    post:
+      tags: [Admin - Cases]
+      summary: Resend round calendar .ics with stable UIDs (update invite)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Sent recipient list
+        "404":
+          description: No schedule saved
+
   /admin/cases:
     post:
       tags: [Admin - Cases]
       summary: Create a new credit repair case
+      description: |
+        Creates a `credit_repair_cases` row. Allowed `pipeline_stage` values are
+        only `prospect` and `new_client` (default) — later stages must be reached
+        via convert / task approval / Pipeline board moves so cases are not
+        created mid-pipeline with incomplete onboarding. `pipeline_stage=prospect`
+        is allowed only when the client has `status=prospect` — this attaches a
+        Prospect-stage case without converting. Convert-time fields (`notes`,
+        `package_id`, `splits`, `round_schedule`, `send_case_email`) are ignored
+        for prospect stage (no welcome email / tasks / payment_confirmed). Other
+        stages for a prospect must use `/admin/prospects/{id}/convert`.
+        Prospect-stage cases do not appear in Kanban case columns; they stay in
+        the Prospect column until convert.
       security:
         - BearerAuth: []
       requestBody:
@@ -3783,11 +4453,19 @@ paths:
                   nullable: true
                 pipeline_stage:
                   type: string
+                  enum: [prospect, new_client]
+                  default: new_client
+                  description: >
+                    New Case may only start at Prospect or New Client. Advance
+                    to Docs Verified / rounds via the Pipeline board after
+                    required tasks are approved.
                 notes:
                   type: string
                   nullable: true
                 send_case_email:
                   type: boolean
+                round_schedule:
+                  $ref: "#/components/schemas/RoundScheduleInput"
                 splits:
                   type: array
                   items:
@@ -3986,7 +4664,7 @@ paths:
   /admin/calendar:
     get:
       tags: [Admin - Calendar]
-      summary: Splits in a date range for the calendar view
+      summary: Payment splits + round targets + open work tasks in a date range
       security:
         - BearerAuth: []
       parameters:
@@ -4004,7 +4682,7 @@ paths:
             format: date
       responses:
         "200":
-          description: Array of calendar splits
+          description: Calendar splits, round events, and open work tasks with due dates
           content:
             application/json:
               schema:
@@ -4014,6 +4692,39 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/PaymentSplit"
+                  round_events:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        case_id: { type: integer }
+                        case_number: { type: string, nullable: true }
+                        client_id: { type: integer }
+                        client_first_name: { type: string }
+                        client_last_name: { type: string }
+                        round_number: { type: integer }
+                        target_date: { type: string, format: date }
+                  work_tasks:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer }
+                        title: { type: string }
+                        status: { type: string, enum: [backlog, doing] }
+                        priority:
+                          type: string
+                          enum: [low, medium, high, urgent]
+                        due_date: { type: string, format: date }
+                        assignee_admin_id: { type: integer, nullable: true }
+                        assignee_name: { type: string, nullable: true }
+                        case_id: { type: integer, nullable: true }
+                        case_number: { type: string, nullable: true }
+                        client_id: { type: integer, nullable: true }
+                        client_first_name: { type: string, nullable: true }
+                        client_last_name: { type: string, nullable: true }
+                        source: { type: string, enum: [optimum, hubspot] }
         "401":
           description: Unauthorized
 
@@ -4085,7 +4796,8 @@ paths:
         provisional `pending` payment before charging, so two concurrent submissions
         (e.g. a double-click or a retried request) can't both succeed against the
         same split. If the split is already reserved/paid, returns `409`. Rate-limited
-        per token.
+        per token. On success, emails every active team admin a "Payment received"
+        alert (installment) with a pipeline deep link.
       parameters:
         - name: token
           in: path
@@ -4229,6 +4941,7 @@ components:
           type: string
         email:
           type: string
+          nullable: true
         phone:
           type: string
           nullable: true
@@ -4309,7 +5022,10 @@ components:
 
     Prospect:
       type: object
-      description: A clients row with status/pipeline_stage='prospect' — no case yet (1C).
+      description: |
+        A clients row with status/pipeline_stage='prospect'. May optionally
+        have an active `credit_repair_cases` row at pipeline_stage=prospect
+        (from New Case → Prospect) before convert.
       properties:
         id: { type: integer }
         first_name: { type: string }
@@ -4323,6 +5039,13 @@ components:
         agent_phone: { type: string, nullable: true }
         rep_name: { type: string, nullable: true }
         credit_analysis_id: { type: integer, nullable: true }
+        case_id:
+          type: integer
+          nullable: true
+          description: Active prospect-stage case id, if any
+        case_number:
+          type: string
+          nullable: true
         labels:
           type: array
           items:
@@ -4551,6 +5274,33 @@ components:
           type: string
           format: date-time
 
+    ReportWizardBeforeContext:
+      type: object
+      properties:
+        source:
+          type: string
+          enum: [enrollment, prior_round, none]
+        can_reuse:
+          type: boolean
+        prior_session_id:
+          type: integer
+          nullable: true
+        prior_round:
+          type: integer
+          nullable: true
+        file_name:
+          type: string
+          nullable: true
+        report_date_after:
+          type: string
+          nullable: true
+        score_after:
+          type: number
+          nullable: true
+        middle_score_after:
+          type: number
+          nullable: true
+
     # ─── Payment Splits ───────────────────────────────────────────────────────────
 
     PaymentSplit:
@@ -4614,3 +5364,18 @@ components:
           description: >
             When true, creates the split already marked paid (manual).
             Skips payment link generation and reminder scheduling.
+
+    RoundScheduleInput:
+      type: object
+      description: >
+        Planned Round 1–5 completion dates (all-day). Opt-in calendar .ics
+        email via send_calendar (default false). Recipients: client, attached
+        referrer (if email), and assigned language-owner admin.
+      properties:
+        round_1_date: { type: string, format: date }
+        round_2_date: { type: string, format: date }
+        round_3_date: { type: string, format: date }
+        round_4_date: { type: string, format: date }
+        round_5_date: { type: string, format: date }
+        interval_days: { type: integer, default: 35 }
+        send_calendar: { type: boolean, default: false }
