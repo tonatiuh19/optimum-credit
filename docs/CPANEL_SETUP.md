@@ -64,12 +64,21 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 The Reminder Flows system schedules delayed emails into the `notification_queue`
 table. A cron job must run periodically to pick up pending rows and send them.
 
+**Primary (production on Vercel):** `vercel.json` schedules
+`GET /api/cron/process-queue` every 5 minutes. Vercel sends
+`Authorization: Bearer <CRON_SECRET>` when `CRON_SECRET` is set in the project
+env. Ensure that value matches production (not the `.env.example` placeholder).
+
+**Optional (cPanel / external curl):** keep the curl job below as a backup.
+
 ### How it works
 
-- **Endpoint:** `POST /api/cron/process-queue`
-- **Auth:** `x-cron-secret` header must match `CRON_SECRET` in `.env`
+- **Endpoint:** `GET|POST /api/cron/process-queue`
+- **Auth:** `Authorization: Bearer CRON_SECRET` **or** `x-cron-secret` header
 - **Batch size:** 50 emails per run, max 3 retry attempts before marking failed
-- **Returns:** `{ ok: true, processed: N, sent: N, failed: N }`
+- **Stale:** pending rows with `scheduled_for` older than 14 days are cancelled
+- **Overlap-safe:** each run claims rows with a unique `claim-<ms>-*` tag
+- **Returns:** `{ ok, processed, sent, failed, stale_cancelled, stuck_reclaimed, work_due_notified }`
 
 ### Setting up in cPanel
 

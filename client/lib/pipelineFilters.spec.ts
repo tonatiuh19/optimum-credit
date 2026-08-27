@@ -4,6 +4,7 @@ import {
   buildAdminPipelineQuery,
   buildReopenToastParts,
   countActivePipelineFilters,
+  isProspectLead,
   pipelineFilterChipLabel,
   taskSlugToDocType,
 } from "./pipelineFilters";
@@ -20,9 +21,49 @@ describe("taskSlugToDocType", () => {
   });
 });
 
+describe("isProspectLead", () => {
+  it("treats status=prospect as a lead", () => {
+    expect(
+      isProspectLead({ status: "prospect", pipeline_stage: "prospect" }),
+    ).toBe(true);
+  });
+
+  it("treats pending_payment + pipeline_stage=prospect as a lead", () => {
+    expect(
+      isProspectLead({
+        status: "pending_payment",
+        pipeline_stage: "prospect",
+      }),
+    ).toBe(true);
+  });
+
+  it("excludes funding lane clients", () => {
+    expect(
+      isProspectLead({ status: "funding", pipeline_stage: "prospect" }),
+    ).toBe(false);
+  });
+
+  it("excludes cancelled and enrolled cases", () => {
+    expect(
+      isProspectLead({ status: "cancelled", pipeline_stage: "prospect" }),
+    ).toBe(false);
+    expect(
+      isProspectLead(
+        { status: "pending_payment", pipeline_stage: "prospect" },
+        { hasEnrolledCase: true },
+      ),
+    ).toBe(false);
+    expect(
+      isProspectLead({ status: "onboarding", pipeline_stage: "new_client" }),
+    ).toBe(false);
+  });
+});
+
 describe("buildAdminPipelineQuery", () => {
-  it("returns empty object when nothing set", () => {
-    expect(buildAdminPipelineQuery("", EMPTY_PIPELINE_FILTERS)).toEqual({});
+  it("returns default page limit when nothing set", () => {
+    expect(buildAdminPipelineQuery("", EMPTY_PIPELINE_FILTERS)).toEqual({
+      limit: 20,
+    });
   });
 
   it("includes trimmed search and selected filters", () => {
@@ -43,6 +84,7 @@ describe("buildAdminPipelineQuery", () => {
       assigned_admin_id: "unassigned",
       tasks: "incomplete",
       labels: ["realtor_broker"],
+      limit: 20,
     });
   });
 });

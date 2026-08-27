@@ -20,16 +20,24 @@ CREATE TABLE IF NOT EXISTS `admins` (
   `phone` VARCHAR(20) DEFAULT NULL,
   `role` ENUM('super_admin','admin','agent','affiliate') NOT NULL DEFAULT 'admin',
   `status` ENUM('active','inactive','suspended') NOT NULL DEFAULT 'active',
-  `preferred_language` ENUM('en','es') NOT NULL DEFAULT 'en' COMMENT 'Client language this admin owns/handles',
+  `preferred_language` ENUM('en','es') NOT NULL DEFAULT 'en' COMMENT 'Admin UI/comms language preference',
+  `language_owner_for` ENUM('en','es') DEFAULT NULL COMMENT 'Language-owner role for client/task routing (en|es); NULL = not an owner',
   `avatar_url` VARCHAR(500) DEFAULT NULL,
   `notification_prefs_json` JSON DEFAULT NULL COMMENT 'Per-admin channel×event toggles: { email|in_app|sms: { event_key: bool } }',
+  `voice_available` TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'Browser softphone registered for inbound on assigned OFG line',
+  `call_forwarding_enabled` TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'Also ring personal phone on inbound',
+  `call_forwarding_phone` VARCHAR(20) DEFAULT NULL COMMENT 'E.164 cell for simultaneous ring',
+  `voicemail_enabled` TINYINT(1) DEFAULT NULL COMMENT 'NULL = inherit org default from system_settings',
+  `voicemail_greeting_text` TEXT DEFAULT NULL,
+  `voicemail_greeting_url` VARCHAR(500) DEFAULT NULL,
   `last_login_at` DATETIME DEFAULT NULL,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_admins_status` (`status`),
   KEY `idx_admins_role` (`role`),
-  KEY `idx_admins_preferred_language` (`preferred_language`)
+  KEY `idx_admins_preferred_language` (`preferred_language`),
+  UNIQUE KEY `uq_admins_language_owner_for` (`language_owner_for`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `admin_otp_codes` (
@@ -327,7 +335,7 @@ CREATE TABLE IF NOT EXISTS `clients` (
   `ssn_last4` CHAR(4) DEFAULT NULL,
   `date_of_birth` DATE DEFAULT NULL,
   `preferred_language` ENUM('en','es') NOT NULL DEFAULT 'en',
-  `assigned_admin_id` INT UNSIGNED DEFAULT NULL COMMENT 'Language-owner admin resolved from admins.preferred_language',
+  `assigned_admin_id` INT UNSIGNED DEFAULT NULL COMMENT 'Language-owner admin from admins.language_owner_for',
   -- Pipeline / process
   `package_id` INT UNSIGNED DEFAULT NULL,
   `pipeline_stage` ENUM(
@@ -352,7 +360,7 @@ CREATE TABLE IF NOT EXISTS `clients` (
   `anet_customer_profile_id` VARCHAR(64) DEFAULT NULL,
   `anet_payment_profile_id` VARCHAR(64) DEFAULT NULL,
   -- Status
-  `status` ENUM('prospect','pending_payment','onboarding','active','paused','cancelled') NOT NULL DEFAULT 'pending_payment',
+  `status` ENUM('prospect','funding','pending_payment','onboarding','active','paused','cancelled') NOT NULL DEFAULT 'pending_payment',
   `admin_notes` TEXT DEFAULT NULL COMMENT 'Internal notes visible only to admins',
   -- Credit Repair Cloud integration
   `crc_client_id` VARCHAR(64) DEFAULT NULL COMMENT 'Base64-encoded CRC lead/client ID from CRC API',
@@ -489,13 +497,64 @@ CREATE TABLE IF NOT EXISTS `case_round_schedules` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================================
--- DOCUMENTS (ID, SSN card, proof of address)
+-- FUNDING APPLICATIONS (business funding intake — separate from Credit Repair)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `funding_applications` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `public_token` CHAR(36) NOT NULL,
+  `funding_type` ENUM('credit_card_stacking','bank_statements') NOT NULL,
+  `status` ENUM(
+    'draft','awaiting_docs','submitted','under_review','complete','converted','cancelled'
+  ) NOT NULL DEFAULT 'draft',
+  `first_name` VARCHAR(100) NOT NULL,
+  `last_name` VARCHAR(100) NOT NULL,
+  `email` VARCHAR(255) NOT NULL,
+  `phone` VARCHAR(30) DEFAULT NULL,
+  `postal_code` VARCHAR(20) DEFAULT NULL,
+  `state` VARCHAR(50) DEFAULT NULL,
+  `preferred_language` ENUM('en','es') NOT NULL DEFAULT 'en',
+  `llc_name` VARCHAR(255) DEFAULT NULL,
+  `llc_address` VARCHAR(500) DEFAULT NULL,
+  `secrets_ciphertext` MEDIUMBLOB DEFAULT NULL,
+  `secrets_iv` VARCHAR(64) DEFAULT NULL,
+  `secrets_tag` VARCHAR(64) DEFAULT NULL,
+  `client_id` INT UNSIGNED DEFAULT NULL,
+  `converted_prospect_client_id` INT UNSIGNED DEFAULT NULL,
+  `converted_at` DATETIME DEFAULT NULL,
+  `converted_by_admin_id` INT UNSIGNED DEFAULT NULL,
+  `docs_complete_notified_at` DATETIME DEFAULT NULL,
+  `submitted_at` DATETIME DEFAULT NULL,
+  `notes` TEXT DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_funding_public_token` (`public_token`),
+  KEY `idx_funding_status` (`status`),
+  KEY `idx_funding_email` (`email`),
+  KEY `idx_funding_client` (`client_id`),
+  KEY `idx_funding_created` (`created_at`),
+  CONSTRAINT `fk_funding_client`
+    FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_funding_converted_client`
+    FOREIGN KEY (`converted_prospect_client_id`) REFERENCES `clients`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_funding_converted_by`
+    FOREIGN KEY (`converted_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================================
+-- DOCUMENTS (ID, SSN card, proof of address, funding uploads)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS `client_documents` (
   `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
   `client_id` INT UNSIGNED NOT NULL,
   `case_id` INT UNSIGNED DEFAULT NULL,
-  `doc_type` ENUM('id_front','id_back','ssn_card','proof_of_address','other') NOT NULL,
+  `funding_application_id` INT UNSIGNED DEFAULT NULL,
+  `doc_type` ENUM(
+    'id_front','id_back','ssn_card','proof_of_address','other',
+    'funding_drivers_license','funding_corp_statement',
+    'funding_bank_m1','funding_bank_m2','funding_bank_m3',
+    'funding_bank_m4','funding_bank_m5','funding_bank_m6'
+  ) NOT NULL,
   `pipeline_round` VARCHAR(30) DEFAULT NULL COMMENT 'Pipeline stage this document is linked to (e.g. round_1)',
   `file_name` VARCHAR(255) NOT NULL,
   `file_size` INT UNSIGNED NOT NULL,
@@ -515,13 +574,15 @@ CREATE TABLE IF NOT EXISTS `client_documents` (
   PRIMARY KEY (`id`),
   KEY `idx_client_docs_client` (`client_id`),
   KEY `idx_client_docs_case` (`case_id`),
+  KEY `idx_client_docs_funding` (`funding_application_id`),
   KEY `idx_client_docs_status` (`review_status`),
   KEY `idx_client_docs_type` (`doc_type`),
   KEY `idx_client_docs_uploaded_by` (`uploaded_by_admin_id`),
   CONSTRAINT `fk_client_docs_client` FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_client_docs_admin` FOREIGN KEY (`reviewed_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL,
   CONSTRAINT `fk_client_docs_uploaded_by` FOREIGN KEY (`uploaded_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL,
-  CONSTRAINT `fk_docs_case` FOREIGN KEY (`case_id`) REFERENCES `credit_repair_cases`(`id`) ON DELETE SET NULL
+  CONSTRAINT `fk_docs_case` FOREIGN KEY (`case_id`) REFERENCES `credit_repair_cases`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_client_docs_funding` FOREIGN KEY (`funding_application_id`) REFERENCES `funding_applications`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================================
@@ -714,33 +775,78 @@ CREATE TABLE IF NOT EXISTS `crc_sync_log` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================================
--- CONVERSATIONS (Twilio SMS / Calls + Email)
+-- CONVERSATIONS (Twilio SMS / Calls + Email) — Contact Hub
 -- ============================================================================
+CREATE TABLE IF NOT EXISTS `admin_phone_numbers` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `e164` VARCHAR(20) NOT NULL COMMENT 'E.164 e.g. +19497734127',
+  `friendly_name` VARCHAR(120) DEFAULT NULL,
+  `twilio_sid` VARCHAR(64) DEFAULT NULL,
+  `assigned_admin_id` INT UNSIGNED DEFAULT NULL,
+  `capabilities_json` JSON DEFAULT NULL COMMENT '{"sms":true,"mms":true,"voice":true}',
+  `is_active` TINYINT(1) NOT NULL DEFAULT 1,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_admin_phone_e164` (`e164`),
+  KEY `idx_admin_phone_assigned` (`assigned_admin_id`),
+  CONSTRAINT `fk_admin_phone_admin` FOREIGN KEY (`assigned_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `conversation_unknown_contacts` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `phone_e164` VARCHAR(20) DEFAULT NULL,
+  `email` VARCHAR(255) DEFAULT NULL,
+  `display_name` VARCHAR(200) DEFAULT NULL,
+  `ofg_number_id` INT UNSIGNED DEFAULT NULL,
+  `status` ENUM('open','linked','dismissed') NOT NULL DEFAULT 'open',
+  `linked_client_id` INT UNSIGNED DEFAULT NULL,
+  `last_message_at` DATETIME DEFAULT NULL,
+  `last_message_preview` VARCHAR(500) DEFAULT NULL,
+  `unread_count` INT UNSIGNED NOT NULL DEFAULT 0,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_unknown_phone` (`phone_e164`),
+  KEY `idx_unknown_status` (`status`),
+  KEY `idx_unknown_number` (`ofg_number_id`),
+  CONSTRAINT `fk_unknown_ofg_number` FOREIGN KEY (`ofg_number_id`) REFERENCES `admin_phone_numbers`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_unknown_linked_client` FOREIGN KEY (`linked_client_id`) REFERENCES `clients`(`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS `conversations` (
   `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
-  `client_id` INT UNSIGNED NOT NULL,
+  `client_id` INT UNSIGNED DEFAULT NULL,
   `channel` ENUM('sms','call','email','internal') NOT NULL DEFAULT 'sms',
   `last_message_at` DATETIME DEFAULT NULL,
   `last_message_preview` VARCHAR(500) DEFAULT NULL,
   `unread_count` INT UNSIGNED NOT NULL DEFAULT 0,
   `assigned_admin_id` INT UNSIGNED DEFAULT NULL,
-  `status` ENUM('open','closed','archived') NOT NULL DEFAULT 'open',
+  `ofg_number_id` INT UNSIGNED DEFAULT NULL,
+  `unknown_contact_id` INT UNSIGNED DEFAULT NULL,
+  `status` ENUM('open','snoozed','closed','archived') NOT NULL DEFAULT 'open',
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_conversations_client` (`client_id`),
   KEY `idx_conversations_assigned` (`assigned_admin_id`),
   KEY `idx_conversations_status` (`status`),
+  KEY `idx_conversations_ofg_number` (`ofg_number_id`),
+  KEY `idx_conversations_unknown` (`unknown_contact_id`),
   CONSTRAINT `fk_conversations_client` FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE CASCADE,
-  CONSTRAINT `fk_conversations_admin` FOREIGN KEY (`assigned_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL
+  CONSTRAINT `fk_conversations_admin` FOREIGN KEY (`assigned_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_conversations_ofg_number` FOREIGN KEY (`ofg_number_id`) REFERENCES `admin_phone_numbers`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_conversations_unknown` FOREIGN KEY (`unknown_contact_id`) REFERENCES `conversation_unknown_contacts`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `conversation_messages` (
   `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
   `conversation_id` INT UNSIGNED NOT NULL,
-  `direction` ENUM('inbound','outbound') NOT NULL,
+  `direction` ENUM('inbound','outbound','internal','system') NOT NULL,
   `channel` ENUM('sms','call','email','internal','whatsapp') NOT NULL DEFAULT 'sms',
   `body` MEDIUMTEXT DEFAULT NULL,
+  `media_url` VARCHAR(1000) DEFAULT NULL,
+  `media_content_type` VARCHAR(120) DEFAULT NULL,
   `from_address` VARCHAR(255) DEFAULT NULL,
   `to_address` VARCHAR(255) DEFAULT NULL,
   `provider_message_id` VARCHAR(255) DEFAULT NULL,
@@ -757,6 +863,20 @@ CREATE TABLE IF NOT EXISTS `conversation_messages` (
   KEY `idx_messages_provider` (`provider_message_id`),
   CONSTRAINT `fk_messages_conversation` FOREIGN KEY (`conversation_id`) REFERENCES `conversations`(`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_messages_admin` FOREIGN KEY (`sent_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `mms_media` (
+  `id` CHAR(36) NOT NULL,
+  `content_type` VARCHAR(120) NOT NULL,
+  `filename` VARCHAR(255) DEFAULT NULL,
+  `data` MEDIUMBLOB NOT NULL,
+  `cdn_url` VARCHAR(1000) DEFAULT NULL,
+  `created_by_admin_id` INT UNSIGNED DEFAULT NULL,
+  `expires_at` DATETIME NOT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_mms_media_expires` (`expires_at`),
+  CONSTRAINT `fk_mms_media_admin` FOREIGN KEY (`created_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================================
@@ -881,6 +1001,25 @@ CREATE TABLE IF NOT EXISTS `communication_templates` (
   KEY `idx_templates_channel` (`channel`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Conversation hub reply templates (composer / Contact Hub)
+CREATE TABLE IF NOT EXISTS `conversation_templates` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `name` VARCHAR(150) NOT NULL,
+  `channel` ENUM('sms','email','internal') NOT NULL DEFAULT 'sms',
+  `subject` VARCHAR(255) DEFAULT NULL,
+  `body` MEDIUMTEXT NOT NULL,
+  `variables_json` JSON DEFAULT NULL,
+  `is_active` TINYINT(1) NOT NULL DEFAULT 1,
+  `sort_order` INT NOT NULL DEFAULT 0,
+  `created_by_admin_id` INT UNSIGNED DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_conv_tmpl_channel_active` (`channel`, `is_active`),
+  KEY `idx_conv_tmpl_sort` (`sort_order`, `id`),
+  CONSTRAINT `fk_conv_tmpl_admin` FOREIGN KEY (`created_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 INSERT INTO `communication_templates` (`slug`,`name`,`channel`,`subject`,`body`,`variables_json`) VALUES
   ('welcome_email','Welcome Email','email','Welcome to Optimum Credit, {{first_name}}!','<h1>Welcome {{first_name}}</h1><p>Your {{package_name}} package is confirmed. Click <a href="{{onboarding_link}}">here</a> to upload your documents.</p>', JSON_ARRAY('first_name','package_name','onboarding_link')),
   ('sms_day1','New Client SMS Day 1','sms',NULL,'Hi {{first_name}}, welcome to Optimum Credit! Please upload your documents to get started: {{onboarding_link}}', JSON_ARRAY('first_name','onboarding_link')),
@@ -958,6 +1097,106 @@ CREATE TABLE IF NOT EXISTS `admin_notifications` (
     FOREIGN KEY (`admin_id`) REFERENCES `admins`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Extra email recipients for team / inbound-SMS alerts (non-admin mailboxes OK)
+CREATE TABLE IF NOT EXISTS `admin_notify_extra_emails` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `email` VARCHAR(255) NOT NULL,
+  `label` VARCHAR(100) DEFAULT NULL,
+  `is_active` TINYINT(1) NOT NULL DEFAULT 1,
+  `events_json` JSON DEFAULT NULL
+    COMMENT 'NULL = all events; else JSON array of AdminNotifyEventKey',
+  `created_by_admin_id` INT UNSIGNED DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_notify_extra_email` (`email`),
+  KEY `idx_notify_extra_active` (`is_active`),
+  CONSTRAINT `fk_notify_extra_admin`
+    FOREIGN KEY (`created_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Admin AI Ask audit (ADMIN_AI_ENABLED)
+CREATE TABLE IF NOT EXISTS `admin_ai_audit_logs` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `admin_id` INT UNSIGNED NOT NULL,
+  `question` TEXT NOT NULL,
+  `context_json` JSON DEFAULT NULL,
+  `tools_json` JSON DEFAULT NULL,
+  `reply_excerpt` VARCHAR(500) DEFAULT NULL,
+  `model` VARCHAR(100) DEFAULT NULL,
+  `input_tokens` INT UNSIGNED DEFAULT NULL,
+  `output_tokens` INT UNSIGNED DEFAULT NULL,
+  `status` ENUM('success', 'failure', 'rate_limited', 'disabled') NOT NULL DEFAULT 'success',
+  `error_message` VARCHAR(500) DEFAULT NULL,
+  `duration_ms` INT UNSIGNED DEFAULT NULL,
+  `ip_address` VARCHAR(45) DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_admin_ai_audit_admin_created` (`admin_id`, `created_at`),
+  KEY `idx_admin_ai_audit_status_created` (`status`, `created_at`),
+  CONSTRAINT `fk_admin_ai_audit_admin`
+    FOREIGN KEY (`admin_id`) REFERENCES `admins`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================================
+-- MCP OAuth (per-admin Cursor / Claude Desktop consent)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `mcp_oauth_clients` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `client_id` VARCHAR(128) NOT NULL,
+  `client_secret_hash` VARCHAR(255) DEFAULT NULL COMMENT 'NULL = public client (PKCE)',
+  `client_name` VARCHAR(255) DEFAULT NULL,
+  `redirect_uris_json` JSON NOT NULL,
+  `grant_types_json` JSON DEFAULT NULL,
+  `token_endpoint_auth_method` VARCHAR(64) NOT NULL DEFAULT 'none',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_mcp_oauth_clients_client_id` (`client_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `mcp_oauth_codes` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `code_hash` VARCHAR(64) NOT NULL,
+  `client_id` VARCHAR(128) NOT NULL,
+  `admin_id` INT UNSIGNED NOT NULL,
+  `redirect_uri` VARCHAR(1000) NOT NULL,
+  `code_challenge` VARCHAR(128) NOT NULL,
+  `code_challenge_method` VARCHAR(16) NOT NULL DEFAULT 'S256',
+  `scopes` VARCHAR(255) NOT NULL DEFAULT 'admin_ai.read',
+  `resource` VARCHAR(500) DEFAULT NULL,
+  `expires_at` DATETIME NOT NULL,
+  `consumed_at` DATETIME DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_mcp_oauth_codes_hash` (`code_hash`),
+  KEY `idx_mcp_oauth_codes_admin` (`admin_id`),
+  KEY `idx_mcp_oauth_codes_expires` (`expires_at`),
+  CONSTRAINT `fk_mcp_oauth_codes_admin` FOREIGN KEY (`admin_id`) REFERENCES `admins`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `mcp_oauth_tokens` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `access_token_hash` VARCHAR(64) NOT NULL,
+  `refresh_token_hash` VARCHAR(64) DEFAULT NULL,
+  `client_id` VARCHAR(128) NOT NULL,
+  `client_name` VARCHAR(255) DEFAULT NULL,
+  `admin_id` INT UNSIGNED NOT NULL,
+  `scopes` VARCHAR(255) NOT NULL DEFAULT 'admin_ai.read',
+  `resource` VARCHAR(500) DEFAULT NULL,
+  `access_expires_at` DATETIME NOT NULL,
+  `refresh_expires_at` DATETIME DEFAULT NULL,
+  `revoked_at` DATETIME DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `last_used_at` DATETIME DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_mcp_oauth_tokens_access` (`access_token_hash`),
+  UNIQUE KEY `uk_mcp_oauth_tokens_refresh` (`refresh_token_hash`),
+  KEY `idx_mcp_oauth_tokens_admin` (`admin_id`),
+  KEY `idx_mcp_oauth_tokens_revoked` (`revoked_at`),
+  CONSTRAINT `fk_mcp_oauth_tokens_admin` FOREIGN KEY (`admin_id`) REFERENCES `admins`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- ============================================================================
 -- AUDIT LOGS
 -- ============================================================================
@@ -999,6 +1238,14 @@ INSERT INTO `system_settings` (`setting_key`,`setting_value`,`description`) VALU
   ('support_email','support@optimumcreditrepair.com','Public-facing support email')
 ON DUPLICATE KEY UPDATE `setting_value`=VALUES(`setting_value`);
 
+INSERT INTO `system_settings` (`setting_key`,`setting_value`,`description`) VALUES
+  ('voice_voicemail_enabled','1','Org default: enable voicemail on assigned OFG lines when admin has no override'),
+  ('voice_voicemail_greeting_text','Hello, you have reached Optimum Credit. We are unable to take your call right now. Please leave a message after the tone.','Default TTS voicemail greeting'),
+  ('voice_voicemail_max_seconds','120','Max voicemail recording seconds'),
+  ('voice_voicemail_transcribe','1','Request Twilio transcription for voicemails'),
+  ('funding_sms_from_phone_number_id','','admin_phone_numbers.id used as From for funding client confirmation SMS')
+ON DUPLICATE KEY UPDATE `description`=VALUES(`description`);
+
 -- ============================================================================
 -- SECTION LOCKS (toggle admin panel sections on/off from the database)
 -- ============================================================================
@@ -1022,6 +1269,7 @@ CREATE TABLE IF NOT EXISTS `section_locks` (
 INSERT INTO `section_locks` (`section_key`, `label`, `is_locked`, `lock_reason`) VALUES
   ('documents',       'Doc Review',      0, NULL),
   ('conversations',   'Conversations',   1, 'Coming soon — messaging system is under construction.'),
+  ('funding',         'Funding',         0, NULL),
   ('tickets',         'Support',         0, NULL),
   ('templates',       'Templates',       0, NULL),
   ('videos',          'Videos',          0, NULL),
@@ -1425,6 +1673,7 @@ INSERT INTO `labels` (`slug`, `name_en`, `name_es`, `layer`, `color`, `is_system
   ('realtor_broker', 'Realtor / Mortgage Broker', 'Agente inmobiliario / Broker hipotecario', 'source', 'accent', 1, 41),
   ('one_off_referral', 'One-off referral', 'Referido único', 'source', 'muted', 1, 42),
   ('affiliate_referral', 'Affiliate referral', 'Referido de afiliado', 'source', 'primary', 1, 50),
+  ('funding_convert', 'Converted from funding', 'Convertido desde funding', 'source', 'accent', 1, 55),
   ('housing', 'Housing / Mortgage', 'Vivienda / Hipoteca', 'analysis', 'primary', 1, 100),
   ('auto', 'Auto loan', 'Préstamo de auto', 'analysis', 'accent', 1, 110),
   ('credit_card', 'Credit card', 'Tarjeta de crédito', 'analysis', 'destructive', 1, 120),

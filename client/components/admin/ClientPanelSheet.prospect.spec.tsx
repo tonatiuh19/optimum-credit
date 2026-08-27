@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { Provider } from "react-redux";
 import { configureStore } from "@reduxjs/toolkit";
 import { renderWithProviders } from "@/test/renderWithProviders";
+import { MemoryRouter } from "react-router-dom";
 import { ClientPanelSheet } from "@/components/admin/ClientPanelSheet";
 import type { Prospect } from "@shared/api";
 
@@ -46,6 +47,8 @@ vi.mock("@/store/slices/adminTasksSlice", async (importOriginal) => {
 function renderProspectPanel(opts: {
   caseId?: number | null;
   onConvert?: (prospect: Prospect) => void;
+  clientStatus?: string;
+  conversationsEnabled?: boolean;
 }) {
   const onConvertProspect = vi.fn<(prospect: Prospect) => void>();
   if (opts.onConvert) onConvertProspect.mockImplementation(opts.onConvert);
@@ -58,7 +61,7 @@ function renderProspectPanel(opts: {
             first_name: "Pat",
             last_name: "Lead",
             email: "pat@example.test",
-            status: "prospect",
+            status: opts.clientStatus ?? "prospect",
             pipeline_stage: "prospect",
             created_at: "2026-01-01T00:00:00Z",
             preferred_language: "en",
@@ -88,20 +91,38 @@ function renderProspectPanel(opts: {
         saving: false,
       }),
       prospects: () => ({ labels: [] }),
+      adminAuth: () => ({
+        user: {
+          id: 1,
+          role: "admin",
+          ai_ask_enabled: false,
+          conversations_enabled: opts.conversationsEnabled ?? false,
+        },
+        token: "test",
+      }),
+      adminAi: () => ({
+        open: false,
+        context: null,
+        messages: [],
+        sending: false,
+        error: null,
+      }),
     },
   });
 
   renderWithProviders(
-    <Provider store={store}>
-      <ClientPanelSheet
-        open
-        caseId={opts.caseId ?? null}
-        clientId={99}
-        onClose={vi.fn()}
-        onCaseUpdated={vi.fn()}
-        onConvertProspect={onConvertProspect}
-      />
-    </Provider>,
+    <MemoryRouter>
+      <Provider store={store}>
+        <ClientPanelSheet
+          open
+          caseId={opts.caseId ?? null}
+          clientId={99}
+          onClose={vi.fn()}
+          onCaseUpdated={vi.fn()}
+          onConvertProspect={onConvertProspect}
+        />
+      </Provider>
+    </MemoryRouter>,
   );
   return { onConvertProspect };
 }
@@ -151,5 +172,28 @@ describe("ClientPanelSheet prospect empty state + convert CTA", () => {
     expect(onConvertProspect).toHaveBeenCalledWith(
       expect.objectContaining({ id: 99, case_id: 55 }),
     );
+  });
+
+  it("shows convert CTA for pending_payment leads still on prospect stage", async () => {
+    renderProspectPanel({ clientStatus: "pending_payment" });
+    expect(
+      await screen.findByTestId("panel-prospect-banner"),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("panel-prospect-convert")).toBeInTheDocument();
+  });
+
+  it("shows Message when staff has conversations enabled", async () => {
+    renderProspectPanel({ conversationsEnabled: true });
+    expect(
+      await screen.findByTestId("panel-start-conversation"),
+    ).toBeInTheDocument();
+  });
+
+  it("hides Message when staff has no OFG number", async () => {
+    renderProspectPanel({ conversationsEnabled: false });
+    await waitFor(() => {
+      expect(screen.getByTestId("panel-prospect-banner")).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("panel-start-conversation")).not.toBeInTheDocument();
   });
 });

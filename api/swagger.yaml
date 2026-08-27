@@ -29,6 +29,8 @@ tags:
     description: Public registration & Authorize.net payment flow
   - name: Credit Analysis
     description: Public credit-analysis lead capture & prospect conversion
+  - name: Funding
+    description: Business funding public wizard, admin board, and portal resume
   - name: Portal
     description: Client portal — documents, dashboard
   - name: Admin
@@ -140,6 +142,136 @@ paths:
           description: Updated document
         "400":
           description: Validation error
+        "404":
+          description: Not found
+
+  /admin/notify-recipients:
+    get:
+      tags: [Admin, Settings]
+      summary: List staff + extra notification recipients (super admin)
+      description: >
+        Active team staff (with Email / In-app / SMS prefs) plus extra email-only
+        recipients that need not be admin accounts.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Staff and extras
+        "401":
+          description: Unauthorized
+        "403":
+          description: Super admin required
+
+  /admin/admins/{id}/notification-prefs:
+    put:
+      tags: [Admin, Settings]
+      summary: Update a staff member's notification prefs (super admin)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                channel_masters:
+                  type: object
+                  description: Set all events for a channel on/off
+                  properties:
+                    email: { type: boolean }
+                    in_app: { type: boolean }
+                    sms: { type: boolean }
+                email: { type: object }
+                in_app: { type: object }
+                sms: { type: object }
+      responses:
+        "200":
+          description: Updated staff prefs
+        "404":
+          description: Not found
+
+  /admin/notify-extra-emails:
+    get:
+      tags: [Admin, Settings]
+      summary: List extra team notification emails (super admin)
+      description: >
+        Email-only recipients for team alerts and inbound SMS. Addresses need not
+        be admin accounts (e.g. support@ shared inbox).
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: List of extra emails
+        "401":
+          description: Unauthorized
+        "403":
+          description: Super admin required
+    post:
+      tags: [Admin, Settings]
+      summary: Add an extra notification email (super admin)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+                label: { type: string, nullable: true }
+      responses:
+        "200":
+          description: Created or reactivated
+        "400":
+          description: Invalid email
+
+  /admin/notify-extra-emails/{id}:
+    patch:
+      tags: [Admin, Settings]
+      summary: Update extra notification email (super admin)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email: { type: string, format: email }
+                label: { type: string, nullable: true }
+                is_active: { type: boolean }
+      responses:
+        "200":
+          description: Updated
+        "404":
+          description: Not found
+        "409":
+          description: Email already exists
+    delete:
+      tags: [Admin, Settings]
+      summary: Remove extra notification email (super admin)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Deleted
         "404":
           description: Not found
 
@@ -372,6 +504,391 @@ paths:
                   client_id: { type: integer }
         "400":
           description: Missing/invalid fields
+
+  /public/funding:
+    post:
+      tags: [Funding]
+      summary: Start a business funding application (public)
+      description: |
+        Creates a `funding_applications` row + links/creates a `clients` row with
+        `status=funding` (excluded from Credit Repair Prospect board). Duplicate
+        emails attach to the existing client. Returns `public_token` for resume.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [first_name, last_name, email, funding_type]
+              properties:
+                first_name: { type: string }
+                last_name: { type: string }
+                email: { type: string, format: email }
+                phone: { type: string }
+                funding_type:
+                  type: string
+                  enum: [credit_card_stacking, bank_statements]
+                preferred_language: { type: string, enum: [en, es] }
+      responses:
+        "201":
+          description: Application started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  application:
+                    $ref: "#/components/schemas/FundingApplication"
+        "400":
+          description: Validation error
+
+  /public/funding/{token}:
+    get:
+      tags: [Funding]
+      summary: Resume funding application by public token
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Application + docs checklist
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  application:
+                    $ref: "#/components/schemas/FundingApplication"
+        "404":
+          description: Not found
+    patch:
+      tags: [Funding]
+      summary: Update funding fields / encrypted SSN+EIN
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                phone: { type: string }
+                postal_code: { type: string }
+                state: { type: string }
+                llc_name: { type: string }
+                llc_address: { type: string }
+                preferred_language: { type: string, enum: [en, es] }
+                ssn: { type: string, description: Full SSN — stored encrypted }
+                ein: { type: string, description: EIN — stored encrypted }
+      responses:
+        "200":
+          description: Updated
+        "409":
+          description: Locked (converted/cancelled/complete)
+
+  /public/funding/{token}/documents:
+    post:
+      tags: [Funding]
+      summary: Upload a required funding document slot
+      description: |
+        Multipart `file` + `doc_type` one of funding_drivers_license,
+        funding_corp_statement, funding_bank_m1…m6. Fires `funding_doc_upload`
+        staff notify; when all 8 slots are present, emails+SMS the applicant
+        (language from application; SMS From = system_settings
+        `funding_sms_from_phone_number_id`).
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, doc_type]
+              properties:
+                file: { type: string, format: binary }
+                doc_type: { type: string }
+      responses:
+        "201":
+          description: Uploaded
+        "400":
+          description: Invalid slot / missing file
+        "409":
+          description: Locked (converted/cancelled/complete)
+
+  /public/funding/{token}/submit:
+    post:
+      tags: [Funding]
+      summary: Mark funding application submitted (requires all docs)
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Submitted
+        "400":
+          description: docs_incomplete
+        "409":
+          description: Locked (converted/cancelled/complete)
+
+  /admin/funding:
+    get:
+      tags: [Funding]
+      summary: List funding applications (admin board)
+      description: |
+        Paginated Kanban board — first page per status column (limit default 20).
+        Pass `column` + `offset` to load more within one column. Requires super_admin or admin role.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: search
+          in: query
+          schema: { type: string }
+          description: Name, email, phone, LLC, or application id
+        - name: q
+          in: query
+          schema: { type: string }
+          description: Alias for search (legacy)
+        - name: funding_type
+          in: query
+          schema:
+            type: string
+            enum: [credit_card_stacking, bank_statements]
+        - name: language
+          in: query
+          schema:
+            type: string
+            enum: [en, es]
+        - name: status
+          in: query
+          schema: { type: string }
+          description: Optional single-status filter (legacy)
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20, maximum: 50 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+        - name: column
+          in: query
+          schema:
+            type: string
+            enum: [awaiting_docs, submitted, under_review, complete, converted]
+          description: When set with offset, returns load-more payload for that column only
+      responses:
+        "200":
+          description: Board (all columns) or single-column page when column is set
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    properties:
+                      limit: { type: integer }
+                      applications:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/FundingApplication"
+                      columns:
+                        type: object
+                        additionalProperties:
+                          type: object
+                          properties:
+                            items:
+                              type: array
+                              items:
+                                $ref: "#/components/schemas/FundingApplication"
+                            total: { type: integer }
+                            offset: { type: integer }
+                            limit: { type: integer }
+                            has_more: { type: boolean }
+                  - type: object
+                    properties:
+                      column: { type: string }
+                      items:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/FundingApplication"
+                      total: { type: integer }
+                      offset: { type: integer }
+                      limit: { type: integer }
+                      has_more: { type: boolean }
+        "403":
+          description: Forbidden — admin or super_admin required
+    post:
+      tags: [Funding]
+      summary: Create funding application manually (admin)
+      description: |
+        Adds a row to the funding board — e.g. phone intake or GHL lead.
+        Fires `funding_application_created` (team email/in-app/SMS per prefs + extra emails)
+        and emails the applicant a link to `/funding?token=…` to upload documents.
+        Requires super_admin or admin role.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [first_name, last_name, email, funding_type]
+              properties:
+                first_name: { type: string }
+                last_name: { type: string }
+                email: { type: string, format: email }
+                phone: { type: string }
+                funding_type:
+                  type: string
+                  enum: [credit_card_stacking, bank_statements]
+                preferred_language:
+                  type: string
+                  enum: [en, es]
+                status:
+                  type: string
+                  enum: [awaiting_docs, submitted, under_review, complete]
+                  default: awaiting_docs
+                postal_code: { type: string }
+                state: { type: string }
+                llc_name: { type: string }
+                llc_address: { type: string }
+                client_id:
+                  type: integer
+                  description: Optional existing client to link and prefill
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  application:
+                    $ref: "#/components/schemas/FundingApplication"
+        "400":
+          description: Validation error
+        "403":
+          description: Forbidden — admin or super_admin required
+        "404":
+          description: client_id not found
+
+  /admin/funding/{id}:
+    get:
+      tags: [Funding]
+      summary: Funding application detail + documents
+      description: Requires super_admin or admin role (agents receive 403).
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  application:
+                    $ref: "#/components/schemas/FundingApplication"
+        "403":
+          description: Forbidden — admin or super_admin required
+
+  /admin/funding/{id}/status:
+    post:
+      tags: [Funding]
+      summary: Update funding application status
+      description: Requires super_admin or admin role (agents receive 403).
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [awaiting_docs, submitted, under_review, complete, cancelled]
+      responses:
+        "200":
+          description: Updated
+        "403":
+          description: Forbidden — admin or super_admin required
+
+  /admin/funding/{id}/convert:
+    post:
+      tags: [Funding]
+      summary: Convert funding lead → Credit Repair prospect
+      description: Sets client status/pipeline to prospect; marks application converted. Requires super_admin or admin role.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Converted
+        "403":
+          description: Forbidden — admin or super_admin required
+        "409":
+          description: Already converted
+
+  /portal/funding:
+    get:
+      tags: [Funding]
+      summary: Client portal — my funding applications
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Applications for the logged-in client
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  applications:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/FundingApplication"
+
+  /portal/funding/{id}/documents:
+    post:
+      tags: [Funding]
+      summary: Client portal — upload remaining funding doc
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, doc_type]
+              properties:
+                file: { type: string, format: binary }
+                doc_type: { type: string }
+      responses:
+        "201":
+          description: Uploaded
 
   /public/affiliates/{slug}:
     get:
@@ -1102,38 +1619,293 @@ paths:
       description: |
         Validates `X-Twilio-Signature` when `TWILIO_AUTH_TOKEN` is set.
         Production refuses unsigned requests if the token is missing.
+        Signature check tries multiple public URL candidates (`PUBLIC_APP_URL`,
+        `X-Forwarded-*`, www/apex ofgllc.com) so proxy host mismatches do not
+        cause Twilio error 11200.
+        Resolves the To address against `admin_phone_numbers`, matches From to a
+        client (else unknown queue), opens/reopens the channel thread, stores the
+        message idempotently by MessageSid, and publishes Ably when configured.
       responses:
         "200":
           description: TwiML / accepted
-        "401":
+        "403":
+          description: Invalid signature
+        "503":
+          description: Twilio not configured (production)
+
+  /webhooks/twilio/sms-status:
+    post:
+      tags: [CRC]
+      summary: Twilio SMS/MMS status callback
+      description: |
+        Same signature rules as `/webhooks/twilio/sms`. Updates
+        `conversation_messages.provider_status` (and `error_message` on
+        failed/undelivered) by MessageSid. Ignores regressive statuses
+        (e.g. delivered → queued). Unknown MessageSid returns 200 (race
+        before INSERT). Set as `statusCallback` on outbound Twilio sends
+        (public base from `OPTIMUM_API_BASE_URL` / `PUBLIC_APP_URL`).
+      responses:
+        "200":
+          description: Accepted
+        "403":
           description: Invalid signature
         "503":
           description: Twilio not configured (production)
 
   /webhooks/twilio/voice:
     post:
-      tags: [CRC]
-      summary: Twilio inbound voice webhook
-      description: Same signature rules as `/webhooks/twilio/sms`.
+      tags: [Conversations]
+      summary: Twilio inbound voice webhook (alias of /voice/incoming)
+      description: |
+        Signature-validated Twilio Voice webhook. Rings only the admin assigned
+        to the dialled OFG number (`admin_{id}` client identity) plus optional
+        call-forwarding with call-screen. Same rules as `/webhooks/twilio/sms`.
       responses:
         "200":
-          description: TwiML / accepted
-        "401":
+          description: TwiML response
+        "403":
           description: Invalid signature
+        "503":
+          description: Twilio not configured (production)
+
+  /voice/token:
+    post:
+      tags: [Conversations]
+      summary: Twilio Voice SDK access token
+      description: Requires admin auth + assigned OFG number. Identity `admin_{id}`.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: JWT access token for Voice SDK
+        "403":
+          description: conversations_number_required
+        "503":
+          description: Twilio / TwiML App unavailable
+
+  /voice/twiml:
+    post:
+      tags: [Conversations]
+      summary: Outbound TwiML dial (Twilio → app)
+      description: Twilio webhook; dials `To` with callerId from admin's assigned OFG e164.
+      responses:
+        "200":
+          description: TwiML
+
+  /voice/availability:
+    post:
+      tags: [Conversations]
+      summary: Set softphone available / unavailable
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Updated
+
+  /voice/call-forwarding:
+    get:
+      tags: [Conversations]
+      summary: Get call-forwarding settings
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: call_forwarding_enabled + phone
+    put:
+      tags: [Conversations]
+      summary: Update call-forwarding settings
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Updated
+
+  /voice/voicemail-settings:
+    get:
+      tags: [Conversations]
+      summary: Admin voicemail overrides + org defaults
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: admin + tenant voicemail settings
+    put:
+      tags: [Conversations]
+      summary: Update admin voicemail overrides
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Updated
+
+  /voice/voicemail-settings/tenant:
+    put:
+      tags: [Conversations]
+      summary: Update org voicemail defaults (super_admin/admin)
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Updated
+        "403":
+          description: Admin access required
+
+  /voice/log:
+    post:
+      tags: [Conversations]
+      summary: Persist call to conversation_messages (channel=call)
+      description: Idempotent on provider_message_id (Twilio CallSid).
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Logged
+
+  /voice/call-answered:
+    post:
+      tags: [Conversations]
+      summary: Broadcast Ably call-answered (dismiss other softphones)
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Published
+
+  /voice/recording-check/{callSid}:
+    get:
+      tags: [Conversations]
+      summary: Poll whether call recording URL is ready
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: callSid
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: ready=true with recording_url
+        "202":
+          description: Still processing
+        "404":
+          description: Call not found
+
+  /voice/recording/{callSid}:
+    get:
+      tags: [Conversations]
+      summary: Proxy Twilio recording MP3 (Bearer or ?token=)
+      parameters:
+        - in: path
+          name: callSid
+          required: true
+          schema: { type: string }
+        - in: query
+          name: token
+          schema: { type: string }
+      responses:
+        "200":
+          description: audio/mpeg stream
+        "401":
+          description: Unauthorized
+        "404":
+          description: Recording not found
+
+  /voice/recording-status:
+    post:
+      tags: [Conversations]
+      summary: Twilio recordingStatusCallback for live calls
+      responses:
+        "204":
+          description: Accepted
+
+  /voice/dial-status:
+    post:
+      tags: [Conversations]
+      summary: Twilio Dial action — answered dismiss / unanswered → voicemail + missed_call notify
+      responses:
+        "200":
+          description: TwiML
+
+  /voice/voicemail-complete:
+    post:
+      tags: [Conversations]
+      summary: TwiML goodbye after voicemail Record
+      responses:
+        "200":
+          description: TwiML
+
+  /voice/voicemail-recording:
+    post:
+      tags: [Conversations]
+      summary: Persist voicemail + notify assigned admin (event_key=voicemail)
+      responses:
+        "204":
+          description: Accepted
+
+  /voice/voicemail-transcription:
+    post:
+      tags: [Conversations]
+      summary: Patch voicemail transcription metadata
+      responses:
+        "204":
+          description: Accepted
+
+  /voice/call-screen:
+    post:
+      tags: [Conversations]
+      summary: Call-forwarding keypress gate (avoid carrier VM)
+      responses:
+        "200":
+          description: TwiML Gather
+
+  /voice/call-screen-accept:
+    post:
+      tags: [Conversations]
+      summary: Bridge after call-screen keypress
+      responses:
+        "200":
+          description: Empty TwiML
+
+  /voice/fix-call-setup:
+    post:
+      tags: [Conversations]
+      summary: Re-verify TwiML App + sync OFG number voice/SMS webhooks
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: "{ success, twimlAppSid, voiceUrl, incomingUrl, numbers[] }"
+        "503":
+          description: Twilio not configured
+
+  /voice/incoming:
+    post:
+      tags: [Conversations]
+      summary: Inbound voice TwiML (same as /webhooks/twilio/voice)
+      responses:
+        "200":
+          description: TwiML
+
+  /admin/conversations/lookup-contact:
+    get:
+      tags: [Conversations]
+      summary: Resolve client by phone for dialpad / inbound UI
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: phone
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: found + client_id / client_name
 
   /cron/process-queue:
-    post:
+    get:
       tags: [Admin]
-      summary: Process pending notification_queue rows
+      summary: Process pending notification_queue rows (Vercel Cron)
       description: |
-        Protected by `X-Cron-Secret` (must match `CRON_SECRET`). Claims a batch
-        atomically (`pending` → `processing`). Emails are sent via Resend; SMS /
-        in_app / push channels are marked `failed` until those deliverers are wired
-        (never fake-marked `sent`).
+        Same as POST. Vercel Cron invokes GET with `Authorization: Bearer CRON_SECRET`
+        every 5 minutes (`vercel.json`). Cancels stale pending (>14d), reclaims stuck
+        claim tags (>15m), claim-tag sends via Resend, and deletes expired `mms_media`.
       parameters:
         - in: header
+          name: Authorization
+          required: false
+          schema: { type: string }
+          description: Bearer CRON_SECRET (Vercel Cron)
+        - in: header
           name: X-Cron-Secret
-          required: true
+          required: false
           schema: { type: string }
       responses:
         "200":
@@ -1147,8 +1919,54 @@ paths:
                   processed: { type: integer }
                   sent: { type: integer }
                   failed: { type: integer }
+                  stale_cancelled: { type: integer }
+                  stuck_reclaimed: { type: integer }
+                  work_due_notified: { type: integer }
+                  mms_expired_deleted: { type: integer }
         "401":
           description: Unauthorized
+        "500":
+          description: Processing failure
+    post:
+      tags: [Admin]
+      summary: Process pending notification_queue rows
+      description: |
+        Protected by `X-Cron-Secret` or `Authorization: Bearer CRON_SECRET`
+        (must match `CRON_SECRET`). Cancels pending rows scheduled more than
+        14 days ago, reclaims stuck `processing` claims older than 15 minutes,
+        then claims a batch with a unique tag (overlap-safe) and sends emails
+        via Resend. SMS / in_app / push channels are marked `failed` until
+        those deliverers are wired (never fake-marked `sent`). Also deletes
+        expired `mms_media` rows (up to 200 per run).
+      parameters:
+        - in: header
+          name: X-Cron-Secret
+          required: false
+          schema: { type: string }
+        - in: header
+          name: Authorization
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Batch processed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  processed: { type: integer }
+                  sent: { type: integer }
+                  failed: { type: integer }
+                  stale_cancelled: { type: integer }
+                  stuck_reclaimed: { type: integer }
+                  work_due_notified: { type: integer }
+                  mms_expired_deleted: { type: integer }
+        "401":
+          description: Unauthorized
+        "500":
+          description: Processing failure
 
   /admin/dashboard:
     get:
@@ -1168,10 +1986,30 @@ paths:
     get:
       tags: [Admin]
       summary: List admin Work Hub tasks (Kanban)
+      description: |
+        Server-side search (`q`) and per-column pagination.
+        Without `status`: returns first page of backlog/doing/done in `columns`
+        (also a flat `tasks` array for compatibility).
+        With `status` + `offset`: returns one column page for load-more.
       security: [{ BearerAuth: [] }]
+      parameters:
+        - in: query
+          name: q
+          schema: { type: string }
+          description: Search title, description, case, client, assignee, labels
+        - in: query
+          name: limit
+          schema: { type: integer, default: 20, maximum: 50 }
+        - in: query
+          name: status
+          schema: { type: string, enum: [backlog, doing, done] }
+          description: When set, returns a single-column page
+        - in: query
+          name: offset
+          schema: { type: integer, default: 0 }
       responses:
         "200":
-          description: Task list for Backlog / Doing / Done (includes optional case link fields)
+          description: Board columns or a single column page
     post:
       tags: [Admin]
       summary: Create an Optimum work task
@@ -1518,12 +2356,293 @@ paths:
         "429":
           description: Too many attempts — rate limited
 
+  /admin/ai/status:
+    get:
+      tags: [Admin]
+      summary: Admin AI Ask feature status
+      description: |
+        Gated by `ADMIN_AI_ENABLED` (off by default). UI visibility also requires
+        role `super_admin` or `admin`. `configured` reflects whether
+        `ANTHROPIC_API_KEY` is set (billing is on the Anthropic account).
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled: { type: boolean }
+                  role_allowed: { type: boolean }
+                  configured: { type: boolean }
+        "403":
+          description: Affiliate role denied
+
+  /admin/ai/chat:
+    post:
+      tags: [Admin]
+      summary: Admin AI Ask chat turn
+      description: |
+        Requires `ADMIN_AI_ENABLED=1` and role `super_admin` or `admin`.
+        Uses Anthropic Messages with curated tools (read + guided writes):
+        `search_clients`, `search_referrers`, `get_case`, `pipeline_summary`, `list_progress_reports`,
+        `get_progress_report`, `search_work_tasks`, `get_client`,
+        `list_case_documents`, `list_payments`, `list_installments`,
+        `list_clients_owing`, `list_round_schedule`, plus write tools
+        `create_prospect`, `create_work_task`, `add_case_note`, `upload_case_document`, `send_email`,
+        `send_sms`, `send_text`, `list_sms`, `get_texts`, `get_conversation`, `list_ofg_phone_numbers`,
+        `update_pipeline_stage`, `preview_convert_prospect`, `convert_prospect`
+        (unconverted leads without an enrolled case), `update_client_status`
+        (MCP blocks pending_payment/onboarding/active until enrolled),
+        `upsert_progress_report`, `upsert_payment_splits`, `update_payment_split`
+        (dry-run then confirm=true; `create_work_task` is OFG-only unless
+        `push_hubspot=true`; `send_email` emails a client or a referrer
+        (realtor/LO) + logs a note; `send_sms`/`send_text` texts via Twilio OFG number into
+        Conversations + case note and returns message/SID/status for HubSpot; inbound SMS
+        auto-logs to the client file; `list_ofg_phone_numbers` lists active OFG numbers).
+        Audits every turn to `admin_ai_audit_logs`. `admin` role is rate-limited (~30/hour);
+        `super_admin` is not. Tool loop is capped (4 rounds / ~50s wall) to
+        fit the API `maxDuration` (60s).
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [messages]
+              properties:
+                messages:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      role: { type: string, enum: [user, assistant] }
+                      content: { type: string }
+                context:
+                  type: object
+                  properties:
+                    case_id: { type: integer, nullable: true }
+                    case_number: { type: string, nullable: true }
+                    client_id: { type: integer, nullable: true }
+      responses:
+        "200":
+          description: Assistant reply
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reply: { type: string }
+                  citations:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        type: { type: string }
+                        href: { type: string }
+                        label: { type: string }
+                  tools_used:
+                    type: array
+                    items: { type: string }
+                  model: { type: string }
+                  usage:
+                    type: object
+                    properties:
+                      input_tokens: { type: integer }
+                      output_tokens: { type: integer }
+        "400":
+          description: Invalid messages
+        "403":
+          description: Role not allowed / affiliate denied
+        "404":
+          description: Feature flag off
+        "429":
+          description: Rate limited (admin role)
+        "502":
+          description: AI provider error (`ai_provider_error`)
+        "503":
+          description: |
+            Ask unavailable — `ai_not_provisioned` (missing key), `ai_billing`
+            (Anthropic credits), or `ai_model_config` (retired/invalid model ID)
+
+  /admin/ai/tools:
+    get:
+      tags: [Admin]
+      summary: List Admin AI curated tools (MCP)
+      description: |
+        Same feature gate as Ask chat. Auth: admin session Bearer **or**
+        `ADMIN_AI_MCP_TOKEN` (scoped to `ADMIN_AI_MCP_ADMIN_ID`).
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Tool definitions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tools:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name: { type: string }
+                        description: { type: string }
+                        input_schema: { type: object }
+        "403":
+          description: Role not allowed / affiliate denied
+        "404":
+          description: Feature flag off
+
+  /admin/ai/tools/{name}:
+    post:
+      tags: [Admin]
+      summary: Execute one Admin AI curated tool (MCP)
+      description: |
+        Runs `executeAdminAiTool` for a named allowlisted tool. Audits to
+        `admin_ai_audit_logs` with question prefix `[mcp/tool]`. Rate-limited
+        for non–super_admin (~120/hour).
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+            enum:
+              - search_clients
+              - search_referrers
+              - get_case
+              - pipeline_summary
+              - list_progress_reports
+              - get_progress_report
+              - search_work_tasks
+              - get_client
+              - list_case_documents
+              - list_payments
+              - list_installments
+              - list_clients_owing
+              - list_round_schedule
+              - create_prospect
+              - create_work_task
+              - add_case_note
+              - upload_case_document
+              - send_email
+              - send_sms
+              - send_text
+              - list_sms
+              - get_texts
+              - get_conversation
+              - list_ofg_phone_numbers
+              - update_pipeline_stage
+              - preview_convert_prospect
+              - convert_prospect
+              - update_client_status
+              - upsert_progress_report
+              - upsert_payment_splits
+              - update_payment_split
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Tool result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  tool: { type: string }
+                  data: {}
+        "400":
+          description: Tool arg / execution error
+        "403":
+          description: Role not allowed / affiliate denied
+        "404":
+          description: Feature off or unknown tool
+        "429":
+          description: Rate limited
+
+  /mcp:
+    post:
+      tags: [Admin]
+      summary: Remote MCP (Streamable HTTP)
+      description: |
+        OAuth 2.1 + PKCE bearer (or legacy `ADMIN_AI_MCP_TOKEN`). Same curated
+        tools as Admin Ask. Discovery via `/.well-known/oauth-protected-resource`
+        and `/.well-known/oauth-authorization-server/api/mcp`. Consent at
+        `/admin/mcp-consent`. DCR redirect URIs limited to known Claude/Cursor
+        callbacks, loopback, or `cursor:` scheme. Tool calls are audited and
+        rate-limited like `/admin/ai/tools/{name}`.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: JSON-RPC MCP response
+        "401":
+          description: Missing/invalid MCP OAuth token
+        "403":
+          description: Role not allowed
+        "404":
+          description: ADMIN_AI_ENABLED off
+
+  /admin/me/mcp-connections:
+    get:
+      tags: [Admin]
+      summary: List my MCP OAuth connections
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Active connections
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  connections:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer }
+                        client_id: { type: string }
+                        client_name: { type: string }
+                        scopes: { type: string }
+                        created_at: { type: string }
+                        last_used_at: { type: string, nullable: true }
+                        access_expires_at: { type: string }
+                        refresh_expires_at: { type: string, nullable: true }
+        "403":
+          description: Affiliate denied
+  /admin/me/mcp-connections/{id}:
+    delete:
+      tags: [Admin]
+      summary: Revoke an MCP OAuth connection
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Revoked
+        "404":
+          description: Not found
+
   /admin/me/notification-prefs:
     get:
       tags: [Admin]
       summary: Get my notification preferences
       description: |
-        Per-admin mute toggles for operational alerts (email / in-app / SMS).
+        Per-admin mute toggles for operational alerts (email / in-app / SMS),
+        including `inbound_sms` for the profile bell when clients text your OFG line.
         Null stored prefs mean all ON. SMS channel is unavailable until Twilio
         env keys are configured. OTP / welcome emails are never included.
       security: [{ bearerAuth: [] }]
@@ -1551,6 +2670,20 @@ paths:
           description: Updated prefs
         "403":
           description: Affiliate role denied
+
+  /admin/me/ably-token:
+    get:
+      tags: [Admin]
+      summary: Ably token for admin realtime (bell + Conversations when enabled)
+      description: |
+        Issues a TokenRequest with subscribe on `admin:{id}:notifications`.
+        Adds `admin:{id}:conversations` when the admin has an assigned OFG number.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: tokenRequest
+        "503":
+          description: ABLY_API_KEY not configured
 
   /admin/me/notifications:
     get:
@@ -1584,12 +2717,523 @@ paths:
         "200":
           description: ok + unread_count
 
+  /admin/conversations/access:
+    get:
+      tags: [Admin]
+      summary: Conversations access for current admin
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: enabled + assigned numbers
+
+  /admin/conversations/badge:
+    get:
+      tags: [Admin]
+      summary: Unread SMS count for sidebar nav badge
+      description: Sum of unread client + unknown threads assigned to you or on your OFG numbers.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: unread_total
+        "403":
+          description: No assigned OFG number
+
+  /admin/conversations/ably-token:
+    get:
+      tags: [Admin]
+      summary: Ably token request for Conversations realtime (alias)
+      description: Same as GET /admin/me/ably-token when Conversations access is enabled.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: tokenRequest
+        "403":
+          description: No assigned OFG number
+        "503":
+          description: ABLY_API_KEY not configured
+
+  /admin/phone-numbers:
+    get:
+      tags: [Admin]
+      summary: List OFG Twilio inventory numbers
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: numbers[]
+
+  /admin/phone-numbers/{id}:
+    patch:
+      tags: [Admin]
+      summary: Assign or unassign an OFG number (admin/super_admin)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                assigned_admin_id: { type: integer, nullable: true }
+      responses:
+        "200":
+          description: Updated number
+        "403":
+          description: Forbidden
+
+  /admin/conversations:
+    get:
+      tags: [Admin]
+      summary: Contact-hub inbox (clients + unknown)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: view
+          schema:
+            type: string
+            enum: [all, mine, unassigned, open, closed, unread, unknown]
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 100 }
+      responses:
+        "200":
+          description: Paginated contact hub inbox
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  contacts:
+                    type: array
+                    items:
+                      type: object
+                  pagination:
+                    type: object
+                    properties:
+                      page: { type: integer }
+                      limit: { type: integer }
+                      total: { type: integer }
+                      totalPages: { type: integer }
+        "403":
+          description: conversations_number_required
+
+  /admin/conversations/contact/{kind}/{id}/timeline:
+    get:
+      tags: [Admin]
+      summary: Unified timeline for a client or unknown contact
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: kind
+          required: true
+          schema: { type: string, enum: [client, unknown] }
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: contact + messages (+ threads for clients)
+        "403":
+          description: conversations_number_required
+
+  /admin/conversations/send:
+    post:
+      tags: [Admin]
+      summary: Send SMS/MMS or internal note on a client or unknown contact
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                client_id: { type: integer }
+                unknown_contact_id:
+                  type: integer
+                  description: Open unknown contact (SMS only; one of client_id or unknown_contact_id)
+                channel: { type: string, enum: [sms, internal] }
+                body: { type: string, description: Text body; optional when media_url is set for SMS/MMS }
+                is_internal_note: { type: boolean }
+                ofg_number_id: { type: integer }
+                media_url:
+                  type: string
+                  description: Public MMS URL from POST /admin/conversations/media/upload
+                media_content_type: { type: string }
+      responses:
+        "200":
+          description: Send result
+        "403":
+          description: conversations_number_required
+        "409":
+          description: conversation_closed — reopen before sending
+
+  /admin/conversations/start:
+    post:
+      tags: [Admin]
+      summary: Cold outbound SMS to a phone number (client or unknown thread)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, body]
+              properties:
+                phone: { type: string }
+                body: { type: string }
+                ofg_number_id: { type: integer }
+                media_url: { type: string }
+                media_content_type: { type: string }
+      responses:
+        "200":
+          description: "{ kind client|unknown, client_id?, unknown_contact_id?, ... }"
+        "409":
+          description: conversation_closed — reopen before sending
+
+  /admin/conversations/suggest-replies:
+    post:
+      tags: [Admin]
+      summary: AI reply suggestions for an open conversation thread
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                kind: { type: string, enum: [client, unknown] }
+                contact_id: { type: integer }
+                recent_messages: { type: array }
+                include_ai: { type: boolean }
+      responses:
+        "200":
+          description: "{ ai_suggestions: [{ id, label, body }] }"
+
+  /admin/conversations/media/upload:
+    post:
+      tags: [Admin]
+      summary: Upload MMS media (stored for Twilio-fetchable public URL; optional DisruptingLabs archival)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          description: "{ success, url, content_type, filename, cdn_url? }"
+        "400":
+          description: Unsupported type or file larger than 4MB
+        "403":
+          description: conversations_number_required
+
+  /conversations/media/public/{id}:
+    get:
+      tags: [Public]
+      summary: Serve MMS media bytes for Twilio (and timeline previews)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Binary media with Content-Type
+        "404":
+          description: Not found or expired
+
+  /conversations/media:
+    get:
+      tags: [Admin]
+      summary: Proxy Twilio/CDN MMS for timeline img/video tags
+      description: |
+        Same pattern as real-state `/api/sms/media`. `<img src>` cannot send
+        `Authorization`, so the admin session JWT is passed as `?token=` and
+        the server fetches Twilio media with Basic auth (or streams allowed CDN URLs).
+      parameters:
+        - in: query
+          name: url
+          required: true
+          schema: { type: string, format: uri }
+        - in: query
+          name: token
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Binary media
+        "400":
+          description: Missing/invalid url (only api.twilio.com / disruptinglabs.com)
+        "401":
+          description: Missing or invalid token
+        "503":
+          description: Twilio not configured
+
+  /admin/conversations/contact/client/{id}/assign:
+    post:
+      tags: [Admin]
+      summary: Assign open client conversation threads
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                assigned_admin_id: { type: integer, nullable: true }
+      responses:
+        "200":
+          description: ok
+
+  /admin/conversations/contact/client/{id}/status:
+    post:
+      tags: [Admin]
+      summary: Set status for all threads of a client contact (close/reopen inserts a system timeline event)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [open, snoozed, closed, archived] }
+      responses:
+        "200":
+          description: "{ ok, status, system_message?, contact? }"
+
+  /admin/conversations/unknown/{id}/status:
+    post:
+      tags: [Admin]
+      summary: Close or reopen unknown-contact SMS threads (does not dismiss the unknown lead)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [open, closed] }
+      responses:
+        "200":
+          description: "{ ok, status, system_message?, contact? }"
+        "404":
+          description: Not found or not accessible
+
+  /admin/conversations/unknown/{id}/link:
+    post:
+      tags: [Admin]
+      summary: Link unknown contact to an existing client
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [client_id]
+              properties:
+                client_id: { type: integer }
+      responses:
+        "200":
+          description: ok + client_id
+
+  /admin/conversations/unknown/{id}/create-prospect:
+    post:
+      tags: [Admin]
+      summary: Create prospect from unknown contact and link threads
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                first_name: { type: string }
+                last_name: { type: string }
+                email: { type: string }
+                preferred_language: { type: string, enum: [en, es] }
+                create_case: { type: boolean }
+                confirm_duplicate: { type: boolean }
+      responses:
+        "200":
+          description: "{ ok, client_id, case_id?, preferred_language }"
+        "409":
+          description: duplicate_phone when confirm_duplicate not set
+          description: ok + client_id
+
+  /admin/conversations/unknown/{id}/dismiss:
+    post:
+      tags: [Admin]
+      summary: Dismiss unknown contact
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: ok
+
+  /admin/conversations/{id}/messages:
+    get:
+      tags: [Admin]
+      summary: Legacy per-thread messages (prefer contact timeline)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: messages[]
+
+  /admin/conversation-templates:
+    get:
+      tags: [Admin]
+      summary: List Conversations hub reply templates
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: channel
+          schema: { type: string, enum: [sms, internal] }
+        - in: query
+          name: all
+          schema: { type: string, enum: ["1"] }
+          description: Include inactive when all=1
+      responses:
+        "200":
+          description: templates[]
+    post:
+      tags: [Admin]
+      summary: Create conversation template (admin/super_admin)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, body]
+              properties:
+                name: { type: string }
+                channel: { type: string, enum: [sms, internal] }
+                body: { type: string }
+                variables: { type: array, items: { type: string } }
+      responses:
+        "201":
+          description: Created template
+
+  /admin/conversation-templates/{id}:
+    patch:
+      tags: [Admin]
+      summary: Update conversation template
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Updated template
+    delete:
+      tags: [Admin]
+      summary: Delete conversation template
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: ok
+
+  /auth/admin/otp-options:
+    post:
+      tags: [Auth]
+      summary: Available admin OTP delivery channels
+      description: |
+        Returns whether email and/or SMS OTP are available for the given staff email.
+        SMS requires an active personal phone on the admin profile, an assigned OFG
+        number in `admin_phone_numbers`, and Twilio account credentials.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        "200":
+          description: Channel availability
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  email: { type: boolean }
+                  sms: { type: boolean }
+
   /auth/admin/request-otp:
     post:
       tags: [Auth]
       summary: Request a one-time login code (admin/staff)
       description: |
         Sends a login OTP when an active staff account exists for the email.
+        Optional `channel` is `email` (default) or `sms`.
         Returns `404 ACCOUNT_NOT_FOUND` when no admin matches, or
         `403 ACCOUNT_INACTIVE` when the account exists but is not active,
         so the UI can show a clear message. Rate-limited per IP+email.
@@ -1602,6 +3246,7 @@ paths:
               required: [email]
               properties:
                 email: { type: string, format: email }
+                channel: { type: string, enum: [email, sms] }
       responses:
         "200":
           description: Code sent
@@ -1611,7 +3256,10 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
+                  channel: { type: string, enum: [email, sms] }
                   message: { type: string }
+        "400":
+          description: SMS requested but unavailable (`sms_otp_unavailable`)
         "403":
           description: Staff account exists but is not active (`code: ACCOUNT_INACTIVE`)
         "404":
@@ -2138,6 +3786,80 @@ paths:
         "200":
           description: File bytes
 
+  /admin/documents:
+    get:
+      tags: [Admin]
+      summary: List uploaded client task documents (paginated)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [all, pending, approved, rejected]
+        - in: query
+          name: doc_type
+          schema:
+            type: string
+          description: Onboarding task slug filter (e.g. id_front, ssn_card)
+        - in: query
+          name: search
+          schema:
+            type: string
+          description: Client name, email, or filename search
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+        - in: query
+          name: sort_by
+          schema:
+            type: string
+            enum: [uploaded_at, file_name, first_name, review_status, doc_type]
+        - in: query
+          name: sort_dir
+          schema:
+            type: string
+            enum: [ASC, DESC]
+      responses:
+        "200":
+          description: Paginated document archive rows with per-status counts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  documents:
+                    type: array
+                    items:
+                      type: object
+                  pagination:
+                    type: object
+                    properties:
+                      page:
+                        type: integer
+                      limit:
+                        type: integer
+                      total:
+                        type: integer
+                      totalPages:
+                        type: integer
+                  status_counts:
+                    type: object
+                    properties:
+                      all: { type: integer }
+                      pending: { type: integer }
+                      approved: { type: integer }
+                      rejected: { type: integer }
+
   /admin/documents/{id}/file:
     get:
       tags: [Admin]
@@ -2226,28 +3948,88 @@ paths:
         "404":
           description: Document not found
 
+  /admin/tickets:
+    get:
+      tags: [Admin]
+      summary: List support tickets (paginated)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [open, in_progress, waiting_client, resolved, closed]
+        - in: query
+          name: search
+          schema:
+            type: string
+          description: Subject or client name/email search
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+      responses:
+        "200":
+          description: Paginated support tickets
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tickets:
+                    type: array
+                    items:
+                      type: object
+                  pagination:
+                    type: object
+                    properties:
+                      page:
+                        type: integer
+                      limit:
+                        type: integer
+                      total:
+                        type: integer
+                      totalPages:
+                        type: integer
+
   /admin/pipeline:
     get:
       tags: [Admin]
-      summary: Get credit repair cases + prospects for the pipeline Kanban (server-side filters)
+      summary: Get credit repair cases + prospects for the pipeline Kanban (server-side filters + column pagination)
       description: |
-        Cases and prospects on the Kanban board. Prospect cards are clients
-        with `status=prospect` and may include `case_id` / `case_number` when a
-        Prospect-stage case already exists (New Case → Prospect). Cases with
-        `pipeline_stage=prospect` are excluded from `cases` (shown via the
-        Prospect column). Convert prospect → new_client via
-        `/admin/prospects/{id}/convert`.
+        Cases and prospects on the Kanban board. Prospect cards are unconverted
+        leads (`status=prospect` OR `pipeline_stage=prospect`, not cancelled,
+        with no enrolled active non-prospect case) and may include `case_id` /
+        `case_number` when a Prospect-stage case already exists (New Case →
+        Prospect). Cases with `pipeline_stage=prospect` are excluded from
+        `cases` (shown via the Prospect column). Convert prospect → new_client
+        via `/admin/prospects/{id}/convert`. Search matches name, email, phone
+        (including digit-stripped), case number, and numeric client id.
 
         Filters apply server-side so column counts stay accurate. Case-only
         filters (package, case status, tasks, info requests, non-prospect stage)
         hide the prospect column results.
+
+        Without `column`: returns the first page of each column in `columns`
+        (default `limit=20`, max 50), plus flat `cases`/`prospects` for the
+        loaded pages. With `column` + `offset`: returns a single-column page
+        for load-more (`column` is `prospect` or a case stage). Do not confuse
+        filter `stage` with load-more `column`.
       security:
         - BearerAuth: []
       parameters:
         - in: query
           name: search
           schema: { type: string }
-          description: Name, email, phone, or case number
+          description: Name, email, phone (digit-stripped), case number, or client id
         - in: query
           name: language
           schema: { type: string, enum: [en, es] }
@@ -2278,7 +4060,7 @@ paths:
         - in: query
           name: stage
           schema: { type: string }
-          description: Pipeline stage or "prospect"
+          description: Filter board to this pipeline stage or "prospect"
         - in: query
           name: payment_badge
           schema: { type: string, enum: [paid, unpaid] }
@@ -2297,22 +4079,73 @@ paths:
           name: labels
           schema: { type: string }
           description: Comma-separated label slugs (ANY match)
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+          description: Page size per column (board) or for load-more
+        - in: query
+          name: column
+          schema:
+            type: string
+            enum:
+              [
+                prospect,
+                new_client,
+                docs_ready,
+                round_1,
+                round_2,
+                round_3,
+                round_4,
+                round_5,
+                completed,
+              ]
+          description: When set, returns a single-column page for load-more
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+          description: Load-more offset within `column`
       responses:
         "200":
-          description: Pipeline cases + prospects
+          description: Board columns or a single column page
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  cases:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/CreditRepairCase"
-                  prospects:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/Prospect"
+                oneOf:
+                  - type: object
+                    properties:
+                      limit:
+                        type: integer
+                      columns:
+                        type: object
+                        additionalProperties:
+                          type: object
+                          properties:
+                            items:
+                              type: array
+                              items: {}
+                            total: { type: integer }
+                            offset: { type: integer }
+                            limit: { type: integer }
+                            has_more: { type: boolean }
+                      cases:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/CreditRepairCase"
+                      prospects:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/Prospect"
+                  - type: object
+                    required: [column, items, total, offset, limit, has_more]
+                    properties:
+                      column: { type: string }
+                      items:
+                        type: array
+                        items: {}
+                      total: { type: integer }
+                      offset: { type: integer }
+                      limit: { type: integer }
+                      has_more: { type: boolean }
         "401":
           description: Unauthorized
         "403":
@@ -2410,9 +4243,12 @@ paths:
       tags: [Admin]
       summary: Convert a prospect into a client + case (5A/7A)
       description: |
-        Sets `status=onboarding`, `pipeline_stage=new_client`. If the prospect
-        already has an active case at `pipeline_stage=prospect` (from New Case),
-        that case is promoted to `new_client`; otherwise a new
+        Sets `status=onboarding`, `pipeline_stage=new_client`. Allowed for any
+        unconverted lead (no enrolled active non-prospect case), even if
+        `clients.status` was set to `active` / `pending_payment` by mistake.
+        Cancelled clients and already-enrolled cases return 409. If the
+        prospect already has an active case at `pipeline_stage=prospect` (from
+        New Case), that case is promoted to `new_client`; otherwise a new
         `credit_repair_cases` row is created. Runs `autoAssignTasksForCase`,
         sends the dedicated prospect-welcome email (portal onboarding link),
         optionally persists/sends round calendar `.ics`, and schedules the
@@ -2457,7 +4293,7 @@ paths:
         "404":
           description: Prospect not found
         "409":
-          description: Client is not a prospect
+          description: Cancelled, or already has an enrolled case
 
   /admin/reminder-flows:
     get:
@@ -2629,7 +4465,7 @@ paths:
     get:
       tags: [Admin]
       summary: List admin team members
-      description: Includes preferred_language (client language each admin owns).
+      description: Includes preferred_language (UI preference) and language_owner_for (EN/ES client routing owner).
       security:
         - BearerAuth: []
       responses:
@@ -2657,7 +4493,14 @@ paths:
                 preferred_language:
                   type: string
                   enum: [en, es]
-                  description: Client language this admin owns/handles
+                  description: Admin UI/comms language preference
+                language_owner_for:
+                  type: string
+                  enum: [en, es]
+                  nullable: true
+                  description: >-
+                    If set, this admin becomes the sole language owner for that
+                    client language (clears any previous owner).
       responses:
         "200":
           description: Created
@@ -2884,6 +4727,44 @@ paths:
           description: Email sent
         "404":
           description: Admin not found
+
+  /admin/admins/{id}:
+    put:
+      tags: [Admin]
+      summary: Update admin team member (super_admin only)
+      description: >-
+        Updates profile fields. `preferred_language` is UI preference.
+        `language_owner_for` (en|es|null) sets/clears sole language ownership
+        (clears any previous owner for that language). Deactivating an admin
+        also clears language_owner_for so reassignment is not blocked.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                first_name: { type: string }
+                last_name: { type: string }
+                phone: { type: string }
+                role: { type: string }
+                status: { type: string, enum: [active, inactive, suspended] }
+                preferred_language: { type: string, enum: [en, es] }
+                language_owner_for:
+                  type: string
+                  enum: [en, es]
+                  nullable: true
+      responses:
+        "200":
+          description: Updated
+        "403":
+          description: Forbidden
 
   /admin/task-templates:
     get:
@@ -3127,6 +5008,15 @@ paths:
           name: search
           schema:
             type: string
+          description: Name, email, phone (digit-stripped), or numeric client id
+        - in: query
+          name: unconverted_lead
+          schema:
+            type: string
+            enum: ["1", "true"]
+          description: >-
+            When set, only unconverted Prospect-column leads (`status` or
+            `pipeline_stage` is prospect, not cancelled, no enrolled case).
         - in: query
           name: labels
           schema:
@@ -3134,9 +5024,68 @@ paths:
           description: >-
             Comma-separated label slugs (e.g. `collections,housing`) — returns
             clients with ANY matching label. `label` (singular) also accepted.
+        - in: query
+          name: status
+          schema:
+            type: string
+        - in: query
+          name: language
+          schema:
+            type: string
+            enum: [en, es]
+        - in: query
+          name: billing
+          schema:
+            type: string
+            enum: [overdue, split_plan, paid_full, direct_paid, no_payment]
+        - in: query
+          name: joined_from
+          schema:
+            type: string
+            format: date
+        - in: query
+          name: joined_to
+          schema:
+            type: string
+            format: date
+        - in: query
+          name: has_notes
+          schema:
+            type: string
+            enum: [yes, no]
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+        - in: query
+          name: sort_by
+          schema:
+            type: string
+            enum:
+              [
+                created_at,
+                first_name,
+                last_name,
+                email,
+                package_name,
+                pipeline_stage,
+                status,
+              ]
+        - in: query
+          name: sort_dir
+          schema:
+            type: string
+            enum: [ASC, DESC]
       responses:
         "200":
-          description: List of clients (each includes a `labels` array)
+          description: Paginated list of clients (each includes a `labels` array)
           content:
             application/json:
               schema:
@@ -3146,13 +5095,25 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/AdminClientListItem"
+                  pagination:
+                    type: object
+                    properties:
+                      page:
+                        type: integer
+                      limit:
+                        type: integer
+                      total:
+                        type: integer
+                      totalPages:
+                        type: integer
     post:
       tags: [Admin]
       summary: Create a new client or prospect lead
       description: >-
         Staff may set `status=prospect` to create a CRM lead without credit
         analysis (`pipeline_stage=prospect`). Language assigns
-        `assigned_admin_id` from active admins matching `preferred_language`.
+        `assigned_admin_id` from `admins.language_owner_for` matching the
+        client's `preferred_language`.
         Optional `referral_category` + `referrer_id` drive round-update routing.
         For non-prospect creates, optional `create_case` (or `round_schedule`
         with dates / `send_calendar`) opens a credit repair case and may persist
@@ -4963,7 +6924,7 @@ components:
         status:
           type: string
           enum:
-            [prospect, pending_payment, onboarding, active, paused, cancelled]
+            [prospect, funding, pending_payment, onboarding, active, paused, cancelled]
         package_name:
           type: string
           nullable: true
@@ -4985,6 +6946,60 @@ components:
         layer: { type: string, enum: [source, analysis] }
         color: { type: string }
         sort_order: { type: integer }
+
+    FundingApplication:
+      type: object
+      properties:
+        id: { type: integer }
+        public_token: { type: string }
+        funding_type:
+          type: string
+          enum: [credit_card_stacking, bank_statements]
+        status:
+          type: string
+          enum:
+            [
+              draft,
+              awaiting_docs,
+              submitted,
+              under_review,
+              complete,
+              converted,
+              cancelled,
+            ]
+        first_name: { type: string }
+        last_name: { type: string }
+        email: { type: string, format: email }
+        phone: { type: string, nullable: true }
+        postal_code: { type: string, nullable: true }
+        state: { type: string, nullable: true }
+        preferred_language: { type: string, enum: [en, es] }
+        llc_name: { type: string, nullable: true }
+        llc_address: { type: string, nullable: true }
+        client_id: { type: integer, nullable: true }
+        has_secrets: { type: boolean }
+        docs_uploaded:
+          type: array
+          items:
+            type: string
+            enum:
+              [
+                funding_drivers_license,
+                funding_corp_statement,
+                funding_bank_m1,
+                funding_bank_m2,
+                funding_bank_m3,
+                funding_bank_m4,
+                funding_bank_m5,
+                funding_bank_m6,
+              ]
+        docs_complete: { type: boolean }
+        docs_complete_notified_at:
+          { type: string, format: date-time, nullable: true }
+        submitted_at: { type: string, format: date-time, nullable: true }
+        converted_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
 
     ReminderFlow:
       type: object

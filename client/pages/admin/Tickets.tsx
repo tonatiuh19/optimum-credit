@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import {
   BookOpen,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   ChevronUp,
   HelpCircle,
   LifeBuoy,
@@ -393,17 +395,49 @@ function FaqPanel() {
 // ── Main page ───────────────────────────────────────────────────────────────
 export default function AdminTickets() {
   const dispatch = useAppDispatch();
-  const { tickets, selectedTicket, ticketReplies } = useAppSelector(
-    (s) => s.admin,
-  );
+  const { tickets, ticketsPagination, ticketsLoading, selectedTicket, ticketReplies } =
+    useAppSelector((s) => s.admin);
   const [tab, setTab] = useState<"tickets" | "faq">("tickets");
   const [activeId, setActiveId] = useState<number | null>(null);
   const [reply, setReply] = useState("");
   const [internal, setInternal] = useState(false);
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [page, setPage] = useState(1);
+
+  const loadTickets = useCallback(
+    (targetPage: number) => {
+      dispatch(
+        fetchAdminTickets({
+          status: statusFilter === "all" ? undefined : statusFilter,
+          page: targetPage,
+          limit: 50,
+        }),
+      );
+    },
+    [dispatch, statusFilter],
+  );
 
   useEffect(() => {
-    dispatch(fetchAdminTickets(undefined));
-  }, [dispatch]);
+    setPage(1);
+    loadTickets(1);
+  }, [statusFilter, loadTickets]);
+
+  useEffect(() => {
+    if (page === 1) return;
+    loadTickets(page);
+  }, [page, loadTickets]);
+
+  const ticketTotal = ticketsPagination?.total ?? tickets.length;
+
+  useEffect(() => {
+    if (
+      activeId != null &&
+      !tickets.some((t) => t.id === activeId) &&
+      !ticketsLoading
+    ) {
+      setActiveId(null);
+    }
+  }, [tickets, activeId, ticketsLoading]);
 
   const open = (id: number) => {
     setActiveId(id);
@@ -426,7 +460,7 @@ export default function AdminTickets() {
   const setStatus = async (status: string) => {
     if (!activeId) return;
     await dispatch(updateTicketStatus({ ticketId: activeId, status }));
-    dispatch(fetchAdminTickets(undefined));
+    loadTickets(page);
     dispatch(fetchAdminTicket({ id: activeId }));
   };
 
@@ -449,9 +483,9 @@ export default function AdminTickets() {
           }`}
         >
           Tickets{" "}
-          {tickets.length > 0 && (
+          {ticketTotal > 0 && (
             <span className="ml-1.5 text-xs bg-primary/10 text-primary px-1.5 py-0.5 rounded-full">
-              {tickets.length}
+              {ticketTotal}
             </span>
           )}
         </button>
@@ -472,49 +506,106 @@ export default function AdminTickets() {
         <div className="grid md:grid-cols-3 gap-4 md:h-[calc(100vh-18rem)]">
           {/* List panel */}
           <div
-            className={`bg-card rounded-2xl border border-border overflow-y-auto max-h-[45vh] md:max-h-none ${
-              activeId ? "hidden md:block" : "block"
+            className={`bg-card rounded-2xl border border-border flex flex-col max-h-[45vh] md:max-h-none ${
+              activeId ? "hidden md:flex" : "flex"
             }`}
           >
-            {tickets.length === 0 ? (
-              <div className="p-8 text-center text-sm text-muted-foreground">
-                No tickets yet.
-              </div>
-            ) : (
-              tickets.map((t) => (
-                <button
-                  key={t.id}
-                  onClick={() => open(t.id)}
-                  className={`w-full text-left p-4 border-b border-border/50 hover:bg-muted/50 transition-colors ${
-                    activeId === t.id ? "bg-muted" : ""
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="font-medium text-sm truncate">
-                      {t.subject}
+            <div className="p-3 border-b border-border shrink-0">
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                className="h-9 w-full px-3 rounded-lg border border-border bg-input text-sm"
+              >
+                <option value="all">All statuses</option>
+                <option value="open">Open</option>
+                <option value="in_progress">In progress</option>
+                <option value="waiting_client">Waiting on client</option>
+                <option value="resolved">Resolved</option>
+                <option value="closed">Closed</option>
+              </select>
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              {tickets.length === 0 ? (
+                <div className="p-8 text-center text-sm text-muted-foreground">
+                  No tickets yet.
+                </div>
+              ) : (
+                tickets.map((t) => (
+                  <button
+                    key={t.id}
+                    onClick={() => open(t.id)}
+                    className={`w-full text-left p-4 border-b border-border/50 hover:bg-muted/50 transition-colors ${
+                      activeId === t.id ? "bg-muted" : ""
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="font-medium text-sm truncate">
+                        {t.subject}
+                      </div>
+                      <span
+                        className={`text-[10px] shrink-0 uppercase px-1.5 py-0.5 rounded font-medium ${STATUS_MAP[t.status] ?? "bg-muted text-muted-foreground"}`}
+                      >
+                        {t.status.replace("_", " ")}
+                      </span>
                     </div>
-                    <span
-                      className={`text-[10px] shrink-0 uppercase px-1.5 py-0.5 rounded font-medium ${STATUS_MAP[t.status] ?? "bg-muted text-muted-foreground"}`}
-                    >
-                      {t.status.replace("_", " ")}
-                    </span>
-                  </div>
-                  <div className="text-xs text-muted-foreground mt-0.5 flex items-center gap-1.5">
-                    <span>
-                      {(t as any).client_first_name}{" "}
-                      {(t as any).client_last_name}
-                    </span>
-                    {t.category && (
-                      <>
-                        <span>·</span>
-                        <span className="capitalize">
-                          {CAT_LABELS[t.category] ?? t.category}
-                        </span>
-                      </>
-                    )}
-                  </div>
-                </button>
-              ))
+                    <div className="text-xs text-muted-foreground mt-0.5 flex items-center gap-1.5">
+                      <span>
+                        {(t as any).first_name ?? (t as any).client_first_name}{" "}
+                        {(t as any).last_name ?? (t as any).client_last_name}
+                      </span>
+                      {t.category && (
+                        <>
+                          <span>·</span>
+                          <span className="capitalize">
+                            {CAT_LABELS[t.category] ?? t.category}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  </button>
+                ))
+              )}
+            </div>
+            {ticketsPagination && ticketsPagination.totalPages > 1 && (
+              <div className="flex items-center justify-between px-3 py-2 border-t border-border shrink-0 text-xs text-muted-foreground">
+                <span>
+                  {(ticketsPagination.page - 1) * ticketsPagination.limit + 1}–
+                  {Math.min(
+                    ticketsPagination.page * ticketsPagination.limit,
+                    ticketsPagination.total,
+                  )}{" "}
+                  of {ticketsPagination.total}
+                </span>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    disabled={ticketsPagination.page <= 1}
+                    className="inline-flex items-center justify-center w-8 h-8 rounded-md border border-border disabled:opacity-40"
+                    aria-label="Previous page"
+                  >
+                    <ChevronLeft className="w-4 h-4" />
+                  </button>
+                  <span>
+                    {ticketsPagination.page}/{ticketsPagination.totalPages}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setPage((p) =>
+                        Math.min(ticketsPagination.totalPages, p + 1),
+                      )
+                    }
+                    disabled={
+                      ticketsPagination.page >= ticketsPagination.totalPages
+                    }
+                    className="inline-flex items-center justify-center w-8 h-8 rounded-md border border-border disabled:opacity-40"
+                    aria-label="Next page"
+                  >
+                    <ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
             )}
           </div>
 

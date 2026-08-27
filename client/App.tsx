@@ -18,6 +18,7 @@ import NotFound from "./pages/NotFound";
 import Register from "./pages/Register";
 import PaySplit from "./pages/PaySplit";
 import CreditAnalysis from "./pages/CreditAnalysis";
+import Funding from "./pages/Funding";
 import Pricing from "./pages/Pricing";
 import AffiliateRedirect from "./pages/public/AffiliateRedirect";
 import AffiliateJoin from "./pages/public/AffiliateJoin";
@@ -36,11 +37,13 @@ import Profile from "./pages/client/Profile";
 import ClientPayments from "./pages/client/Payments";
 import Videos from "./pages/client/Videos";
 import InfoRequests from "./pages/client/InfoRequests";
+import PortalFunding from "./pages/client/PortalFunding";
 
 import AdminDashboard from "./pages/admin/Dashboard";
 import AdminClients from "./pages/admin/Clients";
 import AdminClientDetail from "@/components/admin/ClientDetail";
 import AdminPipeline from "./pages/admin/Pipeline";
+import AdminFunding from "./pages/admin/Funding";
 import AdminDocuments from "./pages/admin/Documents";
 import AdminConversations from "./pages/admin/Conversations";
 import AdminTickets from "./pages/admin/Tickets";
@@ -49,6 +52,7 @@ import AdminVideos from "./pages/admin/Videos";
 import AdminReports from "./pages/admin/Reports";
 import AdminSettings from "./pages/admin/Settings";
 import AdminProfile from "./pages/admin/Profile";
+import AdminMcpConsent from "./pages/admin/McpConsent";
 import AdminPeople from "./pages/admin/People";
 import AdminReminderFlows from "./pages/admin/ReminderFlows";
 import AdminPayments from "./pages/admin/Payments";
@@ -62,6 +66,7 @@ import AdminAffiliatePortal from "./pages/admin/AffiliatePortal";
 import {
   RequireAdmin,
   RequireStaff,
+  RequireStaffManager,
   RequireClient,
   NoAuthAdmin,
   NoAuthClient,
@@ -102,6 +107,9 @@ function AppShell() {
           path="/creditanalisys"
           element={<Navigate to="/credit-analysis" replace />}
         />
+
+        {/* Business funding wizard — public, standalone (OFG-style) */}
+        <Route path="/funding" element={<Funding />} />
 
         {/* Standalone pricing page — default landing for affiliate links */}
         <Route path="/pricing" element={wrap(Layout, Pricing)} />
@@ -181,6 +189,12 @@ function AppShell() {
             <RequireClient>{wrap(ClientLayout, ClientPayments)}</RequireClient>
           }
         />
+        <Route
+          path="/portal/funding"
+          element={
+            <RequireClient>{wrap(ClientLayout, PortalFunding)}</RequireClient>
+          }
+        />
 
         {/* Admin */}
         <Route
@@ -205,6 +219,14 @@ function AppShell() {
           path="/admin/pipeline"
           element={
             <RequireAdmin>{wrap(AdminLayout, AdminPipeline)}</RequireAdmin>
+          }
+        />
+        <Route
+          path="/admin/funding"
+          element={
+            <RequireStaffManager>
+              {wrap(AdminLayout, AdminFunding)}
+            </RequireStaffManager>
           }
         />
         <Route
@@ -257,6 +279,12 @@ function AppShell() {
           path="/admin/profile"
           element={
             <RequireStaff>{wrap(AdminLayout, AdminProfile)}</RequireStaff>
+          }
+        />
+        <Route
+          path="/admin/mcp-consent"
+          element={
+            <RequireStaff>{wrap(AdminLayout, AdminMcpConsent)}</RequireStaff>
           }
         />
         <Route

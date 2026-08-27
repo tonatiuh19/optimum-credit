@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   Search,
@@ -182,6 +182,8 @@ const STAGES: (PipelineStage | "all")[] = [
 ];
 
 const CLIENT_STATUSES = [
+  "prospect",
+  "funding",
   "pending_payment",
   "onboarding",
   "active",
@@ -190,6 +192,8 @@ const CLIENT_STATUSES = [
 ];
 
 const STATUS_COLORS: Record<string, string> = {
+  prospect: "bg-muted text-muted-foreground border-border",
+  funding: "bg-primary/10 text-primary border-primary/20",
   pending_payment: "bg-amber-500/10 text-amber-500 border-amber-500/20",
   onboarding: "bg-primary/10 text-primary border-primary/20",
   active: "bg-accent/10 text-accent border-accent/20",
@@ -250,11 +254,13 @@ function buildClientSchema(isEditing: boolean) {
 function ClientFormDialog({
   open,
   onClose,
+  onSaved,
   editing,
   isAffiliate,
 }: {
   open: boolean;
   onClose: () => void;
+  onSaved?: () => void;
   editing: AdminClientListItem | null;
   isAffiliate: boolean;
 }) {
@@ -361,6 +367,7 @@ function ClientFormDialog({
 
       helpers.resetForm();
       setRoundSchedule(emptyRoundScheduleInput());
+      onSaved?.();
       onClose();
     },
   });
@@ -705,7 +712,9 @@ export default function AdminClients() {
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
   const { t } = useTranslation();
-  const { clients, loading } = useAppSelector((s) => s.admin);
+  const { clients, clientsPagination, clientsLoading } = useAppSelector(
+    (s) => s.admin,
+  );
   const { labels } = useAppSelector((s) => s.prospects);
   const { user } = useAppSelector((s) => s.adminAuth);
   const isAffiliate = user?.role === "affiliate";
@@ -724,6 +733,7 @@ export default function AdminClients() {
   });
   const [sortBy, setSortBy] = useState("created_at");
   const [sortDir, setSortDir] = useState<"ASC" | "DESC">("DESC");
+  const [page, setPage] = useState(1);
   const [showForm, setShowForm] = useState(false);
   const [editingClient, setEditingClient] =
     useState<AdminClientListItem | null>(null);
@@ -774,21 +784,39 @@ export default function AdminClients() {
     dispatch(fetchLabels());
   }, [dispatch]);
 
+  const loadClients = useCallback(
+    (targetPage: number) => {
+      dispatch(
+        fetchAdminClients({
+          search: debouncedSearch || undefined,
+          stage: filters.stage === "all" ? undefined : filters.stage,
+          status: filters.status === "all" ? undefined : filters.status,
+          language: filters.language === "all" ? undefined : filters.language,
+          billing: filters.billing === "all" ? undefined : filters.billing,
+          joined_from: filters.joined_from || undefined,
+          joined_to: filters.joined_to || undefined,
+          has_notes:
+            filters.has_notes === "all" ? undefined : filters.has_notes,
+          labels: filters.labels.length > 0 ? filters.labels : undefined,
+          page: targetPage,
+          limit: 50,
+          sort_by: sortBy,
+          sort_dir: sortDir,
+        }),
+      );
+    },
+    [dispatch, debouncedSearch, filters, sortBy, sortDir],
+  );
+
   useEffect(() => {
-    dispatch(
-      fetchAdminClients({
-        search: debouncedSearch || undefined,
-        stage: filters.stage === "all" ? undefined : filters.stage,
-        status: filters.status === "all" ? undefined : filters.status,
-        language: filters.language === "all" ? undefined : filters.language,
-        billing: filters.billing === "all" ? undefined : filters.billing,
-        joined_from: filters.joined_from || undefined,
-        joined_to: filters.joined_to || undefined,
-        has_notes: filters.has_notes === "all" ? undefined : filters.has_notes,
-        labels: filters.labels.length > 0 ? filters.labels : undefined,
-      }),
-    );
-  }, [dispatch, debouncedSearch, filters]);
+    setPage(1);
+    loadClients(1);
+  }, [debouncedSearch, filters, sortBy, sortDir, loadClients]);
+
+  useEffect(() => {
+    if (page === 1) return;
+    loadClients(page);
+  }, [page, loadClients]);
 
   const handleSort = (key: string) => {
     if (sortBy === key) {
@@ -804,14 +832,8 @@ export default function AdminClients() {
     await dispatch(deleteAdminClient({ id: deletingClient.id }));
     setDeletingClient(null);
     setDeleteConfirmInput("");
+    loadClients(page);
   };
-
-  const sorted = [...clients].sort((a, b) => {
-    const av = (a as any)[sortBy] ?? "";
-    const bv = (b as any)[sortBy] ?? "";
-    const cmp = String(av).localeCompare(String(bv));
-    return sortDir === "ASC" ? cmp : -cmp;
-  });
 
   const columns: DataGridColumn<AdminClientListItem>[] = [
     {
@@ -1317,13 +1339,15 @@ export default function AdminClients() {
 
       <div className="bg-card rounded-2xl border border-border px-6 py-4">
         <DataGrid
-          data={sorted}
+          data={clients}
           columns={columns}
           rowKey={(c) => c.id}
-          isLoading={loading}
+          isLoading={clientsLoading}
           sortBy={sortBy}
           sortDir={sortDir}
           onSort={handleSort}
+          pagination={clientsPagination}
+          onPageChange={setPage}
           onRowClick={(c) => navigate(`/admin/clients/${c.id}`)}
           emptyMessage="No clients found."
         />
@@ -1334,6 +1358,14 @@ export default function AdminClients() {
         onClose={() => {
           setShowForm(false);
           setEditingClient(null);
+        }}
+        onSaved={() => {
+          if (editingClient) {
+            loadClients(page);
+          } else {
+            setPage(1);
+            loadClients(1);
+          }
         }}
         editing={editingClient}
         isAffiliate={isAffiliate}

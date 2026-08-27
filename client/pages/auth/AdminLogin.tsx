@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useFormik } from "formik";
 import * as Yup from "yup";
@@ -7,6 +7,7 @@ import {
   ArrowLeft,
   ShieldCheck,
   Mail,
+  MessageSquare,
   Loader2,
   CheckCircle,
   TrendingUp,
@@ -16,7 +17,11 @@ import {
 } from "lucide-react";
 import PageMeta from "@/components/PageMeta";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
-import { requestAdminOtp, verifyAdminOtp } from "@/store/slices/adminAuthSlice";
+import {
+  fetchAdminOtpOptions,
+  requestAdminOtp,
+  verifyAdminOtp,
+} from "@/store/slices/adminAuthSlice";
 import { formatApiError } from "@/lib/api";
 import OtpInput from "@/components/OtpInput";
 import AdminThemeToggle from "@/components/AdminThemeToggle";
@@ -37,11 +42,19 @@ export default function AdminLogin() {
   const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
-  const { requestingOtp, verifyingOtp, error, otpSentTo } = useAppSelector(
-    (s) => s.adminAuth,
-  );
+  const location = useLocation();
+  const {
+    requestingOtp,
+    verifyingOtp,
+    error,
+    otpSentTo,
+    otpChannel,
+    otpOptions,
+    otpOptionsLoading,
+  } = useAppSelector((s) => s.adminAuth);
   const displayError = error ? formatApiError(error, "Something went wrong") : null;
-  const [step, setStep] = useState<"email" | "code">("email");
+  const [step, setStep] = useState<"email" | "channel" | "code">("email");
+  const [otpDelivery, setOtpDelivery] = useState<"email" | "sms">("email");
   const [resendIn, setResendIn] = useState(0);
 
   useEffect(() => {
@@ -50,17 +63,32 @@ export default function AdminLogin() {
     return () => window.clearTimeout(id);
   }, [resendIn]);
 
+  const sendOtp = async (email: string, channel: "email" | "sms") => {
+    const result = await dispatch(requestAdminOtp({ email, channel }));
+    if (requestAdminOtp.fulfilled.match(result)) {
+      setStep("code");
+      setResendIn(RESEND_COOLDOWN_SEC);
+      return true;
+    }
+    return false;
+  };
+
   const emailForm = useFormik({
     initialValues: { email: "" },
     validationSchema: Yup.object({
       email: Yup.string().email("Invalid email").required("Required"),
     }),
     onSubmit: async (values) => {
-      const result = await dispatch(requestAdminOtp({ email: values.email }));
-      if (requestAdminOtp.fulfilled.match(result)) {
-        setStep("code");
-        setResendIn(RESEND_COOLDOWN_SEC);
+      const optResult = await dispatch(
+        fetchAdminOtpOptions({ email: values.email }),
+      );
+      if (!fetchAdminOtpOptions.fulfilled.match(optResult)) return;
+      if (optResult.payload.sms) {
+        setOtpDelivery("email");
+        setStep("channel");
+        return;
       }
+      await sendOtp(values.email, "email");
     },
   });
 
@@ -77,15 +105,22 @@ export default function AdminLogin() {
         verifyAdminOtp({ email, code: values.code }),
       );
       if (verifyAdminOtp.fulfilled.match(result)) {
-        navigate("/admin", { replace: true });
+        const from = (location.state as { from?: { pathname?: string; search?: string; hash?: string } } | null)
+          ?.from;
+        const target =
+          from?.pathname && from.pathname.startsWith("/admin")
+            ? `${from.pathname}${from.search || ""}${from.hash || ""}`
+            : "/admin";
+        navigate(target, { replace: true });
       }
     },
   });
 
   const handleResend = async () => {
     const email = otpSentTo || emailForm.values.email;
+    const channel = otpChannel || otpDelivery;
     if (!email || requestingOtp || resendIn > 0) return;
-    const result = await dispatch(requestAdminOtp({ email }));
+    const result = await dispatch(requestAdminOtp({ email, channel }));
     if (requestAdminOtp.fulfilled.match(result)) {
       setResendIn(RESEND_COOLDOWN_SEC);
       codeForm.setFieldValue("code", "");
@@ -143,6 +178,10 @@ export default function AdminLogin() {
                   <>
                     Sign in to <span className="gradient-text">Console</span>
                   </>
+                ) : step === "channel" ? (
+                  t("adminLogin.chooseChannel")
+                ) : otpChannel === "sms" ? (
+                  t("adminLogin.checkSms")
                 ) : (
                   t("adminLogin.checkEmail")
                 )}
@@ -150,9 +189,13 @@ export default function AdminLogin() {
               <p className="text-sm text-muted-foreground max-w-xs">
                 {step === "email"
                   ? t("adminLogin.subheading")
-                  : t("adminLogin.codeSentTo", {
-                      email: otpSentTo || emailForm.values.email,
-                    })}
+                  : step === "channel"
+                    ? t("adminLogin.chooseChannelHint")
+                    : otpChannel === "sms"
+                      ? t("adminLogin.codeSentSms")
+                      : t("adminLogin.codeSentTo", {
+                          email: otpSentTo || emailForm.values.email,
+                        })}
               </p>
             </div>
 
@@ -188,10 +231,10 @@ export default function AdminLogin() {
 
                 <button
                   type="submit"
-                  disabled={requestingOtp}
+                  disabled={requestingOtp || otpOptionsLoading}
                   className="w-full btn-primary rounded-xl gap-2"
                 >
-                  {requestingOtp ? (
+                  {requestingOtp || otpOptionsLoading ? (
                     <>
                       <Loader2 className="w-4 h-4 animate-spin" />{" "}
                       {t("adminLogin.sendingCode")}
@@ -201,6 +244,72 @@ export default function AdminLogin() {
                   )}
                 </button>
               </form>
+            ) : step === "channel" ? (
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setOtpDelivery("email")}
+                    className={`h-20 rounded-xl border flex flex-col items-center justify-center gap-1.5 transition-colors ${
+                      otpDelivery === "email"
+                        ? "border-primary bg-primary/10 text-primary"
+                        : "border-border hover:bg-muted"
+                    }`}
+                  >
+                    <Mail className="w-5 h-5" />
+                    <span className="text-sm font-semibold">
+                      {t("adminLogin.channelEmail")}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOtpDelivery("sms")}
+                    disabled={!otpOptions?.sms}
+                    className={`h-20 rounded-xl border flex flex-col items-center justify-center gap-1.5 transition-colors disabled:opacity-40 ${
+                      otpDelivery === "sms"
+                        ? "border-primary bg-primary/10 text-primary"
+                        : "border-border hover:bg-muted"
+                    }`}
+                  >
+                    <MessageSquare className="w-5 h-5" />
+                    <span className="text-sm font-semibold">
+                      {t("adminLogin.channelSms")}
+                    </span>
+                  </button>
+                </div>
+
+                {displayError && (
+                  <div className="text-sm text-destructive bg-destructive/10 border border-destructive/20 px-4 py-3 rounded-xl">
+                    {displayError}
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  disabled={requestingOtp}
+                  onClick={() =>
+                    void sendOtp(emailForm.values.email, otpDelivery)
+                  }
+                  className="w-full btn-primary rounded-xl gap-2"
+                >
+                  {requestingOtp ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />{" "}
+                      {t("adminLogin.sendingCode")}
+                    </>
+                  ) : (
+                    t("adminLogin.sendCode")
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setStep("email")}
+                  className="w-full text-sm text-muted-foreground hover:text-foreground transition-colors py-1"
+                >
+                  {t("adminLogin.useDifferentEmail")}
+                </button>
+              </div>
             ) : (
               <form onSubmit={codeForm.handleSubmit} className="space-y-4">
                 <div>

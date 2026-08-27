@@ -8,6 +8,10 @@ import type {
   UpdateWorkTaskPayload,
   WorkTaskAssignee,
   WorkTaskCaseOption,
+  WorkTaskColumnPage,
+  WorkTaskStatus,
+  WorkTasksBoardResponse,
+  WorkTasksColumnMoreResponse,
   WorkTasksSyncResult,
 } from "@shared/api";
 
@@ -17,14 +21,50 @@ function authHeaders(getState: () => unknown) {
   return { Authorization: `Bearer ${token}` };
 }
 
+const EMPTY_COLUMN = (limit = 20): WorkTaskColumnPage => ({
+  tasks: [],
+  total: 0,
+  offset: 0,
+  limit,
+  has_more: false,
+});
+
 export const fetchWorkTasks = createAsyncThunk(
   "workTasks/fetch",
-  async (_, { getState }) => {
-    const { data } = await axios.get<{ tasks: AdminWorkTask[] }>(
+  async (args: { q?: string; limit?: number } | void, { getState }) => {
+    const q = args && typeof args === "object" ? (args.q ?? "") : "";
+    const limit =
+      args && typeof args === "object" ? (args.limit ?? 20) : 20;
+    const { data } = await axios.get<WorkTasksBoardResponse>(
       "/api/admin/work-tasks",
-      { headers: authHeaders(getState) },
+      {
+        params: { q: q || undefined, limit },
+        headers: authHeaders(getState),
+      },
     );
-    return data.tasks;
+    return data;
+  },
+);
+
+export const fetchMoreWorkTasks = createAsyncThunk(
+  "workTasks/fetchMore",
+  async (
+    args: { status: WorkTaskStatus; offset: number; q?: string; limit?: number },
+    { getState },
+  ) => {
+    const { data } = await axios.get<WorkTasksColumnMoreResponse>(
+      "/api/admin/work-tasks",
+      {
+        params: {
+          status: args.status,
+          offset: args.offset,
+          limit: args.limit ?? 20,
+          q: args.q || undefined,
+        },
+        headers: authHeaders(getState),
+      },
+    );
+    return data;
   },
 );
 
@@ -194,15 +234,35 @@ export const setHubspotPermission = createAsyncThunk(
       );
       return args;
     } catch (err: any) {
-      return rejectWithValue(err.response?.data?.error || "Permission update failed");
+      return rejectWithValue(
+        err.response?.data?.error || "Permission update failed",
+      );
     }
   },
 );
 
+function upsertTaskInColumns(
+  columns: Record<WorkTaskStatus, WorkTaskColumnPage>,
+  task: AdminWorkTask,
+) {
+  for (const st of Object.keys(columns) as WorkTaskStatus[]) {
+    columns[st].tasks = columns[st].tasks.filter((t) => t.id !== task.id);
+  }
+  const col = columns[task.status];
+  if (!col) return;
+  col.tasks = [task, ...col.tasks];
+  col.total += 1;
+}
+
 interface WorkTasksState {
+  /** Flattened tasks currently loaded (all columns). */
   tasks: AdminWorkTask[];
+  columns: Record<WorkTaskStatus, WorkTaskColumnPage>;
+  query: string;
+  pageLimit: number;
   assignees: WorkTaskAssignee[];
   loading: boolean;
+  loadingMore: WorkTaskStatus | null;
   saving: boolean;
   syncing: boolean;
   error: string | null;
@@ -216,8 +276,16 @@ interface WorkTasksState {
 
 const initialState: WorkTasksState = {
   tasks: [],
+  columns: {
+    backlog: EMPTY_COLUMN(),
+    doing: EMPTY_COLUMN(),
+    done: EMPTY_COLUMN(),
+  },
+  query: "",
+  pageLimit: 20,
   assignees: [],
   loading: false,
+  loadingMore: null,
   saving: false,
   syncing: false,
   error: null,
@@ -229,12 +297,21 @@ const initialState: WorkTasksState = {
   caseSearchLoading: false,
 };
 
+function syncFlatTasks(state: WorkTasksState) {
+  state.tasks = (
+    ["backlog", "doing", "done"] as WorkTaskStatus[]
+  ).flatMap((st) => state.columns[st].tasks);
+}
+
 const workTasksSlice = createSlice({
   name: "workTasks",
   initialState,
   reducers: {
     clearWorkTasksError(state) {
       state.error = null;
+    },
+    setWorkTasksQuery(state, action: { payload: string }) {
+      state.query = action.payload;
     },
   },
   extraReducers: (builder) => {
@@ -245,11 +322,40 @@ const workTasksSlice = createSlice({
       })
       .addCase(fetchWorkTasks.fulfilled, (state, action) => {
         state.loading = false;
-        state.tasks = action.payload;
+        state.query = action.payload.q || "";
+        state.pageLimit = action.payload.limit || 20;
+        const cols = action.payload.columns;
+        state.columns = {
+          backlog: cols?.backlog ?? EMPTY_COLUMN(state.pageLimit),
+          doing: cols?.doing ?? EMPTY_COLUMN(state.pageLimit),
+          done: cols?.done ?? EMPTY_COLUMN(state.pageLimit),
+        };
+        syncFlatTasks(state);
       })
       .addCase(fetchWorkTasks.rejected, (state, action) => {
         state.loading = false;
         state.error = action.error.message || "Failed to load tasks";
+      })
+      .addCase(fetchMoreWorkTasks.pending, (state, action) => {
+        state.loadingMore = action.meta.arg.status;
+      })
+      .addCase(fetchMoreWorkTasks.fulfilled, (state, action) => {
+        state.loadingMore = null;
+        const st = action.payload.status;
+        const col = state.columns[st];
+        if (!col) return;
+        const seen = new Set(col.tasks.map((t) => t.id));
+        const appended = action.payload.tasks.filter((t) => !seen.has(t.id));
+        col.tasks = [...col.tasks, ...appended];
+        col.total = action.payload.total;
+        col.offset = action.payload.offset;
+        col.limit = action.payload.limit;
+        col.has_more = action.payload.has_more;
+        syncFlatTasks(state);
+      })
+      .addCase(fetchMoreWorkTasks.rejected, (state, action) => {
+        state.loadingMore = null;
+        state.error = String(action.error.message || "Failed to load more");
       })
       .addCase(fetchWorkAssignees.fulfilled, (state, action) => {
         state.assignees = action.payload;
@@ -273,19 +379,57 @@ const workTasksSlice = createSlice({
       })
       .addCase(createWorkTask.fulfilled, (state, action) => {
         state.saving = false;
-        state.tasks.unshift(action.payload);
+        upsertTaskInColumns(state.columns, action.payload);
+        const col = state.columns[action.payload.status];
+        // Keep page size visually stable; still bump total
+        if (col.tasks.length > state.pageLimit) {
+          col.tasks = col.tasks.slice(0, state.pageLimit);
+          col.has_more = col.total > col.tasks.length;
+        }
+        syncFlatTasks(state);
       })
       .addCase(createWorkTask.rejected, (state, action) => {
         state.saving = false;
         state.error = String(action.payload || "Create failed");
       })
       .addCase(updateWorkTask.fulfilled, (state, action) => {
-        const idx = state.tasks.findIndex((t) => t.id === action.payload.id);
-        if (idx >= 0) state.tasks[idx] = action.payload;
-        else state.tasks.unshift(action.payload);
+        const task = action.payload;
+        let wasPresent = false;
+        for (const st of Object.keys(state.columns) as WorkTaskStatus[]) {
+          const before = state.columns[st].tasks.length;
+          state.columns[st].tasks = state.columns[st].tasks.filter(
+            (t) => t.id !== task.id,
+          );
+          if (state.columns[st].tasks.length < before) {
+            wasPresent = true;
+            state.columns[st].total = Math.max(0, state.columns[st].total - 1);
+          }
+        }
+        const col = state.columns[task.status];
+        if (col) {
+          col.tasks = [task, ...col.tasks];
+          if (wasPresent) col.total += 1;
+          else col.total += 1;
+          if (col.tasks.length > state.pageLimit) {
+            col.tasks = col.tasks.slice(0, state.pageLimit);
+            col.has_more = col.total > col.tasks.length;
+          }
+        }
+        syncFlatTasks(state);
       })
       .addCase(deleteWorkTask.fulfilled, (state, action) => {
-        state.tasks = state.tasks.filter((t) => t.id !== action.payload);
+        for (const st of Object.keys(state.columns) as WorkTaskStatus[]) {
+          const before = state.columns[st].tasks.length;
+          state.columns[st].tasks = state.columns[st].tasks.filter(
+            (t) => t.id !== action.payload,
+          );
+          if (state.columns[st].tasks.length < before) {
+            state.columns[st].total = Math.max(0, state.columns[st].total - 1);
+            state.columns[st].has_more =
+              state.columns[st].tasks.length < state.columns[st].total;
+          }
+        }
+        syncFlatTasks(state);
       })
       .addCase(fetchHubspotStatus.fulfilled, (state, action) => {
         state.hubspot = action.payload;
@@ -323,5 +467,6 @@ const workTasksSlice = createSlice({
   },
 });
 
-export const { clearWorkTasksError } = workTasksSlice.actions;
+export const { clearWorkTasksError, setWorkTasksQuery } =
+  workTasksSlice.actions;
 export default workTasksSlice.reducer;

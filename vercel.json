@@ -8,7 +8,17 @@
       "maxDuration": 60
     }
   },
+  "crons": [
+    {
+      "path": "/api/cron/process-queue",
+      "schedule": "*/5 * * * *"
+    }
+  ],
   "routes": [
+    {
+      "src": "/.well-known/(.*)",
+      "dest": "/api/index.ts"
+    },
     {
       "src": "/api/(.*)",
       "dest": "/api/index.ts"

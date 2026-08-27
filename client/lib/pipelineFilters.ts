@@ -50,7 +50,28 @@ export function buildAdminPipelineQuery(
   if (filters.info_requests !== "all") q.info_requests = filters.info_requests;
   if (filters.has_notes !== "all") q.has_notes = filters.has_notes;
   if (filters.labels.length > 0) q.labels = filters.labels;
+  q.limit = 20;
   return q;
+}
+
+/** Unconverted lead shown as Prospect (status or stage), not cancelled/enrolled. */
+export function isProspectLead(
+  client:
+    | {
+        status?: string | null;
+        pipeline_stage?: string | null;
+      }
+    | null
+    | undefined,
+  opts?: { hasEnrolledCase?: boolean },
+): boolean {
+  if (!client) return false;
+  if (opts?.hasEnrolledCase) return false;
+  if (client.status === "cancelled") return false;
+  if (client.status === "funding") return false;
+  return (
+    client.status === "prospect" || client.pipeline_stage === "prospect"
+  );
 }
 
 export function countActivePipelineFilters(

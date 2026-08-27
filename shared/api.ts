@@ -30,12 +30,54 @@ export interface AdminUser {
   phone?: string | null;
   role: "super_admin" | "admin" | "support" | "agent" | "affiliate";
   status: "active" | "suspended" | "invited" | "inactive";
-  /** Client language this admin owns/handles (EN/ES routing) */
+  /** Admin UI/comms language preference (not client ownership) */
   preferred_language?: "en" | "es" | null;
   /** Present when role=affiliate */
   affiliate?: AffiliateProfile | null;
   /** Present when role=affiliate — whether their portal (pipeline/leads) is unlocked */
   has_portal_access?: boolean;
+  /**
+   * Admin AI Ask UI (server ADMIN_AI_ENABLED + role super_admin|admin).
+   * Live CRM tools roll out separately; chat may still answer process questions.
+   */
+  ai_ask_enabled?: boolean;
+  /** Conversations module: staff has at least one active assigned OFG Twilio number */
+  conversations_enabled?: boolean;
+  /** Assigned OFG numbers (E.164) for SMS send / OTP SMS option */
+  assigned_phone_numbers?: AdminPhoneNumber[];
+  /** Can choose SMS OTP on login when true */
+  otp_sms_available?: boolean;
+}
+
+/** One turn in Admin AI Ask (client ↔ API). */
+export interface AdminAiChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface AdminAiChatContext {
+  case_id?: number | null;
+  case_number?: string | null;
+  client_id?: number | null;
+}
+
+export interface AdminAiChatRequest {
+  messages: AdminAiChatMessage[];
+  context?: AdminAiChatContext | null;
+}
+
+export interface AdminAiCitation {
+  type: "pipeline" | "case" | "client" | "tasks" | "other";
+  label?: string;
+  href: string;
+}
+
+export interface AdminAiChatResponse {
+  reply: string;
+  citations: AdminAiCitation[];
+  tools_used: string[];
+  model?: string;
+  usage?: { input_tokens?: number; output_tokens?: number };
 }
 
 /** Operational alert types admins can mute per channel (OTP/welcome never included). */
@@ -48,7 +90,12 @@ export type AdminNotifyEventKey =
   | "doc_upload_link"
   | "round_calendar"
   | "work_task_assigned"
-  | "work_task_overdue";
+  | "work_task_overdue"
+  | "inbound_sms"
+  | "missed_call"
+  | "voicemail"
+  | "funding_doc_upload"
+  | "funding_application_created";
 
 export type AdminNotifyChannel = "email" | "in_app" | "sms";
 
@@ -101,6 +148,7 @@ export type PipelineStage =
 
 export type ClientStatus =
   | "prospect"
+  | "funding"
   | "pending_payment"
   | "onboarding"
   | "active"
@@ -214,7 +262,96 @@ export type DocType =
   | "id_back"
   | "ssn_card"
   | "proof_of_address"
-  | "other";
+  | "other"
+  | "funding_drivers_license"
+  | "funding_corp_statement"
+  | "funding_bank_m1"
+  | "funding_bank_m2"
+  | "funding_bank_m3"
+  | "funding_bank_m4"
+  | "funding_bank_m5"
+  | "funding_bank_m6";
+
+export type FundingType = "credit_card_stacking" | "bank_statements";
+
+export type FundingApplicationStatus =
+  | "draft"
+  | "awaiting_docs"
+  | "submitted"
+  | "under_review"
+  | "complete"
+  | "converted"
+  | "cancelled";
+
+export type FundingDocSlot =
+  | "funding_drivers_license"
+  | "funding_corp_statement"
+  | "funding_bank_m1"
+  | "funding_bank_m2"
+  | "funding_bank_m3"
+  | "funding_bank_m4"
+  | "funding_bank_m5"
+  | "funding_bank_m6";
+
+export const FUNDING_REQUIRED_DOC_SLOTS: FundingDocSlot[] = [
+  "funding_drivers_license",
+  "funding_corp_statement",
+  "funding_bank_m1",
+  "funding_bank_m2",
+  "funding_bank_m3",
+  "funding_bank_m4",
+  "funding_bank_m5",
+  "funding_bank_m6",
+];
+
+export interface FundingApplication {
+  id: number;
+  public_token?: string;
+  funding_type: FundingType;
+  status: FundingApplicationStatus;
+  first_name: string;
+  last_name: string;
+  email: string;
+  phone?: string | null;
+  postal_code?: string | null;
+  state?: string | null;
+  preferred_language: "en" | "es";
+  llc_name?: string | null;
+  llc_address?: string | null;
+  client_id?: number | null;
+  has_secrets?: boolean;
+  docs_uploaded?: FundingDocSlot[];
+  docs_complete?: boolean;
+  docs_complete_notified_at?: string | null;
+  submitted_at?: string | null;
+  converted_at?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface AdminFundingQuery {
+  search?: string;
+  funding_type?: FundingType | "all";
+  language?: "en" | "es" | "all";
+  limit?: number;
+  column?: string;
+  offset?: number;
+}
+
+export interface AdminFundingBoardResponse {
+  applications: FundingApplication[];
+  limit?: number;
+  columns?: Record<string, PipelineColumnPage<FundingApplication>>;
+}
+
+export interface AdminFundingColumnMoreResponse {
+  column: string;
+  items: FundingApplication[];
+  total: number;
+  offset: number;
+  limit: number;
+  has_more: boolean;
+}
 
 export interface ClientDocument {
   id: number;
@@ -227,6 +364,7 @@ export interface ClientDocument {
   rejection_reason?: string | null;
   uploaded_at: string;
   reviewed_at?: string | null;
+  funding_application_id?: number | null;
 }
 
 // ============================================================
@@ -290,14 +428,51 @@ export interface SupportFaq {
   updated_at: string;
 }
 
-export interface Conversation {
+export interface AdminPhoneNumber {
   id: number;
-  client_id: number;
-  channel: "sms" | "call" | "email" | "internal" | "whatsapp";
-  status: "open" | "snoozed" | "closed";
+  e164: string;
+  friendly_name?: string | null;
+  twilio_sid?: string | null;
+  assigned_admin_id?: number | null;
+  assigned_admin_name?: string | null;
+  is_active: boolean;
+  capabilities?: { sms?: boolean; mms?: boolean; voice?: boolean } | null;
+}
+
+/** Contact-centric inbox row (aggregates channel threads for one client or unknown). */
+export interface ConversationContactHubItem {
+  kind: "client" | "unknown";
+  /** clients.id or conversation_unknown_contacts.id */
+  contact_id: number;
+  display_name: string;
+  phone?: string | null;
+  email?: string | null;
   last_message_at?: string | null;
   last_message_preview?: string | null;
   unread_count: number;
+  status: "open" | "snoozed" | "closed" | "archived";
+  assigned_admin_id?: number | null;
+  assigned_admin_name?: string | null;
+  channels: Array<"sms" | "email" | "call" | "internal">;
+  /** Primary conversation id for deep links (latest active thread) */
+  primary_conversation_id?: number | null;
+  client_id?: number | null;
+  unknown_contact_id?: number | null;
+  pipeline_stage?: string | null;
+  client_status?: string | null;
+}
+
+export interface Conversation {
+  id: number;
+  client_id: number | null;
+  unknown_contact_id?: number | null;
+  ofg_number_id?: number | null;
+  channel: "sms" | "call" | "email" | "internal" | "whatsapp";
+  status: "open" | "snoozed" | "closed" | "archived";
+  last_message_at?: string | null;
+  last_message_preview?: string | null;
+  unread_count: number;
+  assigned_admin_id?: number | null;
   first_name?: string;
   last_name?: string;
   email?: string;
@@ -306,12 +481,23 @@ export interface Conversation {
 
 export interface ConversationMessage {
   id: number;
-  direction: "inbound" | "outbound";
+  conversation_id?: number;
+  direction: "inbound" | "outbound" | "internal" | "system";
   channel: string;
   body: string;
+  media_url?: string | null;
+  media_content_type?: string | null;
+  subject?: string | null;
   from_address?: string | null;
   to_address?: string | null;
   sent_by_admin_id?: number | null;
+  sent_by_admin_name?: string | null;
+  provider_message_id?: string | null;
+  provider_status?: string | null;
+  error_message?: string | null;
+  call_duration_sec?: number | null;
+  recording_url?: string | null;
+  metadata_json?: Record<string, unknown> | null;
   created_at: string;
 }
 
@@ -539,6 +725,19 @@ export interface AdminDashboardUpcomingRound {
   days_until: number;
 }
 
+export interface ConversationTemplate {
+  id: number;
+  name: string;
+  channel: "sms" | "email" | "internal";
+  subject?: string | null;
+  body: string;
+  variables?: string[];
+  is_active: boolean;
+  sort_order: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
 export interface CommunicationTemplate {
   id: number;
   slug: string;
@@ -556,6 +755,36 @@ export interface SystemSetting {
   setting_value: string | null;
   description?: string | null;
   updated_at: string;
+}
+
+/** Settings → Notifications: email-only recipients (need not be admins). */
+export interface AdminNotifyExtraEmail {
+  id: number;
+  email: string;
+  label: string | null;
+  is_active: boolean;
+  /** null = all events; otherwise only these event keys. */
+  events?: AdminNotifyEventKey[] | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+/** Settings → Notifications: active staff who receive team alerts. */
+export interface AdminNotifyStaffRecipient {
+  id: number;
+  email: string;
+  first_name: string;
+  last_name: string;
+  role: string;
+  phone: string | null;
+  prefs: AdminNotificationPrefs;
+  channels: Record<AdminNotifyChannel, AdminNotificationChannelMeta>;
+}
+
+export interface AdminNotifyRecipientsResponse {
+  staff: AdminNotifyStaffRecipient[];
+  extras: AdminNotifyExtraEmail[];
+  events: AdminNotifyEventKey[];
 }
 
 export interface SectionLock {
@@ -589,8 +818,10 @@ export interface AdminUserListItem {
   phone?: string | null;
   role: "super_admin" | "admin" | "agent" | "affiliate";
   status: "active" | "inactive" | "suspended";
-  /** Client language this admin owns/handles */
+  /** Admin UI/comms language preference */
   preferred_language?: "en" | "es" | null;
+  /** Client/task language this admin owns (routing); at most one admin per en|es */
+  language_owner_for?: "en" | "es" | null;
   last_login_at?: string | null;
   created_at: string;
 }
@@ -961,6 +1192,50 @@ export interface AdminPaymentsSummary {
   revenue_7d_cents: number;
 }
 
+export interface AdminClientsListResponse {
+  clients: AdminClientListItem[];
+  pagination: PaginationInfo;
+}
+
+export interface AdminDocumentsStatusCounts {
+  all: number;
+  pending: number;
+  approved: number;
+  rejected: number;
+}
+
+export interface AdminDocumentsListResponse {
+  documents: ClientDocument[];
+  pagination: PaginationInfo;
+  status_counts: AdminDocumentsStatusCounts;
+}
+
+export interface AdminConversationsListResponse {
+  contacts: ConversationContactHubItem[];
+  pagination: PaginationInfo;
+}
+
+export type AdminClientsListQuery = {
+  stage?: string;
+  search?: string;
+  status?: string;
+  language?: string;
+  billing?: string;
+  joined_from?: string;
+  joined_to?: string;
+  has_notes?: string;
+  labels?: string[];
+  page?: number;
+  limit?: number;
+  sort_by?: string;
+  sort_dir?: "ASC" | "DESC";
+};
+
+export interface AdminTicketsListResponse {
+  tickets: SupportTicket[];
+  pagination: PaginationInfo;
+}
+
 export interface AdminPaymentsResponse {
   payments: Payment[];
   summary: AdminPaymentsSummary;
@@ -1282,6 +1557,9 @@ export type {
   HubspotConnectionStatus,
   HubspotPermissionRow,
   WorkTasksSyncResult,
+  WorkTaskColumnPage,
+  WorkTasksBoardResponse,
+  WorkTasksColumnMoreResponse,
   AdminDashboardWorkTask,
 } from "./workTasks";
 
@@ -1700,11 +1978,36 @@ export interface AdminPipelineQuery {
   info_requests?: string;
   has_notes?: string;
   labels?: string[];
+  /** Page size per column (board mode) or for load-more. Default 20. */
+  limit?: number;
+  /** Load-more: column key (`prospect` | case stage). */
+  column?: string;
+  /** Load-more offset within that column. */
+  offset?: number;
+}
+
+export interface PipelineColumnPage<T = CreditRepairCase | Prospect> {
+  items: T[];
+  total: number;
+  offset: number;
+  limit: number;
+  has_more: boolean;
 }
 
 export interface AdminPipelineResponse {
   cases: CreditRepairCase[];
   prospects: Prospect[];
+  limit?: number;
+  columns?: Record<string, PipelineColumnPage>;
+}
+
+export interface AdminPipelineColumnMoreResponse {
+  column: string;
+  items: Array<CreditRepairCase | Prospect>;
+  total: number;
+  offset: number;
+  limit: number;
+  has_more: boolean;
 }
 
 // ============================================================

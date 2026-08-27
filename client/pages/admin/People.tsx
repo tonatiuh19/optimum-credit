@@ -10,6 +10,7 @@ import {
   Search,
   ChevronDown,
   Mail,
+  Phone,
 } from "lucide-react";
 import { useDebounce } from "@/hooks/use-debounce";
 import { useFormik } from "formik";
@@ -31,6 +32,10 @@ import {
   deleteAdminTeamMember,
   resendAdminWelcomeEmail,
 } from "@/store/slices/adminSlice";
+import {
+  assignAdminPhoneNumber,
+  fetchAdminPhoneNumbers,
+} from "@/store/slices/conversationsSlice";
 import type { AdminUserListItem } from "@shared/api";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -90,6 +95,9 @@ const memberSchema = Yup.object({
   role: Yup.string().required("Required"),
   status: Yup.string().required("Required"),
   preferred_language: Yup.string().oneOf(["en", "es"]).required("Required"),
+  language_owner_for: Yup.string()
+    .oneOf(["", "en", "es"])
+    .nullable(),
 });
 
 type MemberForm = {
@@ -100,6 +108,7 @@ type MemberForm = {
   role: string;
   status: string;
   preferred_language: "en" | "es";
+  language_owner_for: "" | "en" | "es";
 };
 
 // ─── Member dialog ────────────────────────────────────────────────────────────
@@ -128,6 +137,11 @@ function MemberDialog({
       role: initial?.role ?? "admin",
       status: initial?.status ?? "active",
       preferred_language: initial?.preferred_language ?? "en",
+      language_owner_for:
+        initial?.language_owner_for === "en" ||
+        initial?.language_owner_for === "es"
+          ? initial.language_owner_for
+          : "",
     },
     validationSchema: memberSchema,
     onSubmit: async (vals, { resetForm }) => {
@@ -258,6 +272,27 @@ function MemberDialog({
             <FieldHint>{t("adminHelpers.teamLanguageHint")}</FieldHint>
           </div>
 
+          <div>
+            <label className="text-xs font-medium text-muted-foreground mb-1 block">
+              {t("adminHelpers.teamLanguageOwnerLabel")}
+            </label>
+            <select
+              className={inputClass}
+              {...form.getFieldProps("language_owner_for")}
+            >
+              <option value="">
+                {t("adminHelpers.teamLanguageOwnerNone")}
+              </option>
+              <option value="en">
+                {t("adminHelpers.teamLanguageOwnerEn")}
+              </option>
+              <option value="es">
+                {t("adminHelpers.teamLanguageOwnerEs")}
+              </option>
+            </select>
+            <FieldHint>{t("adminHelpers.teamLanguageOwnerHint")}</FieldHint>
+          </div>
+
           {/* Role permission legend */}
           <div className="rounded-lg border border-border bg-muted/40 p-3 space-y-2">
             <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
@@ -385,11 +420,16 @@ function DeleteDialog({
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function AdminPeople() {
+  const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const { toast } = useToast();
   const { team, loading } = useAppSelector((s) => s.admin);
   const me = useAppSelector((s) => s.adminAuth.user);
+  const { phoneNumbers, phoneNumbersLoading } = useAppSelector(
+    (s) => s.conversations,
+  );
   const isSuperAdmin = me?.role === "super_admin";
+  const canManageNumbers = isSuperAdmin || me?.role === "admin";
 
   const [search, setSearch] = useState("");
   const [roleFilter, setRoleFilter] = useState("all");
@@ -412,6 +452,10 @@ export default function AdminPeople() {
   useEffect(() => {
     dispatch(fetchAdminTeam(teamParams));
   }, [dispatch, debouncedSearch, roleFilter]);
+
+  useEffect(() => {
+    if (canManageNumbers) dispatch(fetchAdminPhoneNumbers());
+  }, [dispatch, canManageNumbers]);
 
   const handleSort = (key: string) => {
     if (sortBy === key) {
@@ -479,7 +523,7 @@ export default function AdminPeople() {
     },
     {
       key: "preferred_language",
-      label: "Language",
+      label: "UI",
       sortable: true,
       shrink: true,
       render: (m) => (
@@ -487,6 +531,20 @@ export default function AdminPeople() {
           {m.preferred_language === "es" ? "ES" : "EN"}
         </span>
       ),
+    },
+    {
+      key: "language_owner_for",
+      label: t("adminHelpers.teamLanguageOwnerCol"),
+      sortable: true,
+      shrink: true,
+      render: (m) =>
+        m.language_owner_for === "en" || m.language_owner_for === "es" ? (
+          <span className="inline-flex text-xs font-semibold px-2 py-0.5 rounded-full border border-accent/30 bg-accent/10 text-accent">
+            {m.language_owner_for === "es" ? "ES" : "EN"}
+          </span>
+        ) : (
+          <span className="text-xs text-muted-foreground">—</span>
+        ),
     },
     {
       key: "last_login_at",
@@ -559,7 +617,20 @@ export default function AdminPeople() {
   ];
 
   const handleCreate = async (vals: MemberForm) => {
-    const res = await dispatch(createAdminTeamMember(vals));
+    const res = await dispatch(
+      createAdminTeamMember({
+        email: vals.email,
+        first_name: vals.first_name,
+        last_name: vals.last_name,
+        phone: vals.phone,
+        role: vals.role,
+        preferred_language: vals.preferred_language,
+        language_owner_for:
+          vals.language_owner_for === "en" || vals.language_owner_for === "es"
+            ? vals.language_owner_for
+            : null,
+      }),
+    );
     if (createAdminTeamMember.fulfilled.match(res)) {
       toast({
         title: "Team member added",
@@ -605,6 +676,10 @@ export default function AdminPeople() {
         role: vals.role,
         status: vals.status,
         preferred_language: vals.preferred_language,
+        language_owner_for:
+          vals.language_owner_for === "en" || vals.language_owner_for === "es"
+            ? vals.language_owner_for
+            : null,
       }),
     );
     dispatch(fetchAdminTeam(teamParams));
@@ -636,6 +711,86 @@ export default function AdminPeople() {
           ) : undefined
         }
       />
+
+      {canManageNumbers && (
+        <div className="bg-card rounded-2xl border border-border p-5 space-y-3">
+          <div className="flex items-start gap-3">
+            <div className="w-9 h-9 rounded-xl bg-primary/10 text-primary flex items-center justify-center shrink-0">
+              <Phone className="w-4 h-4" />
+            </div>
+            <div>
+              <h2 className="font-semibold text-foreground">
+                {t("conversations.phoneNumbersTitle")}
+              </h2>
+              <p className="text-sm text-muted-foreground">
+                {t("conversations.phoneNumbersHint")}
+              </p>
+            </div>
+          </div>
+          {phoneNumbersLoading ? (
+            <p className="text-sm text-muted-foreground">{t("conversations.loading")}</p>
+          ) : phoneNumbers.length === 0 ? (
+            <p className="text-sm text-muted-foreground">—</p>
+          ) : (
+            <div className="space-y-2">
+              {phoneNumbers.map((n) => (
+                <div
+                  key={n.id}
+                  className="flex flex-wrap items-center gap-3 justify-between rounded-xl border border-border px-3 py-2.5"
+                >
+                  <div>
+                    <div className="text-sm font-medium">{n.e164}</div>
+                    <div className="text-xs text-muted-foreground">
+                      {n.friendly_name || "—"}
+                    </div>
+                  </div>
+                  <select
+                    value={n.assigned_admin_id ?? ""}
+                    onChange={async (e) => {
+                      const raw = e.target.value;
+                      const assigned = raw === "" ? null : Number(raw);
+                      const res = await dispatch(
+                        assignAdminPhoneNumber({
+                          id: n.id,
+                          assigned_admin_id: assigned,
+                        }),
+                      );
+                      if (assignAdminPhoneNumber.fulfilled.match(res)) {
+                        toast({
+                          title: t("conversations.phoneNumbersTitle"),
+                          description: assigned
+                            ? res.payload.assigned_admin_name || "OK"
+                            : t("conversations.phoneUnassigned"),
+                        });
+                      }
+                    }}
+                    className="h-9 min-w-[180px] px-2 rounded-lg border border-input bg-background text-sm"
+                  >
+                    <option value="">
+                      {t("conversations.phoneUnassigned")}
+                    </option>
+                    {n.assigned_admin_id != null &&
+                      !team.some((m) => m.id === n.assigned_admin_id) && (
+                        <option value={n.assigned_admin_id}>
+                          {n.assigned_admin_name || `#${n.assigned_admin_id}`}
+                        </option>
+                      )}
+                    {team
+                      .filter(
+                        (m) => m.role !== "affiliate" && m.status === "active",
+                      )
+                      .map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.first_name} {m.last_name}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Search + role filter */}
       <div className="flex flex-wrap gap-3 items-center">

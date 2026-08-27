@@ -26,6 +26,7 @@ export default function Layout({ children }: LayoutProps) {
             <Link
               to="/"
               className="flex items-center transition-opacity hover:opacity-80"
+              aria-label={t("nav.home")}
             >
               <img
                 src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_dark.png"
@@ -42,12 +43,6 @@ export default function Layout({ children }: LayoutProps) {
 
             {/* Desktop Navigation */}
             <nav className="hidden md:flex items-center gap-8">
-              <Link
-                to="/"
-                className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
-              >
-                {t("nav.home")}
-              </Link>
               <a
                 href="#how-it-works"
                 className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
@@ -59,6 +54,12 @@ export default function Layout({ children }: LayoutProps) {
                 className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
               >
                 {t("nav.creditAnalysis")}
+              </Link>
+              <Link
+                to="/funding"
+                className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
+              >
+                {t("nav.funding")}
               </Link>
               <a
                 href="#packages"
@@ -106,13 +107,6 @@ export default function Layout({ children }: LayoutProps) {
           {/* Mobile Navigation */}
           {mobileMenuOpen && (
             <nav className="md:hidden pb-4 space-y-2">
-              <Link
-                to="/"
-                className="block px-4 py-2 rounded-lg text-foreground hover:bg-secondary transition-colors"
-                onClick={() => setMobileMenuOpen(false)}
-              >
-                {t("nav.home")}
-              </Link>
               <a
                 href="#how-it-works"
                 className="block px-4 py-2 rounded-lg text-foreground hover:bg-secondary transition-colors"
@@ -126,6 +120,13 @@ export default function Layout({ children }: LayoutProps) {
                 onClick={() => setMobileMenuOpen(false)}
               >
                 {t("nav.creditAnalysis")}
+              </Link>
+              <Link
+                to="/funding"
+                className="block px-4 py-2 rounded-lg text-foreground hover:bg-secondary transition-colors"
+                onClick={() => setMobileMenuOpen(false)}
+              >
+                {t("nav.funding")}
               </Link>
               <a
                 href="#packages"
@@ -207,6 +208,14 @@ export default function Layout({ children }: LayoutProps) {
                     className="hover:text-foreground transition-colors"
                   >
                     {t("footer.creditAnalysis")}
+                  </Link>
+                </li>
+                <li>
+                  <Link
+                    to="/funding"
+                    className="hover:text-foreground transition-colors"
+                  >
+                    {t("footer.funding")}
                   </Link>
                 </li>
                 <li>

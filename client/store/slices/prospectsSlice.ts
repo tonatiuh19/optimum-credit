@@ -7,7 +7,7 @@ import type {
   Prospect,
   SetClientLabelsPayload,
 } from "@shared/api";
-import { fetchPipeline } from "./adminSlice";
+import { fetchMorePipelineColumn, fetchPipeline } from "./adminSlice";
 
 interface ProspectsState {
   prospects: Prospect[];
@@ -95,6 +95,14 @@ const slice = createSlice({
     // without a second network round-trip.
     b.addCase(fetchPipeline.fulfilled, (s, a) => {
       s.prospects = a.payload.prospects ?? [];
+    });
+    b.addCase(fetchMorePipelineColumn.fulfilled, (s, a) => {
+      if (a.payload.column !== "prospect") return;
+      const seen = new Set(s.prospects.map((p) => p.id));
+      s.prospects = [
+        ...s.prospects,
+        ...(a.payload.items as Prospect[]).filter((p) => !seen.has(p.id)),
+      ];
     });
 
     b.addCase(convertProspect.pending, (s) => {

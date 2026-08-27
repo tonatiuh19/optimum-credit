@@ -7,6 +7,7 @@ import { Search, X, Loader2, User } from "lucide-react";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { searchClients } from "@/store/slices/adminSlice";
 import { useDebounce } from "@/hooks/use-debounce";
+import { isProspectLead } from "@/lib/pipelineFilters";
 import type { AdminClientListItem } from "@shared/api";
 
 interface ClientSearchPickerProps {
@@ -57,7 +58,7 @@ export function ClientSearchPicker({
       dispatch(
         searchClients(
           prospectsOnly
-            ? { query: debouncedQuery.trim(), status: "prospect" }
+            ? { query: debouncedQuery.trim(), unconvertedLead: true }
             : debouncedQuery.trim(),
         ),
       );
@@ -97,10 +98,10 @@ export function ClientSearchPicker({
 
   const results = useMemo(() => {
     if (prospectsOnly) {
-      return clientSearchResults.filter((c) => c.status === "prospect");
+      return clientSearchResults.filter((c) => isProspectLead(c));
     }
     if (excludeProspects) {
-      return clientSearchResults.filter((c) => c.status !== "prospect");
+      return clientSearchResults.filter((c) => !isProspectLead(c));
     }
     return clientSearchResults;
   }, [clientSearchResults, excludeProspects, prospectsOnly]);
@@ -148,7 +149,7 @@ export function ClientSearchPicker({
             {value.email}
           </p>
         </div>
-        {value.status === "prospect" && (
+        {isProspectLead(value) && (
           <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full border border-accent/30 text-accent bg-accent/10 shrink-0">
             prospect
           </span>

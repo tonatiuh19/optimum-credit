@@ -375,7 +375,7 @@ function TransactionsTab() {
     payments,
     paymentsSummary: summary,
     paymentsPagination: pagination,
-    loading,
+    paymentsLoading: loading,
   } = useAppSelector((s) => s.admin);
 
   const [statusFilter, setStatusFilter] = useState("all");
@@ -385,26 +385,30 @@ function TransactionsTab() {
 
   const search = useDebounce(searchRaw, 350);
 
-  const load = useCallback(() => {
-    dispatch(
-      fetchAdminPayments({
-        status: statusFilter === "all" ? undefined : statusFilter,
-        provider: providerFilter === "all" ? undefined : providerFilter,
-        search: search || undefined,
-        page,
-        limit: 50,
-      }),
-    );
-  }, [dispatch, statusFilter, providerFilter, search, page]);
+  const loadPayments = useCallback(
+    (targetPage: number) => {
+      dispatch(
+        fetchAdminPayments({
+          status: statusFilter === "all" ? undefined : statusFilter,
+          provider: providerFilter === "all" ? undefined : providerFilter,
+          search: search || undefined,
+          page: targetPage,
+          limit: 50,
+        }),
+      );
+    },
+    [dispatch, statusFilter, providerFilter, search],
+  );
 
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  // Reset page when filters change
   useEffect(() => {
     setPage(1);
-  }, [statusFilter, providerFilter, search]);
+    loadPayments(1);
+  }, [statusFilter, providerFilter, search, loadPayments]);
+
+  useEffect(() => {
+    if (page === 1) return;
+    loadPayments(page);
+  }, [page, loadPayments]);
 
   const totalRevenue = summary?.total_revenue_cents ?? 0;
   const revenue30d = summary?.revenue_30d_cents ?? 0;
@@ -488,7 +492,7 @@ function TransactionsTab() {
             <Button
               variant="outline"
               size="icon"
-              onClick={load}
+              onClick={() => loadPayments(page)}
               disabled={loading}
               className="shrink-0"
             >

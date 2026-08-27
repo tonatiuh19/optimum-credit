@@ -1,4 +1,4 @@
-import { ReactNode, useEffect, useState } from "react";
+import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import {
   Link,
   NavLink,
@@ -33,14 +33,36 @@ import {
   CalendarDays,
   Repeat,
   Handshake,
+  Banknote,
 } from "lucide-react";
 import AdminThemeToggle from "@/components/AdminThemeToggle";
 import AdminNotificationBell from "@/components/admin/AdminNotificationBell";
+import AdminAskDrawer, {
+  AdminAskFab,
+} from "@/components/admin/AdminAskDrawer";
+import GlobalVoiceManager from "@/components/GlobalVoiceManager";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { adminLogout, fetchAdminMe } from "@/store/slices/adminAuthSlice";
 import { fetchSectionLocks } from "@/store/slices/adminSlice";
 import { fetchWorkBadge } from "@/store/slices/workTasksSlice";
+import {
+  fetchAdminInbox,
+  fetchNotificationPrefs,
+} from "@/store/slices/adminNotificationsSlice";
+import { fetchConversationsNavBadge } from "@/store/slices/conversationsSlice";
+import { getSharedAblyClient } from "@/lib/ably-client";
+import {
+  installNotificationSoundUnlock,
+  isNotificationSoundMuted,
+  playNotificationChime,
+} from "@/lib/notification-sound";
+import {
+  shouldPlayAdminNotifyChime,
+  shouldPlayInboundSmsChime,
+} from "@/lib/inboundSmsNotification";
+import type { RealtimeChannel } from "ably";
 import { useTranslation } from "react-i18next";
+import { logger } from "@/utils/logger";
 
 interface Props {
   children: ReactNode;
@@ -68,6 +90,13 @@ const NAV_GROUPS = [
         labelKey: "adminNav.pipeline",
         icon: Workflow,
         sectionKey: "pipeline",
+      },
+      {
+        to: "/admin/funding",
+        labelKey: "adminNav.funding",
+        icon: Banknote,
+        sectionKey: "funding",
+        affiliateManagersOnly: true,
       },
       {
         to: "/admin/affiliates",
@@ -200,15 +229,53 @@ export default function AdminLayout({ children }: Props) {
   const { sectionLocks, sectionLocksLoading, sectionLocksInitialized } =
     useAppSelector((s) => s.admin);
   const workBadge = useAppSelector((s) => s.workTasks.badge);
+  const conversationsNavBadge = useAppSelector((s) => s.conversations.navBadgeUnread);
+  const notificationPrefs = useAppSelector((s) => s.adminNotifications.prefs);
+  const inboundSmsChimeRef = useRef(true);
+  const notifyChimePrefsRef = useRef(notificationPrefs);
   const isSuperAdmin = user?.role === "super_admin";
   const isAdmin = user?.role === "admin";
   const isAffiliate = user?.role === "affiliate";
+  const lockedKeys = useMemo(
+    () =>
+      new Set(
+        sectionLocks.filter((l) => l.is_locked).map((l) => l.section_key),
+      ),
+    [sectionLocks],
+  );
+  const conversationsLocked = useMemo(
+    () =>
+      sectionLocks.some(
+        (l) => l.section_key === "conversations" && l.is_locked,
+      ),
+    [sectionLocks],
+  );
   const [mobileOpen, setMobileOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
 
   useEffect(() => {
-    if (token && !user) dispatch(fetchAdminMe());
-  }, [token, user, dispatch]);
+    notifyChimePrefsRef.current = notificationPrefs;
+    const syncChimeGate = () => {
+      inboundSmsChimeRef.current = shouldPlayInboundSmsChime(
+        notificationPrefs,
+        isNotificationSoundMuted(),
+      );
+    };
+    syncChimeGate();
+    window.addEventListener("ofg:notification-sound-mute", syncChimeGate);
+    return () =>
+      window.removeEventListener("ofg:notification-sound-mute", syncChimeGate);
+  }, [notificationPrefs]);
+
+  useEffect(() => {
+    installNotificationSoundUnlock();
+  }, []);
+
+  useEffect(() => {
+    // Always refresh /me so flags like conversations_enabled stay current
+    // (login payload may omit them; number assignment can change mid-session).
+    if (token) dispatch(fetchAdminMe());
+  }, [token, dispatch]);
 
   useEffect(() => {
     if (token) dispatch(fetchSectionLocks());
@@ -219,6 +286,113 @@ export default function AdminLayout({ children }: Props) {
       dispatch(fetchWorkBadge());
     }
   }, [token, user, dispatch]);
+
+  // Conversations nav badge (unread SMS in your inbox).
+  useEffect(() => {
+    if (!token || !user || user.role === "affiliate") return;
+    if (conversationsLocked) return;
+    dispatch(fetchConversationsNavBadge()).catch((e) =>
+      logger.warn("conversations badge load failed", e),
+    );
+  }, [dispatch, token, user?.id, user?.role, conversationsLocked]);
+
+  // Inbox once on shell load (no polling). Bell refreshes when opened + on Ably push.
+  useEffect(() => {
+    if (!token || !user || user.role === "affiliate") return;
+    dispatch(fetchNotificationPrefs()).catch((e) =>
+      logger.warn("notification prefs load failed", e),
+    );
+    dispatch(fetchAdminInbox()).catch((e) =>
+      logger.warn("inbox load failed", e),
+    );
+  }, [dispatch, token, user?.id, user?.role]);
+
+  // Real-time bell updates (inbound SMS + other in-app alerts) — real-state pattern.
+  useEffect(() => {
+    if (!token || !user?.id || user.role === "affiliate") return;
+
+    let cancelled = false;
+    let channel: RealtimeChannel | null = null;
+
+    const onNew = (msg: { data?: { event_key?: string } }) => {
+      const eventKey = msg?.data?.event_key;
+      dispatch(fetchAdminInbox()).catch((e) =>
+        logger.warn("inbox refresh failed", e),
+      );
+      if (
+        eventKey === "inbound_sms" ||
+        eventKey === "missed_call" ||
+        eventKey === "voicemail"
+      ) {
+        dispatch(fetchConversationsNavBadge()).catch((e) =>
+          logger.warn("conversations badge refresh failed", e),
+        );
+      }
+      // SMS chime stays on conversations channel; bell chime for voice events only
+      if (
+        (eventKey === "missed_call" || eventKey === "voicemail") &&
+        shouldPlayAdminNotifyChime(
+          eventKey,
+          notifyChimePrefsRef.current,
+          isNotificationSoundMuted(),
+        )
+      ) {
+        playNotificationChime();
+      }
+    };
+
+    void (async () => {
+      const client = await getSharedAblyClient(token);
+      if (cancelled || !client) return;
+      channel = client.channels.get(`admin:${user.id}:notifications`);
+      channel.subscribe("new", onNew);
+    })();
+
+    return () => {
+      cancelled = true;
+      try {
+        channel?.unsubscribe("new", onNew);
+      } catch {
+        /* noop */
+      }
+    };
+  }, [dispatch, token, user?.id, user?.role]);
+
+  // Conversations SMS realtime — nav badge + chime (shared Ably client).
+  useEffect(() => {
+    if (!token || !user?.id || user.role === "affiliate") return;
+    if (conversationsLocked) return;
+
+    let cancelled = false;
+    let channel: RealtimeChannel | null = null;
+
+    const onInboundSms = () => {
+      if (inboundSmsChimeRef.current) {
+        playNotificationChime();
+      }
+      dispatch(fetchConversationsNavBadge()).catch((e) =>
+        logger.warn("conversations badge refresh failed", e),
+      );
+    };
+
+    void (async () => {
+      const client = await getSharedAblyClient(token);
+      if (cancelled || !client) return;
+      channel = client.channels.get(`admin:${user.id}:conversations`);
+      channel.subscribe("inbound", onInboundSms);
+      channel.subscribe("inbound_unknown", onInboundSms);
+    })();
+
+    return () => {
+      cancelled = true;
+      try {
+        channel?.unsubscribe("inbound", onInboundSms);
+        channel?.unsubscribe("inbound_unknown", onInboundSms);
+      } catch {
+        /* noop */
+      }
+    };
+  }, [dispatch, token, user?.id, user?.role, conversationsLocked]);
 
   useEffect(() => {
     if (!token) navigate("/admin/login", { replace: true });
@@ -232,11 +406,6 @@ export default function AdminLayout({ children }: Props) {
       document.body.style.overflow = prev;
     };
   }, [mobileOpen]);
-
-  // Build a quick lookup: sectionKey → is_locked
-  const lockedKeys = new Set(
-    sectionLocks.filter((l) => l.is_locked).map((l) => l.section_key),
-  );
 
   // Synchronously check if the current route is locked (no flash).
   // Use exact match for items with `end: true` (e.g. /admin dashboard) so the
@@ -400,17 +569,24 @@ export default function AdminLayout({ children }: Props) {
                   )}
                   <div className="space-y-0.5">
                     {visibleItems.map((item) => {
-                      const locked = (item as any).sectionKey
-                        ? lockedKeys.has((item as any).sectionKey)
-                        : false;
+                      const numberGated =
+                        item.sectionKey === "conversations" &&
+                        user != null &&
+                        !user.conversations_enabled;
+                      const locked =
+                        ((item as any).sectionKey
+                          ? lockedKeys.has((item as any).sectionKey)
+                          : false) || numberGated;
 
                       if (locked) {
                         const lockData = sectionLocks.find(
                           (l) => l.section_key === item.sectionKey,
                         );
-                        const tooltip = lockData?.lock_reason
-                          ? `${t(item.labelKey)}: ${lockData.lock_reason}`
-                          : `${t(item.labelKey)} — ${t("adminNav.sectionLocked")}`;
+                        const tooltip = numberGated
+                          ? t("adminNav.conversationsNumberRequired")
+                          : lockData?.lock_reason
+                            ? `${t(item.labelKey)}: ${lockData.lock_reason}`
+                            : `${t(item.labelKey)} — ${t("adminNav.sectionLocked")}`;
                         return (
                           <div
                             key={item.to}
@@ -477,6 +653,27 @@ export default function AdminLayout({ children }: Props) {
                                 workBadge.mine_open > 0 && (
                                   <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-primary/30 text-white shrink-0">
                                     {workBadge.mine_open}
+                                  </span>
+                                )}
+                              {!collapsed &&
+                                item.sectionKey === "conversations" &&
+                                conversationsNavBadge > 0 && (
+                                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-accent text-accent-foreground shrink-0 min-w-[1.25rem] text-center">
+                                    {conversationsNavBadge > 99
+                                      ? "99+"
+                                      : conversationsNavBadge}
+                                  </span>
+                                )}
+                              {collapsed &&
+                                item.sectionKey === "conversations" &&
+                                conversationsNavBadge > 0 && (
+                                  <span
+                                    className="absolute top-0.5 right-0.5 min-w-[14px] h-3.5 px-0.5 rounded-full bg-accent text-accent-foreground text-[9px] font-bold flex items-center justify-center"
+                                    aria-hidden
+                                  >
+                                    {conversationsNavBadge > 9
+                                      ? "9+"
+                                      : conversationsNavBadge}
                                   </span>
                                 )}
                               {isActive && collapsed && (
@@ -620,6 +817,9 @@ export default function AdminLayout({ children }: Props) {
           )}
         </main>
       </div>
+      <AdminAskFab />
+      <AdminAskDrawer />
+      {user?.conversations_enabled && <GlobalVoiceManager />}
     </div>
   );
 }

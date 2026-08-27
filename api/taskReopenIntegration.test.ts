@@ -11,7 +11,7 @@ import mysql, {
   type RowDataPacket,
 } from "mysql2/promise";
 import { createServer, createSession } from "./index";
-import { cleanupIntegrationTestClients } from "./testDbCleanup";
+import { cleanupIntegrationTestClients, createIntegrationTestPool } from "./testDbCleanup";
 
 const RUN_ID = `reopen-${Date.now()}`;
 const CLIENT_EMAIL = `${RUN_ID}@example.test`;
@@ -24,18 +24,6 @@ let clientId = 0;
 let caseId = 0;
 let optionalTemplateId = 0;
 let optionalCompletionId = 0;
-
-async function makePool() {
-  return mysql.createPool({
-    host: process.env.DB_HOST,
-    port: Number(process.env.DB_PORT || 4000),
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
-    ssl: { rejectUnauthorized: true },
-    connectionLimit: 3,
-  });
-}
 
 function tinyPng(): Buffer {
   return Buffer.from(
@@ -95,7 +83,7 @@ describe("task reopen — edge scenarios", () => {
         "DB_HOST / JWT_SECRET / CDN_UPLOAD_SECRET / DOC_ENCRYPTION_KEY required",
       );
     }
-    pool = await makePool();
+    pool = createIntegrationTestPool();
     app = createServer();
 
     const [admins] = await pool.query<RowDataPacket[]>(

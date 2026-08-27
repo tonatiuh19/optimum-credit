@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "optimum-admin-ask": {
+      "url": "https://www.ofgllc.com/api/mcp"
+    },
+    "twilio-docs": {
+      "url": "https://mcp.twilio.com/docs"
+    }
+  }
+}

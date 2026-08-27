@@ -64,6 +64,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import ConversationTemplatesAdmin from "@/components/admin/ConversationTemplatesAdmin";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 
@@ -1074,6 +1075,9 @@ export default function AdminTemplates() {
                 {generalTemplates.length}
               </Badge>
             </TabsTrigger>
+            <TabsTrigger value="conversations" className="text-sm gap-1.5">
+              <MessageSquare className="h-3.5 w-3.5" /> Conversations
+            </TabsTrigger>
           </TabsList>
           <Button
             size="sm"
@@ -1104,6 +1108,10 @@ export default function AdminTemplates() {
         {/* General Templates tab */}
         <TabsContent value="general" className="mt-4">
           {renderList(generalTemplates, "No general templates found.")}
+        </TabsContent>
+
+        <TabsContent value="conversations" className="mt-4">
+          <ConversationTemplatesAdmin />
         </TabsContent>
       </Tabs>
 

@@ -105,6 +105,33 @@ export interface WorkTasksSyncResult {
   errors: string[];
 }
 
+/** One Kanban column page from GET /api/admin/work-tasks */
+export interface WorkTaskColumnPage {
+  tasks: AdminWorkTask[];
+  total: number;
+  offset: number;
+  limit: number;
+  has_more: boolean;
+}
+
+/** Full board response (all three columns). */
+export interface WorkTasksBoardResponse {
+  q: string;
+  limit: number;
+  columns: Record<WorkTaskStatus, WorkTaskColumnPage>;
+}
+
+/** Load-more response for a single column. */
+export interface WorkTasksColumnMoreResponse {
+  q: string;
+  status: WorkTaskStatus;
+  tasks: AdminWorkTask[];
+  total: number;
+  offset: number;
+  limit: number;
+  has_more: boolean;
+}
+
 export interface AdminDashboardWorkTask {
   id: number;
   title: string;

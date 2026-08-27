@@ -12,7 +12,7 @@ import mysql, {
   type RowDataPacket,
 } from "mysql2/promise";
 import { createServer, createSession } from "./index";
-import { cleanupIntegrationTestClients } from "./testDbCleanup";
+import { cleanupIntegrationTestClients, createIntegrationTestPool } from "./testDbCleanup";
 
 const RUN_ID = `pros-edge-${Date.now()}`;
 
@@ -22,18 +22,6 @@ let adminId = 0;
 let adminToken = "";
 const clientIds: number[] = [];
 const caseIds: number[] = [];
-
-async function makePool() {
-  return mysql.createPool({
-    host: process.env.DB_HOST,
-    port: Number(process.env.DB_PORT || 4000),
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
-    ssl: { rejectUnauthorized: true },
-    connectionLimit: 3,
-  });
-}
 
 async function createProspect(suffix: string): Promise<number> {
   const email = `${RUN_ID}-${suffix}@example.test`;
@@ -70,7 +58,7 @@ describe("prospect-stage case edge cases — HTTP", () => {
     if (!process.env.DB_HOST || !process.env.JWT_SECRET) {
       throw new Error("DB_HOST / JWT_SECRET required for integration tests");
     }
-    pool = await makePool();
+    pool = createIntegrationTestPool();
     app = createServer();
     const [admins] = await pool.query<RowDataPacket[]>(
       `SELECT id, email FROM admins ORDER BY id ASC LIMIT 1`,
@@ -347,6 +335,34 @@ describe("prospect-stage case edge cases — HTTP", () => {
       .expect(409);
   }, 45_000);
 
+  it("converts a stuck active lead with no case", async () => {
+    const [ins] = await pool.query<ResultSetHeader>(
+      `INSERT INTO clients
+         (email, first_name, last_name, phone, status, pipeline_stage, preferred_language)
+       VALUES (?, 'Stuck', ?, '5550108888', 'active', 'prospect', 'en')`,
+      [`${RUN_ID}-stuck-active@example.test`, RUN_ID],
+    );
+    const clientId = Number(ins.insertId);
+    clientIds.push(clientId);
+
+    const conv = await request(app)
+      .post(`/api/admin/prospects/${clientId}/convert`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ notes: `stuck ${RUN_ID}` })
+      .expect(200);
+
+    const caseId = Number(conv.body.case.id);
+    expect(caseId).toBeGreaterThan(0);
+    caseIds.push(caseId);
+
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT status, pipeline_stage FROM clients WHERE id = ? LIMIT 1`,
+      [clientId],
+    );
+    expect(rows[0].status).toBe("onboarding");
+    expect(rows[0].pipeline_stage).toBe("new_client");
+  }, 45_000);
+
   it("convert cancels duplicate allow_duplicate prospect-stage cases", async () => {
     const clientId = await createProspect("dup-cancel");
     const first = await createProspectCase(clientId);
@@ -402,11 +418,22 @@ describe("prospect-stage case edge cases — HTTP", () => {
       [clientId, txnId],
     );
 
+    // Shared TiDB: prefs suite mutes ephemeral *@example.test agents; other
+    // suites may mute real staff. Reset + exclude fixtures so fan-out matches
+    // teamAdminNotifyIntegration (see resetTeamAdminNotifyPrefs).
+    await pool.query(
+      `UPDATE admins SET notification_prefs_json = NULL
+       WHERE status = 'active'
+         AND role IN ('super_admin','admin','agent')
+         AND email IS NOT NULL AND TRIM(email) <> ''
+         AND email NOT LIKE '%@example.test'`,
+    );
     const [teamAdmins] = await pool.query<RowDataPacket[]>(
       `SELECT email FROM admins
        WHERE status = 'active'
          AND role IN ('super_admin', 'admin', 'agent')
-         AND email IS NOT NULL AND TRIM(email) <> ''`,
+         AND email IS NOT NULL AND TRIM(email) <> ''
+         AND email NOT LIKE '%@example.test'`,
     );
     expect(teamAdmins.length).toBeGreaterThan(0);
 
@@ -429,9 +456,13 @@ describe("prospect-stage case edge cases — HTTP", () => {
         e.subject.startsWith("New purchase —") ||
         e.subject.startsWith("Nueva compra —"),
     );
-    const purchaseRecipients = new Set(purchaseMails.map((e) => e.to));
+    const purchaseRecipients = new Set(
+      purchaseMails.map((e) => String(e.to || "").trim().toLowerCase()),
+    );
     for (const a of teamAdmins) {
-      expect(purchaseRecipients.has(String(a.email))).toBe(true);
+      expect(
+        purchaseRecipients.has(String(a.email).trim().toLowerCase()),
+      ).toBe(true);
     }
 
     // Idempotent: retry must not re-email the team

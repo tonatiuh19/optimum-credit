@@ -1,8 +1,14 @@
 import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
 import api, { formatAxiosError } from "@/lib/api";
 import { normalizeAdminCalendarResponse } from "@/lib/adminCalendarPayload";
+import type { RootState } from "@/store";
 import type {
   AdminClientListItem,
+  AdminClientsListResponse,
+  AdminClientsListQuery,
+  AdminDocumentsListResponse,
+  AdminDocumentsStatusCounts,
+  AdminTicketsListResponse,
   AdminReferrer,
   AdminDashboardStats,
   AdminDashboardTicket,
@@ -16,6 +22,8 @@ import type {
   AdminPaymentsResponse,
   AdminPipelineResponse,
   AdminPipelineQuery,
+  AdminPipelineColumnMoreResponse,
+  PipelineColumnPage,
   AdminSubscriptionsResponse,
   AdminUserListItem,
   CommunicationTemplate,
@@ -33,6 +41,11 @@ import type {
   SupportTicket,
   SectionLock,
   SystemSetting,
+  AdminNotifyExtraEmail,
+  AdminNotifyStaffRecipient,
+  AdminNotifyRecipientsResponse,
+  AdminNotifyChannel,
+  AdminNotifyEventKey,
   UpdateCouponPayload,
   PaymentSplit,
   CreateCasePayload,
@@ -53,10 +66,16 @@ interface AdminState {
     my_work_tasks: AdminDashboardWorkTask[];
   };
   clients: AdminClientListItem[];
+  clientsPagination: AdminClientsListResponse["pagination"] | null;
+  clientsListQuery: AdminClientsListQuery | null;
+  clientsLoading: boolean;
   pipelineClients: AdminClientListItem[];
   pipelineCases: CreditRepairCase[];
   pipelineProspects: Prospect[];
+  pipelineColumns: Record<string, PipelineColumnPage>;
   pipelineLoading: boolean;
+  pipelineLoadingMore: string | null;
+  pipelinePageLimit: number;
   selectedClient: any | null;
   panelClient: {
     case_info?: {
@@ -80,15 +99,25 @@ interface AdminState {
   panelLoading: boolean;
   pendingDocuments: any[];
   allDocuments: any[];
+  documentsPagination: AdminDocumentsListResponse["pagination"] | null;
+  documentsStatusCounts: AdminDocumentsStatusCounts | null;
+  documentsLoading: boolean;
   conversations: Conversation[];
   conversationMessages: Record<number, ConversationMessage[]>;
   tickets: SupportTicket[];
+  ticketsPagination: AdminTicketsListResponse["pagination"] | null;
+  ticketsLoading: boolean;
   selectedTicket: any | null;
   ticketReplies: any[];
   faqs: SupportFaq[];
   templates: CommunicationTemplate[];
   videos: EducationalVideo[];
   settings: SystemSetting[];
+  notifyStaff: AdminNotifyStaffRecipient[];
+  notifyExtraEmails: AdminNotifyExtraEmail[];
+  notifyExtraEmailsLoading: boolean;
+  notifyExtraEmailsSaving: boolean;
+  notifyExtraEmailsError: string | null;
   reports: {
     revenueByMonth: any[];
     signupsByMonth: any[];
@@ -98,6 +127,7 @@ interface AdminState {
   payments: Payment[];
   paymentsSummary: AdminPaymentsResponse["summary"] | null;
   paymentsPagination: AdminPaymentsResponse["pagination"] | null;
+  paymentsLoading: boolean;
   subscriptions: AdminSubscriptionsResponse["subscriptions"];
   subscriptionsSummary: AdminSubscriptionsResponse["summary"] | null;
   subscriptionsPagination: AdminSubscriptionsResponse["pagination"] | null;
@@ -149,29 +179,46 @@ const initialState: AdminState = {
     my_work_tasks: [],
   },
   clients: [],
+  clientsPagination: null,
+  clientsListQuery: null,
+  clientsLoading: false,
   pipelineClients: [],
   pipelineCases: [],
   pipelineProspects: [],
+  pipelineColumns: {},
   pipelineLoading: false,
+  pipelineLoadingMore: null,
+  pipelinePageLimit: 20,
   selectedClient: null,
   panelClient: null,
   panelLoading: false,
   pendingDocuments: [],
   allDocuments: [],
+  documentsPagination: null,
+  documentsStatusCounts: null,
+  documentsLoading: false,
   conversations: [],
   conversationMessages: {},
   tickets: [],
+  ticketsPagination: null,
+  ticketsLoading: false,
   selectedTicket: null,
   ticketReplies: [],
   faqs: [],
   templates: [],
   videos: [],
   settings: [],
+  notifyStaff: [],
+  notifyExtraEmails: [],
+  notifyExtraEmailsLoading: false,
+  notifyExtraEmailsSaving: false,
+  notifyExtraEmailsError: null,
   reports: { revenueByMonth: [], signupsByMonth: [], packageBreakdown: [] },
   team: [],
   payments: [],
   paymentsSummary: null,
   paymentsPagination: null,
+  paymentsLoading: false,
   subscriptions: [],
   subscriptionsSummary: null,
   subscriptionsPagination: null,
@@ -215,21 +262,10 @@ export const fetchAdminDashboard = createAsyncThunk(
 );
 
 export const fetchAdminClients = createAsyncThunk<
-  AdminClientListItem[],
-  | {
-      stage?: string;
-      search?: string;
-      status?: string;
-      language?: string;
-      billing?: string;
-      joined_from?: string;
-      joined_to?: string;
-      has_notes?: string;
-      labels?: string[];
-    }
-  | undefined
+  AdminClientsListResponse,
+  AdminClientsListQuery | undefined
 >("admin/clients", async (args) => {
-  const params: any = {};
+  const params: Record<string, string | number> = {};
   if (args?.stage) params.stage = args.stage;
   if (args?.search) params.search = args.search;
   if (args?.status) params.status = args.status;
@@ -240,21 +276,37 @@ export const fetchAdminClients = createAsyncThunk<
   if (args?.has_notes) params.has_notes = args.has_notes;
   if (args?.labels && args.labels.length > 0)
     params.labels = args.labels.join(",");
+  if (args?.page) params.page = args.page;
+  if (args?.limit) params.limit = args.limit;
+  if (args?.sort_by) params.sort_by = args.sort_by;
+  if (args?.sort_dir) params.sort_dir = args.sort_dir;
   const { data } = await api.get("/admin/clients", { params });
-  return data.clients;
+  return data as AdminClientsListResponse;
+});
+
+export const refetchAdminClients = createAsyncThunk<
+  AdminClientsListResponse,
+  void,
+  { state: RootState }
+>("admin/clients/refetch", async (_, { getState, dispatch }) => {
+  const q = getState().admin.clientsListQuery;
+  return dispatch(fetchAdminClients(q ?? { page: 1, limit: 50 })).unwrap();
 });
 
 export const searchClients = createAsyncThunk<
   AdminClientListItem[],
-  string | { query: string; status?: string }
+  string | { query: string; status?: string; unconvertedLead?: boolean }
 >("admin/clients/search", async (args) => {
   const query = typeof args === "string" ? args : args.query;
   const status = typeof args === "string" ? undefined : args.status;
+  const unconvertedLead =
+    typeof args === "string" ? undefined : args.unconvertedLead;
   const { data } = await api.get("/admin/clients", {
     params: {
       search: query,
       limit: 10,
       ...(status ? { status } : {}),
+      ...(unconvertedLead ? { unconverted_lead: "1" } : {}),
     },
   });
   return data.clients as AdminClientListItem[];
@@ -268,29 +320,58 @@ export const fetchAdminClient = createAsyncThunk<any, { id: number }>(
   },
 );
 
+function pipelineQueryParams(
+  args?: AdminPipelineQuery,
+): Record<string, string | number> {
+  const params: Record<string, string | number> = {};
+  if (args?.search) params.search = args.search;
+  if (args?.language) params.language = args.language;
+  if (args?.billing) params.billing = args.billing;
+  if (args?.package_id) params.package_id = args.package_id;
+  if (args?.assigned_admin_id)
+    params.assigned_admin_id = args.assigned_admin_id;
+  if (args?.referral_category)
+    params.referral_category = args.referral_category;
+  if (args?.client_status) params.client_status = args.client_status;
+  if (args?.case_status) params.case_status = args.case_status;
+  if (args?.stage) params.stage = args.stage;
+  if (args?.payment_badge) params.payment_badge = args.payment_badge;
+  if (args?.tasks) params.tasks = args.tasks;
+  if (args?.info_requests) params.info_requests = args.info_requests;
+  if (args?.has_notes) params.has_notes = args.has_notes;
+  if (args?.labels && args.labels.length > 0)
+    params.labels = args.labels.join(",");
+  if (args?.limit != null) params.limit = args.limit;
+  if (args?.column) params.column = args.column;
+  if (args?.offset != null) params.offset = args.offset;
+  return params;
+}
+
 export const fetchPipeline = createAsyncThunk(
   "admin/pipeline",
   async (args?: AdminPipelineQuery) => {
-    const params: Record<string, string> = {};
-    if (args?.search) params.search = args.search;
-    if (args?.language) params.language = args.language;
-    if (args?.billing) params.billing = args.billing;
-    if (args?.package_id) params.package_id = args.package_id;
-    if (args?.assigned_admin_id)
-      params.assigned_admin_id = args.assigned_admin_id;
-    if (args?.referral_category)
-      params.referral_category = args.referral_category;
-    if (args?.client_status) params.client_status = args.client_status;
-    if (args?.case_status) params.case_status = args.case_status;
-    if (args?.stage) params.stage = args.stage;
-    if (args?.payment_badge) params.payment_badge = args.payment_badge;
-    if (args?.tasks) params.tasks = args.tasks;
-    if (args?.info_requests) params.info_requests = args.info_requests;
-    if (args?.has_notes) params.has_notes = args.has_notes;
-    if (args?.labels && args.labels.length > 0)
-      params.labels = args.labels.join(",");
+    const params = pipelineQueryParams({
+      ...args,
+      limit: args?.limit ?? 20,
+      column: undefined,
+      offset: undefined,
+    });
     const { data } = await api.get("/admin/pipeline", { params });
     return data as AdminPipelineResponse;
+  },
+);
+
+export const fetchMorePipelineColumn = createAsyncThunk(
+  "admin/pipelineMore",
+  async (args: AdminPipelineQuery & { column: string; offset: number }) => {
+    const params = pipelineQueryParams({
+      ...args,
+      limit: args.limit ?? 20,
+      column: args.column,
+      offset: args.offset,
+    });
+    const { data } = await api.get("/admin/pipeline", { params });
+    return data as AdminPipelineColumnMoreResponse;
   },
 );
 
@@ -320,9 +401,9 @@ export const fetchPendingDocuments = createAsyncThunk(
   "admin/pendingDocs",
   async () => {
     const { data } = await api.get("/admin/documents", {
-      params: { status: "pending" },
+      params: { status: "pending", limit: 100 },
     });
-    return data.documents;
+    return (data as AdminDocumentsListResponse).documents;
   },
 );
 
@@ -341,15 +422,32 @@ export const fetchPanelClient = createAsyncThunk(
   },
 );
 
-export const fetchAllDocuments = createAsyncThunk(
-  "admin/allDocs",
-  async (params?: { status?: string; search?: string }) => {
-    const { data } = await api.get("/admin/documents", {
-      params: { status: params?.status || "all", search: params?.search },
-    });
-    return data.documents;
-  },
-);
+export const fetchAllDocuments = createAsyncThunk<
+  AdminDocumentsListResponse,
+  | {
+      status?: string;
+      search?: string;
+      doc_type?: string;
+      page?: number;
+      limit?: number;
+      sort_by?: string;
+      sort_dir?: "ASC" | "DESC";
+    }
+  | undefined
+>("admin/allDocs", async (params) => {
+  const query: Record<string, string | number> = {
+    status: params?.status || "all",
+  };
+  if (params?.search) query.search = params.search;
+  if (params?.doc_type && params.doc_type !== "all")
+    query.doc_type = params.doc_type;
+  if (params?.page) query.page = params.page;
+  if (params?.limit) query.limit = params.limit;
+  if (params?.sort_by) query.sort_by = params.sort_by;
+  if (params?.sort_dir) query.sort_dir = params.sort_dir;
+  const { data } = await api.get("/admin/documents", { params: query });
+  return data as AdminDocumentsListResponse;
+});
 
 export const fetchCaseDocuments = createAsyncThunk<
   { caseId: number; documents: any[] },
@@ -397,24 +495,32 @@ export const sendConversationMessage = createAsyncThunk<
   { conversation_id: number },
   {
     client_id: number;
-    channel: "sms" | "email";
+    channel: "sms";
     body: string;
-    subject?: string;
   }
 >("admin/sendConv", async (args) => {
   const { data } = await api.post("/admin/conversations/send", args);
   return data;
 });
 
-export const fetchAdminTickets = createAsyncThunk(
-  "admin/tickets",
-  async (args: { status?: string } | undefined) => {
-    const { data } = await api.get("/admin/tickets", {
-      params: args?.status ? { status: args.status } : {},
-    });
-    return data.tickets as SupportTicket[];
-  },
-);
+export const fetchAdminTickets = createAsyncThunk<
+  AdminTicketsListResponse,
+  | {
+      status?: string;
+      search?: string;
+      page?: number;
+      limit?: number;
+    }
+  | undefined
+>("admin/tickets", async (args) => {
+  const params: Record<string, string | number> = {};
+  if (args?.status) params.status = args.status;
+  if (args?.search) params.search = args.search;
+  if (args?.page) params.page = args.page;
+  if (args?.limit) params.limit = args.limit;
+  const { data } = await api.get("/admin/tickets", { params });
+  return data as AdminTicketsListResponse;
+});
 
 export const fetchAdminTicket = createAsyncThunk<any, { id: number }>(
   "admin/ticket",
@@ -581,6 +687,95 @@ export const saveSetting = createAsyncThunk<
   await api.post("/admin/settings", args);
 });
 
+export const fetchNotifyExtraEmails = createAsyncThunk<
+  AdminNotifyRecipientsResponse,
+  void,
+  { rejectValue: string }
+>("admin/notifyExtraEmails/fetch", async (_arg, { rejectWithValue }) => {
+  try {
+    const { data } = await api.get<AdminNotifyRecipientsResponse>(
+      "/admin/notify-recipients",
+    );
+    return data;
+  } catch (err: unknown) {
+    return rejectWithValue(
+      formatAxiosError(err, "Failed to load notification recipients"),
+    );
+  }
+});
+
+export const updateStaffNotifyPrefs = createAsyncThunk<
+  AdminNotifyStaffRecipient,
+  {
+    id: number;
+    channel_masters?: Partial<Record<AdminNotifyChannel, boolean>>;
+    email?: Partial<Record<AdminNotifyEventKey, boolean>>;
+    in_app?: Partial<Record<AdminNotifyEventKey, boolean>>;
+    sms?: Partial<Record<AdminNotifyEventKey, boolean>>;
+  },
+  { rejectValue: string }
+>("admin/notifyStaff/updatePrefs", async ({ id, ...body }, { rejectWithValue }) => {
+  try {
+    const { data } = await api.put(`/admin/admins/${id}/notification-prefs`, body);
+    return data.staff as AdminNotifyStaffRecipient;
+  } catch (err: unknown) {
+    return rejectWithValue(
+      formatAxiosError(err, "Failed to update staff notification prefs"),
+    );
+  }
+});
+
+export const addNotifyExtraEmail = createAsyncThunk<
+  AdminNotifyExtraEmail,
+  { email: string; label?: string },
+  { rejectValue: string }
+>("admin/notifyExtraEmails/add", async (args, { rejectWithValue }) => {
+  try {
+    const { data } = await api.post("/admin/notify-extra-emails", args);
+    return data.email as AdminNotifyExtraEmail;
+  } catch (err: unknown) {
+    return rejectWithValue(
+      formatAxiosError(err, "Failed to add notification email"),
+    );
+  }
+});
+
+export const updateNotifyExtraEmail = createAsyncThunk<
+  AdminNotifyExtraEmail,
+  {
+    id: number;
+    email?: string;
+    label?: string | null;
+    is_active?: boolean;
+    events?: AdminNotifyEventKey[] | null;
+  },
+  { rejectValue: string }
+>("admin/notifyExtraEmails/update", async ({ id, ...body }, { rejectWithValue }) => {
+  try {
+    const { data } = await api.patch(`/admin/notify-extra-emails/${id}`, body);
+    return data.email as AdminNotifyExtraEmail;
+  } catch (err: unknown) {
+    return rejectWithValue(
+      formatAxiosError(err, "Failed to update notification email"),
+    );
+  }
+});
+
+export const deleteNotifyExtraEmail = createAsyncThunk<
+  number,
+  { id: number },
+  { rejectValue: string }
+>("admin/notifyExtraEmails/delete", async ({ id }, { rejectWithValue }) => {
+  try {
+    await api.delete(`/admin/notify-extra-emails/${id}`);
+    return id;
+  } catch (err: unknown) {
+    return rejectWithValue(
+      formatAxiosError(err, "Failed to remove notification email"),
+    );
+  }
+});
+
 export const fetchAdminReports = createAsyncThunk("admin/reports", async () => {
   const { data } = await api.get("/admin/reports");
   return data;
@@ -603,6 +798,7 @@ export const createAdminTeamMember = createAsyncThunk<
     phone?: string;
     role: string;
     preferred_language?: "en" | "es";
+    language_owner_for?: "en" | "es" | null;
   },
   { rejectValue: string }
 >("admin/team/create", async (args, { rejectWithValue }) => {
@@ -640,6 +836,7 @@ export const updateAdminTeamMember = createAsyncThunk<
     role?: string;
     status?: string;
     preferred_language?: "en" | "es";
+    language_owner_for?: "en" | "es" | null;
   },
   { rejectValue: string }
 >("admin/team/update", async ({ id, ...rest }) => {
@@ -996,18 +1193,34 @@ const slice = createSlice({
       s.loading = false;
     };
     [
-      fetchAdminClients,
-      fetchAllDocuments,
       fetchAdminTeam,
       fetchAdminDashboard,
       fetchAdminReports,
       fetchSettings,
       fetchTemplates,
       fetchAdminVideos,
-      fetchAdminTickets,
     ].forEach((thunk) => {
       b.addCase(thunk.pending, setLoading);
       b.addCase(thunk.rejected, clearLoading);
+    });
+
+    b.addCase(fetchAdminClients.pending, (s) => {
+      s.clientsLoading = true;
+    });
+    b.addCase(fetchAdminClients.rejected, (s) => {
+      s.clientsLoading = false;
+    });
+    b.addCase(fetchAllDocuments.pending, (s) => {
+      s.documentsLoading = true;
+    });
+    b.addCase(fetchAllDocuments.rejected, (s) => {
+      s.documentsLoading = false;
+    });
+    b.addCase(fetchAdminTickets.pending, (s) => {
+      s.ticketsLoading = true;
+    });
+    b.addCase(fetchAdminTickets.rejected, (s) => {
+      s.ticketsLoading = false;
     });
 
     b.addCase(fetchPipeline.pending, (s) => {
@@ -1020,6 +1233,53 @@ const slice = createSlice({
       s.pipelineLoading = false;
       s.pipelineCases = a.payload.cases ?? [];
       s.pipelineProspects = a.payload.prospects ?? [];
+      s.pipelineColumns = a.payload.columns ?? {};
+      s.pipelinePageLimit = a.payload.limit ?? 20;
+    });
+    b.addCase(fetchMorePipelineColumn.pending, (s, a) => {
+      s.pipelineLoadingMore = a.meta.arg.column;
+    });
+    b.addCase(fetchMorePipelineColumn.rejected, (s) => {
+      s.pipelineLoadingMore = null;
+    });
+    b.addCase(fetchMorePipelineColumn.fulfilled, (s, a) => {
+      s.pipelineLoadingMore = null;
+      const colKey = a.payload.column;
+      const prev = s.pipelineColumns[colKey] ?? {
+        items: [],
+        total: 0,
+        offset: 0,
+        limit: a.payload.limit,
+        has_more: false,
+      };
+      const seen = new Set(
+        (prev.items as Array<{ id: number }>).map((x) => x.id),
+      );
+      const appended = (a.payload.items as Array<{ id: number }>).filter(
+        (x) => !seen.has(x.id),
+      );
+      s.pipelineColumns[colKey] = {
+        items: [...prev.items, ...appended] as any,
+        total: a.payload.total,
+        offset: a.payload.offset,
+        limit: a.payload.limit,
+        has_more: a.payload.has_more,
+      };
+      if (colKey === "prospect") {
+        const pSeen = new Set(s.pipelineProspects.map((p) => p.id));
+        s.pipelineProspects = [
+          ...s.pipelineProspects,
+          ...(a.payload.items as Prospect[]).filter((p) => !pSeen.has(p.id)),
+        ];
+      } else {
+        const cSeen = new Set(s.pipelineCases.map((c) => c.id));
+        s.pipelineCases = [
+          ...s.pipelineCases,
+          ...(a.payload.items as CreditRepairCase[]).filter(
+            (c) => !cSeen.has(c.id),
+          ),
+        ];
+      }
     });
 
     b.addCase(fetchAdminDashboard.fulfilled, (s, a) => {
@@ -1031,8 +1291,10 @@ const slice = createSlice({
       };
     });
     b.addCase(fetchAdminClients.fulfilled, (s, a) => {
-      s.loading = false;
-      s.clients = a.payload;
+      s.clientsLoading = false;
+      s.clients = a.payload.clients;
+      s.clientsPagination = a.payload.pagination;
+      if (a.meta.arg) s.clientsListQuery = a.meta.arg;
     });
     b.addCase(searchClients.pending, (s) => {
       s.clientSearchLoading = true;
@@ -1081,8 +1343,10 @@ const slice = createSlice({
       s.pendingDocuments = a.payload;
     });
     b.addCase(fetchAllDocuments.fulfilled, (s, a) => {
-      s.loading = false;
-      s.allDocuments = a.payload;
+      s.documentsLoading = false;
+      s.allDocuments = a.payload.documents;
+      s.documentsPagination = a.payload.pagination;
+      s.documentsStatusCounts = a.payload.status_counts;
     });
     b.addCase(fetchCaseDocuments.pending, (s) => {
       s.caseDocumentsLoading = true;
@@ -1117,8 +1381,9 @@ const slice = createSlice({
       s.conversationMessages[a.payload.id] = a.payload.messages;
     });
     b.addCase(fetchAdminTickets.fulfilled, (s, a) => {
-      s.loading = false;
-      s.tickets = a.payload;
+      s.ticketsLoading = false;
+      s.tickets = a.payload.tickets;
+      s.ticketsPagination = a.payload.pagination;
     });
     b.addCase(fetchAdminTicket.fulfilled, (s, a) => {
       s.selectedTicket = a.payload.ticket;
@@ -1152,6 +1417,73 @@ const slice = createSlice({
       s.loading = false;
       s.settings = a.payload;
     });
+    b.addCase(fetchNotifyExtraEmails.pending, (s) => {
+      s.notifyExtraEmailsLoading = true;
+      s.notifyExtraEmailsError = null;
+    });
+    b.addCase(fetchNotifyExtraEmails.fulfilled, (s, a) => {
+      s.notifyExtraEmailsLoading = false;
+      s.notifyStaff = a.payload.staff || [];
+      s.notifyExtraEmails = a.payload.extras || [];
+    });
+    b.addCase(fetchNotifyExtraEmails.rejected, (s, a) => {
+      s.notifyExtraEmailsLoading = false;
+      s.notifyExtraEmailsError = a.payload || "Failed";
+    });
+    b.addCase(updateStaffNotifyPrefs.pending, (s) => {
+      s.notifyExtraEmailsSaving = true;
+      s.notifyExtraEmailsError = null;
+    });
+    b.addCase(updateStaffNotifyPrefs.fulfilled, (s, a) => {
+      s.notifyExtraEmailsSaving = false;
+      s.notifyStaff = s.notifyStaff.map((row) =>
+        row.id === a.payload.id ? { ...row, ...a.payload } : row,
+      );
+    });
+    b.addCase(updateStaffNotifyPrefs.rejected, (s, a) => {
+      s.notifyExtraEmailsSaving = false;
+      s.notifyExtraEmailsError = a.payload || "Failed";
+    });
+    b.addCase(addNotifyExtraEmail.pending, (s) => {
+      s.notifyExtraEmailsSaving = true;
+      s.notifyExtraEmailsError = null;
+    });
+    b.addCase(addNotifyExtraEmail.fulfilled, (s, a) => {
+      s.notifyExtraEmailsSaving = false;
+      const idx = s.notifyExtraEmails.findIndex((e) => e.id === a.payload.id);
+      if (idx >= 0) s.notifyExtraEmails[idx] = a.payload;
+      else s.notifyExtraEmails = [...s.notifyExtraEmails, a.payload];
+    });
+    b.addCase(addNotifyExtraEmail.rejected, (s, a) => {
+      s.notifyExtraEmailsSaving = false;
+      s.notifyExtraEmailsError = a.payload || "Failed";
+    });
+    b.addCase(updateNotifyExtraEmail.pending, (s) => {
+      s.notifyExtraEmailsSaving = true;
+      s.notifyExtraEmailsError = null;
+    });
+    b.addCase(updateNotifyExtraEmail.fulfilled, (s, a) => {
+      s.notifyExtraEmailsSaving = false;
+      s.notifyExtraEmails = s.notifyExtraEmails.map((e) =>
+        e.id === a.payload.id ? a.payload : e,
+      );
+    });
+    b.addCase(updateNotifyExtraEmail.rejected, (s, a) => {
+      s.notifyExtraEmailsSaving = false;
+      s.notifyExtraEmailsError = a.payload || "Failed";
+    });
+    b.addCase(deleteNotifyExtraEmail.pending, (s) => {
+      s.notifyExtraEmailsSaving = true;
+      s.notifyExtraEmailsError = null;
+    });
+    b.addCase(deleteNotifyExtraEmail.fulfilled, (s, a) => {
+      s.notifyExtraEmailsSaving = false;
+      s.notifyExtraEmails = s.notifyExtraEmails.filter((e) => e.id !== a.payload);
+    });
+    b.addCase(deleteNotifyExtraEmail.rejected, (s, a) => {
+      s.notifyExtraEmailsSaving = false;
+      s.notifyExtraEmailsError = a.payload || "Failed";
+    });
     b.addCase(fetchAdminReports.fulfilled, (s, a) => {
       s.loading = false;
       s.reports = a.payload;
@@ -1160,8 +1492,8 @@ const slice = createSlice({
       s.loading = false;
       s.team = a.payload;
     });
-    b.addCase(createAdminClient.fulfilled, (s, a) => {
-      s.clients.unshift(a.payload);
+    b.addCase(createAdminClient.fulfilled, () => {
+      /* list refresh via refetchAdminClients / onSaved */
     });
     b.addCase(updateAdminClient.fulfilled, (s, a) => {
       const idx = s.clients.findIndex((c) => c.id === a.payload.id);
@@ -1173,15 +1505,22 @@ const slice = createSlice({
     b.addCase(deleteAdminClient.fulfilled, (s, a) => {
       const id = a.meta.arg.id;
       s.clients = s.clients.filter((c) => c.id !== id);
+      if (s.clientsPagination) {
+        s.clientsPagination.total = Math.max(0, s.clientsPagination.total - 1);
+        s.clientsPagination.totalPages = Math.max(
+          1,
+          Math.ceil(s.clientsPagination.total / s.clientsPagination.limit),
+        );
+      }
     });
     b.addCase(fetchAdminPayments.pending, (s) => {
-      s.loading = true;
+      s.paymentsLoading = true;
     });
     b.addCase(fetchAdminPayments.rejected, (s) => {
-      s.loading = false;
+      s.paymentsLoading = false;
     });
     b.addCase(fetchAdminPayments.fulfilled, (s, a) => {
-      s.loading = false;
+      s.paymentsLoading = false;
       s.payments = a.payload.payments;
       s.paymentsSummary = a.payload.summary;
       s.paymentsPagination = a.payload.pagination;

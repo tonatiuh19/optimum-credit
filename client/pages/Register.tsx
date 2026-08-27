@@ -8,7 +8,6 @@ import {
   Check,
   ShieldCheck,
   Lock,
-  BadgeCheck,
   Loader2,
   CheckCircle,
   Mail,
@@ -26,8 +25,7 @@ import {
 } from "react-icons/si";
 import { useTranslation } from "react-i18next";
 import PageMeta from "@/components/PageMeta";
-import ThemeToggle from "@/components/ThemeToggle";
-import LegalLinks from "@/components/LegalLinks";
+import PublicWizardFooter from "@/components/PublicWizardFooter";
 import LegalConsent from "@/components/LegalConsent";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import TradelinePicker from "@/components/TradelinePicker";
@@ -367,6 +365,24 @@ export default function Register() {
     !!selectedSlug &&
     (!isTradelineCheckout || selectedTradelineIds.length > 0);
 
+  /** Card click: non-tradeline packages advance to checkout; tradeline stays for picker. */
+  const handleSelectPlan = (slug: string) => {
+    setSelectedSlug(slug);
+    const pkg = packages.find((p) => p.slug === slug);
+    const needsTradelines =
+      pkg?.checkout_type === "tradeline_picker" || slug === "tradeline";
+    if (needsTradelines) {
+      window.setTimeout(() => {
+        tradelinePickerRef.current?.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
+      }, 100);
+      return;
+    }
+    goTo(2);
+  };
+
   const handleApplyCoupon = () => {
     if (!couponInput.trim() || !selectedPackage) return;
     dispatch(
@@ -486,7 +502,7 @@ export default function Register() {
                 loading={loading}
                 mode="register"
                 selectedSlug={selectedSlug}
-                onSelectPlan={setSelectedSlug}
+                onSelectPlan={handleSelectPlan}
               />
 
               {isTradelineCheckout && (
@@ -503,16 +519,19 @@ export default function Register() {
                 </div>
               )}
 
-              <div className="flex justify-center mt-10">
-                <button
-                  type="button"
-                  disabled={!canContinueStep1}
-                  onClick={() => goTo(2)}
-                  className="btn-primary w-full max-w-xs sm:min-w-[220px] sm:w-auto !h-12 px-8 text-base shadow-lg shadow-primary/25 hover:shadow-xl hover:shadow-primary/30"
-                >
-                  Continue <ArrowRight className="w-4 h-4 ml-1.5" />
-                </button>
-              </div>
+              {isTradelineCheckout && (
+                <div className="flex justify-center mt-10">
+                  <button
+                    type="button"
+                    disabled={!canContinueStep1}
+                    onClick={() => goTo(2)}
+                    className="btn-primary w-full max-w-xs sm:min-w-[220px] sm:w-auto !h-12 px-8 text-base shadow-lg shadow-primary/25 hover:shadow-xl hover:shadow-primary/30"
+                  >
+                    {t("register.continue")}{" "}
+                    <ArrowRight className="w-4 h-4 ml-1.5" />
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -920,40 +939,7 @@ export default function Register() {
       </div>
 
       {/* ── Footer ── */}
-      <footer className="border-t border-border/60 bg-background/60 backdrop-blur-sm mt-auto">
-        <div className="container max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-          <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 mb-3">
-            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <Lock className="w-3.5 h-3.5 text-accent" />
-              <span>256-bit SSL encryption</span>
-            </div>
-            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <ShieldCheck className="w-3.5 h-3.5 text-accent" />
-              <span>Bank-level data security</span>
-            </div>
-            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <BadgeCheck className="w-3.5 h-3.5 text-primary" />
-              <span>BBB Accredited Business</span>
-            </div>
-            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <Check className="w-3.5 h-3.5 text-accent" />
-              <span>Cancel anytime, no hidden fees</span>
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 text-[11px] text-muted-foreground/70">
-            <ThemeToggle zone="portal" compact className="!text-muted-foreground hover:!text-foreground" />
-            <span className="text-border hidden sm:inline">·</span>
-            <span>
-              © {new Date().getFullYear()} Optimum Credit. All rights reserved.
-            </span>
-            <span className="hidden sm:inline text-border">·</span>
-            <LegalLinks className="text-[11px] text-muted-foreground/70" />
-            <span className="hidden sm:inline text-border">·</span>
-            <span className="hidden sm:inline">{t("footer.neverSold")}</span>
-          </div>
-        </div>
-      </footer>
+      <PublicWizardFooter />
     </div>
   );
 }

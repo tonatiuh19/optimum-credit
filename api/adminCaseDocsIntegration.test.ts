@@ -11,7 +11,7 @@ import mysql, {
   type RowDataPacket,
 } from "mysql2/promise";
 import { createServer, createSession } from "./index";
-import { cleanupIntegrationTestClients } from "./testDbCleanup";
+import { cleanupIntegrationTestClients, createIntegrationTestPool } from "./testDbCleanup";
 
 const RUN_ID = `adoc-${Date.now()}`;
 const CLIENT_EMAIL = `${RUN_ID}@example.test`;
@@ -23,18 +23,6 @@ let adminToken = "";
 let clientId = 0;
 let caseId = 0;
 let clientToken = "";
-
-async function makePool() {
-  return mysql.createPool({
-    host: process.env.DB_HOST,
-    port: Number(process.env.DB_PORT || 4000),
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
-    ssl: { rejectUnauthorized: true },
-    connectionLimit: 3,
-  });
-}
 
 function tinyPng(): Buffer {
   // 1x1 PNG
@@ -56,7 +44,7 @@ describe("admin case document upload — edges + docs_ready rules", () => {
         "DB_HOST / JWT_SECRET / CDN_UPLOAD_SECRET / DOC_ENCRYPTION_KEY required",
       );
     }
-    pool = await makePool();
+    pool = createIntegrationTestPool();
     app = createServer();
 
     const [admins] = await pool.query<RowDataPacket[]>(

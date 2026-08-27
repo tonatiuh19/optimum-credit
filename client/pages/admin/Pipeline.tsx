@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import type { LucideIcon } from "lucide-react";
 import {
@@ -19,6 +19,7 @@ import AdminPageHeader from "@/components/AdminPageHeader";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
   fetchPipeline,
+  fetchMorePipelineColumn,
   updateCaseStage,
   createAdminCase,
   fetchAdminTeam,
@@ -74,6 +75,7 @@ import {
   EMPTY_PIPELINE_FILTERS,
   buildAdminPipelineQuery,
   countActivePipelineFilters,
+  isProspectLead,
 } from "@/lib/pipelineFilters";
 import { buildNewCaseCreatePayload } from "@/lib/newCasePayload";
 import PipelineFilterBar from "@/components/admin/PipelineFilterBar";
@@ -467,10 +469,10 @@ function NewCaseModal({
   const handleStageChange = (next: PipelineStage) => {
     setStage(next);
     // Clear picker when switching between prospect-only and clients-only modes
-    if (next === "prospect" && selectedClient?.status !== "prospect") {
+    if (next === "prospect" && selectedClient && !isProspectLead(selectedClient)) {
       setSelectedClient(null);
     }
-    if (next !== "prospect" && selectedClient?.status === "prospect") {
+    if (next !== "prospect" && isProspectLead(selectedClient)) {
       setSelectedClient(null);
     }
   };
@@ -480,7 +482,7 @@ function NewCaseModal({
       setSelectedClient(null);
       return;
     }
-    if (isProspectStage && client.status !== "prospect") {
+    if (isProspectStage && !isProspectLead(client)) {
       toast({
         title: t("adminPipeline.newCaseNeedProspectTitle"),
         description: t("adminPipeline.newCaseNeedProspectBody"),
@@ -488,7 +490,7 @@ function NewCaseModal({
       });
       return;
     }
-    if (!isProspectStage && client.status === "prospect") {
+    if (!isProspectStage && isProspectLead(client)) {
       toast({
         title: t("adminPipeline.newCaseProspectBlockedTitle"),
         description: t("adminPipeline.newCaseProspectBlockedBody"),
@@ -509,7 +511,7 @@ function NewCaseModal({
       });
       return;
     }
-    if (isProspectStage && selectedClient.status !== "prospect") {
+    if (isProspectStage && !isProspectLead(selectedClient)) {
       toast({
         title: t("adminPipeline.newCaseNeedProspectTitle"),
         description: t("adminPipeline.newCaseNeedProspectBody"),
@@ -517,7 +519,7 @@ function NewCaseModal({
       });
       return;
     }
-    if (!isProspectStage && selectedClient.status === "prospect") {
+    if (!isProspectStage && isProspectLead(selectedClient)) {
       toast({
         title: t("adminPipeline.newCaseProspectBlockedTitle"),
         description: t("adminPipeline.newCaseProspectBlockedBody"),
@@ -728,7 +730,14 @@ function NewCaseModal({
 export default function AdminPipeline() {
   const dispatch = useAppDispatch();
   const { t } = useTranslation();
-  const { pipelineCases, team, pipelineLoading } = useAppSelector((s) => s.admin);
+  const {
+    pipelineCases,
+    team,
+    pipelineLoading,
+    pipelineColumns,
+    pipelineLoadingMore,
+    pipelinePageLimit,
+  } = useAppSelector((s) => s.admin);
   const { prospects, labels } = useAppSelector((s) => s.prospects);
   const { packages } = useAppSelector((s) => s.packages);
   const [searchParams, setSearchParams] = useSearchParams();
@@ -781,14 +790,38 @@ export default function AdminPipeline() {
     reloadPipeline();
   }, [reloadPipeline]);
 
-  // Auto-open panel when navigated from another page with ?client=ID
+  const pipelineLoadStarted = useRef(false);
+  useEffect(() => {
+    if (pipelineLoading) pipelineLoadStarted.current = true;
+  }, [pipelineLoading]);
+
+  // Auto-open panel from MCP / email deep links: ?client=ID and/or ?case=ID.
+  // Case id in the URL is enough — do not require the card to be on this page.
   useEffect(() => {
     const clientParam = searchParams.get("client");
-    if (!clientParam) return;
-    const clientId = Number(clientParam);
-    if (isNaN(clientId) || clientId <= 0) return;
+    const caseParam = searchParams.get("case");
+    if (!clientParam && !caseParam) return;
 
-    const matchedCase = pipelineCases.find((c) => c.client_id === clientId);
+    const parsedClient = clientParam ? Number(clientParam) : NaN;
+    const parsedCase = caseParam ? Number(caseParam) : NaN;
+    const hasClient = Number.isFinite(parsedClient) && parsedClient > 0;
+    const hasCase = Number.isFinite(parsedCase) && parsedCase > 0;
+    if (!hasClient && !hasCase) return;
+
+    if (hasCase) {
+      const matched = pipelineCases.find((c) => c.id === parsedCase);
+      setPanelCaseId(parsedCase);
+      setPanelClientId(
+        hasClient ? parsedClient : (matched?.client_id ?? null),
+      );
+      setPanelOpen(true);
+      setSearchParams({}, { replace: true });
+      return;
+    }
+
+    if (pipelineLoading || !pipelineLoadStarted.current) return;
+
+    const matchedCase = pipelineCases.find((c) => c.client_id === parsedClient);
     if (matchedCase) {
       setPanelCaseId(matchedCase.id);
       setPanelClientId(matchedCase.client_id);
@@ -797,14 +830,26 @@ export default function AdminPipeline() {
       return;
     }
 
-    const matchedProspect = prospects.find((p) => p.id === clientId);
+    const matchedProspect = prospects.find((p) => p.id === parsedClient);
     if (matchedProspect) {
       setPanelCaseId(matchedProspect.case_id ?? null);
       setPanelClientId(matchedProspect.id);
       setPanelOpen(true);
       setSearchParams({}, { replace: true });
+      return;
     }
-  }, [searchParams, pipelineCases, prospects, setSearchParams]);
+
+    setPanelCaseId(null);
+    setPanelClientId(parsedClient);
+    setPanelOpen(true);
+    setSearchParams({}, { replace: true });
+  }, [
+    searchParams,
+    pipelineCases,
+    prospects,
+    pipelineLoading,
+    setSearchParams,
+  ]);
 
   // Panel
   const openPanel = (caseId: number, clientId: number) => {
@@ -905,6 +950,31 @@ export default function AdminPipeline() {
     {},
   );
 
+  const prospectTotal =
+    pipelineColumns.prospect?.total ?? prospects.length;
+  const caseTotal = COLUMNS.reduce(
+    (sum, c) => sum + (pipelineColumns[c.stage]?.total ?? grouped[c.stage]?.length ?? 0),
+    0,
+  );
+
+  const loadMoreColumn = (column: string, shown: number) => {
+    const page = pipelineColumns[column];
+    if (!page?.has_more || pipelineLoadingMore) return;
+    void dispatch(
+      fetchMorePipelineColumn({
+        ...pipelineQuery,
+        column,
+        offset: shown,
+        limit: pipelinePageLimit || 20,
+      }),
+    );
+  };
+
+  const showBoardSkeleton =
+    pipelineLoading &&
+    pipelineCases.length === 0 &&
+    prospects.length === 0;
+
   return (
     <div className="flex flex-col space-y-5">
       <AdminPageHeader
@@ -947,15 +1017,16 @@ export default function AdminPipeline() {
         filters={filters}
         onFiltersChange={setFilters}
         activeFilterCount={activeFilterCount}
-        caseCount={pipelineCases.length}
-        prospectCount={prospects.length}
+        caseCount={caseTotal}
+        prospectCount={prospectTotal}
         packages={packages}
         team={team}
         labels={labels}
         showEmptyState={
           (activeFilterCount > 0 || !!debouncedSearch) &&
-          pipelineCases.length === 0 &&
-          prospects.length === 0
+          caseTotal === 0 &&
+          prospectTotal === 0 &&
+          !pipelineLoading
         }
       />
 
@@ -972,16 +1043,22 @@ export default function AdminPipeline() {
         </div>
       )}
 
-      {/* Kanban — skeleton on initial load and Refresh */}
-      {pipelineLoading ? (
+      {/* Kanban — skeleton only on first empty load; soft opacity while refreshing */}
+      {showBoardSkeleton ? (
         <PipelineBoardSkeleton />
       ) : (
-      <div className="table-scroll pb-4 -mx-1 px-1 max-w-full">
+      <div
+        className={[
+          "table-scroll pb-4 -mx-1 px-1 max-w-full transition-opacity",
+          pipelineLoading ? "opacity-60" : "",
+        ].join(" ")}
+      >
         <div className="flex gap-3 w-max min-w-full pr-2">
           {/* ── Prospect column (virtual — pre-conversion leads) ── */}
           {(() => {
             const isDragTarget = dragOverStage === "prospect";
             const canDrop = dragging ? canDropOnStage("prospect") : false;
+            const prospectPage = pipelineColumns.prospect;
             return (
               <div
                 onDragOver={(e) => onDragOver(e, "prospect")}
@@ -1002,17 +1079,17 @@ export default function AdminPipeline() {
                     <div className="flex items-center gap-1.5">
                       <UserPlus className="w-3 h-3 text-accent" />
                       <h3 className="font-bold text-[11px] uppercase tracking-[0.1em] text-accent">
-                        Prospect
+                        {t("adminPipeline.prospectLabel")}
                       </h3>
                     </div>
                     <span
-                      className={`min-w-[20px] h-5 flex items-center justify-center text-[10px] font-bold px-1.5 rounded-md ${
-                        prospects.length > 0
+                      className={`min-w-[20px] h-5 flex items-center justify-center text-[10px] font-bold px-1.5 rounded-md tabular-nums ${
+                        prospectTotal > 0
                           ? "bg-accent/10 text-accent"
                           : "text-muted-foreground/40 bg-muted"
                       }`}
                     >
-                      {prospects.length}
+                      {prospectTotal}
                     </span>
                   </div>
                 </div>
@@ -1051,6 +1128,24 @@ export default function AdminPipeline() {
                       )}
                     </div>
                   )}
+                  {prospectPage?.has_more && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="w-full"
+                      disabled={pipelineLoadingMore === "prospect"}
+                      onClick={() => loadMoreColumn("prospect", prospects.length)}
+                    >
+                      {pipelineLoadingMore === "prospect" ? (
+                        <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                      ) : null}
+                      {t("adminPipeline.loadMore", {
+                        shown: prospects.length,
+                        total: prospectTotal,
+                      })}
+                    </Button>
+                  )}
                 </div>
               </div>
             );
@@ -1058,6 +1153,8 @@ export default function AdminPipeline() {
 
           {COLUMNS.map((col) => {
             const colCases = grouped[col.stage] ?? [];
+            const colPage = pipelineColumns[col.stage];
+            const colTotal = colPage?.total ?? colCases.length;
             const isDragTarget = dragOverStage === col.stage;
             const canDrop = canDropOnStage(col.stage);
             const prospectDropTarget =
@@ -1097,13 +1194,13 @@ export default function AdminPipeline() {
                         )}
                     </div>
                     <span
-                      className={`min-w-[20px] h-5 flex items-center justify-center text-[10px] font-bold px-1.5 rounded-md ${
-                        colCases.length > 0
+                      className={`min-w-[20px] h-5 flex items-center justify-center text-[10px] font-bold px-1.5 rounded-md tabular-nums ${
+                        colTotal > 0
                           ? col.countBg
                           : "text-muted-foreground/40 bg-muted"
                       }`}
                     >
-                      {colCases.length}
+                      {colTotal}
                     </span>
                   </div>
                 </div>
@@ -1141,6 +1238,26 @@ export default function AdminPipeline() {
                         </span>
                       )}
                     </div>
+                  )}
+                  {colPage?.has_more && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="w-full"
+                      disabled={pipelineLoadingMore === col.stage}
+                      onClick={() =>
+                        loadMoreColumn(col.stage, colCases.length)
+                      }
+                    >
+                      {pipelineLoadingMore === col.stage ? (
+                        <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                      ) : null}
+                      {t("adminPipeline.loadMore", {
+                        shown: colCases.length,
+                        total: colTotal,
+                      })}
+                    </Button>
                   )}
                 </div>
               </div>

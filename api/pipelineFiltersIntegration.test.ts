@@ -10,13 +10,16 @@ import mysql, {
   type RowDataPacket,
 } from "mysql2/promise";
 import { createServer, createSession } from "./index";
-import { cleanupIntegrationTestClients } from "./testDbCleanup";
+import { cleanupIntegrationTestClients, createIntegrationTestPool } from "./testDbCleanup";
 
 const RUN_ID = `pipe-${Date.now()}`;
 const EMAIL_EN = `${RUN_ID}-en@example.test`;
 const EMAIL_ES = `${RUN_ID}-es@example.test`;
 const EMAIL_PROSPECT = `${RUN_ID}-prospect@example.test`;
 const EMAIL_WILDCARD = `${RUN_ID}-pct%wild@example.test`;
+const EMAIL_GHOST = `${RUN_ID}-ghost@example.test`;
+const EMAIL_CHECKOUT = `${RUN_ID}-checkout@example.test`;
+const GHOST_PHONE = `(951) 648-${String(Date.now()).slice(-4)}`;
 
 let pool: Pool;
 let app: ReturnType<typeof createServer>;
@@ -26,6 +29,8 @@ let clientEnId = 0;
 let clientEsId = 0;
 let prospectId = 0;
 let wildcardClientId = 0;
+let ghostLeadId = 0;
+let checkoutLeadId = 0;
 let caseEnId = 0;
 let caseEsId = 0;
 let caseWildcardId = 0;
@@ -33,24 +38,12 @@ let packageId = 0;
 let labelSlug = "";
 let labelId = 0;
 
-async function makePool() {
-  return mysql.createPool({
-    host: process.env.DB_HOST,
-    port: Number(process.env.DB_PORT || 4000),
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
-    ssl: { rejectUnauthorized: true },
-    connectionLimit: 3,
-  });
-}
-
 describe("admin pipeline filters", () => {
   beforeAll(async () => {
     if (!process.env.DB_HOST || !process.env.JWT_SECRET) {
       throw new Error("DB_HOST / JWT_SECRET required");
     }
-    pool = await makePool();
+    pool = createIntegrationTestPool();
     app = createServer();
 
     const [admins] = await pool.query<RowDataPacket[]>(
@@ -111,6 +104,22 @@ describe("admin pipeline filters", () => {
       [EMAIL_PROSPECT, RUN_ID],
     );
     prospectId = pr.insertId;
+
+    const [ghost] = await pool.query<ResultSetHeader>(
+      `INSERT INTO clients
+         (email, first_name, last_name, phone, preferred_language, status, pipeline_stage)
+       VALUES (?, 'PipeGhost', ?, ?, 'en', 'pending_payment', 'prospect')`,
+      [EMAIL_GHOST, RUN_ID, GHOST_PHONE],
+    );
+    ghostLeadId = ghost.insertId;
+
+    const [checkout] = await pool.query<ResultSetHeader>(
+      `INSERT INTO clients
+         (email, first_name, last_name, preferred_language, status, pipeline_stage)
+       VALUES (?, 'PipeCheckout', ?, 'en', 'pending_payment', 'new_client')`,
+      [EMAIL_CHECKOUT, RUN_ID],
+    );
+    checkoutLeadId = checkout.insertId;
 
     const [wc] = await pool.query<ResultSetHeader>(
       `INSERT INTO clients
@@ -216,7 +225,14 @@ describe("admin pipeline filters", () => {
       await pool.query(`DELETE FROM payment_splits WHERE case_id = ?`, [id]);
       await pool.query(`DELETE FROM credit_repair_cases WHERE id = ?`, [id]);
     }
-    for (const id of [clientEnId, clientEsId, prospectId, wildcardClientId]) {
+    for (const id of [
+      clientEnId,
+      clientEsId,
+      prospectId,
+      wildcardClientId,
+      ghostLeadId,
+      checkoutLeadId,
+    ]) {
       if (!id) continue;
       await pool.query(`DELETE FROM client_labels WHERE client_id = ?`, [id]);
       await pool.query(`DELETE FROM payment_splits WHERE client_id = ?`, [id]);
@@ -228,7 +244,14 @@ describe("admin pipeline filters", () => {
     }
     await cleanupIntegrationTestClients(pool, {
       runId: RUN_ID,
-      clientIds: [clientEnId, clientEsId, prospectId, wildcardClientId],
+      clientIds: [
+        clientEnId,
+        clientEsId,
+        prospectId,
+        wildcardClientId,
+        ghostLeadId,
+        checkoutLeadId,
+      ],
     });
     await pool?.end();
   });
@@ -293,6 +316,90 @@ describe("admin pipeline filters", () => {
     expect(res.body.cases || []).toEqual([]);
     const pids = (res.body.prospects || []).map((p: { id: number }) => p.id);
     expect(pids).toContain(prospectId);
+  }, 30_000);
+
+  it("includes pending_payment + prospect-stage leads (no case) on Prospect", async () => {
+    const res = await request(app)
+      .get("/api/admin/pipeline")
+      .query({ stage: "prospect", search: RUN_ID })
+      .set("Authorization", `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    const pids = (res.body.prospects || []).map((p: { id: number }) => p.id);
+    expect(pids).toContain(ghostLeadId);
+    expect(pids).not.toContain(checkoutLeadId);
+    const caseIds = (res.body.cases || []).map((c: { id: number }) => c.id);
+    expect(caseIds).toEqual([]);
+  }, 30_000);
+
+  it("does not put pending_payment checkout (new_client, no case) on New Client", async () => {
+    const res = await request(app)
+      .get("/api/admin/pipeline")
+      .query({ stage: "new_client", search: RUN_ID })
+      .set("Authorization", `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    const pids = (res.body.prospects || []).map((p: { id: number }) => p.id);
+    expect(pids).not.toContain(ghostLeadId);
+    expect(pids).not.toContain(checkoutLeadId);
+    const clientIds = (res.body.cases || []).map(
+      (c: { client_id: number }) => c.client_id,
+    );
+    expect(clientIds).not.toContain(ghostLeadId);
+    expect(clientIds).not.toContain(checkoutLeadId);
+  }, 30_000);
+
+  it("searches prospects by client id and digit-stripped phone", async () => {
+    const byId = await request(app)
+      .get("/api/admin/pipeline")
+      .query({ stage: "prospect", search: String(ghostLeadId) })
+      .set("Authorization", `Bearer ${adminToken}`);
+    expect(byId.status).toBe(200);
+    const idHits = (byId.body.prospects || []).map((p: { id: number }) => p.id);
+    expect(idHits).toContain(ghostLeadId);
+
+    const digits = GHOST_PHONE.replace(/\D/g, "");
+    const byPhone = await request(app)
+      .get("/api/admin/pipeline")
+      .query({ stage: "prospect", search: digits })
+      .set("Authorization", `Bearer ${adminToken}`);
+    expect(byPhone.status).toBe(200);
+    const phoneHits = (byPhone.body.prospects || []).map(
+      (p: { id: number }) => p.id,
+    );
+    expect(phoneHits).toContain(ghostLeadId);
+  }, 30_000);
+
+  it("lists clients by numeric id and digit-stripped phone", async () => {
+    const byId = await request(app)
+      .get("/api/admin/clients")
+      .query({ search: String(ghostLeadId) })
+      .set("Authorization", `Bearer ${adminToken}`);
+    expect(byId.status).toBe(200);
+    const idHits = (byId.body.clients || []).map((c: { id: number }) => c.id);
+    expect(idHits).toContain(ghostLeadId);
+
+    const digits = GHOST_PHONE.replace(/\D/g, "");
+    const byPhone = await request(app)
+      .get("/api/admin/clients")
+      .query({ search: digits })
+      .set("Authorization", `Bearer ${adminToken}`);
+    expect(byPhone.status).toBe(200);
+    const phoneHits = (byPhone.body.clients || []).map(
+      (c: { id: number }) => c.id,
+    );
+    expect(phoneHits).toContain(ghostLeadId);
+  }, 30_000);
+
+  it("GET /admin/clients unconverted_lead includes pending_payment prospect-stage", async () => {
+    const res = await request(app)
+      .get("/api/admin/clients")
+      .query({ search: RUN_ID, unconverted_lead: "1" })
+      .set("Authorization", `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    const ids = (res.body.clients || []).map((c: { id: number }) => c.id);
+    expect(ids).toContain(ghostLeadId);
+    expect(ids).toContain(prospectId);
+    expect(ids).not.toContain(checkoutLeadId);
+    expect(ids).not.toContain(clientEnId);
   }, 30_000);
 
   it("filters by payment_badge using real payments/splits", async () => {
@@ -474,5 +581,104 @@ describe("admin pipeline filters", () => {
     const ids = (res.body.cases || []).map((c: { id: number }) => c.id);
     expect(ids).toContain(caseEsId);
     expect(ids).not.toContain(caseEnId);
+  }, 30_000);
+
+  it("paginates columns on board and load-more", async () => {
+    const board = await request(app)
+      .get("/api/admin/pipeline")
+      .query({ search: RUN_ID, limit: 1 })
+      .set("Authorization", `Bearer ${adminToken}`);
+    expect(board.status).toBe(200);
+    expect(board.body.limit).toBe(1);
+    expect(board.body.columns).toBeTruthy();
+    const nc = board.body.columns.new_client;
+    expect(nc.total).toBeGreaterThanOrEqual(2);
+    expect(nc.items.length).toBe(1);
+    expect(nc.has_more).toBe(true);
+    expect(board.body.columns.prospect.total).toBeGreaterThanOrEqual(1);
+
+    const firstId = nc.items[0].id as number;
+    const more = await request(app)
+      .get("/api/admin/pipeline")
+      .query({
+        search: RUN_ID,
+        limit: 1,
+        column: "new_client",
+        offset: 1,
+      })
+      .set("Authorization", `Bearer ${adminToken}`);
+    expect(more.status).toBe(200);
+    expect(more.body.column).toBe("new_client");
+    expect(more.body.items.length).toBe(1);
+    expect(more.body.items[0].id).not.toBe(firstId);
+    expect(more.body.total).toBe(nc.total);
+    expect(more.body.has_more).toBe(1 + more.body.items.length < more.body.total);
+  }, 30_000);
+
+  it("GET /admin/clients returns pagination metadata and respects limit/page", async () => {
+    const res = await request(app)
+      .get("/api/admin/clients")
+      .query({ search: RUN_ID, limit: 2, page: 1 })
+      .set("Authorization", `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.pagination).toMatchObject({
+      page: 1,
+      limit: 2,
+      total: expect.any(Number),
+      totalPages: expect.any(Number),
+    });
+    expect(res.body.pagination.total).toBeGreaterThanOrEqual(5);
+    expect(res.body.clients.length).toBeLessThanOrEqual(2);
+
+    const p1 = await request(app)
+      .get("/api/admin/clients")
+      .query({
+        search: RUN_ID,
+        limit: 2,
+        page: 1,
+        sort_by: "first_name",
+        sort_dir: "ASC",
+      })
+      .set("Authorization", `Bearer ${adminToken}`);
+    const p2 = await request(app)
+      .get("/api/admin/clients")
+      .query({
+        search: RUN_ID,
+        limit: 2,
+        page: 2,
+        sort_by: "first_name",
+        sort_dir: "ASC",
+      })
+      .set("Authorization", `Bearer ${adminToken}`);
+    expect(p1.status).toBe(200);
+    expect(p2.status).toBe(200);
+    if (p1.body.pagination.total > 2) {
+      expect(p1.body.clients).toHaveLength(2);
+      expect(p2.body.clients.length).toBeGreaterThan(0);
+      expect(p1.body.clients[0].id).not.toBe(p2.body.clients[0].id);
+    } else {
+      expect(p2.body.clients).toEqual([]);
+    }
+  }, 30_000);
+
+  it("GET /admin/clients page beyond total returns empty slice with valid pagination", async () => {
+    const res = await request(app)
+      .get("/api/admin/clients")
+      .query({ search: RUN_ID, limit: 50, page: 999 })
+      .set("Authorization", `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.clients).toEqual([]);
+    expect(res.body.pagination.page).toBe(999);
+    expect(res.body.pagination.total).toBeGreaterThan(0);
+  }, 30_000);
+
+  it("GET /admin/clients rejects unknown sort_by safely (falls back to created_at)", async () => {
+    const res = await request(app)
+      .get("/api/admin/clients")
+      .query({ search: RUN_ID, sort_by: "DROP TABLE", limit: 5 })
+      .set("Authorization", `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.clients)).toBe(true);
+    expect(res.body.pagination).toBeTruthy();
   }, 30_000);
 });

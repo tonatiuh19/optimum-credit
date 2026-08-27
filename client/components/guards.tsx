@@ -80,6 +80,25 @@ export function RequireAffiliatePortal({ children }: { children: ReactNode }) {
 }
 
 /**
+ * Protect staff-manager routes (super_admin + admin) — redirect agents and
+ * affiliates to the dashboard. Matches API requireStaffManager (Funding board).
+ */
+export function RequireStaffManager({ children }: { children: ReactNode }) {
+  const { token, user } = useAppSelector((s) => s.adminAuth);
+  const location = useLocation();
+  if (!token) {
+    return <Navigate to="/admin/login" state={{ from: location }} replace />;
+  }
+  if (user?.role === "affiliate") {
+    return <Navigate to="/admin/affiliate" replace />;
+  }
+  if (user && user.role !== "super_admin" && user.role !== "admin") {
+    return <Navigate to="/admin" replace />;
+  }
+  return <>{children}</>;
+}
+
+/**
  * Protect staff-only admin routes — affiliates may use dashboard / clients /
  * pipeline / their portal, but not team ops pages (API already 403s).
  */

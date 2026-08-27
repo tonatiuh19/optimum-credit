@@ -49,6 +49,13 @@ const prospect = makeClient({
   last_name: "Pect",
   status: "prospect",
 });
+const ghostLead = makeClient({
+  id: 3,
+  first_name: "Ghost",
+  last_name: "Lead",
+  status: "pending_payment",
+  pipeline_stage: "prospect",
+});
 const client = makeClient({
   id: 2,
   first_name: "Real",
@@ -89,7 +96,7 @@ describe("ClientSearchPicker prospect filters", () => {
     searchClientsMock.mockClear();
   });
 
-  it("prospectsOnly dispatches search with status=prospect", async () => {
+  it("prospectsOnly dispatches search for unconverted leads", async () => {
     const user = userEvent.setup();
     renderPicker({ prospectsOnly: true, results: [prospect] });
     await user.type(screen.getByPlaceholderText("Search…"), "pros");
@@ -101,7 +108,7 @@ describe("ClientSearchPicker prospect filters", () => {
     );
     const calls = searchClientsMock.mock.calls;
     const last = calls[calls.length - 1]?.[0];
-    expect(last).toEqual({ query: "pros", status: "prospect" });
+    expect(last).toEqual({ query: "pros", unconvertedLead: true });
   });
 
   it("prospectsOnly only lists prospects in results", async () => {
@@ -120,6 +127,25 @@ describe("ClientSearchPicker prospect filters", () => {
     await user.click(screen.getByText(/Pros Pect/i));
     expect(onChange).toHaveBeenCalledWith(
       expect.objectContaining({ id: 1, status: "prospect" }),
+    );
+  });
+
+  it("prospectsOnly lists pending_payment leads still on prospect stage", async () => {
+    const user = userEvent.setup();
+    const { onChange } = renderPicker({
+      prospectsOnly: true,
+      results: [ghostLead, client],
+    });
+    const input = screen.getByPlaceholderText("Search…");
+    await user.click(input);
+    await user.type(input, "g");
+    await waitFor(() => {
+      expect(screen.getByText(/Ghost Lead/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/Real Client/i)).not.toBeInTheDocument();
+    await user.click(screen.getByText(/Ghost Lead/i));
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 3, status: "pending_payment" }),
     );
   });
 

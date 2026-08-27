@@ -27,6 +27,10 @@ export default defineConfig({
           // default Vitest timeouts flake deploy. Unit tests still finish in ms.
           testTimeout: 20_000,
           hookTimeout: 90_000,
+          // Cap parallel integration files — each opens pools against shared TiDB.
+          fileParallelism: 2,
+          maxWorkers: 2,
+          sequence: { groupOrder: 0 },
         },
       },
       {
@@ -38,6 +42,7 @@ export default defineConfig({
           environment: "jsdom",
           setupFiles: ["client/test/setup.ts"],
           env: { VITEST: "true" },
+          sequence: { groupOrder: 1 },
         },
       },
     ],

@@ -10,8 +10,8 @@ import mysql, {
   type ResultSetHeader,
   type RowDataPacket,
 } from "mysql2/promise";
-import { createServer, createSession } from "./index";
-import { cleanupIntegrationTestClients } from "./testDbCleanup";
+import { createServer, createSession, resolveLanguageOwnerAdminId } from "./index";
+import { cleanupIntegrationTestClients, createIntegrationTestPool } from "./testDbCleanup";
 
 const RUN_ID = `ref-own-${Date.now()}`;
 const PROSPECT_EMAIL = `${RUN_ID}@example.test`;
@@ -23,25 +23,14 @@ let adminToken = "";
 let clientId = 0;
 let referrerId = 0;
 let caseId = 0;
-
-async function makePool() {
-  return mysql.createPool({
-    host: process.env.DB_HOST,
-    port: Number(process.env.DB_PORT || 4000),
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
-    ssl: { rejectUnauthorized: true },
-    connectionLimit: 3,
-  });
-}
+let expectedEnOwnerId = 0;
 
 describe("referral owners + prospect create — HTTP smoke", () => {
   beforeAll(async () => {
     if (!process.env.DB_HOST || !process.env.JWT_SECRET) {
       throw new Error("DB_HOST / JWT_SECRET required for integration tests");
     }
-    pool = await makePool();
+    pool = createIntegrationTestPool();
     app = createServer();
 
     const [admins] = await pool.query<RowDataPacket[]>(
@@ -51,11 +40,7 @@ describe("referral owners + prospect create — HTTP smoke", () => {
     );
     if (!admins[0]) throw new Error("No admin user in DB for integration tests");
     adminId = Number(admins[0].id);
-    // Ensure this admin owns EN so auto-assign is deterministic for the test
-    await pool.query(
-      `UPDATE admins SET preferred_language = 'en' WHERE id = ?`,
-      [adminId],
-    );
+    // Session admin only — language ownership is resolved separately (Lecca/Angel).
     adminToken = await createSession(
       "admin",
       adminId,
@@ -63,6 +48,7 @@ describe("referral owners + prospect create — HTTP smoke", () => {
       "127.0.0.1",
       "vitest-referral-owners",
     );
+    expectedEnOwnerId = (await resolveLanguageOwnerAdminId("en")) || adminId;
   }, 60_000);
 
   afterAll(async () => {
@@ -142,7 +128,7 @@ describe("referral owners + prospect create — HTTP smoke", () => {
     expect(res.body.client.preferred_language).toBe("en");
     expect(res.body.client.referral_category).toBe("realtor_broker");
     expect(Number(res.body.client.referrer_id)).toBe(referrerId);
-    expect(Number(res.body.client.assigned_admin_id)).toBe(adminId);
+    expect(Number(res.body.client.assigned_admin_id)).toBe(expectedEnOwnerId);
     clientId = Number(res.body.client.id);
 
     const [labels] = await pool.query<RowDataPacket[]>(

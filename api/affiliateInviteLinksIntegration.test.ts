@@ -10,10 +10,7 @@ import mysql, {
   type RowDataPacket,
 } from "mysql2/promise";
 import { createServer, createSession } from "./index";
-import {
-  cleanupIntegrationTestAffiliates,
-  cleanupIntegrationTestClients,
-} from "./testDbCleanup";
+import { cleanupIntegrationTestAffiliates, cleanupIntegrationTestClients, createIntegrationTestPool } from "./testDbCleanup";
 
 const RUN_ID = `inv-${Date.now()}`;
 
@@ -24,18 +21,6 @@ let adminToken = "";
 const affiliateIds: number[] = [];
 const inviteIds: number[] = [];
 const adminIds: number[] = [];
-
-async function makePool() {
-  return mysql.createPool({
-    host: process.env.DB_HOST,
-    port: Number(process.env.DB_PORT || 4000),
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
-    ssl: { rejectUnauthorized: true },
-    connectionLimit: 3,
-  });
-}
 
 describe("affiliate invite links", () => {
   beforeAll(async () => {
@@ -49,7 +34,7 @@ describe("affiliate invite links", () => {
     ) {
       process.env.AFFILIATES_ENABLED = "1";
     }
-    pool = await makePool();
+    pool = createIntegrationTestPool();
     app = createServer();
     const [admins] = await pool.query<RowDataPacket[]>(
       `SELECT id, email FROM admins

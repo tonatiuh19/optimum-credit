@@ -11,7 +11,7 @@ import mysql, {
   type RowDataPacket,
 } from "mysql2/promise";
 import { createServer, createSession } from "./index";
-import { cleanupIntegrationTestClients } from "./testDbCleanup";
+import { cleanupIntegrationTestClients, createIntegrationTestPool } from "./testDbCleanup";
 
 const RUN_ID = `wt-case-${Date.now()}`;
 
@@ -23,24 +23,12 @@ const clientIds: number[] = [];
 const caseIds: number[] = [];
 const taskIds: number[] = [];
 
-async function makePool() {
-  return mysql.createPool({
-    host: process.env.DB_HOST,
-    port: Number(process.env.DB_PORT || 4000),
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
-    ssl: { rejectUnauthorized: true },
-    connectionLimit: 3,
-  });
-}
-
 describe("work tasks case link — calendar + dashboard", () => {
   beforeAll(async () => {
     if (!process.env.DB_HOST || !process.env.JWT_SECRET) {
       throw new Error("DB_HOST / JWT_SECRET required for integration tests");
     }
-    pool = await makePool();
+    pool = createIntegrationTestPool();
     app = createServer();
     const [admins] = await pool.query<RowDataPacket[]>(
       `SELECT id, email FROM admins ORDER BY id ASC LIMIT 1`,
@@ -149,6 +137,40 @@ describe("work tasks case link — calendar + dashboard", () => {
       .expect((res) => {
         expect(res.body.task.case_id).toBeNull();
       });
+  });
+
+  it("supports server search and per-column pagination", async () => {
+    const stamp = `${RUN_ID}-page`;
+    for (let i = 0; i < 3; i++) {
+      const created = await request(app)
+        .post("/api/admin/work-tasks")
+        .set("Authorization", `Bearer ${adminToken}`)
+        .send({
+          title: `${stamp} done ${i}`,
+          status: "done",
+          priority: "medium",
+        })
+        .expect(201);
+      taskIds.push(Number(created.body.task.id));
+    }
+
+    const board = await request(app)
+      .get("/api/admin/work-tasks")
+      .set("Authorization", `Bearer ${adminToken}`)
+      .query({ q: stamp, limit: 2 })
+      .expect(200);
+    expect(board.body.columns?.done?.total).toBeGreaterThanOrEqual(3);
+    expect(board.body.columns.done.tasks.length).toBeLessThanOrEqual(2);
+    expect(board.body.columns.done.has_more).toBe(true);
+
+    const more = await request(app)
+      .get("/api/admin/work-tasks")
+      .set("Authorization", `Bearer ${adminToken}`)
+      .query({ q: stamp, status: "done", offset: 2, limit: 2 })
+      .expect(200);
+    expect(more.body.status).toBe("done");
+    expect(more.body.tasks.length).toBeGreaterThanOrEqual(1);
+    expect(more.body.total).toBeGreaterThanOrEqual(3);
   });
 
   it("rejects invalid case_id on create", async () => {

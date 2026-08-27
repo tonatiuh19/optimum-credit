@@ -15,10 +15,7 @@ import mysql, {
   type ResultSetHeader,
   type RowDataPacket,
 } from "mysql2/promise";
-import {
-  cleanupIntegrationTestAffiliates,
-  cleanupIntegrationTestClients,
-} from "./testDbCleanup";
+import { cleanupIntegrationTestAffiliates, cleanupIntegrationTestClients, createIntegrationTestPool } from "./testDbCleanup";
 
 // Must run before `./index` is loaded — imports below would hoist after this
 // in some runners; also re-set in beforeAll for safety.
@@ -54,25 +51,13 @@ let subAdminId = 0;
 let attributedClientId = 0;
 let foreignClientId = 0;
 
-async function makePool() {
-  return mysql.createPool({
-    host: process.env.DB_HOST,
-    port: Number(process.env.DB_PORT || 4000),
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
-    ssl: { rejectUnauthorized: true },
-    connectionLimit: 3,
-  });
-}
-
 describe("affiliates — HTTP integration", () => {
   beforeAll(async () => {
     process.env.AFFILIATES_ENABLED = "1";
     if (!process.env.DB_HOST || !process.env.JWT_SECRET) {
       throw new Error("DB_HOST / JWT_SECRET required for integration tests");
     }
-    pool = await makePool();
+    pool = createIntegrationTestPool();
     app = createServer();
 
     const [admins] = await pool.query<RowDataPacket[]>(

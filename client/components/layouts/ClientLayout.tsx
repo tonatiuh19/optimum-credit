@@ -19,12 +19,14 @@ import {
   Lock,
   CreditCard,
   ClipboardList,
+  Landmark,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { clientLogout, fetchClientMe } from "@/store/slices/clientAuthSlice";
 import { fetchPortalSectionLocks } from "@/store/slices/portalSlice";
 import { fetchPortalInfoRequests } from "@/store/slices/infoRequestsSlice";
+import { fetchPortalFunding } from "@/store/slices/fundingSlice";
 import LanguageSwitcher from "@/components/LanguageSwitcher";
 import ThemeToggle from "@/components/ThemeToggle";
 import LegalLinks from "@/components/LegalLinks";
@@ -39,6 +41,8 @@ const NAV: {
   labelKey: string;
   icon: React.ComponentType<{ className?: string }>;
   sectionKey?: string;
+  /** When true, only show if portal funding application exists */
+  fundingOnly?: boolean;
 }[] = [
   {
     to: "/portal",
@@ -51,6 +55,12 @@ const NAV: {
     to: "/portal/documents",
     labelKey: "sidebar.documents",
     icon: FileText,
+  },
+  {
+    to: "/portal/funding",
+    labelKey: "sidebar.funding",
+    icon: Landmark,
+    fundingOnly: true,
   },
   {
     to: "/portal/requests",
@@ -98,6 +108,9 @@ export default function ClientLayout({ children }: Props) {
     (s) => s.portal,
   );
   const { actionableCount } = useAppSelector((s) => s.infoRequests);
+  const { portalApplication, portalInitialized } = useAppSelector(
+    (s) => s.funding,
+  );
   const [mobileOpen, setMobileOpen] = useState(false);
 
   useEffect(() => {
@@ -117,6 +130,10 @@ export default function ClientLayout({ children }: Props) {
   }, [token, dispatch]);
 
   useEffect(() => {
+    if (token) void dispatch(fetchPortalFunding());
+  }, [token, dispatch]);
+
+  useEffect(() => {
     if (!mobileOpen) return;
     const prev = document.body.style.overflow;
     document.body.style.overflow = "hidden";
@@ -130,16 +147,30 @@ export default function ClientLayout({ children }: Props) {
     sectionLocks.filter((l) => l.is_locked).map((l) => l.section_key),
   );
 
+  const hasFundingApp = Boolean(portalApplication);
+  const visibleNav = NAV.filter(
+    (item) => !item.fundingOnly || hasFundingApp,
+  );
+
   // Redirect direct URL access to locked sections (only after locks are loaded)
   const isLockedRoute =
     sectionLocksInitialized &&
-    NAV.some(
+    visibleNav.some(
       (item) =>
         item.sectionKey &&
         lockedKeys.has(item.sectionKey) &&
         location.pathname === item.to,
     );
   if (isLockedRoute) return <Navigate to="/portal/documents" replace />;
+
+  // Funding route without an application → documents
+  if (
+    portalInitialized &&
+    location.pathname === "/portal/funding" &&
+    !hasFundingApp
+  ) {
+    return <Navigate to="/portal/documents" replace />;
+  }
 
   const handleLogout = async () => {
     await dispatch(clientLogout());
@@ -237,7 +268,7 @@ export default function ClientLayout({ children }: Props) {
                 ))}
               </div>
             ) : (
-              NAV.map((item) => {
+              visibleNav.map((item) => {
                 const locked = item.sectionKey
                   ? lockedKeys.has(item.sectionKey)
                   : false;

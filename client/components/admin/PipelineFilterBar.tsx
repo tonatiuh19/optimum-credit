@@ -325,6 +325,7 @@ export default function PipelineFilterBar({
                   </option>
                   {[
                     "prospect",
+                    "funding",
                     "pending_payment",
                     "onboarding",
                     "active",
@@ -332,7 +333,9 @@ export default function PipelineFilterBar({
                     "cancelled",
                   ].map((s) => (
                     <option key={s} value={s}>
-                      {s.replace(/_/g, " ")}
+                      {t(`adminHelpers.clientStatus.${s}`, {
+                        defaultValue: s.replace(/_/g, " "),
+                      })}
                     </option>
                   ))}
                 </select>

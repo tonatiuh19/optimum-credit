@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
   CheckSquare,
@@ -15,6 +15,7 @@ import {
   Sparkles,
   Lock,
   Briefcase,
+  Search,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import AdminPageHeader from "@/components/AdminPageHeader";
@@ -25,10 +26,12 @@ import {
   disconnectHubspot,
   fetchHubspotPermissions,
   fetchHubspotStatus,
+  fetchMoreWorkTasks,
   fetchWorkAssignees,
   fetchWorkBadge,
   fetchWorkTasks,
   setHubspotPermission,
+  setWorkTasksQuery,
   startHubspotOAuth,
   syncHubspotTasks,
   updateWorkTask,
@@ -40,6 +43,7 @@ import type {
   WorkTaskStatus,
 } from "@shared/api";
 import { useToast } from "@/hooks/use-toast";
+import { useDebounce } from "@/hooks/use-debounce";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -58,6 +62,7 @@ import {
 } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
 import { CaseSearchPicker } from "@/components/ui/case-search-picker";
+import MyTasksBoardSkeleton from "@/components/admin/MyTasksBoardSkeleton";
 
 const COLUMNS: {
   status: WorkTaskStatus;
@@ -88,6 +93,8 @@ const PRIORITY_STYLES: Record<WorkTaskPriority, string> = {
   urgent: "bg-destructive/15 text-destructive",
 };
 
+const PAGE_LIMIT = 20;
+
 function fmtDue(iso: string | null) {
   if (!iso) return null;
   return new Date(iso).toLocaleDateString(undefined, {
@@ -104,8 +111,11 @@ export default function AdminMyTasks() {
   const { user } = useAppSelector((s) => s.adminAuth);
   const {
     tasks,
+    columns,
+    query,
     assignees,
     loading,
+    loadingMore,
     saving,
     syncing,
     hubspot,
@@ -119,6 +129,8 @@ export default function AdminMyTasks() {
   const [createOpen, setCreateOpen] = useState(false);
   const [editTask, setEditTask] = useState<AdminWorkTask | null>(null);
   const [permOpen, setPermOpen] = useState(false);
+  const [searchInput, setSearchInput] = useState(query);
+  const debouncedSearch = useDebounce(searchInput, 320);
 
   const [form, setForm] = useState({
     title: "",
@@ -132,11 +144,17 @@ export default function AdminMyTasks() {
   const [linkedCase, setLinkedCase] = useState<WorkTaskCaseOption | null>(null);
 
   useEffect(() => {
-    dispatch(fetchWorkTasks());
     dispatch(fetchWorkAssignees());
     dispatch(fetchWorkBadge());
     dispatch(fetchHubspotStatus());
   }, [dispatch]);
+
+  useEffect(() => {
+    dispatch(setWorkTasksQuery(debouncedSearch.trim()));
+    void dispatch(
+      fetchWorkTasks({ q: debouncedSearch.trim(), limit: PAGE_LIMIT }),
+    );
+  }, [debouncedSearch, dispatch]);
 
   // Soft sync on visit when HubSpot is connected + permitted
   useEffect(() => {
@@ -146,10 +164,12 @@ export default function AdminMyTasks() {
     if (Date.now() - last < 45_000) return;
     sessionStorage.setItem(key, String(Date.now()));
     void dispatch(syncHubspotTasks()).then(() => {
-      dispatch(fetchWorkTasks());
+      dispatch(
+        fetchWorkTasks({ q: debouncedSearch.trim(), limit: PAGE_LIMIT }),
+      );
       dispatch(fetchWorkBadge());
     });
-  }, [hubspot?.connected, hubspot?.can_extract, dispatch]);
+  }, [hubspot?.connected, hubspot?.can_extract, dispatch, debouncedSearch]);
 
   useEffect(() => {
     const hs = searchParams.get("hubspot");
@@ -157,7 +177,11 @@ export default function AdminMyTasks() {
     if (hs === "connected") {
       toast({ title: t("myTasks.hubspot.connected") });
       dispatch(fetchHubspotStatus());
-      dispatch(syncHubspotTasks()).then(() => dispatch(fetchWorkTasks()));
+      void dispatch(syncHubspotTasks()).then(() =>
+        dispatch(
+          fetchWorkTasks({ q: debouncedSearch.trim(), limit: PAGE_LIMIT }),
+        ),
+      );
     } else if (hs === "error") {
       toast({
         title: t("myTasks.hubspot.connectFailed"),
@@ -166,19 +190,20 @@ export default function AdminMyTasks() {
       });
     }
     setSearchParams({}, { replace: true });
-  }, [searchParams, setSearchParams, dispatch, toast, t]);
+  }, [searchParams, setSearchParams, dispatch, toast, t, debouncedSearch]);
 
-  const byStatus = useMemo(() => {
-    const map: Record<WorkTaskStatus, AdminWorkTask[]> = {
-      backlog: [],
-      doing: [],
-      done: [],
-    };
-    for (const task of tasks) {
-      map[task.status]?.push(task);
-    }
-    return map;
-  }, [tasks]);
+  const loadMore = (status: WorkTaskStatus) => {
+    const col = columns[status];
+    if (!col?.has_more || loadingMore) return;
+    void dispatch(
+      fetchMoreWorkTasks({
+        status,
+        offset: col.tasks.length,
+        q: debouncedSearch.trim(),
+        limit: PAGE_LIMIT,
+      }),
+    );
+  };
 
   const resetForm = (status: WorkTaskStatus = "backlog") => {
     setForm({
@@ -281,7 +306,9 @@ export default function AdminMyTasks() {
 
   const handleSync = async () => {
     const result = await dispatch(syncHubspotTasks());
-    await dispatch(fetchWorkTasks());
+    await dispatch(
+      fetchWorkTasks({ q: debouncedSearch.trim(), limit: PAGE_LIMIT }),
+    );
     dispatch(fetchWorkBadge());
     if (syncHubspotTasks.fulfilled.match(result)) {
       toast({
@@ -393,13 +420,41 @@ export default function AdminMyTasks() {
         </div>
       )}
 
+      <div className="relative max-w-xl">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+        <Input
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
+          placeholder={t("myTasks.searchPlaceholder")}
+          className="pl-9 pr-9 h-10 rounded-xl"
+          aria-label={t("myTasks.searchPlaceholder")}
+        />
+        {searchInput ? (
+          <button
+            type="button"
+            onClick={() => setSearchInput("")}
+            className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted"
+            aria-label={t("myTasks.clearSearch")}
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        ) : null}
+      </div>
+
       {loading && tasks.length === 0 ? (
-        <div className="flex justify-center py-20">
-          <Loader2 className="w-8 h-8 animate-spin text-primary" />
-        </div>
+        <MyTasksBoardSkeleton />
       ) : (
-        <div className="grid lg:grid-cols-3 gap-4 items-start">
-          {COLUMNS.map((col) => (
+        <div
+          className={[
+            "grid lg:grid-cols-3 gap-4 items-start transition-opacity",
+            loading ? "opacity-60" : "",
+          ].join(" ")}
+        >
+          {COLUMNS.map((col) => {
+            const page = columns[col.status];
+            const colTasks = page?.tasks ?? [];
+            const total = page?.total ?? colTasks.length;
+            return (
             <div
               key={col.status}
               onDragOver={(e) => {
@@ -419,8 +474,8 @@ export default function AdminMyTasks() {
                   <h3 className="text-sm font-semibold">
                     {t(col.labelKey)}
                   </h3>
-                  <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
-                    {byStatus[col.status].length}
+                  <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-muted text-muted-foreground tabular-nums">
+                    {total}
                   </span>
                 </div>
                 <button
@@ -433,7 +488,7 @@ export default function AdminMyTasks() {
                 </button>
               </div>
               <div className="p-3 space-y-2 flex-1">
-                {byStatus[col.status].map((task) => (
+                {colTasks.map((task) => (
                   <div
                     key={task.id}
                     draggable
@@ -522,14 +577,35 @@ export default function AdminMyTasks() {
                     </div>
                   </div>
                 ))}
-                {byStatus[col.status].length === 0 && (
+                {colTasks.length === 0 && (
                   <p className="text-xs text-muted-foreground text-center py-8">
-                    {t("myTasks.emptyColumn")}
+                    {debouncedSearch.trim()
+                      ? t("myTasks.emptySearchColumn")
+                      : t("myTasks.emptyColumn")}
                   </p>
+                )}
+                {page?.has_more && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="w-full mt-1"
+                    disabled={loadingMore === col.status}
+                    onClick={() => loadMore(col.status)}
+                  >
+                    {loadingMore === col.status ? (
+                      <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                    ) : null}
+                    {t("myTasks.loadMore", {
+                      shown: colTasks.length,
+                      total,
+                    })}
+                  </Button>
                 )}
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
 

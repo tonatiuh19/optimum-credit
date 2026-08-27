@@ -22,7 +22,7 @@ import {
   setBulkImportTableFilter,
   validateBulkImport,
 } from "@/store/slices/bulkImportSlice";
-import { fetchAdminClients } from "@/store/slices/adminSlice";
+import { fetchAdminClients, refetchAdminClients } from "@/store/slices/adminSlice";
 import BulkImportSummaryCards from "@/components/bulk-import/BulkImportSummaryCards";
 import BulkImportPreviewTable from "@/components/bulk-import/BulkImportPreviewTable";
 import {
@@ -141,7 +141,7 @@ export default function BulkImportWizard() {
           options: commitOptions,
         }),
       ).unwrap();
-      dispatch(fetchAdminClients({}));
+      dispatch(refetchAdminClients());
     } catch {
       // error is stored in Redux `error` and shown in the banner
     }

@@ -1,4 +1,5 @@
 import axios from "axios";
+import { isAdminApiPath } from "./apiAuthPath";
 
 const api = axios.create({
   baseURL: "/api",
@@ -22,10 +23,10 @@ export function setAdminToken(t: string | null) {
   else localStorage.removeItem(ADMIN_TOKEN_KEY);
 }
 
-// Attach the right token based on path: /admin/* uses admin token
+// Attach the right token based on path: /admin/*, /mcp/*, /voice/* use admin token
 api.interceptors.request.use((config) => {
   const url = config.url || "";
-  const isAdmin = url.startsWith("/admin") || url.startsWith("/auth/admin");
+  const isAdmin = isAdminApiPath(url);
   const token = isAdmin ? getAdminToken() : getClientToken();
   if (token) {
     config.headers = (config.headers ?? {}) as any;
@@ -40,7 +41,7 @@ api.interceptors.response.use(
   (err) => {
     if (err?.response?.status === 401) {
       const url: string = err?.config?.url || "";
-      const isAdmin = url.startsWith("/admin") || url.startsWith("/auth/admin");
+      const isAdmin = isAdminApiPath(url);
       if (isAdmin) {
         setAdminToken(null);
         if (!window.location.pathname.startsWith("/admin/login")) {

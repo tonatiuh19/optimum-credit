@@ -1,0 +1,26 @@
+{
+  "name": "@optimum-credit/admin-ask-mcp",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "stdio MCP server — Optimum Admin Ask curated CRM tools (proxies authenticated API)",
+  "bin": {
+    "optimum-admin-ask-mcp": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "axios": "^1.19.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.3",
+    "typescript": "^5.9.2"
+  }
+}

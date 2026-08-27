@@ -1,8 +1,17 @@
 /**
  * Admin notification prefs — mute email/in-app; inbox delivery.
+ * Uses an ephemeral agent so muting never races teamAdminNotify fan-out
+ * assertions on real staff rows in shared TiDB.
  */
 import "dotenv/config";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+} from "vitest";
 import request from "supertest";
 import mysql, {
   type Pool,
@@ -16,9 +25,10 @@ import {
   __testGetEmailDryRuns,
   __testMarkPaymentSucceeded,
 } from "./index";
-import { cleanupIntegrationTestClients } from "./testDbCleanup";
+import { cleanupIntegrationTestClients, createIntegrationTestPool } from "./testDbCleanup";
 
 const RUN_ID = `prefs-${Date.now()}`;
+const PREFS_ADMIN_EMAIL = `prefs-agent-${RUN_ID}@example.test`;
 
 let pool: Pool;
 let app: ReturnType<typeof createServer>;
@@ -35,33 +45,22 @@ function trackClient(id: number) {
   clientId = id;
 }
 
-async function makePool() {
-  return mysql.createPool({
-    host: process.env.DB_HOST,
-    port: Number(process.env.DB_PORT || 4000),
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
-    ssl: { rejectUnauthorized: true },
-    connectionLimit: 3,
-  });
-}
-
 describe("admin notification preferences", () => {
   beforeAll(async () => {
     if (!process.env.DB_HOST || !process.env.JWT_SECRET) {
       throw new Error("DB_HOST / JWT_SECRET required");
     }
-    pool = await makePool();
+    pool = createIntegrationTestPool();
     app = createServer();
-    const [admins] = await pool.query<RowDataPacket[]>(
-      `SELECT id, email FROM admins
-       WHERE status = 'active' AND role IN ('super_admin','admin','agent')
-       ORDER BY id ASC LIMIT 1`,
+
+    const [ins] = await pool.query<ResultSetHeader>(
+      `INSERT INTO admins
+         (email, first_name, last_name, role, status, preferred_language)
+       VALUES (?, 'Prefs', 'Agent', 'agent', 'active', 'en')`,
+      [PREFS_ADMIN_EMAIL],
     );
-    if (!admins[0]) throw new Error("No admin");
-    adminId = Number(admins[0].id);
-    adminEmail = String(admins[0].email);
+    adminId = Number(ins.insertId);
+    adminEmail = PREFS_ADMIN_EMAIL;
     adminToken = await createSession(
       "admin",
       adminId,
@@ -69,7 +68,6 @@ describe("admin notification preferences", () => {
       "127.0.0.1",
       "vitest-prefs",
     );
-    // Reset prefs for clean mute test
     await pool.query(
       `UPDATE admins SET notification_prefs_json = NULL WHERE id = ?`,
       [adminId],
@@ -77,19 +75,29 @@ describe("admin notification preferences", () => {
   }, 60_000);
 
   afterAll(async () => {
-    await pool.query(
-      `UPDATE admins SET notification_prefs_json = NULL WHERE id = ?`,
-      [adminId],
-    );
-    await pool.query(`DELETE FROM admin_notifications WHERE admin_id = ?`, [
-      adminId,
-    ]);
+    if (adminId) {
+      await pool.query(`DELETE FROM admin_notifications WHERE admin_id = ?`, [
+        adminId,
+      ]);
+      await pool.query(`DELETE FROM admin_sessions WHERE admin_id = ?`, [
+        adminId,
+      ]);
+      await pool.query(`DELETE FROM admins WHERE id = ?`, [adminId]);
+    }
     await cleanupIntegrationTestClients(pool, {
       runId: RUN_ID,
       clientIds: seededClientIds,
     });
     await pool?.end();
   }, 90_000);
+
+  afterEach(async () => {
+    if (!adminId) return;
+    await pool.query(
+      `UPDATE admins SET notification_prefs_json = NULL WHERE id = ?`,
+      [adminId],
+    );
+  });
 
   it("GET prefs defaults all ON + SMS channel meta", async () => {
     const res = await request(app)
@@ -143,19 +151,12 @@ describe("admin notification preferences", () => {
       [cid, `${RUN_ID}-both`],
     );
 
-    // Direct deliver via notifyAdminsPaymentByClientId isn't exported —
-    // exercise prefs parse by verifying GET reflects mute, then restore.
     const check = await request(app)
       .get("/api/admin/me/notification-prefs")
       .set("Authorization", `Bearer ${adminToken}`)
       .expect(200);
     expect(check.body.prefs.email.payment_installment).toBe(false);
     expect(check.body.prefs.in_app.payment_installment).toBe(false);
-
-    await pool.query(
-      `UPDATE admins SET notification_prefs_json = NULL WHERE id = ?`,
-      [adminId],
-    );
   });
 
   it("PUT mutes purchase email and still creates in-app on payment", async () => {
@@ -222,11 +223,5 @@ describe("admin notification preferences", () => {
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ all: true })
       .expect(200);
-
-    // Restore so parallel suites expecting team emails still see this admin
-    await pool.query(
-      `UPDATE admins SET notification_prefs_json = NULL WHERE id = ?`,
-      [adminId],
-    );
   }, 45_000);
 });

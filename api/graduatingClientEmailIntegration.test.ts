@@ -16,7 +16,7 @@ import {
   __testClearEmailDryRuns,
   __testGetEmailDryRuns,
 } from "./index";
-import { cleanupIntegrationTestClients } from "./testDbCleanup";
+import { cleanupIntegrationTestClients, createIntegrationTestPool } from "./testDbCleanup";
 
 const RUN_ID = `grad-${Date.now()}`;
 
@@ -26,18 +26,6 @@ let adminId = 0;
 let adminToken = "";
 const clientIds: number[] = [];
 const caseIds: number[] = [];
-
-async function makePool() {
-  return mysql.createPool({
-    host: process.env.DB_HOST,
-    port: Number(process.env.DB_PORT || 4000),
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
-    ssl: { rejectUnauthorized: true },
-    connectionLimit: 3,
-  });
-}
 
 async function insertClient(opts: {
   first_name: string;
@@ -84,7 +72,7 @@ describe("graduating client email — completed stage", () => {
     if (!process.env.DB_HOST || !process.env.JWT_SECRET) {
       throw new Error("DB_HOST / JWT_SECRET required");
     }
-    pool = await makePool();
+    pool = createIntegrationTestPool();
     app = createServer();
     const [admins] = await pool.query<RowDataPacket[]>(
       `SELECT id, email FROM admins

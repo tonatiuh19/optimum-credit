@@ -16,6 +16,11 @@ import affiliates from "./slices/affiliatesSlice";
 import paySplit from "./slices/paySplitSlice";
 import workTasks from "./slices/workTasksSlice";
 import adminNotifications from "./slices/adminNotificationsSlice";
+import adminAi from "./slices/adminAiSlice";
+import adminMcp from "./slices/adminMcpSlice";
+import conversations from "./slices/conversationsSlice";
+import voice from "./slices/voiceSlice";
+import funding from "./slices/fundingSlice";
 
 export const store = configureStore({
   reducer: {
@@ -36,6 +41,11 @@ export const store = configureStore({
     paySplit,
     workTasks,
     adminNotifications,
+    adminAi,
+    adminMcp,
+    conversations,
+    voice,
+    funding,
   },
   middleware: (getDefault) => getDefault({ serializableCheck: false }),
 });

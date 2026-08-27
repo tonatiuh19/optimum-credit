@@ -1,5 +1,13 @@
 import { useEffect, useState } from "react";
-import { Save, Settings, Tag, Scale, Loader2, ExternalLink } from "lucide-react";
+import {
+  Save,
+  Settings,
+  Tag,
+  Scale,
+  Loader2,
+  ExternalLink,
+  Landmark,
+} from "lucide-react";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import AdminPageHeader from "@/components/AdminPageHeader";
@@ -10,13 +18,20 @@ import {
   fetchAdminLegalDocuments,
   saveLegalDocument,
 } from "@/store/slices/legalSlice";
+import { fetchAdminPhoneNumbers } from "@/store/slices/conversationsSlice";
 import { LEGAL_PATHS } from "@/lib/legal";
 import FieldHint from "@/components/admin/FieldHint";
+import NotifyExtraEmailsPanel from "@/components/admin/NotifyExtraEmailsPanel";
+
+const FUNDING_SMS_SETTING_KEY = "funding_sms_from_phone_number_id";
 
 export default function AdminSettings() {
   const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const { settings } = useAppSelector((s) => s.admin);
+  const { phoneNumbers, phoneNumbersLoading } = useAppSelector(
+    (s) => s.conversations,
+  );
   const {
     bySlug,
     list,
@@ -28,13 +43,19 @@ export default function AdminSettings() {
   const appVersion =
     settings.find((s) => s.setting_key === "app_version")?.setting_value ??
     null;
+  const fundingSmsFromId =
+    settings.find((s) => s.setting_key === FUNDING_SMS_SETTING_KEY)
+      ?.setting_value ?? "";
   const visibleSettings = settings.filter(
     (s) =>
       s.setting_key !== "app_version" &&
-      s.setting_key !== "contract_template_html",
+      s.setting_key !== "contract_template_html" &&
+      s.setting_key !== FUNDING_SMS_SETTING_KEY,
   );
 
   const [edits, setEdits] = useState<Record<string, string>>({});
+  const [fundingPhoneEdit, setFundingPhoneEdit] = useState<string | null>(null);
+  const [fundingPhoneSaving, setFundingPhoneSaving] = useState(false);
   const [legalEdits, setLegalEdits] = useState<
     Record<string, { title: string; content_md: string; source_url: string }>
   >({});
@@ -42,6 +63,7 @@ export default function AdminSettings() {
   useEffect(() => {
     dispatch(fetchSettings());
     dispatch(fetchAdminLegalDocuments());
+    dispatch(fetchAdminPhoneNumbers());
   }, [dispatch]);
 
   useEffect(() => {
@@ -74,6 +96,23 @@ export default function AdminSettings() {
     dispatch(fetchSettings());
   };
 
+  const saveFundingPhone = async () => {
+    if (fundingPhoneEdit === null) return;
+    setFundingPhoneSaving(true);
+    try {
+      await dispatch(
+        saveSetting({
+          setting_key: FUNDING_SMS_SETTING_KEY,
+          setting_value: fundingPhoneEdit,
+        }),
+      );
+      setFundingPhoneEdit(null);
+      dispatch(fetchSettings());
+    } finally {
+      setFundingPhoneSaving(false);
+    }
+  };
+
   const saveLegal = async (slug: string) => {
     const draft = legalEdits[slug];
     if (!draft) return;
@@ -100,6 +139,9 @@ export default function AdminSettings() {
   const previewPath = (slug: string) =>
     slug === "terms" ? LEGAL_PATHS.terms : LEGAL_PATHS.privacy;
 
+  const fundingPhoneValue =
+    fundingPhoneEdit !== null ? fundingPhoneEdit : fundingSmsFromId;
+
   return (
     <div className="space-y-6">
       <AdminPageHeader
@@ -107,6 +149,63 @@ export default function AdminSettings() {
         title="Settings"
         description="Global app configuration."
       />
+
+      <NotifyExtraEmailsPanel />
+
+      {/* ── Business Funding SMS From ──────────────────────────── */}
+      <div className="bg-card border border-border rounded-2xl p-5 space-y-3">
+        <div className="flex items-start gap-3">
+          <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
+            <Landmark className="w-5 h-5 text-primary" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="text-sm font-semibold text-foreground">
+              {t("adminSettings.fundingSmsTitle")}
+            </h2>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {t("adminSettings.fundingSmsHint")}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void saveFundingPhone()}
+            disabled={
+              fundingPhoneEdit === null ||
+              fundingPhoneEdit === fundingSmsFromId ||
+              fundingPhoneSaving
+            }
+            className="btn-primary text-sm inline-flex items-center gap-1.5 disabled:opacity-40 shrink-0"
+          >
+            {fundingPhoneSaving ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Save className="w-4 h-4" />
+            )}
+            {t("adminSettings.fundingSmsSave")}
+          </button>
+        </div>
+        {phoneNumbersLoading && phoneNumbers.length === 0 ? (
+          <Skeleton className="h-10 w-full" />
+        ) : (
+          <select
+            className="w-full h-10 px-3 rounded-lg border border-input bg-background text-sm text-foreground"
+            value={fundingPhoneValue}
+            onChange={(e) => setFundingPhoneEdit(e.target.value)}
+          >
+            <option value="">{t("adminSettings.fundingSmsNone")}</option>
+            {phoneNumbers
+              .filter((n) => n.is_active)
+              .map((n) => (
+                <option key={n.id} value={String(n.id)}>
+                  {n.friendly_name
+                    ? `${n.friendly_name} (${n.e164})`
+                    : n.e164}
+                </option>
+              ))}
+          </select>
+        )}
+        <FieldHint>{t("adminSettings.fundingSmsFieldHint")}</FieldHint>
+      </div>
 
       {/* ── App Version ───────────────────────────────────────── */}
       <div className="bg-card border border-border rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center gap-4">

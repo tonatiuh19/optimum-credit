@@ -112,7 +112,8 @@ export default function AdminDocuments() {
   const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
-  const { allDocuments, loading } = useAppSelector((s) => s.admin);
+  const { allDocuments, documentsPagination, documentsStatusCounts, documentsLoading } =
+    useAppSelector((s) => s.admin);
 
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -123,29 +124,46 @@ export default function AdminDocuments() {
   const [typeFilter, setTypeFilter] = useState<string>("all");
   const [sortBy, setSortBy] = useState("uploaded_at");
   const [sortDir, setSortDir] = useState<"ASC" | "DESC">("DESC");
+  const [page, setPage] = useState(1);
 
   const [selected, setSelected] = useState<DocRecord | null>(null);
   const [fileUrl, setFileUrl] = useState<string | null>(null);
   const [fileLoading, setFileLoading] = useState(false);
-  useEffect(() => {
-    dispatch(fetchAllDocuments({ search: debouncedSearch || undefined }));
-  }, [dispatch, debouncedSearch]);
 
-  const docs = (allDocuments as DocRecord[]).filter((d) => {
-    if (statusFilter !== "all" && d.review_status !== statusFilter)
-      return false;
-    if (typeFilter !== "all" && d.doc_type !== typeFilter) return false;
-    return true;
-  });
-
-  const counts = (allDocuments as DocRecord[]).reduce(
-    (acc, d) => {
-      acc[d.review_status] = (acc[d.review_status] || 0) + 1;
-      acc.all++;
-      return acc;
+  const loadDocuments = useCallback(
+    (targetPage: number) => {
+      dispatch(
+        fetchAllDocuments({
+          search: debouncedSearch || undefined,
+          status: statusFilter,
+          doc_type: typeFilter !== "all" ? typeFilter : undefined,
+          page: targetPage,
+          limit: 50,
+          sort_by: sortBy,
+          sort_dir: sortDir,
+        }),
+      );
     },
-    { all: 0, pending: 0, approved: 0, rejected: 0 } as Record<string, number>,
+    [dispatch, debouncedSearch, statusFilter, typeFilter, sortBy, sortDir],
   );
+
+  useEffect(() => {
+    setPage(1);
+    loadDocuments(1);
+  }, [debouncedSearch, statusFilter, typeFilter, sortBy, sortDir, loadDocuments]);
+
+  useEffect(() => {
+    if (page === 1) return;
+    loadDocuments(page);
+  }, [page, loadDocuments]);
+
+  const docs = allDocuments as DocRecord[];
+  const counts = documentsStatusCounts ?? {
+    all: 0,
+    pending: 0,
+    approved: 0,
+    rejected: 0,
+  };
 
   const handleSort = (key: string) => {
     if (sortBy === key) {
@@ -155,17 +173,6 @@ export default function AdminDocuments() {
       setSortDir("ASC");
     }
   };
-
-  const sorted = [...docs]
-    .filter(
-      (doc, idx, arr) => arr.findIndex((d) => d.id === doc.id) === idx,
-    )
-    .sort((a, b) => {
-    const av = (a as any)[sortBy] ?? "";
-    const bv = (b as any)[sortBy] ?? "";
-    const cmp = String(av).localeCompare(String(bv));
-    return sortDir === "ASC" ? cmp : -cmp;
-  });
 
   const loadFile = useCallback(async (doc: DocRecord) => {
     setFileUrl(null);
@@ -403,13 +410,15 @@ export default function AdminDocuments() {
       {/* Document grid */}
       <div className="bg-card rounded-2xl border border-border px-6 py-4">
         <DataGrid
-          data={sorted}
+          data={docs}
           columns={columns}
           rowKey={(d) => d.id}
-          isLoading={loading}
+          isLoading={documentsLoading}
           sortBy={sortBy}
           sortDir={sortDir}
           onSort={handleSort}
+          pagination={documentsPagination}
+          onPageChange={setPage}
           onRowClick={openDoc}
           emptyMessage={
             search || statusFilter !== "all" || typeFilter !== "all"
@@ -531,7 +540,7 @@ export default function AdminDocuments() {
         open={uploadDialogOpen}
         onOpenChange={setUploadDialogOpen}
         onSuccess={() => {
-          dispatch(fetchAllDocuments({ search: debouncedSearch || undefined }));
+          loadDocuments(page);
         }}
       />
     </div>

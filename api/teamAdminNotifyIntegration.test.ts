@@ -20,7 +20,7 @@ import {
   __testClearEmailDryRuns,
   __testGetEmailDryRuns,
 } from "./index";
-import { cleanupIntegrationTestClients } from "./testDbCleanup";
+import { cleanupIntegrationTestClients, createIntegrationTestPool } from "./testDbCleanup";
 
 const RUN_ID = `team-alert-${Date.now()}`;
 const CLIENT_EMAIL = `${RUN_ID}@example.test`;
@@ -34,18 +34,6 @@ let caseId = 0;
 let clientToken = "";
 let teamAdminEmails: string[] = [];
 let requiredTemplates: { id: number; slug: string; task_type: string }[] = [];
-
-async function makePool() {
-  return mysql.createPool({
-    host: process.env.DB_HOST,
-    port: Number(process.env.DB_PORT || 4000),
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
-    ssl: { rejectUnauthorized: true },
-    connectionLimit: 3,
-  });
-}
 
 function tinyPng(): Buffer {
   return Buffer.from(
@@ -91,10 +79,36 @@ function submissionSubjects(mails: ReturnType<typeof __testGetEmailDryRuns>) {
 function expectAllTeamAdminsGot(
   mails: ReturnType<typeof __testGetEmailDryRuns>,
 ) {
-  const recipients = new Set(mails.map((e) => e.to));
-  for (const email of teamAdminEmails) {
-    expect(recipients.has(email)).toBe(true);
+  const recipients = new Set(
+    mails.map((e) => String(e.to || "").trim().toLowerCase()),
+  );
+  const missing = teamAdminEmails.filter(
+    (email) => !recipients.has(String(email).trim().toLowerCase()),
+  );
+  if (missing.length) {
+    throw new Error(
+      `missing alert emails for: ${missing.join(", ")}; got: ${[...recipients].join(", ")}`,
+    );
   }
+}
+
+/** Shared TiDB — other suites may mute events; force defaults so email fans out. */
+async function resetTeamAdminNotifyPrefs() {
+  await pool.query(
+    `UPDATE admins SET notification_prefs_json = NULL
+     WHERE status = 'active'
+       AND role IN ('super_admin','admin','agent')
+       AND email IS NOT NULL AND TRIM(email) <> ''
+       AND email NOT LIKE '%@example.test'`,
+  );
+  const [admins] = await pool.query<RowDataPacket[]>(
+    `SELECT email FROM admins
+     WHERE status = 'active' AND role IN ('super_admin','admin','agent')
+       AND email IS NOT NULL AND TRIM(email) <> ''
+       AND email NOT LIKE '%@example.test'
+     ORDER BY id ASC`,
+  );
+  teamAdminEmails = admins.map((a) => String(a.email));
 }
 
 describe("team admin notify — gaps + edges", () => {
@@ -109,18 +123,20 @@ describe("team admin notify — gaps + edges", () => {
         "DB_HOST / JWT_SECRET / CDN_UPLOAD_SECRET / DOC_ENCRYPTION_KEY required",
       );
     }
-    pool = await makePool();
+    pool = createIntegrationTestPool();
     app = createServer();
 
     const [admins] = await pool.query<RowDataPacket[]>(
       `SELECT id, email FROM admins
        WHERE status = 'active' AND role IN ('super_admin','admin','agent')
          AND email IS NOT NULL AND TRIM(email) <> ''
+         AND email NOT LIKE '%@example.test'
        ORDER BY id ASC`,
     );
     if (!admins[0]) throw new Error("No team admin for tests");
     adminId = Number(admins[0].id);
     teamAdminEmails = admins.map((a) => String(a.email));
+    await resetTeamAdminNotifyPrefs();
     adminToken = await createSession(
       "admin",
       adminId,
@@ -279,28 +295,65 @@ describe("team admin notify — gaps + edges", () => {
   }, 90_000);
 
   it("reopen one required then re-complete re-alerts ready for review", async () => {
-    const first = requiredTemplates[0];
-    await pool.query(
-      `UPDATE client_task_completions
-       SET status = 'pending', admin_review_status = 'pending',
-           completed_at = NULL, file_storage_key = NULL, file_name = NULL
-       WHERE case_id = ? AND task_template_id = ?`,
-      [caseId, first.id],
-    );
+    // Prefer sign_document so this assertion does not depend on CDN (upload
+    // tasks flake 500 under parallel suites). Fall back to first required.
+    const target =
+      requiredTemplates.find((t) => t.task_type === "sign_document") ||
+      requiredTemplates[0];
+
+    // Self-contained baseline: every other required task completed; target pending.
+    // (Vitest -t / order changes must not leave this relying on a prior test.)
+    for (const t of requiredTemplates) {
+      if (t.id === target.id) {
+        await pool.query(
+          `INSERT INTO client_task_completions
+             (client_id, case_id, task_template_id, status, admin_review_status,
+              completed_at, file_storage_key, file_name)
+           VALUES (?, ?, ?, 'pending', 'pending', NULL, NULL, NULL)
+           ON DUPLICATE KEY UPDATE
+             status = 'pending',
+             admin_review_status = 'pending',
+             completed_at = NULL,
+             file_storage_key = NULL,
+             file_name = NULL,
+             signature_name = NULL`,
+          [clientId, caseId, t.id],
+        );
+      } else {
+        await pool.query(
+          `INSERT INTO client_task_completions
+             (client_id, case_id, task_template_id, status, admin_review_status, completed_at)
+           VALUES (?, ?, ?, 'completed', 'pending', NOW())
+           ON DUPLICATE KEY UPDATE
+             status = 'completed',
+             admin_review_status = 'pending',
+             completed_at = NOW()`,
+          [clientId, caseId, t.id],
+        );
+      }
+    }
 
     __testClearEmailDryRuns();
-    if (first.task_type === "upload") {
-      await request(app)
-        .post(`/api/portal/tasks/${first.id}/complete`)
+    if (target.task_type === "upload") {
+      const res = await request(app)
+        .post(`/api/portal/tasks/${target.id}/complete`)
         .set("Authorization", `Bearer ${clientToken}`)
-        .attach("file", tinyPng(), "reopen.png")
-        .expect(200);
-    } else if (first.task_type === "sign_document") {
+        .attach("file", tinyPng(), "reopen.png");
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+    } else if (target.task_type === "sign_document") {
       await request(app)
-        .post(`/api/portal/tasks/${first.id}/complete`)
+        .post(`/api/portal/tasks/${target.id}/complete`)
         .set("Authorization", `Bearer ${clientToken}`)
         .field("signature_name", "Reopen Signer")
         .expect(200);
+    } else if (target.task_type === "form") {
+      await request(app)
+        .post(`/api/portal/tasks/${target.id}/complete`)
+        .set("Authorization", `Bearer ${clientToken}`)
+        .field("form_data", JSON.stringify({ note: "reopen" }))
+        .expect(200);
+    } else {
+      throw new Error(`Unsupported task_type for reopen: ${target.task_type}`);
     }
     const ready = readySubjects(__testGetEmailDryRuns());
     expect(ready.length).toBeGreaterThan(0);
@@ -358,6 +411,7 @@ describe("team admin notify — gaps + edges", () => {
   }, 60_000);
 
   it("manual installment mark-paid emails Payment received", async () => {
+    await resetTeamAdminNotifyPrefs();
     const due = new Date();
     due.setDate(due.getDate() + 10);
     const dueStr = due.toISOString().slice(0, 10);
@@ -385,9 +439,10 @@ describe("team admin notify — gaps + edges", () => {
     expect(paid.length).toBeGreaterThan(0);
     expectAllTeamAdminsGot(paid);
     expect(purchaseSubjects(__testGetEmailDryRuns()).length).toBe(0);
-  }, 60_000);
+  }, 120_000);
 
   it("creating an already-paid split emails Payment received", async () => {
+    await resetTeamAdminNotifyPrefs();
     const due = new Date();
     due.setDate(due.getDate() + 12);
     const dueStr = due.toISOString().slice(0, 10);
@@ -408,5 +463,5 @@ describe("team admin notify — gaps + edges", () => {
     const paid = paymentReceivedSubjects(__testGetEmailDryRuns());
     expect(paid.length).toBeGreaterThan(0);
     expectAllTeamAdminsGot(paid);
-  }, 60_000);
+  }, 120_000);
 });

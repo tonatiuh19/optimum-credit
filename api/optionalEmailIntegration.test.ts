@@ -10,7 +10,7 @@ import mysql, {
   type RowDataPacket,
 } from "mysql2/promise";
 import { createServer, createSession } from "./index";
-import { cleanupIntegrationTestClients } from "./testDbCleanup";
+import { cleanupIntegrationTestClients, createIntegrationTestPool, withDbRetry } from "./testDbCleanup";
 
 const RUN_ID = `opt-email-${Date.now()}`;
 
@@ -21,24 +21,12 @@ let adminToken = "";
 const clientIds: number[] = [];
 const caseIds: number[] = [];
 
-async function makePool() {
-  return mysql.createPool({
-    host: process.env.DB_HOST,
-    port: Number(process.env.DB_PORT || 4000),
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
-    ssl: { rejectUnauthorized: true },
-    connectionLimit: 3,
-  });
-}
-
 describe("optional client email — edges", () => {
   beforeAll(async () => {
     if (!process.env.DB_HOST || !process.env.JWT_SECRET) {
       throw new Error("DB_HOST / JWT_SECRET required");
     }
-    pool = await makePool();
+    pool = createIntegrationTestPool();
     app = createServer();
     const [admins] = await pool.query<RowDataPacket[]>(
       `SELECT id, email FROM admins
@@ -179,8 +167,10 @@ describe("optional client email — edges", () => {
     const caseId = Number(conv.body.case.id);
     caseIds.push(caseId);
 
-    const [tpls] = await pool.query<RowDataPacket[]>(
-      `SELECT id FROM onboarding_task_templates WHERE is_active = 1 LIMIT 1`,
+    const [tpls] = await withDbRetry(() =>
+      pool.query<RowDataPacket[]>(
+        `SELECT id FROM onboarding_task_templates WHERE is_active = 1 LIMIT 1`,
+      ),
     );
     expect(tpls[0]?.id).toBeTruthy();
 

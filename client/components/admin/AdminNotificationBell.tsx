@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { Bell, CheckCheck, Loader2 } from "lucide-react";
@@ -21,22 +21,12 @@ export default function AdminNotificationBell({
 }) {
   const { t } = useTranslation();
   const dispatch = useAppDispatch();
-  const { token, user } = useAppSelector((s) => s.adminAuth);
+  const { user } = useAppSelector((s) => s.adminAuth);
   const { inbox, unreadCount, inboxLoading } = useAppSelector(
     (s) => s.adminNotifications,
   );
   const isAffiliate = user?.role === "affiliate";
-
-  useEffect(() => {
-    if (!token || isAffiliate) return;
-    dispatch(fetchAdminInbox()).catch((e) =>
-      logger.warn("inbox poll failed", e),
-    );
-    const id = window.setInterval(() => {
-      dispatch(fetchAdminInbox());
-    }, 45_000);
-    return () => window.clearInterval(id);
-  }, [dispatch, token, isAffiliate]);
+  const [open, setOpen] = useState(false);
 
   if (isAffiliate) return null;
 
@@ -50,7 +40,17 @@ export default function AdminNotificationBell({
   };
 
   return (
-    <Popover>
+    <Popover
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (next) {
+          dispatch(fetchAdminInbox()).catch((e) =>
+            logger.warn("inbox refresh failed", e),
+          );
+        }
+      }}
+    >
       <PopoverTrigger asChild>
         <button
           type="button"

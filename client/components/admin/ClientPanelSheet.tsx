@@ -46,6 +46,8 @@ import {
 } from "@/store/slices/adminTasksSlice";
 import type { OnboardingTaskType, Prospect, RoundScheduleInput } from "@shared/api";
 import AdminSplitActions from "@/components/admin/AdminSplitActions";
+import { AdminAskCaseButton } from "@/components/admin/AdminAskDrawer";
+import { ClientPanelConversationButton } from "@/components/admin/ClientPanelConversationButton";
 import InstallmentDraftFields, {
   emptyInstallmentDraft,
   draftToCreateSplitPayload,
@@ -89,6 +91,7 @@ import NoEmailWarning from "@/components/admin/NoEmailWarning";
 import {
   taskSlugToDocType,
   buildReopenToastParts,
+  isProspectLead,
 } from "@/lib/pipelineFilters";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -1295,7 +1298,7 @@ export function ClientPanelSheet({
   // Prospects land on Overview (tasks aren't assigned until convert)
   useEffect(() => {
     if (!open || !pd || prospectTabInitialized.current) return;
-    if (pd.client?.status === "prospect") {
+    if (isProspectLead(pd.client)) {
       setPanelTab("overview");
       prospectTabInitialized.current = true;
     } else if (caseId) {
@@ -1517,7 +1520,14 @@ export function ClientPanelSheet({
 
   const isPreviewImage = previewDoc?.file_mime?.startsWith("image/");
   const isPreviewPdf = previewDoc?.file_mime === "application/pdf";
-  const isProspect = pd?.client?.status === "prospect";
+  const isProspect = isProspectLead(pd?.client, {
+    hasEnrolledCase: Boolean(
+      pd?.case_info &&
+        pd.case_info.status === "active" &&
+        pd.case_info.pipeline_stage &&
+        pd.case_info.pipeline_stage !== "prospect",
+    ),
+  });
   const resolvedCaseId = caseId ?? pd?.case_info?.id ?? null;
 
   const handleConvertClick = () => {
@@ -1585,6 +1595,14 @@ export function ClientPanelSheet({
                     >
                       <X className="w-4 h-4" />
                     </button>
+                    <AdminAskCaseButton
+                      caseId={pd.case_info?.id ?? caseId}
+                      caseNumber={pd.case_info?.case_number ?? null}
+                      clientId={pd.client?.id ?? clientId}
+                    />
+                    <ClientPanelConversationButton
+                      clientId={pd.client?.id ?? clientId}
+                    />
                     {(pd.client.status === "onboarding" ||
                       pd.client.status === "active") && (
                       <span className="inline-flex items-center gap-1 text-[10px] font-bold bg-accent/15 text-accent border border-accent/30 px-2 py-0.5 rounded-full">

@@ -10,6 +10,9 @@ interface AdminAuthState {
   verifyingOtp: boolean;
   error: string | null;
   otpSentTo: string | null;
+  otpChannel: "email" | "sms" | null;
+  otpOptions: { email: boolean; sms: boolean } | null;
+  otpOptionsLoading: boolean;
 }
 
 const initialState: AdminAuthState = {
@@ -20,16 +23,41 @@ const initialState: AdminAuthState = {
   verifyingOtp: false,
   error: null,
   otpSentTo: null,
+  otpChannel: null,
+  otpOptions: null,
+  otpOptionsLoading: false,
 };
 
-export const requestAdminOtp = createAsyncThunk<
-  { email: string },
+export const fetchAdminOtpOptions = createAsyncThunk<
+  { email: boolean; sms: boolean },
   { email: string },
   { rejectValue: string }
->("adminAuth/requestOtp", async ({ email }, { rejectWithValue }) => {
+>("adminAuth/otpOptions", async ({ email }, { rejectWithValue }) => {
   try {
-    await api.post("/auth/admin/request-otp", { email });
-    return { email };
+    const { data } = await api.post("/auth/admin/otp-options", { email });
+    return {
+      email: data.email !== false,
+      sms: !!data.sms,
+    };
+  } catch (e: any) {
+    return rejectWithValue(formatAxiosError(e, "Could not load sign-in options"));
+  }
+});
+
+export const requestAdminOtp = createAsyncThunk<
+  { email: string; channel: "email" | "sms" },
+  { email: string; channel?: "email" | "sms" },
+  { rejectValue: string }
+>("adminAuth/requestOtp", async ({ email, channel = "email" }, { rejectWithValue }) => {
+  try {
+    const { data } = await api.post("/auth/admin/request-otp", {
+      email,
+      channel,
+    });
+    return {
+      email,
+      channel: data.channel === "sms" ? "sms" : "email",
+    };
   } catch (e: any) {
     return rejectWithValue(
       formatAxiosError(
@@ -78,6 +106,20 @@ const slice = createSlice({
     },
   },
   extraReducers: (b) => {
+    b.addCase(fetchAdminOtpOptions.pending, (s) => {
+      s.otpOptionsLoading = true;
+      s.error = null;
+    });
+    b.addCase(fetchAdminOtpOptions.fulfilled, (s, a) => {
+      s.otpOptionsLoading = false;
+      s.otpOptions = a.payload;
+    });
+    b.addCase(fetchAdminOtpOptions.rejected, (s, a) => {
+      s.otpOptionsLoading = false;
+      s.otpOptions = { email: true, sms: false };
+      s.error = a.payload || null;
+    });
+
     b.addCase(requestAdminOtp.pending, (s) => {
       s.requestingOtp = true;
       s.error = null;
@@ -85,6 +127,7 @@ const slice = createSlice({
     b.addCase(requestAdminOtp.fulfilled, (s, a) => {
       s.requestingOtp = false;
       s.otpSentTo = a.payload.email;
+      s.otpChannel = a.payload.channel;
     });
     b.addCase(requestAdminOtp.rejected, (s, a) => {
       s.requestingOtp = false;

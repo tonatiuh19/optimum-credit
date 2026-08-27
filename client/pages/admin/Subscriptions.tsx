@@ -170,24 +170,29 @@ export default function AdminSubscriptions() {
   const [page, setPage] = useState(1);
   const search = useDebounce(searchRaw, 350);
 
-  const load = useCallback(() => {
-    dispatch(
-      fetchAdminSubscriptions({
-        status: statusFilter === "all" ? undefined : statusFilter,
-        search: search || undefined,
-        page,
-        limit: 50,
-      }),
-    );
-  }, [dispatch, statusFilter, search, page]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
+  const load = useCallback(
+    (targetPage: number) => {
+      dispatch(
+        fetchAdminSubscriptions({
+          status: statusFilter === "all" ? undefined : statusFilter,
+          search: search || undefined,
+          page: targetPage,
+          limit: 50,
+        }),
+      );
+    },
+    [dispatch, statusFilter, search],
+  );
 
   useEffect(() => {
     setPage(1);
-  }, [statusFilter, search]);
+    load(1);
+  }, [statusFilter, search, load]);
+
+  useEffect(() => {
+    if (page === 1) return;
+    load(page);
+  }, [page, load]);
 
   const mrr = summary?.mrr_cents ?? 0;
 

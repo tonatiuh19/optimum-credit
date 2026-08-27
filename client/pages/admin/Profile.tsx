@@ -1,19 +1,38 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Bell, Loader2, MessageSquare, Mail, Smartphone } from "lucide-react";
+import {
+  Bell,
+  Loader2,
+  MessageSquare,
+  Mail,
+  Smartphone,
+  Sparkles,
+  Volume2,
+} from "lucide-react";
 import AdminPageHeader from "@/components/AdminPageHeader";
 import { Switch } from "@/components/ui/switch";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
   fetchNotificationPrefs,
   saveNotificationPrefs,
 } from "@/store/slices/adminNotificationsSlice";
+import {
+  fetchMcpConnections,
+  revokeMcpConnection,
+} from "@/store/slices/adminMcpSlice";
 import type {
   AdminNotifyChannel,
   AdminNotifyEventKey,
 } from "@shared/api";
 import { logger } from "@/utils/logger";
+import {
+  isNotificationSoundMuted,
+  previewNotificationChime,
+  setNotificationSoundMuted,
+} from "@/lib/notification-sound";
+import { isInboundSmsInAppEnabled } from "@/lib/inboundSmsNotification";
 
 const EVENT_ORDER: AdminNotifyEventKey[] = [
   "purchase_enrollment",
@@ -25,6 +44,11 @@ const EVENT_ORDER: AdminNotifyEventKey[] = [
   "round_calendar",
   "work_task_assigned",
   "work_task_overdue",
+  "inbound_sms",
+  "missed_call",
+  "voicemail",
+  "funding_doc_upload",
+  "funding_application_created",
 ];
 
 const CHANNELS: {
@@ -42,10 +66,29 @@ export default function AdminProfile() {
   const { prefs, channels, prefsLoading, prefsSaving, prefsError } =
     useAppSelector((s) => s.adminNotifications);
   const user = useAppSelector((s) => s.adminAuth.user);
+  const {
+    connections: mcpConnections,
+    loading: mcpLoading,
+    revokingId,
+  } = useAppSelector((s) => s.adminMcp);
+  const [soundEnabled, setSoundEnabled] = useState(
+    () => !isNotificationSoundMuted(),
+  );
+
+  useEffect(() => {
+    const sync = () => setSoundEnabled(!isNotificationSoundMuted());
+    window.addEventListener("ofg:notification-sound-mute", sync);
+    return () => window.removeEventListener("ofg:notification-sound-mute", sync);
+  }, []);
+
+  const inboundSmsInApp = isInboundSmsInAppEnabled(prefs);
 
   useEffect(() => {
     dispatch(fetchNotificationPrefs()).catch((e) =>
       logger.warn("prefs load failed", e),
+    );
+    dispatch(fetchMcpConnections()).catch((e) =>
+      logger.warn("mcp connections load failed", e),
     );
   }, [dispatch]);
 
@@ -184,6 +227,113 @@ export default function AdminProfile() {
           </div>
         )}
       </section>
+
+      <section className="rounded-xl border border-border bg-card overflow-hidden">
+        <div className="px-4 sm:px-5 py-4 border-b border-border">
+          <h2 className="text-base font-semibold text-foreground inline-flex items-center gap-2">
+            <Volume2 className="w-4 h-4 text-primary" />
+            {t("adminProfile.soundTitle")}
+          </h2>
+          <p className="text-sm text-muted-foreground mt-1">
+            {t("adminProfile.soundSubtitle")}
+          </p>
+        </div>
+        <div className="px-4 sm:px-5 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-foreground">
+              {t("adminProfile.soundToggleLabel")}
+            </div>
+            {!inboundSmsInApp && (
+              <p className="text-xs text-muted-foreground mt-1">
+                {t("adminProfile.soundRequiresInApp")}
+              </p>
+            )}
+          </div>
+          <div className="flex items-center gap-3 shrink-0">
+            <Switch
+              checked={soundEnabled}
+              disabled={!inboundSmsInApp}
+              onCheckedChange={(enabled) => {
+                setNotificationSoundMuted(!enabled);
+                setSoundEnabled(enabled);
+                if (enabled) previewNotificationChime();
+              }}
+              aria-label={t("adminProfile.soundToggleLabel")}
+            />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={!soundEnabled || !inboundSmsInApp}
+              onClick={() => previewNotificationChime()}
+            >
+              {t("adminProfile.soundPreview")}
+            </Button>
+          </div>
+        </div>
+      </section>
+
+      {user?.ai_ask_enabled ? (
+        <section className="rounded-xl border border-border bg-card overflow-hidden">
+          <div className="px-4 sm:px-5 py-4 border-b border-border">
+            <h2 className="text-base font-semibold text-foreground inline-flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-primary" />
+              {t("adminMcp.connectionsTitle")}
+            </h2>
+            <p className="text-sm text-muted-foreground mt-1">
+              {t("adminMcp.connectionsSubtitle")}
+            </p>
+          </div>
+          {mcpLoading && mcpConnections.length === 0 ? (
+            <div className="p-5 space-y-3">
+              <Skeleton className="h-10 w-full" />
+            </div>
+          ) : mcpConnections.length === 0 ? (
+            <div className="p-5 text-sm text-muted-foreground">
+              {t("adminMcp.connectionsEmpty")}
+            </div>
+          ) : (
+            <ul className="divide-y divide-border">
+              {mcpConnections.map((c) => (
+                <li
+                  key={c.id}
+                  className="px-4 sm:px-5 py-3 flex items-center justify-between gap-3"
+                >
+                  <div className="min-w-0">
+                    <div className="font-medium text-foreground truncate">
+                      {c.client_name}
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-0.5">
+                      {c.last_used_at
+                        ? t("adminMcp.lastUsed", {
+                            when: new Date(c.last_used_at).toLocaleString(),
+                          })
+                        : t("adminMcp.neverUsed")}
+                    </div>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={revokingId === c.id}
+                    onClick={() =>
+                      void dispatch(revokeMcpConnection(c.id)).catch((e) =>
+                        logger.warn("mcp revoke failed", e),
+                      )
+                    }
+                  >
+                    {revokingId === c.id ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      t("adminMcp.revoke")
+                    )}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      ) : null}
 
       <p className="text-xs text-muted-foreground">
         {t("adminProfile.otpNote")}
