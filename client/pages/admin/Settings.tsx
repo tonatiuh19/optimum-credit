@@ -22,6 +22,7 @@ import { fetchAdminPhoneNumbers } from "@/store/slices/conversationsSlice";
 import { LEGAL_PATHS } from "@/lib/legal";
 import FieldHint from "@/components/admin/FieldHint";
 import NotifyExtraEmailsPanel from "@/components/admin/NotifyExtraEmailsPanel";
+import OfgPhoneNumbersPanel from "@/components/admin/OfgPhoneNumbersPanel";
 
 const FUNDING_SMS_SETTING_KEY = "funding_sms_from_phone_number_id";
 
@@ -151,6 +152,8 @@ export default function AdminSettings() {
       />
 
       <NotifyExtraEmailsPanel />
+
+      <OfgPhoneNumbersPanel />
 
       {/* ── Business Funding SMS From ──────────────────────────── */}
       <div className="bg-card border border-border rounded-2xl p-5 space-y-3">

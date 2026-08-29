@@ -34,7 +34,10 @@ OAuth callbacks we allow for Claude:
 | `list_clients_owing` | “Which clients owe money / are overdue?” |
 | `list_installments` | “Show installments for case CR-…” |
 | `list_payments` | “Payment history for Jane” |
-| `get_client` / `list_case_documents` | Profile + docs status |
+| `get_client` / `list_case_documents` | Profile + `referrers[]` + `funding_applications[]` (dual CR+funding) + docs status |
+| `search_clients` | CR clients **and** `funding_applications` (funding-only intakes) |
+| `list_funding_applications` / `get_funding_application` | Funding board search + one app + docs uploaded |
+| `funding_pipeline_summary` | Funding column counts (use instead of CR `pipeline_summary`) |
 | `list_round_schedule` | Round calendar dates |
 | (+ existing search/pipeline/reports/tasks) | |
 
@@ -50,6 +53,10 @@ Claude must collect fields, call with `confirm=false` (preview), show the user, 
 | `create_work_task` | title + `preferred_language` (routes via `admins.language_owner_for`); OFG-only by default — set `push_hubspot=true` to also create a HubSpot task |
 | `add_case_note` | OFG `client_id` (not HubSpot) + note; dry-run is safe preview (does not email — use `send_email`) |
 | `upload_case_document` | Attach ID/SSN/utility/PDF to client file via `file_base64` + `doc_type`; dry-run then confirm; JPEG/PNG/HEIC/PDF ~3MB max |
+| `create_funding_application` | Funding board intake; `funding_type` + name/email (or `client_id` for dual); dry-run then confirm |
+| `update_funding_status` | Move funding card status (not converted) |
+| `convert_funding_application` | Funding → CR prospect (`status=prospect` + `funding_convert` label) |
+| `upload_funding_document` | Funding doc slots (`funding_drivers_license`, corp, bank_m1–m6) via `file_base64` |
 | `send_email` | subject + body → branded email to a **client** (`client_id`) or **referrer** (`referrer_id` from `search_referrers` / `get_client`); auto-logs (client `admin_notes` and/or `referrers.notes`); optional `include_doc_upload_link=true` for client portal upload magic link only (never minted for partners); body is message-only (Hi/Hola greeting added automatically); dry-run never mints tokens or sends |
 | `send_sms` | body → Twilio SMS from the acting admin’s OFG number to a **client** (`client_id`) or **referrer** (`referrer_id`); logs Conversations hub + SMS case note; returns `message_id`, Twilio SID, `provider_status`, `sent_at` for HubSpot; closed threads reopen on confirm |
 | `send_text` | **Alias for `send_sms`** (ATLAS texting spec) — same dry-run → confirm flow; accepts `body` or `message` |

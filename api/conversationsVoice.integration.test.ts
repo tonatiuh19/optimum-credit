@@ -399,9 +399,11 @@ describe("conversations voice", () => {
       const allowed = await request(app)
         .get(`/api/voice/recording/${sid}`)
         .set("Authorization", `Bearer ${agentToken}`);
-      // Authz passes; Twilio fetch may 503/upstream fail in test env
+      // Authz passes; Twilio fetch may fail upstream (fake SID / test creds).
+      // Upstream 401/403 are mapped to 502 so they are not mistaken for session auth.
       expect([200, 206, 502, 503, 404]).toContain(allowed.status);
       expect(allowed.status).not.toBe(403);
+      expect(allowed.status).not.toBe(401);
     } finally {
       await pool
         .query(`DELETE FROM admin_phone_numbers WHERE id = ?`, [peerPhoneId])

@@ -21,6 +21,7 @@ interface ReportWizardState {
   publishing: boolean;
   previewing: boolean;
   reExtracting: boolean;
+  enhancing: boolean;
   error: string | null;
   previewUrl: string | null;
 }
@@ -38,6 +39,7 @@ const initialState: ReportWizardState = {
   publishing: false,
   previewing: false,
   reExtracting: false,
+  enhancing: false,
   error: null,
   previewUrl: null,
 };
@@ -156,6 +158,12 @@ export const createReportWizardSession = createAsyncThunk<
   if (args.options?.tradeline_rec) fd.append("tradeline_rec", "true");
   if (args.options?.funding_note) fd.append("funding_note", "true");
   if (args.options?.spanish) fd.append("spanish", "true");
+  // Explicit true/false so API default-on stays in sync with the checkbox
+  if (args.options?.enhance_with_claude === false) {
+    fd.append("enhance_with_claude", "false");
+  } else {
+    fd.append("enhance_with_claude", "true");
+  }
   try {
     const { data } = await api.post<{ session: ReportWizardSession }>(
       `/admin/cases/${args.caseId}/report-wizard/sessions`,
@@ -172,17 +180,39 @@ export const createReportWizardSession = createAsyncThunk<
 
 export const reExtractReportWizard = createAsyncThunk<
   ReportWizardSession,
-  number,
+  { sessionId: number; enhanceWithClaude?: boolean },
   { rejectValue: string }
->("reportWizard/reExtract", async (sessionId, { rejectWithValue }) => {
+>("reportWizard/reExtract", async (args, { rejectWithValue }) => {
   try {
+    const body: { enhance_with_claude?: boolean } = {};
+    if (args.enhanceWithClaude === true) body.enhance_with_claude = true;
+    if (args.enhanceWithClaude === false) body.enhance_with_claude = false;
     const { data } = await api.post<{ session: ReportWizardSession }>(
-      `/admin/report-wizard/sessions/${sessionId}/extract`,
+      `/admin/report-wizard/sessions/${args.sessionId}/extract`,
+      body,
     );
     return normalizeSession(data.session);
   } catch (e: any) {
     return rejectWithValue(
       e?.response?.data?.error || "Failed to re-run extraction",
+    );
+  }
+});
+
+export const enhanceReportWizardNarrative = createAsyncThunk<
+  ReportWizardSession,
+  { sessionId: number; reviewedJson?: OfGReportData },
+  { rejectValue: string }
+>("reportWizard/enhanceNarrative", async (args, { rejectWithValue }) => {
+  try {
+    const { data } = await api.post<{ session: ReportWizardSession }>(
+      `/admin/report-wizard/sessions/${args.sessionId}/enhance`,
+      args.reviewedJson ? { reviewed_json: args.reviewedJson } : {},
+    );
+    return normalizeSession(data.session);
+  } catch (e: any) {
+    return rejectWithValue(
+      e?.response?.data?.error || "Failed to enhance report with Claude",
     );
   }
 });
@@ -242,7 +272,17 @@ export const previewReportWizard = createAsyncThunk<
 });
 
 export const finalizeReportWizard = createAsyncThunk<
-  { ok: boolean; pipeline_stage: string },
+  {
+    ok: boolean;
+    pipeline_stage: string;
+    alerts?: Array<{
+      type: string;
+      severity: string;
+      title: string;
+      detail: string;
+    }>;
+    alerts_count?: number;
+  },
   { sessionId: number; acknowledgeScoreAnomalies?: boolean },
   { rejectValue: string }
 >("reportWizard/finalize", async (args, { rejectWithValue }) => {
@@ -250,6 +290,13 @@ export const finalizeReportWizard = createAsyncThunk<
     const { data } = await api.post<{
       ok: boolean;
       pipeline_stage: string;
+      alerts?: Array<{
+        type: string;
+        severity: string;
+        title: string;
+        detail: string;
+      }>;
+      alerts_count?: number;
     }>(`/admin/report-wizard/sessions/${args.sessionId}/finalize`, {
       compliance_acknowledged: true,
       acknowledge_score_anomalies: !!args.acknowledgeScoreAnomalies,
@@ -257,7 +304,7 @@ export const finalizeReportWizard = createAsyncThunk<
     return data;
   } catch (e: any) {
     const issues = Array.isArray(e?.response?.data?.issues)
-      ? e.response.data.issues.join("; ")
+      ? e?.response?.data?.issues.join("; ")
       : "";
     return rejectWithValue(
       [e?.response?.data?.error || "Failed to publish report", issues]
@@ -396,6 +443,18 @@ const reportWizardSlice = createSlice({
       .addCase(reExtractReportWizard.rejected, (state, action) => {
         state.reExtracting = false;
         state.error = action.payload || "Re-extract failed";
+      })
+      .addCase(enhanceReportWizardNarrative.pending, (state) => {
+        state.enhancing = true;
+        state.error = null;
+      })
+      .addCase(enhanceReportWizardNarrative.fulfilled, (state, action) => {
+        state.enhancing = false;
+        state.session = action.payload;
+      })
+      .addCase(enhanceReportWizardNarrative.rejected, (state, action) => {
+        state.enhancing = false;
+        state.error = action.payload || "Claude enhance failed";
       })
       .addCase(saveReportWizardReview.fulfilled, (state, action) => {
         state.session = action.payload;

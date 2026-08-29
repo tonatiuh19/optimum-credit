@@ -35,6 +35,7 @@ import {
   finalizeReportWizard,
   previewReportWizard,
   reExtractReportWizard,
+  enhanceReportWizardNarrative,
   saveReportWizardReview,
   setReviewedData,
   wizardStepForStatus,
@@ -115,11 +116,15 @@ export default function OfGReportWizard({
     publishing,
     previewing,
     reExtracting,
+    enhancing,
     previewUrl,
     error,
   } = useAppSelector((s) => s.reportWizard);
 
   const [step, setStep] = useState(1);
+  const [publishAlerts, setPublishAlerts] = useState<
+    Array<{ type: string; severity: string; title: string; detail: string }>
+  >([]);
   const [roundNumber, setRoundNumber] = useState(suggestedRound);
   const [beforePdf, setBeforePdf] = useState<File | null>(null);
   const [afterPdf, setAfterPdf] = useState<File | null>(null);
@@ -129,6 +134,7 @@ export default function OfGReportWizard({
   const [tradelineRec, setTradelineRec] = useState(false);
   const [fundingNote, setFundingNote] = useState(false);
   const [spanish, setSpanish] = useState(false);
+  const [enhanceWithClaude, setEnhanceWithClaude] = useState(true);
   const [complianceOk, setComplianceOk] = useState(false);
   const [scoreAnomalyOk, setScoreAnomalyOk] = useState(false);
 
@@ -228,6 +234,7 @@ export default function OfGReportWizard({
     setTradelineRec(!!opts.tradeline_rec);
     setFundingNote(!!opts.funding_note);
     setSpanish(!!opts.spanish);
+    setEnhanceWithClaude(opts.enhance_with_claude !== false);
   };
 
   const handleResumeDraft = async (sessionId: number) => {
@@ -258,6 +265,7 @@ export default function OfGReportWizard({
           tradeline_rec: tradelineRec,
           funding_note: fundingNote,
           spanish,
+          enhance_with_claude: enhanceWithClaude,
         },
       }),
     );
@@ -287,12 +295,36 @@ export default function OfGReportWizard({
 
   const handleReExtract = async () => {
     if (!session?.id) return;
-    const result = await dispatch(reExtractReportWizard(session.id));
+    const result = await dispatch(
+      reExtractReportWizard({
+        sessionId: session.id,
+        enhanceWithClaude,
+      }),
+    );
     if (reExtractReportWizard.fulfilled.match(result)) {
       setComplianceOk(false);
       setScoreAnomalyOk(false);
     }
   };
+
+  const handleEnhanceClaude = async () => {
+    if (!session?.id || !reviewData) return;
+    const result = await dispatch(
+      enhanceReportWizardNarrative({
+        sessionId: session.id,
+        reviewedJson: reviewData,
+      }),
+    );
+    if (enhanceReportWizardNarrative.fulfilled.match(result)) {
+      setComplianceOk(false);
+      setScoreAnomalyOk(false);
+    }
+  };
+
+  const claudeNarrative =
+    session?.extraction_meta &&
+    (session.extraction_meta as Record<string, unknown>).claude_narrative ===
+      true;
 
   const handlePreview = async () => {
     if (!session?.id || !reviewData) return;
@@ -321,6 +353,8 @@ export default function OfGReportWizard({
       }),
     );
     if (finalizeReportWizard.fulfilled.match(result)) {
+      const alerts = result.payload.alerts || [];
+      setPublishAlerts(alerts);
       setStep(5);
       onPublished();
     }
@@ -694,6 +728,21 @@ export default function OfGReportWizard({
                     </span>
                   </span>
                 </label>
+                <label className="flex items-start gap-2.5 text-sm cursor-pointer">
+                  <Checkbox
+                    className="mt-0.5"
+                    checked={enhanceWithClaude}
+                    onCheckedChange={(v) => setEnhanceWithClaude(!!v)}
+                  />
+                  <span>
+                    <span className="font-medium text-foreground">
+                      {t("reportWizard.enhanceOnExtract")}
+                    </span>
+                    <span className="block text-[11px] text-muted-foreground mt-0.5 leading-snug">
+                      {t("reportWizard.enhanceOnExtractHint")}
+                    </span>
+                  </span>
+                </label>
               </div>
 
               {/* Legend — what each checkbox means */}
@@ -725,6 +774,14 @@ export default function OfGReportWizard({
                     </dt>
                     <dd className="text-muted-foreground">
                       {t("reportWizard.spanishLocaleLegend")}
+                    </dd>
+                  </div>
+                  <div className="grid gap-0.5 sm:grid-cols-[minmax(0,9.5rem)_1fr] sm:gap-3">
+                    <dt className="font-medium text-foreground">
+                      {t("reportWizard.enhanceOnExtract")}
+                    </dt>
+                    <dd className="text-muted-foreground">
+                      {t("reportWizard.enhanceOnExtractLegend")}
                     </dd>
                   </div>
                 </dl>
@@ -841,6 +898,21 @@ export default function OfGReportWizard({
                 type="button"
                 variant="outline"
                 size="sm"
+                onClick={handleEnhanceClaude}
+                disabled={enhancing || !reviewData}
+                data-testid="report-wizard-enhance-claude"
+              >
+                {enhancing ? (
+                  <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />
+                ) : (
+                  <Sparkles className="w-3.5 h-3.5 mr-1" />
+                )}
+                {t("reportWizard.enhanceClaude")}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
                 onClick={handleReExtract}
                 disabled={reExtracting}
               >
@@ -852,6 +924,20 @@ export default function OfGReportWizard({
                 {t("reportWizard.reExtract")}
               </Button>
             </div>
+            {claudeNarrative && (
+              <div
+                className="rounded-lg border border-primary/25 bg-primary/5 px-3 py-2 text-[11px] text-foreground leading-snug"
+                data-testid="report-wizard-claude-banner"
+              >
+                <p className="font-semibold text-primary flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5" />
+                  {t("reportWizard.claudeDraftTitle")}
+                </p>
+                <p className="text-muted-foreground mt-0.5">
+                  {t("reportWizard.claudeDraftBody")}
+                </p>
+              </div>
+            )}
             <p className="text-sm text-muted-foreground">
               {t("reportWizard.reviewIntro")}
             </p>
@@ -1008,6 +1094,50 @@ export default function OfGReportWizard({
                 <FieldHint>{t("adminHelpers.winsTargetsHint")}</FieldHint>
               </div>
             </div>
+            <div>
+              <Label className="text-xs">{t("reportWizard.actionPlanLabel")}</Label>
+              <textarea
+                rows={4}
+                className="mt-1 w-full rounded-md border border-input bg-background px-2 py-1.5 text-xs"
+                value={(reviewData.actionPlan || [])
+                  .map(
+                    (a) =>
+                      `${a.step}. [${a.owner}] ${a.description}`,
+                  )
+                  .join("\n")}
+                onChange={(e) => {
+                  if (!reviewData) return;
+                  const lines = e.target.value
+                    .split("\n")
+                    .map((l) => l.trim())
+                    .filter(Boolean);
+                  const actionPlan = lines.map((line, i) => {
+                    const m = line.match(
+                      /^\d+\.\s*\[(ofg|client)\]\s*(.+)$/i,
+                    );
+                    if (m) {
+                      return {
+                        step: i + 1,
+                        owner: m[1].toLowerCase() === "client" ? "client" as const : "ofg" as const,
+                        description: m[2].trim(),
+                      };
+                    }
+                    return {
+                      step: i + 1,
+                      owner: "ofg" as const,
+                      description: line.replace(/^\d+\.\s*/, "").trim(),
+                    };
+                  });
+                  dispatch(
+                    setReviewedData({
+                      ...reviewData,
+                      actionPlan,
+                    }),
+                  );
+                }}
+              />
+              <FieldHint>{t("reportWizard.actionPlanHint")}</FieldHint>
+            </div>
             {scoreAnomalyWarnings.length > 0 && (
               <div className="rounded-xl border border-destructive/25 bg-destructive/5 p-3 space-y-2">
                 <p className="text-xs font-semibold text-destructive">
@@ -1105,6 +1235,32 @@ export default function OfGReportWizard({
             <p className="text-sm text-muted-foreground">
               {t("reportWizard.publishedBody", { round: roundNumber })}
             </p>
+            {publishAlerts.length > 0 && (
+              <div
+                className="text-left mx-auto max-w-md rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 space-y-1.5"
+                data-testid="report-publish-alerts"
+              >
+                <p className="text-xs font-semibold text-destructive">
+                  {t("reportWizard.publishAlertsTitle", {
+                    count: publishAlerts.length,
+                  })}
+                </p>
+                <ul className="space-y-1">
+                  {publishAlerts.slice(0, 6).map((a, i) => (
+                    <li
+                      key={`${a.type}-${i}`}
+                      className="text-[11px] text-foreground/90 leading-snug"
+                    >
+                      <span className="font-medium">{a.title}</span>
+                      {a.detail ? ` — ${a.detail}` : ""}
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-[10px] text-muted-foreground">
+                  {t("reportWizard.publishAlertsNotify")}
+                </p>
+              </div>
+            )}
             <Button onClick={close}>{t("reportWizard.done")}</Button>
           </div>
         )}

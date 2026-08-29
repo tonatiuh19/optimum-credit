@@ -177,6 +177,7 @@ describe("admin AI tools", () => {
     expect(hit.href).toContain(`client=${clientId}`);
     expect(hit.href).toContain(`case=${caseId}`);
     expect(hit.on_prospect_board).toBe(false);
+    expect(Array.isArray((res.data as any).funding_applications)).toBe(true);
   }, 30_000);
 
   it("search_clients finds by numeric client id", async () => {
@@ -262,6 +263,7 @@ describe("admin AI tools", () => {
     if (!client.ok) return;
     expect((client.data as any).client_id).toBe(clientId);
     expect((client.data as any)).not.toHaveProperty("ssn_last4");
+    expect(Array.isArray((client.data as any).referrers)).toBe(true);
 
     const docs = await executeAdminAiTool(
       "list_case_documents",
@@ -636,6 +638,11 @@ describe("admin AI tools", () => {
     if (!got.ok) return;
     expect(Number((got.data as any).referrer?.id)).toBe(referrerId);
     expect((got.data as any).referrer?.email).toBe(refEmail);
+    expect(
+      ((got.data as any).referrers || []).some(
+        (r: { id: number }) => Number(r.id) === referrerId,
+      ),
+    ).toBe(true);
 
     const dry = await executeAdminAiTool(
       "send_email",
@@ -1703,4 +1710,211 @@ describe("admin AI tools", () => {
       }
     }
   }, 60_000);
+
+  it("ATLAS funding: search + pipeline + create/status/upload/convert", async () => {
+    process.env.VITEST = "true";
+    const fundingEmail = `funding-mcp-${RUN_ID}@example.test`;
+    const tinyPngB64 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    let fundingAppId = 0;
+    let fundingClientId = 0;
+
+    try {
+      const summary = await executeAdminAiTool(
+        "funding_pipeline_summary",
+        {},
+        { adminId },
+      );
+      expect(summary.ok).toBe(true);
+      if (!summary.ok) return;
+      expect((summary.data as any).columns.awaiting_docs).toBeTruthy();
+      expect((summary.data as any).href).toBe("/admin/funding");
+
+      const dryCreate = await executeAdminAiTool(
+        "create_funding_application",
+        {
+          first_name: "Jose",
+          last_name: `Pineda${RUN_ID}`,
+          email: fundingEmail,
+          phone: "9495550199",
+          funding_type: "bank_statements",
+          preferred_language: "en",
+        },
+        { adminId },
+      );
+      expect(dryCreate.ok).toBe(true);
+      if (!dryCreate.ok) return;
+      expect((dryCreate.data as any).dry_run).toBe(true);
+      expect((dryCreate.data as any).ready).toBe(true);
+
+      const created = await executeAdminAiTool(
+        "create_funding_application",
+        {
+          first_name: "Jose",
+          last_name: `Pineda${RUN_ID}`,
+          email: fundingEmail,
+          phone: "9495550199",
+          funding_type: "bank_statements",
+          preferred_language: "en",
+          confirm: true,
+          confirm_phrase: "CONFIRM",
+        },
+        { adminId },
+      );
+      expect(created.ok).toBe(true);
+      if (!created.ok) return;
+      fundingAppId = Number((created.data as any).application?.id || 0);
+      fundingClientId = Number((created.data as any).client_id || 0);
+      expect(fundingAppId).toBeGreaterThan(0);
+      expect(fundingClientId).toBeGreaterThan(0);
+
+      const search = await executeAdminAiTool(
+        "search_clients",
+        { q: `Pineda${RUN_ID}`, limit: 10 },
+        { adminId },
+      );
+      expect(search.ok).toBe(true);
+      if (!search.ok) return;
+      const fundingHits = (search.data as any).funding_applications as Array<{
+        id: number;
+        name: string;
+      }>;
+      expect(fundingHits.some((f) => f.id === fundingAppId)).toBe(true);
+
+      const dual = await executeAdminAiTool(
+        "get_client",
+        { client_id: fundingClientId },
+        { adminId },
+      );
+      expect(dual.ok).toBe(true);
+      if (!dual.ok) return;
+      const apps = (dual.data as any).funding_applications as Array<{
+        id: number;
+      }>;
+      expect(apps.some((a) => a.id === fundingAppId)).toBe(true);
+
+      const getOne = await executeAdminAiTool(
+        "get_funding_application",
+        { funding_application_id: fundingAppId },
+        { adminId },
+      );
+      expect(getOne.ok).toBe(true);
+
+      const dryStatus = await executeAdminAiTool(
+        "update_funding_status",
+        {
+          funding_application_id: fundingAppId,
+          status: "under_review",
+        },
+        { adminId },
+      );
+      expect(dryStatus.ok).toBe(true);
+      if (dryStatus.ok) {
+        expect((dryStatus.data as any).dry_run).toBe(true);
+      }
+
+      const statusOk = await executeAdminAiTool(
+        "update_funding_status",
+        {
+          funding_application_id: fundingAppId,
+          status: "under_review",
+          confirm: true,
+          confirm_phrase: "CONFIRM",
+        },
+        { adminId },
+      );
+      expect(statusOk.ok).toBe(true);
+
+      const dryUpload = await executeAdminAiTool(
+        "upload_funding_document",
+        {
+          funding_application_id: fundingAppId,
+          doc_type: "funding_drivers_license",
+          file_name: `dl-${RUN_ID}.png`,
+          file_base64: tinyPngB64,
+        },
+        { adminId },
+      );
+      expect(dryUpload.ok).toBe(true);
+      if (dryUpload.ok) {
+        expect((dryUpload.data as any).ready).toBe(true);
+      }
+
+      const uploaded = await executeAdminAiTool(
+        "upload_funding_document",
+        {
+          funding_application_id: fundingAppId,
+          doc_type: "funding_drivers_license",
+          file_name: `dl-${RUN_ID}.png`,
+          file_base64: tinyPngB64,
+          confirm: true,
+          confirm_phrase: "CONFIRM",
+        },
+        { adminId },
+      );
+      expect(uploaded.ok).toBe(true);
+      if (uploaded.ok) {
+        expect(
+          ((uploaded.data as any).docs_uploaded as string[]).includes(
+            "funding_drivers_license",
+          ),
+        ).toBe(true);
+      }
+
+      const dryConvert = await executeAdminAiTool(
+        "convert_funding_application",
+        { funding_application_id: fundingAppId },
+        { adminId },
+      );
+      expect(dryConvert.ok).toBe(true);
+      if (dryConvert.ok) {
+        expect((dryConvert.data as any).dry_run).toBe(true);
+      }
+
+      const converted = await executeAdminAiTool(
+        "convert_funding_application",
+        {
+          funding_application_id: fundingAppId,
+          confirm: true,
+          confirm_phrase: "CONFIRM",
+        },
+        { adminId },
+      );
+      expect(converted.ok).toBe(true);
+      if (converted.ok) {
+        expect((converted.data as any).application?.status).toBe("converted");
+        expect((converted.data as any).client_id).toBe(fundingClientId);
+      }
+
+      const [cRows] = await pool.query<RowDataPacket[]>(
+        `SELECT status, pipeline_stage FROM clients WHERE id = ? LIMIT 1`,
+        [fundingClientId],
+      );
+      expect(cRows[0]?.status).toBe("prospect");
+    } finally {
+      if (fundingAppId) {
+        await pool
+          .query(
+            `DELETE FROM client_documents WHERE funding_application_id = ?`,
+            [fundingAppId],
+          )
+          .catch(() => {});
+        await pool
+          .query(`DELETE FROM funding_applications WHERE id = ?`, [
+            fundingAppId,
+          ])
+          .catch(() => {});
+      }
+      if (fundingClientId && fundingClientId !== clientId) {
+        await pool
+          .query(`DELETE FROM client_labels WHERE client_id = ?`, [
+            fundingClientId,
+          ])
+          .catch(() => {});
+        await pool
+          .query(`DELETE FROM clients WHERE id = ?`, [fundingClientId])
+          .catch(() => {});
+      }
+    }
+  }, 120_000);
 });

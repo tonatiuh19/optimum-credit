@@ -1927,6 +1927,8 @@ paths:
           description: Unauthorized
         "500":
           description: Processing failure
+        "503":
+          description: CRON_SECRET not configured
     post:
       tags: [Admin]
       summary: Process pending notification_queue rows
@@ -1967,6 +1969,65 @@ paths:
           description: Unauthorized
         "500":
           description: Processing failure
+
+  /cron/admin-morning-digest:
+    get:
+      tags: [Admin]
+      summary: Weekday morning Claude digest email for each active admin
+      description: |
+        Vercel Cron hits this Mon–Fri at 13:00 and 14:00 UTC. The handler only sends when
+        America/Denver local hour is 7 (business morning) unless `force=1`.
+        Builds a per-admin snapshot (assigned clients/prospects, open/overdue My Tasks,
+        open conversations), asks Claude for an energizing brief + quote (falls back to
+        deterministic copy), and delivers via email/in-app prefs (`morning_digest`).
+        Idempotent per admin per Denver calendar day via `audit_logs`.
+      parameters:
+        - in: header
+          name: Authorization
+          required: false
+          schema: { type: string }
+          description: Bearer CRON_SECRET
+        - in: header
+          name: X-Cron-Secret
+          required: false
+          schema: { type: string }
+        - in: query
+          name: force
+          schema: { type: string, enum: ["0", "1", "true"] }
+          description: >-
+            Bypass Denver weekday 7am window only. Still enforces one email per
+            admin per Denver day unless force_resend=1.
+        - in: query
+          name: force_resend
+          schema: { type: string, enum: ["0", "1", "true"] }
+          description: Allow a duplicate send the same Denver day (manual/test only)
+        - in: query
+          name: admin_email
+          schema: { type: string }
+          description: Limit run to one admin email
+      responses:
+        "200":
+          description: Digests processed or skipped (outside window)
+        "401":
+          description: Unauthorized
+        "503":
+          description: CRON_SECRET not configured
+    post:
+      tags: [Admin]
+      summary: Weekday morning Claude digest (manual / cPanel)
+      parameters:
+        - in: header
+          name: X-Cron-Secret
+          required: false
+          schema: { type: string }
+        - in: query
+          name: force
+          schema: { type: string, enum: ["0", "1", "true"] }
+      responses:
+        "200":
+          description: Digests processed
+        "401":
+          description: Unauthorized
 
   /admin/dashboard:
     get:
@@ -2516,6 +2577,13 @@ paths:
               - search_referrers
               - get_case
               - pipeline_summary
+              - list_funding_applications
+              - get_funding_application
+              - update_funding_status
+              - funding_pipeline_summary
+              - create_funding_application
+              - convert_funding_application
+              - upload_funding_document
               - list_progress_reports
               - get_progress_report
               - search_work_tasks
@@ -2761,6 +2829,20 @@ paths:
         "200":
           description: numbers[]
 
+  /admin/phone-numbers/sync-twilio:
+    post:
+      tags: [Admin]
+      summary: Upsert Twilio IncomingPhoneNumbers into admin_phone_numbers
+      description: Super-admin only. Does not change existing assignments.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: upserted count + numbers[]
+        "403":
+          description: super_admin required
+        "503":
+          description: Twilio not configured
+
   /admin/phone-numbers/{id}:
     patch:
       tags: [Admin]
@@ -2779,6 +2861,7 @@ paths:
               type: object
               properties:
                 assigned_admin_id: { type: integer, nullable: true }
+                friendly_name: { type: string, nullable: true }
       responses:
         "200":
           description: Updated number
@@ -4557,6 +4640,154 @@ paths:
         "201":
           description: Referrer created
 
+  /admin/referrers/{id}:
+    put:
+      tags: [Admin]
+      summary: Update a referral partner (email, phone, status, etc.)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                category:
+                  type: string
+                  enum: [realtor_broker, one_off, affiliate_partner]
+                first_name: { type: string }
+                last_name: { type: string }
+                email: { type: string, nullable: true }
+                phone: { type: string, nullable: true }
+                company: { type: string, nullable: true }
+                affiliate_id: { type: integer, nullable: true }
+                preferred_language:
+                  type: string
+                  enum: [en, es]
+                notes: { type: string, nullable: true }
+                status:
+                  type: string
+                  enum: [active, inactive]
+      responses:
+        "200":
+          description: Referrer updated
+        "404":
+          description: Not found
+
+  /admin/clients/{id}/referrers:
+    get:
+      tags: [Admin]
+      summary: List up to 3 referral partners linked to a client
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Client referrer links
+    put:
+      tags: [Admin]
+      summary: Replace client referral partners (max 3). Supports inline create.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [referrers]
+              properties:
+                referrers:
+                  type: array
+                  maxItems: 3
+                  items:
+                    type: object
+                    properties:
+                      referrer_id: { type: integer }
+                      first_name: { type: string }
+                      last_name: { type: string }
+                      email: { type: string }
+                      phone: { type: string }
+                      category: { type: string }
+                      notify_on_round: { type: boolean }
+                      role:
+                        type: string
+                        enum: [primary, secondary, tertiary]
+      responses:
+        "200":
+          description: Updated links
+        "400":
+          description: Validation error
+
+  /admin/clients/{id}/cms-credentials:
+    get:
+      tags: [Admin]
+      summary: Get SmartCredit + MyFreeScoreNow login metadata (optional secrets reveal)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+        - in: query
+          name: include_secrets
+          schema: { type: string, enum: ["0", "1", "true"] }
+          description: When "1", also return decrypted passwords (requires confirm_reveal=1)
+        - in: query
+          name: confirm_reveal
+          schema: { type: string, enum: ["0", "1", "true"] }
+          description: Required with include_secrets=1; writes audit_logs action cms_credentials.revealed
+      responses:
+        "200":
+          description: Credentials (passwords only when include_secrets=1 and confirm_reveal=1)
+        "400":
+          description: confirm_reveal_required when include_secrets without confirm_reveal
+    put:
+      tags: [Admin]
+      summary: Upsert CMS login emails/passwords (AES-GCM vault on client)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                smart_credit:
+                  type: object
+                  properties:
+                    email: { type: string }
+                    password: { type: string }
+                myfreescorenow:
+                  type: object
+                  properties:
+                    email: { type: string }
+                    password: { type: string }
+      responses:
+        "200":
+          description: Saved
+
   /admin/cases/{id}/documents:
     get:
       tags: [Admin]
@@ -5163,6 +5394,34 @@ paths:
                 referrer_id:
                   type: integer
                   nullable: true
+                referrers:
+                  type: array
+                  maxItems: 3
+                  description: Multi-partner links (replaces single referrer_id when present)
+                  items:
+                    type: object
+                    properties:
+                      referrer_id: { type: integer }
+                      notify_on_round: { type: boolean }
+                      first_name: { type: string }
+                      last_name: { type: string }
+                      email: { type: string }
+                      phone: { type: string }
+                      preferred_language: { type: string, enum: [en, es] }
+                cms_credentials:
+                  type: object
+                  description: SmartCredit + MyFreeScoreNow vault (staff only; hard-fails create if save fails)
+                  properties:
+                    smart_credit:
+                      type: object
+                      properties:
+                        email: { type: string }
+                        password: { type: string }
+                    myfreescorenow:
+                      type: object
+                      properties:
+                        email: { type: string }
+                        password: { type: string }
                 assigned_admin_id:
                   type: integer
                   nullable: true
@@ -5198,6 +5457,8 @@ paths:
           description: Affiliate subscription required (code `affiliate_subscription_required`)
         "409":
           description: Email already exists
+        "500":
+          description: CMS vault save failed after insert (code `cms_credentials_failed`; client rolled back)
 
   /admin/clients/{id}:
     put:
@@ -5237,6 +5498,34 @@ paths:
                 status:
                   type: string
                   enum: [pending_payment, onboarding, active, paused, cancelled]
+                referral_category:
+                  type: string
+                  enum: [realtor_broker, one_off, affiliate_partner]
+                referrer_id:
+                  type: integer
+                  nullable: true
+                referrers:
+                  type: array
+                  maxItems: 3
+                  items:
+                    type: object
+                    properties:
+                      referrer_id: { type: integer }
+                      notify_on_round: { type: boolean }
+                cms_credentials:
+                  type: object
+                  description: SmartCredit + MyFreeScoreNow vault (staff only; hard-fails update if save fails)
+                  properties:
+                    smart_credit:
+                      type: object
+                      properties:
+                        email: { type: string }
+                        password: { type: string }
+                    myfreescorenow:
+                      type: object
+                      properties:
+                        email: { type: string }
+                        password: { type: string }
       responses:
         "200":
           description: Updated client
@@ -5253,6 +5542,8 @@ paths:
           description: Client not found (or out of the caller's affiliate scope)
         "409":
           description: Email already exists
+        "500":
+          description: CMS vault save failed (code `cms_credentials_failed`)
     delete:
       tags: [Admin]
       summary: Delete a client
@@ -5836,6 +6127,9 @@ paths:
                   type: string
                 spanish:
                   type: string
+                enhance_with_claude:
+                  type: string
+                  description: Claude narrative polish during extract (default on; "false" to skip)
       responses:
         "201":
           description: Session created and extraction complete
@@ -5892,6 +6186,17 @@ paths:
           required: true
           schema:
             type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enhance_with_claude:
+                  type: boolean
+                  description: >-
+                    Claude narrative polish. Default true; when omitted, uses
+                    session options_json (also default on). Pass false to skip.
       responses:
         "200":
           description: Re-extraction complete
@@ -5899,6 +6204,34 @@ paths:
           description: Session published or invalid
         "500":
           description: Extraction failed
+
+  /admin/report-wizard/sessions/{id}/enhance:
+    post:
+      tags: [Admin]
+      summary: Claude narrative enhance (action plan / wins / targets wording; scores untouched)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reviewed_json:
+                  type: object
+      responses:
+        "200":
+          description: Enhanced reviewed_json saved for human confirm
+        "503":
+          description: Claude unavailable
+        "502":
+          description: Claude enhance failed
 
   /admin/report-wizard/sessions/{id}/preview:
     post:

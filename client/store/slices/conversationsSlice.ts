@@ -490,6 +490,25 @@ export const fetchAdminPhoneNumbers = createAsyncThunk(
   },
 );
 
+export const syncAdminPhoneNumbersFromTwilio = createAsyncThunk(
+  "conversations/syncPhoneNumbers",
+  async (_, { rejectWithValue }) => {
+    try {
+      const { data } = await api.post<{
+        ok: boolean;
+        upserted: number;
+        numbers: AdminPhoneNumber[];
+      }>("/admin/phone-numbers/sync-twilio");
+      return {
+        upserted: Number(data.upserted || 0),
+        numbers: (data.numbers || []) as AdminPhoneNumber[],
+      };
+    } catch (e: any) {
+      return rejectWithValue(formatAxiosError(e, "Failed to sync from Twilio"));
+    }
+  },
+);
+
 export const assignAdminPhoneNumber = createAsyncThunk(
   "conversations/assignPhone",
   async (
@@ -981,6 +1000,11 @@ const slice = createSlice({
       s.phoneNumbers = a.payload;
     });
     b.addCase(fetchAdminPhoneNumbers.rejected, (s) => {
+      s.phoneNumbersLoading = false;
+    });
+
+    b.addCase(syncAdminPhoneNumbersFromTwilio.fulfilled, (s, a) => {
+      s.phoneNumbers = a.payload.numbers;
       s.phoneNumbersLoading = false;
     });
 

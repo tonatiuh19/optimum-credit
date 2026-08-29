@@ -39,6 +39,11 @@ const WRITE_TOOLS = new Set([
   "upsert_progress_report",
   "upsert_payment_splits",
   "update_payment_split",
+  "update_funding_status",
+  "create_funding_application",
+  "convert_funding_application",
+  "upload_funding_document",
+  "send_text",
 ]);
 
 /** Convert API JSON Schema → Zod so MCP advertises real args per tool. */

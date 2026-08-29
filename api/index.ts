@@ -56,6 +56,1117 @@ import type {
   AdminNotifyEventToggles,
 } from "../shared/api";
 // ============================================================================
+// INLINED HELPERS (Vercel serverless — do NOT runtime-import sibling api/*.ts)
+// Unit tests import from ./progressReportAlerts, ./ofgReportClaudeEnhance,
+// ./adminMorningDigest directly. Keep those files in sync when editing below.
+// ============================================================================
+
+type ProgressReportAlertType =
+  | "personal_info_mismatch"
+  | "closed_still_reporting"
+  | "hard_inquiry_open";
+
+interface ProgressReportAlert {
+  type: ProgressReportAlertType;
+  severity: "warning" | "critical";
+  title: string;
+  detail: string;
+  meta?: Record<string, string | number | boolean | null>;
+}
+
+interface ClientProfileForAlerts {
+  first_name?: string | null;
+  last_name?: string | null;
+  phone?: string | null;
+  address_line1?: string | null;
+  city?: string | null;
+  state?: string | null;
+  zip?: string | null;
+}
+
+interface NegativeAccountLike {
+  key: string;
+  label: string;
+  type: string;
+  bureaus?: string[];
+}
+
+/** Lowercase, fold diacritics, and strip punctuation/spaces for fuzzy compare. */
+function normalizeCompareText(s: string): string {
+  return String(s ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function praDigitsOnly(s: string): string {
+  return String(s ?? "").replace(/\D/g, "");
+}
+
+/** Normalize to 10-digit US phone when possible. */
+function praNormalizePhoneDigits(s: string): string {
+  let d = praDigitsOnly(s);
+  if (d.length === 11 && d.startsWith("1")) d = d.slice(1);
+  return d;
+}
+
+function extractPhonesFromText(text: string): string[] {
+  const found = new Set<string>();
+  const re =
+    /(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const n = praNormalizePhoneDigits(m[0]);
+    if (n.length === 10) found.add(n);
+  }
+  return [...found];
+}
+
+const STREET_ADDRESS_RE =
+  /\b(\d{1,6}\s+[A-Za-z0-9.'\-\s]{2,40}(?:st|street|ave|avenue|rd|road|blvd|boulevard|ln|lane|dr|drive|ct|court|way|pl|place|cir|circle|pkwy|parkway)\.?)\b/gi;
+
+const CITY_STATE_ZIP_RE =
+  /\b([A-Za-z][A-Za-z\s.'-]{1,40}),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)\b/g;
+
+function extractStreetAddresses(text: string): string[] {
+  const found = new Set<string>();
+  let m: RegExpExecArray | null;
+  const re = new RegExp(STREET_ADDRESS_RE.source, STREET_ADDRESS_RE.flags);
+  while ((m = re.exec(text)) !== null) {
+    const normalized = normalizeCompareText(m[1]);
+    if (normalized.length >= 8) found.add(m[1].trim().replace(/\s+/g, " "));
+  }
+  return [...found];
+}
+
+function extractCityStateZips(
+  text: string,
+): Array<{ city: string; state: string; zip: string }> {
+  const out: Array<{ city: string; state: string; zip: string }> = [];
+  const seen = new Set<string>();
+  let m: RegExpExecArray | null;
+  const re = new RegExp(CITY_STATE_ZIP_RE.source, CITY_STATE_ZIP_RE.flags);
+  while ((m = re.exec(text)) !== null) {
+    const city = m[1].trim().replace(/\s+/g, " ");
+    const state = m[2].toUpperCase();
+    const zip = m[3];
+    const key = `${normalizeCompareText(city)}|${state}|${zip.slice(0, 5)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ city, state, zip });
+  }
+  return out;
+}
+
+function phonesMatch(a: string, b: string): boolean {
+  const na = praNormalizePhoneDigits(a);
+  const nb = praNormalizePhoneDigits(b);
+  if (!na || !nb) return false;
+  return na === nb;
+}
+
+function streetMatchesProfile(
+  streetFromPdf: string,
+  profileStreet: string | null | undefined,
+): boolean {
+  if (!profileStreet?.trim()) return false;
+  const a = normalizeCompareText(streetFromPdf);
+  const b = normalizeCompareText(profileStreet);
+  if (!a || !b) return false;
+  return a.includes(b) || b.includes(a);
+}
+
+function cityStateZipMatchesProfile(
+  row: { city: string; state: string; zip: string },
+  profile: ClientProfileForAlerts,
+): boolean {
+  const pCity = normalizeCompareText(profile.city ?? "");
+  const pState = (profile.state ?? "").trim().toUpperCase();
+  const pZip = praDigitsOnly(profile.zip ?? "").slice(0, 5);
+  const rCity = normalizeCompareText(row.city);
+  const rZip = praDigitsOnly(row.zip).slice(0, 5);
+
+  // Require at least zip or (city+state) agreement when profile has those fields.
+  if (pZip && rZip && pZip === rZip) {
+    if (pState && row.state !== pState) return false;
+    if (pCity && rCity && !(rCity.includes(pCity) || pCity.includes(rCity))) {
+      return false;
+    }
+    return true;
+  }
+  if (pCity && pState && rCity && row.state) {
+    return (
+      row.state === pState &&
+      (rCity.includes(pCity) || pCity.includes(rCity))
+    );
+  }
+  return false;
+}
+
+/**
+ * Conservative personal-info mismatches: only when the PDF shows a clear
+ * alternate phone/address that conflicts with the profile, or when the
+ * profile full name (length > 3) is absent from the PDF text.
+ */
+function detectPersonalInfoMismatches(
+  profile: ClientProfileForAlerts,
+  afterPdfText: string,
+): ProgressReportAlert[] {
+  const alerts: ProgressReportAlert[] = [];
+  const text = afterPdfText ?? "";
+
+  const profilePhone = (profile.phone ?? "").trim();
+  if (profilePhone) {
+    const pdfPhones = extractPhonesFromText(text);
+    const mismatches = pdfPhones.filter((p) => !phonesMatch(p, profilePhone));
+    // Conservative: only when PDF contains an alternate phone that ≠ profile
+    for (const alt of mismatches.slice(0, 3)) {
+      alerts.push({
+        type: "personal_info_mismatch",
+        severity: "warning",
+        title: "Phone mismatch on report",
+        detail: `Report lists phone ending in ${alt.slice(-4)} that does not match the client profile.`,
+        meta: {
+          field: "phone",
+          profile_phone_last4: praNormalizePhoneDigits(profilePhone).slice(-4),
+          report_phone_last4: alt.slice(-4),
+        },
+      });
+    }
+  }
+
+  const profileStreet = (profile.address_line1 ?? "").trim();
+  const streets = extractStreetAddresses(text);
+  if (profileStreet && streets.length > 0) {
+    const mismatchedStreets = streets.filter(
+      (s) => !streetMatchesProfile(s, profileStreet),
+    );
+    if (mismatchedStreets.length > 0) {
+      const sample = mismatchedStreets[0];
+      alerts.push({
+        type: "personal_info_mismatch",
+        severity: "warning",
+        title: "Address mismatch on report",
+        detail: `Report lists address "${sample}" which does not match the client profile street.`,
+        meta: {
+          field: "address_line1",
+          report_address: sample,
+          profile_address: profileStreet,
+        },
+      });
+    }
+  }
+
+  const hasLocationProfile =
+    !!(profile.city?.trim() || profile.state?.trim() || profile.zip?.trim());
+  if (hasLocationProfile) {
+    const locations = extractCityStateZips(text);
+    const mismatched = locations.filter(
+      (loc) => !cityStateZipMatchesProfile(loc, profile),
+    );
+    // Only alert when we found location rows and none match profile
+    // (or clear alternate city/state/zip present).
+    if (locations.length > 0 && mismatched.length > 0) {
+      const anyMatch = locations.some((loc) =>
+        cityStateZipMatchesProfile(loc, profile),
+      );
+      if (!anyMatch) {
+        const sample = mismatched[0];
+        alerts.push({
+          type: "personal_info_mismatch",
+          severity: "warning",
+          title: "City/state/ZIP mismatch on report",
+          detail: `Report lists "${sample.city}, ${sample.state} ${sample.zip}" which does not match the client profile.`,
+          meta: {
+            field: "city_state_zip",
+            report_city: sample.city,
+            report_state: sample.state,
+            report_zip: sample.zip,
+          },
+        });
+      }
+    }
+  }
+
+  const first = (profile.first_name ?? "").trim();
+  const last = (profile.last_name ?? "").trim();
+  const fullName = `${first} ${last}`.trim();
+  if (fullName.length > 3 && text.trim().length > 0) {
+    const hay = normalizeCompareText(text);
+    const needle = normalizeCompareText(fullName);
+    const firstN = normalizeCompareText(first);
+    const lastN = normalizeCompareText(last);
+    const found =
+      (needle.length > 0 && hay.includes(needle)) ||
+      (firstN.length >= 2 &&
+        lastN.length >= 2 &&
+        hay.includes(firstN) &&
+        hay.includes(lastN));
+    if (!found) {
+      alerts.push({
+        type: "personal_info_mismatch",
+        severity: "warning",
+        title: "Name not found on report",
+        detail: `Client name "${fullName}" was not found in the after report text.`,
+        meta: { field: "name", profile_name: fullName },
+      });
+    }
+  }
+
+  return alerts;
+}
+
+const CLOSED_STILL_REPORTING_RE =
+  /\b(?:paid\s+closed|paid\s+was\s+collection|closed|settled)\b/i;
+
+/**
+ * Accounts whose type/label suggests closed/paid/settled but are still listed.
+ */
+function detectClosedStillReporting(
+  afterAccounts: NegativeAccountLike[],
+): ProgressReportAlert[] {
+  const alerts: ProgressReportAlert[] = [];
+  for (const acct of afterAccounts ?? []) {
+    const hay = `${acct.type ?? ""} ${acct.label ?? ""}`;
+    if (!CLOSED_STILL_REPORTING_RE.test(hay)) continue;
+    alerts.push({
+      type: "closed_still_reporting",
+      severity: "warning",
+      title: "Closed account still reporting",
+      detail: `"${acct.label}" appears closed/paid/settled but is still listed on the after report.`,
+      meta: {
+        account_key: acct.key,
+        account_label: acct.label,
+        account_type: acct.type,
+      },
+    });
+  }
+  return alerts;
+}
+
+function isInquiryAccount(acct: NegativeAccountLike): boolean {
+  const hay = `${acct.type ?? ""} ${acct.label ?? ""}`;
+  return /\bhard\s*inquiry\b|\binquiry\b/i.test(hay);
+}
+
+function creditorTokenFromAccount(acct: NegativeAccountLike): string {
+  // Prefer key left of "|", else label before em-dash / hyphen type suffix
+  const fromKey = (acct.key ?? "").split("|")[0] ?? "";
+  if (fromKey) return normalizeCompareText(fromKey);
+  const label = acct.label ?? "";
+  const beforeSep = label.split(/\s*[—–\-]\s*/)[0] ?? label;
+  return normalizeCompareText(beforeSep);
+}
+
+function winMatchesInquiry(
+  winLabel: string,
+  inquiry: NegativeAccountLike,
+): boolean {
+  const win = normalizeCompareText(winLabel);
+  if (!win || win.length < 3) return false;
+  const creditor = creditorTokenFromAccount(inquiry);
+  const labelN = normalizeCompareText(inquiry.label);
+  const typeN = normalizeCompareText(inquiry.type);
+  if (creditor && (win.includes(creditor) || creditor.includes(win))) {
+    return true;
+  }
+  if (labelN && (win.includes(labelN) || labelN.includes(win))) return true;
+  // Win may be just creditor name while inquiry label includes type
+  if (creditor && win.length >= 3 && labelN.includes(win)) return true;
+  void typeN;
+  return false;
+}
+
+/**
+ * Hard inquiries remaining on the after report. Critical when prior wins
+ * claimed removal of the same creditor; otherwise warning.
+ */
+function detectHardInquiriesStillOpen(
+  afterAccounts: NegativeAccountLike[],
+  priorTargets?: NegativeAccountLike[],
+  priorWins?: Array<{ label: string }>,
+): ProgressReportAlert[] {
+  const alerts: ProgressReportAlert[] = [];
+  const inquiries = (afterAccounts ?? []).filter(isInquiryAccount);
+  const wins = priorWins ?? [];
+  // priorTargets reserved for future matching; keep signature stable
+  void priorTargets;
+
+  for (const inquiry of inquiries) {
+    const claimedRemoved = wins.some((w) =>
+      winMatchesInquiry(w.label ?? "", inquiry),
+    );
+    if (claimedRemoved) {
+      alerts.push({
+        type: "hard_inquiry_open",
+        severity: "critical",
+        title: "Hard inquiry still open after claimed removal",
+        detail: `"${inquiry.label}" was marked removed in a prior win but still appears on the after report.`,
+        meta: {
+          account_key: inquiry.key,
+          account_label: inquiry.label,
+          claimed_removed: true,
+        },
+      });
+    } else {
+      alerts.push({
+        type: "hard_inquiry_open",
+        severity: "warning",
+        title: "Hard inquiry still reporting",
+        detail: `"${inquiry.label}" is still listed as an inquiry on the after report.`,
+        meta: {
+          account_key: inquiry.key,
+          account_label: inquiry.label,
+          claimed_removed: false,
+        },
+      });
+    }
+  }
+  return alerts;
+}
+
+interface BuildDeterministicProgressAlertsOpts {
+  profile: ClientProfileForAlerts;
+  afterPdfText: string;
+  afterAccounts: NegativeAccountLike[];
+  priorTargets?: NegativeAccountLike[];
+  priorWins?: Array<{ label: string }>;
+}
+
+/** Combine detectors and dedupe by type+detail. */
+function buildDeterministicProgressAlerts(
+  opts: BuildDeterministicProgressAlertsOpts,
+): ProgressReportAlert[] {
+  const combined: ProgressReportAlert[] = [
+    ...detectPersonalInfoMismatches(opts.profile, opts.afterPdfText),
+    ...detectClosedStillReporting(opts.afterAccounts),
+    ...detectHardInquiriesStillOpen(
+      opts.afterAccounts,
+      opts.priorTargets,
+      opts.priorWins,
+    ),
+  ];
+
+  const seen = new Set<string>();
+  const out: ProgressReportAlert[] = [];
+  for (const alert of combined) {
+    const key = `${alert.type}|${alert.detail}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(alert);
+  }
+  return out;
+}
+
+/** Namespace export for future `export { ProgressReportAlerts } from "..."` wiring. */
+const ProgressReportAlerts = {
+  normalizeCompareText,
+  detectPersonalInfoMismatches,
+  detectClosedStillReporting,
+  detectHardInquiriesStillOpen,
+  buildDeterministicProgressAlerts,
+} as const;
+
+type ClaudeNarrativeDraft = {
+  wins?: Array<{
+    itemRemoved?: string;
+    impact?: string;
+    status?: string;
+  }>;
+  targets?: Array<{
+    item?: string;
+    detail?: string;
+    priority?: "high" | "medium" | "low";
+  }>;
+  actionPlan?: Array<{
+    step?: number;
+    description?: string;
+    owner?: "ofg" | "client";
+  }>;
+  roadmap?: {
+    milestones?: string[];
+    scoreGoal?: number;
+    gapRemaining?: number;
+  };
+  positiveAccounts?: string[];
+  actionNeeded?: string[];
+  fundingReadinessNote?: string | null;
+  tradelineRecommendation?: {
+    code?: string;
+    projectedImpact?: string;
+  } | null;
+};
+
+const OFG_CLAUDE_NARRATIVE_SYSTEM = `You are the OFG Progress Report narrative writer for Optimum Financial Group (Newport Beach, CA).
+Tone: encouraging, results-focused, professional.
+Compliance (non-negotiable):
+- Factual results only — what was removed / still reporting
+- NO goodwill letters, NO payoff advice, NO debt negotiation
+- NO score guarantees — use "projected" or "on track for"
+- Tradeline codes only as IH-1, IH-2, etc. — NEVER cardholder names
+- Do NOT invent removals, scores, or accounts that are not in the input
+
+Return ONLY a JSON object (no markdown) with optional keys:
+{
+  "wins": [{ "itemRemoved": "<match existing>", "impact": "...", "status": "..." }],
+  "targets": [{ "item": "<match existing>", "detail": "...", "priority": "high"|"medium"|"low" }],
+  "actionPlan": [{ "step": 1, "description": "...", "owner": "ofg"|"client" }],  // 3–5 steps
+  "roadmap": { "milestones": ["..."], "scoreGoal": number, "gapRemaining": number },
+  "positiveAccounts": ["..."],
+  "actionNeeded": ["..."],
+  "fundingReadinessNote": "..." | null,
+  "tradelineRecommendation": { "code": "IH-1", "projectedImpact": "..." } | null
+}
+
+Match wins/targets to existing itemRemoved/item strings when improving wording.
+Keep locale (en/es) from the input report.locale.`;
+
+function normKey(s: string): string {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+/** Merge Claude draft onto base — never mutates scores/utilization/CROA/client. */
+function mergeClaudeNarrativeEnhancement(
+  base: OfGReportData,
+  draft: ClaudeNarrativeDraft | null | undefined,
+): OfGReportData {
+  if (!draft || typeof draft !== "object") return base;
+
+  const wins = base.wins.map((w) => {
+    const byKey = (draft.wins || []).find(
+      (d) =>
+        d.itemRemoved &&
+        normKey(d.itemRemoved) === normKey(w.itemRemoved),
+    );
+    if (!byKey) return w;
+    return {
+      ...w,
+      impact:
+        typeof byKey.impact === "string" && byKey.impact.trim()
+          ? byKey.impact.trim().slice(0, 160)
+          : w.impact,
+      status:
+        typeof byKey.status === "string" && byKey.status.trim()
+          ? byKey.status.trim().slice(0, 80)
+          : w.status,
+    };
+  });
+
+  const targets = base.targets.map((t) => {
+    const byKey = (draft.targets || []).find(
+      (d) => d.item && normKey(d.item) === normKey(t.item),
+    );
+    if (!byKey) return t;
+    const priority =
+      byKey.priority === "high" ||
+      byKey.priority === "medium" ||
+      byKey.priority === "low"
+        ? byKey.priority
+        : t.priority;
+    return {
+      ...t,
+      detail:
+        typeof byKey.detail === "string" && byKey.detail.trim()
+          ? byKey.detail.trim().slice(0, 200)
+          : t.detail,
+      priority,
+    };
+  });
+
+  let actionPlan = base.actionPlan;
+  if (Array.isArray(draft.actionPlan) && draft.actionPlan.length > 0) {
+    actionPlan = draft.actionPlan
+      .slice(0, 5)
+      .map((a, idx) => ({
+        step: Number(a.step) > 0 ? Number(a.step) : idx + 1,
+        description: String(a.description || "")
+          .trim()
+          .slice(0, 220),
+        owner: (a.owner === "client" ? "client" : "ofg") as "client" | "ofg",
+      }))
+      .filter((a) => a.description.length > 0);
+    if (!actionPlan.length) actionPlan = base.actionPlan;
+  }
+
+  const roadmap = { ...base.roadmap };
+  if (draft.roadmap) {
+    // Never overwrite numeric score goals from Claude — only milestone copy.
+    if (Array.isArray(draft.roadmap.milestones) && draft.roadmap.milestones.length) {
+      roadmap.milestones = draft.roadmap.milestones
+        .map((m) => String(m).trim().slice(0, 120))
+        .filter(Boolean)
+        .slice(0, 6);
+    }
+  }
+
+  const positiveAccounts = Array.isArray(draft.positiveAccounts)
+    ? draft.positiveAccounts
+        .map((s) => String(s).trim().slice(0, 120))
+        .filter(Boolean)
+        .slice(0, 8)
+    : base.positiveAccounts;
+  const actionNeeded = Array.isArray(draft.actionNeeded)
+    ? draft.actionNeeded
+        .map((s) => String(s).trim().slice(0, 160))
+        .filter(Boolean)
+        .slice(0, 8)
+    : base.actionNeeded;
+
+  let fundingReadinessNote = base.fundingReadinessNote;
+  if (draft.fundingReadinessNote === null) {
+    fundingReadinessNote = undefined;
+  } else if (
+    typeof draft.fundingReadinessNote === "string" &&
+    draft.fundingReadinessNote.trim()
+  ) {
+    fundingReadinessNote = draft.fundingReadinessNote.trim().slice(0, 280);
+  }
+
+  let tradelineRecommendation = base.tradelineRecommendation;
+  if (draft.tradelineRecommendation === null) {
+    tradelineRecommendation = undefined;
+  } else if (
+    draft.tradelineRecommendation &&
+    typeof draft.tradelineRecommendation.code === "string"
+  ) {
+    const code = draft.tradelineRecommendation.code.trim().toUpperCase();
+    if (/^IH-\d+$/i.test(code)) {
+      tradelineRecommendation = {
+        code,
+        projectedImpact: String(
+          draft.tradelineRecommendation.projectedImpact ||
+            base.tradelineRecommendation?.projectedImpact ||
+            "",
+        )
+          .trim()
+          .slice(0, 200),
+      };
+    }
+  }
+
+  return {
+    ...base,
+    wins,
+    targets,
+    actionPlan,
+    roadmap,
+    positiveAccounts: positiveAccounts.length
+      ? positiveAccounts
+      : base.positiveAccounts,
+    actionNeeded: actionNeeded.length ? actionNeeded : base.actionNeeded,
+    fundingReadinessNote,
+    tradelineRecommendation,
+  };
+}
+
+function parseClaudeNarrativeJson(
+  text: string,
+): ClaudeNarrativeDraft | null {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  const objMatch = raw.match(/\{[\s\S]*\}/);
+  if (!objMatch) return null;
+  try {
+    return JSON.parse(objMatch[0]) as ClaudeNarrativeDraft;
+  } catch {
+    return null;
+  }
+}
+
+type MorningDigestLang = "en" | "es";
+
+type MorningDigestPriority = {
+  title: string;
+  why: string;
+  href?: string | null;
+};
+
+type MorningDigestClaudeBrief = {
+  headline: string;
+  quote: string;
+  quote_attribution?: string | null;
+  energy_note: string;
+  priorities: MorningDigestPriority[];
+  conversation_resumes: Array<{ who: string; resume: string }>;
+  risks: string[];
+  wins_or_quiet_note: string;
+};
+
+type MorningDigestSnapshot = {
+  admin: {
+    id: number;
+    first_name: string;
+    preferred_language: MorningDigestLang;
+  };
+  date_label: string;
+  counts: {
+    prospects: number;
+    active_clients: number;
+    onboarding: number;
+    pending_payment: number;
+    open_tasks: number;
+    overdue_tasks: number;
+    open_conversations: number;
+    unread_messages: number;
+  };
+  pipeline_stages: Array<{ stage: string; count: number }>;
+  prospects: Array<{
+    id: number;
+    name: string;
+    phone?: string | null;
+    stage?: string | null;
+  }>;
+  clients: Array<{
+    id: number;
+    name: string;
+    status: string;
+    stage: string;
+  }>;
+  tasks: Array<{
+    id: number;
+    title: string;
+    status: string;
+    priority?: string | null;
+    due_at?: string | null;
+    overdue: boolean;
+  }>;
+  conversations: Array<{
+    id: number;
+    client_id?: number | null;
+    who: string;
+    unread: number;
+    preview?: string | null;
+    status: string;
+  }>;
+  app_url: string;
+};
+
+const FALLBACK_QUOTES: Record<
+  MorningDigestLang,
+  Array<{ quote: string; attribution: string }>
+> = {
+  en: [
+    {
+      quote:
+        "Small, consistent actions compound into extraordinary client outcomes.",
+      attribution: "OFG morning brief",
+    },
+    {
+      quote:
+        "Clarity first. Then courage. Then the next right conversation.",
+      attribution: "OFG morning brief",
+    },
+    {
+      quote:
+        "You don’t have to do everything today — just the work that unlocks today.",
+      attribution: "OFG morning brief",
+    },
+  ],
+  es: [
+    {
+      quote:
+        "Acciones pequeñas y constantes se convierten en resultados extraordinarios para el cliente.",
+      attribution: "Resumen matutino OFG",
+    },
+    {
+      quote:
+        "Primero claridad. Luego valor. Luego la siguiente conversación correcta.",
+      attribution: "Resumen matutino OFG",
+    },
+    {
+      quote:
+        "No tienes que hacerlo todo hoy — solo el trabajo que desbloquea el día.",
+      attribution: "Resumen matutino OFG",
+    },
+  ],
+};
+
+const ADMIN_MORNING_DIGEST_SYSTEM = `You are the Optimum Financial Group (OFG) morning coach for credit-repair admins.
+Given a factual JSON snapshot of ONE admin's book of business, return ONLY valid JSON (no markdown) with:
+{
+  "headline": "short energizing subject-line style headline",
+  "quote": "original empowering quote (1–2 sentences, no clichés about grind/hustle)",
+  "quote_attribution": "short label e.g. OFG Morning",
+  "energy_note": "1 warm sentence greeting them by first name energy — use the name from snapshot",
+  "priorities": [{"title":"...","why":"...","href":"/admin/..."}]  // max 5, grounded, grounded ONLY in snapshot
+  "conversation_resumes": [{"who":"...","resume":"..."}]  // max 5, only for conversations in snapshot; paraphrase preview, never invent facts
+  "risks": ["..."]  // max 4 overdue / unread / stuck prospects; empty array if none
+  "wins_or_quiet_note": "1 sentence — celebrate quiet day or steady pipeline"
+}
+Rules:
+- Match preferred_language (en or es) for ALL text fields.
+- NEVER invent clients, tasks, phones, or statuses not in the snapshot.
+- href must be paths under /admin (my-tasks, conversations, pipeline, clients) when useful.
+- Keep tone professional, warm, high-agency — start-the-day energy without hype.`;
+
+function denverParts(now = new Date()): {
+  weekday: string;
+  hour: number;
+  ymd: string;
+} {
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Denver",
+    weekday: "short",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    hour12: false,
+  });
+  const parts = Object.fromEntries(
+    fmt.formatToParts(now).map((p) => [p.type, p.value]),
+  ) as Record<string, string>;
+  const hourRaw = Number(parts.hour);
+  // Intl may emit "24" for midnight in some engines
+  const hour = hourRaw === 24 ? 0 : hourRaw;
+  const ymd = `${parts.year}-${parts.month}-${parts.day}`;
+  return { weekday: String(parts.weekday || ""), hour, ymd };
+}
+
+/** True Mon–Fri when local Denver hour is in [startHour, startHour+1). */
+function isDenverWeekdayMorningWindow(
+  now = new Date(),
+  startHour = 7,
+): boolean {
+  const { weekday, hour } = denverParts(now);
+  if (["Sat", "Sun"].includes(weekday)) return false;
+  return hour === startHour;
+}
+
+function pickFallbackQuote(
+  lang: MorningDigestLang,
+  seed: string,
+): { quote: string; attribution: string } {
+  const list = FALLBACK_QUOTES[lang] || FALLBACK_QUOTES.en;
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
+  return list[h % list.length];
+}
+
+function buildDeterministicMorningBrief(
+  snapshot: MorningDigestSnapshot,
+): MorningDigestClaudeBrief {
+  const lang = snapshot.admin.preferred_language;
+  const isEs = lang === "es";
+  const name = snapshot.admin.first_name || (isEs ? "equipo" : "team");
+  const q = pickFallbackQuote(lang, `${snapshot.date_label}:${snapshot.admin.id}`);
+  const priorities: MorningDigestPriority[] = [];
+  if (snapshot.counts.overdue_tasks > 0) {
+    priorities.push({
+      title: isEs
+        ? `${snapshot.counts.overdue_tasks} tarea(s) vencida(s)`
+        : `${snapshot.counts.overdue_tasks} overdue task(s)`,
+      why: isEs
+        ? "Límpialas primero para liberar el día."
+        : "Clear these first to free the day.",
+      href: "/admin/my-tasks",
+    });
+  }
+  if (snapshot.counts.unread_messages > 0) {
+    priorities.push({
+      title: isEs
+        ? `${snapshot.counts.unread_messages} mensaje(s) sin leer`
+        : `${snapshot.counts.unread_messages} unread message(s)`,
+      why: isEs
+        ? "Los clientes y socios esperan respuesta."
+        : "Clients and partners are waiting on a reply.",
+      href: "/admin/conversations",
+    });
+  }
+  if (snapshot.counts.prospects > 0) {
+    priorities.push({
+      title: isEs
+        ? `${snapshot.counts.prospects} prospecto(s) activos`
+        : `${snapshot.counts.prospects} active prospect(s)`,
+      why: isEs
+        ? "Un seguimiento hoy mueve el pipeline."
+        : "One follow-up today moves the pipeline.",
+      href: "/admin/pipeline",
+    });
+  }
+  if (snapshot.counts.open_tasks > 0 && priorities.length < 5) {
+    priorities.push({
+      title: isEs
+        ? `${snapshot.counts.open_tasks} tarea(s) abiertas`
+        : `${snapshot.counts.open_tasks} open task(s)`,
+      why: isEs
+        ? "Revisa My Tasks y marca lo que puedas cerrar."
+        : "Scan My Tasks and close what you can.",
+      href: "/admin/my-tasks",
+    });
+  }
+  if (!priorities.length) {
+    priorities.push({
+      title: isEs ? "Día despejado" : "Clear runway",
+      why: isEs
+        ? "Pipeline estable — buen momento para prospectar o pulir reportes."
+        : "Steady pipeline — good day to prospect or polish reports.",
+      href: "/admin/pipeline",
+    });
+  }
+
+  const conversation_resumes = snapshot.conversations.slice(0, 5).map((c) => ({
+    who: c.who,
+    resume: isEs
+      ? `${c.unread > 0 ? `${c.unread} sin leer · ` : ""}${c.preview || "Conversación abierta"}`
+      : `${c.unread > 0 ? `${c.unread} unread · ` : ""}${c.preview || "Open thread"}`,
+  }));
+
+  const risks: string[] = [];
+  for (const t of snapshot.tasks.filter((x) => x.overdue).slice(0, 3)) {
+    risks.push(
+      isEs ? `Tarea vencida: ${t.title}` : `Overdue task: ${t.title}`,
+    );
+  }
+  for (const c of snapshot.conversations.filter((x) => x.unread > 0).slice(0, 2)) {
+    risks.push(
+      isEs
+        ? `Sin leer con ${c.who}`
+        : `Unread with ${c.who}`,
+    );
+  }
+
+  return {
+    headline: isEs
+      ? `Tu mañana OFG · ${snapshot.date_label}`
+      : `Your OFG morning · ${snapshot.date_label}`,
+    quote: q.quote,
+    quote_attribution: q.attribution,
+    energy_note: isEs
+      ? `Buenos días, ${name}. Aquí tienes tu resumen para arrancar con claridad.`
+      : `Good morning, ${name}. Here’s your brief so you can start with clarity.`,
+    priorities,
+    conversation_resumes,
+    risks,
+    wins_or_quiet_note:
+      snapshot.counts.open_tasks + snapshot.counts.unread_messages === 0
+        ? isEs
+          ? "Todo en calma — aprovecha para avanzar un prospecto clave."
+          : "All quiet — use the space to advance one key prospect."
+        : isEs
+          ? "Enfócate en lo vencido y lo sin leer; el resto espera."
+          : "Hit overdue and unread first; the rest can wait.",
+  };
+}
+
+function parseClaudeMorningDigestJson(
+  text: string,
+): MorningDigestClaudeBrief | null {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(match[0]);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const o = parsed as Record<string, unknown>;
+  const headline = String(o.headline || "").trim();
+  const quote = String(o.quote || "").trim();
+  const energy_note = String(o.energy_note || "").trim();
+  if (!headline || !quote || !energy_note) return null;
+
+  const prioritiesRaw = Array.isArray(o.priorities) ? o.priorities : [];
+  const priorities: MorningDigestPriority[] = prioritiesRaw
+    .slice(0, 5)
+    .map((p) => {
+      const row = (p || {}) as Record<string, unknown>;
+      return {
+        title: String(row.title || "").trim(),
+        why: String(row.why || "").trim(),
+        href: row.href != null ? String(row.href) : null,
+      };
+    })
+    .filter((p) => p.title);
+
+  const conversation_resumes = (
+    Array.isArray(o.conversation_resumes) ? o.conversation_resumes : []
+  )
+    .slice(0, 5)
+    .map((c) => {
+      const row = (c || {}) as Record<string, unknown>;
+      return {
+        who: String(row.who || "").trim(),
+        resume: String(row.resume || "").trim(),
+      };
+    })
+    .filter((c) => c.who && c.resume);
+
+  const risks = (Array.isArray(o.risks) ? o.risks : [])
+    .map((r) => String(r || "").trim())
+    .filter(Boolean)
+    .slice(0, 4);
+
+  return {
+    headline,
+    quote,
+    quote_attribution: o.quote_attribution
+      ? String(o.quote_attribution).trim()
+      : null,
+    energy_note,
+    priorities,
+    conversation_resumes,
+    risks,
+    wins_or_quiet_note: String(o.wins_or_quiet_note || "").trim(),
+  };
+}
+
+function amdEscapeHtml(s: string): string {
+  return String(s || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function absHref(appUrl: string, href?: string | null): string | null {
+  if (!href) return null;
+  const h = String(href).trim();
+  if (!h) return null;
+  if (h.startsWith("http")) return h;
+  const base = appUrl.replace(/\/$/, "");
+  return h.startsWith("/") ? `${base}${h}` : `${base}/${h}`;
+}
+
+/** Body HTML (inside emailLayout). */
+function renderMorningDigestBodyHtml(opts: {
+  snapshot: MorningDigestSnapshot;
+  brief: MorningDigestClaudeBrief;
+  escapeHtmlFn?: (s: string) => string;
+}): string {
+  const esc = opts.escapeHtmlFn || amdEscapeHtml;
+  const { snapshot, brief } = opts;
+  const isEs = snapshot.admin.preferred_language === "es";
+  const app = snapshot.app_url.replace(/\/$/, "");
+  const c = snapshot.counts;
+
+  const tile = (label: string, value: number, accent = false) => `
+    <td style="padding:8px;width:25%;">
+      <div style="background:${accent ? "#fef3e2" : "#f8fafc"};border:1px solid ${accent ? "#e8d4a8" : "#e2e8f0"};border-radius:12px;padding:12px;text-align:center;">
+        <div style="font-size:22px;font-weight:800;color:#121829;">${value}</div>
+        <div style="font-size:11px;color:#64748b;margin-top:4px;font-weight:600;">${esc(label)}</div>
+      </div>
+    </td>`;
+
+  const priorityRows = brief.priorities
+    .map((p, i) => {
+      const url = absHref(app, p.href);
+      const title = url
+        ? `<a href="${esc(url)}" style="color:#121829;text-decoration:none;font-weight:700;">${esc(p.title)}</a>`
+        : `<strong>${esc(p.title)}</strong>`;
+      return `<tr>
+        <td style="padding:10px 0;border-bottom:1px solid #e2e8f0;vertical-align:top;width:28px;font-weight:800;color:#C0A06A;">${i + 1}.</td>
+        <td style="padding:10px 0;border-bottom:1px solid #e2e8f0;">
+          <div style="font-size:14px;color:#0f172a;">${title}</div>
+          <div style="font-size:12px;color:#64748b;margin-top:2px;">${esc(p.why)}</div>
+        </td>
+      </tr>`;
+    })
+    .join("");
+
+  const convRows = brief.conversation_resumes.length
+    ? brief.conversation_resumes
+        .map(
+          (r) => `<tr>
+      <td style="padding:8px 0;border-bottom:1px solid #f1f5f9;font-weight:700;color:#0f172a;width:34%;vertical-align:top;">${esc(r.who)}</td>
+      <td style="padding:8px 0;border-bottom:1px solid #f1f5f9;font-size:13px;color:#475569;">${esc(r.resume)}</td>
+    </tr>`,
+        )
+        .join("")
+    : `<tr><td style="padding:8px 0;color:#64748b;font-size:13px;">${
+        isEs ? "Sin hilos urgentes." : "No urgent threads."
+      }</td></tr>`;
+
+  const riskHtml = brief.risks.length
+    ? `<ul style="margin:0;padding-left:18px;color:#b45309;font-size:13px;line-height:1.5;">${brief.risks
+        .map((r) => `<li style="margin-bottom:4px;">${esc(r)}</li>`)
+        .join("")}</ul>`
+    : `<p style="margin:0;font-size:13px;color:#64748b;">${
+        isEs ? "Sin riesgos críticos detectados." : "No critical risks flagged."
+      }</p>`;
+
+  const btn = (href: string, label: string) =>
+    `<a href="${esc(href)}" style="display:inline-block;margin:4px 8px 4px 0;padding:10px 16px;background:#121829;color:#fff;text-decoration:none;border-radius:10px;font-size:13px;font-weight:700;">${esc(label)}</a>`;
+
+  return `
+    <h1 style="margin:0 0 8px;font-size:22px;font-weight:800;color:#0f172a;">${esc(brief.headline)}</h1>
+    <p style="margin:0 0 20px;font-size:15px;line-height:1.55;color:#334155;">${esc(brief.energy_note)}</p>
+
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px;background:linear-gradient(135deg,#121829 0%,#1e293b 100%);border-radius:14px;">
+      <tr><td style="padding:20px 22px;">
+        <div style="font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#C0A06A;font-weight:700;margin-bottom:8px;">${
+          isEs ? "Frase del día" : "Quote of the day"
+        }</div>
+        <div style="font-size:16px;line-height:1.5;color:#f8fafc;font-style:italic;">“${esc(brief.quote)}”</div>
+        ${
+          brief.quote_attribution
+            ? `<div style="margin-top:10px;font-size:12px;color:#94a3b8;">— ${esc(brief.quote_attribution)}</div>`
+            : ""
+        }
+      </td></tr>
+    </table>
+
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
+      <tr>
+        ${tile(isEs ? "Prospectos" : "Prospects", c.prospects)}
+        ${tile(isEs ? "Activos" : "Active", c.active_clients)}
+        ${tile(isEs ? "Tareas" : "Tasks", c.open_tasks, c.overdue_tasks > 0)}
+        ${tile(isEs ? "Sin leer" : "Unread", c.unread_messages, c.unread_messages > 0)}
+      </tr>
+    </table>
+
+    <h2 style="margin:0 0 10px;font-size:15px;font-weight:800;color:#0f172a;">${
+      isEs ? "Prioridades de hoy" : "Today’s priorities"
+    }</h2>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 22px;">
+      ${priorityRows}
+    </table>
+
+    <h2 style="margin:0 0 10px;font-size:15px;font-weight:800;color:#0f172a;">${
+      isEs ? "Conversaciones" : "Conversations"
+    }</h2>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 22px;">
+      ${convRows}
+    </table>
+
+    <h2 style="margin:0 0 10px;font-size:15px;font-weight:800;color:#0f172a;">${
+      isEs ? "Riesgos / seguimiento" : "Risks / follow-ups"
+    }</h2>
+    <div style="margin:0 0 18px;">${riskHtml}</div>
+
+    <p style="margin:0 0 20px;font-size:14px;line-height:1.55;color:#334155;">${esc(
+      brief.wins_or_quiet_note,
+    )}</p>
+
+    <div style="margin:8px 0 4px;">
+      ${btn(`${app}/admin/my-tasks`, isEs ? "Mis tareas" : "My Tasks")}
+      ${btn(`${app}/admin/conversations`, isEs ? "Conversaciones" : "Conversations")}
+      ${btn(`${app}/admin/pipeline`, isEs ? "Pipeline" : "Pipeline")}
+    </div>
+  `;
+}
+
+function morningDigestSubject(
+  brief: MorningDigestClaudeBrief,
+  lang: MorningDigestLang,
+): string {
+  const prefix = lang === "es" ? "IMPORTANTE 🚨" : "IMPORTANT 🚨";
+  const base =
+    brief.headline.slice(0, 80) ||
+    (lang === "es" ? "Tu resumen matutino OFG" : "Your OFG morning brief");
+  if (base.startsWith("IMPORTANT") || base.startsWith("IMPORTANTE")) {
+    return base;
+  }
+  return `${prefix} ${base}`;
+}
+
+// ============================================================================
 // AFFILIATE HELPERS (inline — Vercel serverless; keep tests importing from ./index)
 // ============================================================================
 
@@ -304,7 +1415,7 @@ export function hubspotAuthMode(): "service_key" | "oauth" | null {
 function hubspotConfigured(): boolean {
   return Boolean(
     (process.env.HUBSPOT_CLIENT_ID && process.env.HUBSPOT_CLIENT_SECRET) ||
-      isHubspotServiceKeyConfigured(),
+    isHubspotServiceKeyConfigured(),
   );
 }
 
@@ -3286,14 +4397,14 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "search_clients",
     description:
-      "Search clients/prospects by name, email, phone, or case number. Returns a small page of matches.",
+      "Search credit-repair clients/prospects AND funding applications by name, email, phone, or case number. Returns `clients` plus `funding_applications` (funding-only leads like board intakes that may not appear as CR clients).",
     input_schema: {
       type: "object",
       properties: {
         q: { type: "string", description: "Search query" },
         limit: {
           type: "integer",
-          description: "Max rows (1–20, default 10)",
+          description: "Max rows per list (1–20, default 10)",
         },
       },
       required: ["q"],
@@ -3337,7 +4448,8 @@ const ADMIN_AI_TOOLS: Array<{
         search: { type: "string" },
         stage: {
           type: "string",
-          description: "prospect | new_client | docs_ready | round_1…5 | completed",
+          description:
+            "prospect | new_client | docs_ready | round_1…5 | completed",
         },
         language: { type: "string", enum: ["en", "es"] },
       },
@@ -3353,6 +4465,140 @@ const ADMIN_AI_TOOLS: Array<{
         case_id: { type: "integer" },
         case_number: { type: "string" },
       },
+    },
+  },
+  {
+    name: "list_funding_applications",
+    description:
+      "List business funding applications (ATLAS Funding board). Filter by status or search name/email/phone.",
+    input_schema: {
+      type: "object",
+      properties: {
+        status: {
+          type: "string",
+          description:
+            "draft|awaiting_docs|submitted|under_review|complete|converted|cancelled",
+        },
+        search: { type: "string" },
+        limit: { type: "integer", description: "1–50, default 20" },
+      },
+    },
+  },
+  {
+    name: "get_funding_application",
+    description:
+      "Get one funding application by id (status, contact, docs uploaded summary). Secrets not included.",
+    input_schema: {
+      type: "object",
+      properties: {
+        funding_application_id: { type: "integer" },
+      },
+      required: ["funding_application_id"],
+    },
+  },
+  {
+    name: "update_funding_status",
+    description:
+      "Update funding application status (not converted). Dry-run unless confirm=true + confirm_phrase=CONFIRM.",
+    input_schema: {
+      type: "object",
+      properties: {
+        funding_application_id: { type: "integer" },
+        status: {
+          type: "string",
+          description:
+            "draft|awaiting_docs|submitted|under_review|complete|cancelled",
+        },
+        confirm: { type: "boolean" },
+        confirm_phrase: { type: "string" },
+      },
+      required: ["funding_application_id", "status"],
+    },
+  },
+  {
+    name: "funding_pipeline_summary",
+    description:
+      "Funding board column counts by status (draft, awaiting_docs, submitted, under_review, complete, converted, cancelled). Use instead of pipeline_summary for Funding clients.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "create_funding_application",
+    description:
+      "Create a business funding application (ATLAS Funding board). Links/creates a clients row via email. Pass client_id to dual-link an existing CR client (name/email filled from client if omitted). ALWAYS dry-run first (confirm=false), then confirm=true + confirm_phrase=CONFIRM. funding_type: credit_card_stacking | bank_statements.",
+    input_schema: {
+      type: "object",
+      properties: {
+        first_name: { type: "string" },
+        last_name: { type: "string" },
+        email: { type: "string" },
+        phone: { type: "string" },
+        funding_type: {
+          type: "string",
+          enum: ["credit_card_stacking", "bank_statements"],
+        },
+        preferred_language: { type: "string", enum: ["en", "es"] },
+        status: {
+          type: "string",
+          description:
+            "awaiting_docs|submitted|under_review|complete (default awaiting_docs)",
+        },
+        client_id: {
+          type: "integer",
+          description:
+            "Optional existing credit-repair client to link (dual client)",
+        },
+        postal_code: { type: "string" },
+        state: { type: "string" },
+        llc_name: { type: "string" },
+        llc_address: { type: "string" },
+        confirm: { type: "boolean" },
+        confirm_phrase: { type: "string" },
+      },
+      required: ["funding_type"],
+    },
+  },
+  {
+    name: "convert_funding_application",
+    description:
+      "Convert a funding application into a credit-repair prospect (clients.status=prospect). Dry-run unless confirm=true + confirm_phrase=CONFIRM.",
+    input_schema: {
+      type: "object",
+      properties: {
+        funding_application_id: { type: "integer" },
+        confirm: { type: "boolean" },
+        confirm_phrase: { type: "string" },
+      },
+      required: ["funding_application_id"],
+    },
+  },
+  {
+    name: "upload_funding_document",
+    description:
+      "Upload a funding document (drivers license, corp statement, bank months 1–6) to a funding application via file_base64. Dry-run then confirm. JPEG/PNG/HEIC/PDF ~3MB max.",
+    input_schema: {
+      type: "object",
+      properties: {
+        funding_application_id: { type: "integer" },
+        doc_type: {
+          type: "string",
+          enum: [
+            "funding_drivers_license",
+            "funding_corp_statement",
+            "funding_bank_m1",
+            "funding_bank_m2",
+            "funding_bank_m3",
+            "funding_bank_m4",
+            "funding_bank_m5",
+            "funding_bank_m6",
+          ],
+        },
+        file_name: { type: "string" },
+        file_base64: { type: "string" },
+        mime_type: { type: "string" },
+        confirm: { type: "boolean" },
+        confirm_phrase: { type: "string" },
+      },
+      required: ["funding_application_id", "doc_type", "file_name"],
     },
   },
   {
@@ -3391,7 +4637,7 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "get_client",
     description:
-      "Get one client profile by client_id (or via case_id / case_number). No SSN/DOB.",
+      "Get one client profile by client_id (or via case_id / case_number). Includes referrers[] (up to 3 partners), legacy referrer (primary), and funding_applications[] when dual CR+funding. No SSN/DOB.",
     input_schema: {
       type: "object",
       properties: {
@@ -3440,7 +4686,8 @@ const ADMIN_AI_TOOLS: Array<{
         case_number: { type: "string" },
         status: {
           type: "string",
-          description: "pending | processing | paid | overdue | cancelled | open (pending+overdue)",
+          description:
+            "pending | processing | paid | overdue | cancelled | open (pending+overdue)",
         },
         limit: { type: "integer", description: "1–20, default 15" },
       },
@@ -3455,8 +4702,7 @@ const ADMIN_AI_TOOLS: Array<{
       properties: {
         mode: {
           type: "string",
-          description:
-            "overdue (default) | pending | open (pending+overdue)",
+          description: "overdue (default) | pending | open (pending+overdue)",
           enum: ["overdue", "pending", "open"],
         },
         search: {
@@ -3482,13 +4728,16 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "create_prospect",
     description:
-      "Create a new prospect lead on OFG. ALWAYS call first with confirm=false to preview + phone duplicate check; show preview to the user; only re-call with confirm=true and confirm_phrase=\"CONFIRM\" after they approve. Required: first_name, last_name, phone, preferred_language (en|es). If realtor/agent referred them, set referral_category=realtor_broker and referrer_first_name + referrer_last_name (+ referrer_phone). Realtor is NOT the client. If duplicates found, also pass confirm_duplicate=true and confirm_phrase=\"CONFIRM\" after user approves.",
+      'Create a new prospect lead on OFG. ALWAYS call first with confirm=false to preview + phone duplicate check; show preview to the user; only re-call with confirm=true and confirm_phrase="CONFIRM" after they approve. Required: first_name, last_name, phone, preferred_language (en|es). If realtor/agent referred them, set referral_category=realtor_broker and referrer_first_name + referrer_last_name (+ referrer_phone). Realtor is NOT the client. If duplicates found, also pass confirm_duplicate=true and confirm_phrase="CONFIRM" after user approves.',
     input_schema: {
       type: "object",
       properties: {
         first_name: { type: "string" },
         last_name: { type: "string" },
-        phone: { type: "string", description: "Required. Used for duplicate check (last 10 digits)." },
+        phone: {
+          type: "string",
+          description: "Required. Used for duplicate check (last 10 digits).",
+        },
         email: { type: "string" },
         preferred_language: {
           type: "string",
@@ -3511,7 +4760,8 @@ const ADMIN_AI_TOOLS: Array<{
         notes: { type: "string", description: "Optional intake notes" },
         confirm: {
           type: "boolean",
-          description: "false/omit = dry-run preview; true = create after user approval",
+          description:
+            "false/omit = dry-run preview; true = create after user approval",
         },
         confirm_phrase: {
           type: "string",
@@ -3519,7 +4769,8 @@ const ADMIN_AI_TOOLS: Array<{
         },
         confirm_duplicate: {
           type: "boolean",
-          description: "Required true when phone duplicates exist and user still wants to create",
+          description:
+            "Required true when phone duplicates exist and user still wants to create",
         },
       },
       required: ["first_name", "last_name", "phone", "preferred_language"],
@@ -3528,7 +4779,7 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "create_work_task",
     description:
-      "Create a My Tasks / work-hub task on OFG (source of truth). HubSpot push is OFF by default — set push_hubspot=true only if the user asks to sync (avoids Claude+OFG duplicate HubSpot tasks). ALWAYS dry-run first (confirm=false), show preview, then confirm=true with confirm_phrase=\"CONFIRM\". Auto-assigns the DB language owner (admins.language_owner_for matching preferred_language) unless assignee_admin_id is set. Never set status=done. Does not email clients.",
+      'Create a My Tasks / work-hub task on OFG (source of truth). HubSpot push is OFF by default — set push_hubspot=true only if the user asks to sync (avoids Claude+OFG duplicate HubSpot tasks). ALWAYS dry-run first (confirm=false), show preview, then confirm=true with confirm_phrase="CONFIRM". Auto-assigns the DB language owner (admins.language_owner_for matching preferred_language) unless assignee_admin_id is set. Never set status=done. Does not email clients.',
     input_schema: {
       type: "object",
       properties: {
@@ -3548,7 +4799,8 @@ const ADMIN_AI_TOOLS: Array<{
         case_number: { type: "string" },
         client_id: {
           type: "integer",
-          description: "Optional; if set without case, links latest active case when present",
+          description:
+            "Optional; if set without case, links latest active case when present",
         },
         priority: {
           type: "string",
@@ -3582,11 +4834,14 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "add_case_note",
     description:
-      "Append an internal admin note (SMS/call log) to the client file. ALWAYS dry-run first with confirm=false (safe preview — does not write); only confirm=true with confirm_phrase=\"CONFIRM\" after the user approves the exact note. client_id must be OFG id from search_clients (not HubSpot). Does not text/email the client — use send_sms to text them or send_email to email them.",
+      'Append an internal admin note (SMS/call log) to the client file. ALWAYS dry-run first with confirm=false (safe preview — does not write); only confirm=true with confirm_phrase="CONFIRM" after the user approves the exact note. client_id must be OFG id from search_clients (not HubSpot). Does not text/email the client — use send_sms to text them or send_email to email them.',
     input_schema: {
       type: "object",
       properties: {
-        client_id: { type: "integer", description: "OFG clients.id from search_clients" },
+        client_id: {
+          type: "integer",
+          description: "OFG clients.id from search_clients",
+        },
         case_id: { type: "integer" },
         case_number: { type: "string" },
         note: {
@@ -3600,7 +4855,8 @@ const ADMIN_AI_TOOLS: Array<{
         },
         confirm: {
           type: "boolean",
-          description: "false/omit = dry-run preview; true = append after approval",
+          description:
+            "false/omit = dry-run preview; true = append after approval",
         },
         confirm_phrase: {
           type: "string",
@@ -3613,17 +4869,27 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "upload_case_document",
     description:
-      "Upload a client document (ID, SSN card, proof of address, PDF bank statement, etc.) into the OFG case file — same encryption/CDN path as the admin portal. ALWAYS dry-run first with confirm=false (safe preview — does not upload); only confirm=true with confirm_phrase=\"CONFIRM\" after the user approves. client_id must be OFG id from search_clients (not HubSpot). Pass file_base64 (raw base64 or data: URL) + file_name; optional mime_type. Supported: JPEG, PNG, HEIC/HEIF, PDF (max ~3MB). doc_type: id_front | id_back | ssn_card | proof_of_address | other. Resolves latest active case when only client_id is given.",
+      'Upload a client document (ID, SSN card, proof of address, PDF bank statement, etc.) into the OFG case file — same encryption/CDN path as the admin portal. ALWAYS dry-run first with confirm=false (safe preview — does not upload); only confirm=true with confirm_phrase="CONFIRM" after the user approves. client_id must be OFG id from search_clients (not HubSpot). Pass file_base64 (raw base64 or data: URL) + file_name; optional mime_type. Supported: JPEG, PNG, HEIC/HEIF, PDF (max ~3MB). doc_type: id_front | id_back | ssn_card | proof_of_address | other. Resolves latest active case when only client_id is given.',
     input_schema: {
       type: "object",
       properties: {
-        client_id: { type: "integer", description: "OFG clients.id from search_clients" },
+        client_id: {
+          type: "integer",
+          description: "OFG clients.id from search_clients",
+        },
         case_id: { type: "integer" },
         case_number: { type: "string" },
         doc_type: {
           type: "string",
-          enum: ["id_front", "id_back", "ssn_card", "proof_of_address", "other"],
-          description: "Document category (maps to onboarding checklist when applicable)",
+          enum: [
+            "id_front",
+            "id_back",
+            "ssn_card",
+            "proof_of_address",
+            "other",
+          ],
+          description:
+            "Document category (maps to onboarding checklist when applicable)",
         },
         file_name: {
           type: "string",
@@ -3636,11 +4902,13 @@ const ADMIN_AI_TOOLS: Array<{
         },
         mime_type: {
           type: "string",
-          description: "Optional MIME override (image/jpeg, image/png, image/heic, image/heif, application/pdf)",
+          description:
+            "Optional MIME override (image/jpeg, image/png, image/heic, image/heif, application/pdf)",
         },
         confirm: {
           type: "boolean",
-          description: "false/omit = dry-run preview; true = upload after approval",
+          description:
+            "false/omit = dry-run preview; true = upload after approval",
         },
         confirm_phrase: {
           type: "string",
@@ -3653,7 +4921,7 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "send_email",
     description:
-      "Send a branded email via the OFG platform mailer (Resend) to a CLIENT or a REFERRER (realtor/loan officer). ALWAYS dry-run first with confirm=false (safe preview — does not send); only confirm=true with confirm_phrase=\"CONFIRM\" after the user approves the exact To/subject/body. Client: client_id from search_clients (not HubSpot); auto EMAIL case note; include_doc_upload_link mints a portal upload button. Referrer: referrer_id from search_referrers or get_client; logs on referrers.notes; pass client_id too to also stamp that client's file (e.g. email Miguel about Sofia). include_doc_upload_link is ignored for referrer sends (never mint client portal links for partners). Body is message content only (Hi/Hola added automatically). Does not send SMS (use send_sms). Refuses cancelled/inactive records and missing email.",
+      'Send a branded email via the OFG platform mailer (Resend) to a CLIENT or a REFERRER (realtor/loan officer). ALWAYS dry-run first with confirm=false (safe preview — does not send); only confirm=true with confirm_phrase="CONFIRM" after the user approves the exact To/subject/body. Client: client_id from search_clients (not HubSpot); auto EMAIL case note; include_doc_upload_link mints a portal upload button. Referrer: referrer_id from search_referrers or get_client; logs on referrers.notes; pass client_id too to also stamp that client\'s file (e.g. email Miguel about Sofia). include_doc_upload_link is ignored for referrer sends (never mint client portal links for partners). Body is message content only (Hi/Hola added automatically). Does not send SMS (use send_sms). Refuses cancelled/inactive records and missing email.',
     input_schema: {
       type: "object",
       properties: {
@@ -3685,7 +4953,8 @@ const ADMIN_AI_TOOLS: Array<{
         },
         confirm: {
           type: "boolean",
-          description: "false/omit = dry-run preview; true = send after approval",
+          description:
+            "false/omit = dry-run preview; true = send after approval",
         },
         confirm_phrase: {
           type: "string",
@@ -3698,7 +4967,7 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "send_sms",
     description:
-      "Send an SMS via Twilio from the acting admin's assigned OFG business number to a CLIENT or REFERRER. ALWAYS dry-run first with confirm=false (safe preview — does not send); only confirm=true with confirm_phrase=\"CONFIRM\" after the user approves the exact To/body. Client: client_id from search_clients; logs into Conversations hub + SMS case note; returns message_id / provider_message_id / provider_status for HubSpot logging. Referrer: referrer_id from search_referrers; SMS to partner phone + notes on referrer (and optional client stamp). Requires the MCP-connected admin to have an OFG number in People. Closed threads auto-reopen on confirmed client sends. Does not send email (use send_email).",
+      'Send an SMS via Twilio from the acting admin\'s assigned OFG business number to a CLIENT or REFERRER. ALWAYS dry-run first with confirm=false (safe preview — does not send); only confirm=true with confirm_phrase="CONFIRM" after the user approves the exact To/body. Client: client_id from search_clients; logs into Conversations hub + SMS case note; returns message_id / provider_message_id / provider_status for HubSpot logging. Referrer: referrer_id from search_referrers; SMS to partner phone + notes on referrer (and optional client stamp). Requires the MCP-connected admin to have an OFG number in People. Closed threads auto-reopen on confirmed client sends. Does not send email (use send_email).',
     input_schema: {
       type: "object",
       properties: {
@@ -3721,7 +4990,8 @@ const ADMIN_AI_TOOLS: Array<{
         },
         confirm: {
           type: "boolean",
-          description: "false/omit = dry-run preview; true = send after approval",
+          description:
+            "false/omit = dry-run preview; true = send after approval",
         },
         confirm_phrase: {
           type: "string",
@@ -3752,7 +5022,7 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "send_text",
     description:
-      "Alias for send_sms — send an SMS via Twilio from the acting admin's assigned OFG business number (ATLAS texting spec). ALWAYS dry-run first with confirm=false; confirm=true + confirm_phrase=\"CONFIRM\" to send. Logs Conversations hub + SMS case note; returns message_id / Twilio SID / provider_status for HubSpot.",
+      'Alias for send_sms — send an SMS via Twilio from the acting admin\'s assigned OFG business number (ATLAS texting spec). ALWAYS dry-run first with confirm=false; confirm=true + confirm_phrase="CONFIRM" to send. Logs Conversations hub + SMS case note; returns message_id / Twilio SID / provider_status for HubSpot.',
     input_schema: {
       type: "object",
       properties: {
@@ -3770,8 +5040,7 @@ const ADMIN_AI_TOOLS: Array<{
         },
         body: {
           type: "string",
-          description:
-            "SMS message body (plain text). Alias: message.",
+          description: "SMS message body (plain text). Alias: message.",
         },
         message: {
           type: "string",
@@ -3779,7 +5048,8 @@ const ADMIN_AI_TOOLS: Array<{
         },
         confirm: {
           type: "boolean",
-          description: "false/omit = dry-run preview; true = send after approval",
+          description:
+            "false/omit = dry-run preview; true = send after approval",
         },
         confirm_phrase: {
           type: "string",
@@ -3874,7 +5144,7 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "preview_convert_prospect",
     description:
-      "SAFE READ-ONLY preview of converting an unconverted lead to New Client / onboarding. Works even if status was set to active/pending_payment by mistake, as long as there is no enrolled case. Does not write. After the user approves, call convert_prospect with confirm=true and confirm_phrase=\"CONFIRM\". client_id must be OFG id from search_clients (not HubSpot).",
+      'SAFE READ-ONLY preview of converting an unconverted lead to New Client / onboarding. Works even if status was set to active/pending_payment by mistake, as long as there is no enrolled case. Does not write. After the user approves, call convert_prospect with confirm=true and confirm_phrase="CONFIRM". client_id must be OFG id from search_clients (not HubSpot).',
     input_schema: {
       type: "object",
       properties: {
@@ -3891,7 +5161,7 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "convert_prospect",
     description:
-      "Convert an unconverted lead into New Client / onboarding after preview. Allowed whenever there is no enrolled case yet (status need not be prospect). ALWAYS call preview_convert_prospect first. Then confirm=true and confirm_phrase=\"CONFIRM\". Auto-assigns onboarding tasks. Does not charge cards or send welcome email.",
+      'Convert an unconverted lead into New Client / onboarding after preview. Allowed whenever there is no enrolled case yet (status need not be prospect). ALWAYS call preview_convert_prospect first. Then confirm=true and confirm_phrase="CONFIRM". Auto-assigns onboarding tasks. Does not charge cards or send welcome email.',
     input_schema: {
       type: "object",
       properties: {
@@ -3917,7 +5187,7 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "update_client_status",
     description:
-      "Update clients.status. ALWAYS dry-run first. Unconverted leads (no enrolled case): only prospect, paused, or cancelled — never pending_payment/onboarding/active (those require convert_prospect first, which creates the case). Do NOT use pending_payment or active to mean \"paid/still a lead\". Prefer convert_prospect when moving a lead to paying. cancelled = closed/lost. Cannot set prospect after they have an enrolled case.",
+      'Update clients.status. ALWAYS dry-run first. Unconverted leads (no enrolled case): only prospect, paused, or cancelled — never pending_payment/onboarding/active (those require convert_prospect first, which creates the case). Do NOT use pending_payment or active to mean "paid/still a lead". Prefer convert_prospect when moving a lead to paying. cancelled = closed/lost. Cannot set prospect after they have an enrolled case.',
     input_schema: {
       type: "object",
       properties: {
@@ -3935,7 +5205,10 @@ const ADMIN_AI_TOOLS: Array<{
             "cancelled",
           ],
         },
-        notes: { type: "string", description: "Optional note appended to admin_notes" },
+        notes: {
+          type: "string",
+          description: "Optional note appended to admin_notes",
+        },
         confirm: { type: "boolean" },
         confirm_phrase: { type: "string" },
       },
@@ -3991,7 +5264,7 @@ const ADMIN_AI_TOOLS: Array<{
         splits_json: {
           type: "string",
           description:
-            'JSON array of {label, amount_cents, due_date (YYYY-MM-DD), status?: pending|paid|overdue|cancelled, notes?}. Max 20.',
+            "JSON array of {label, amount_cents, due_date (YYYY-MM-DD), status?: pending|paid|overdue|cancelled, notes?}. Max 20.",
         },
         replace_open: {
           type: "boolean",
@@ -4029,6 +5302,13 @@ const ADMIN_AI_TOOLS: Array<{
 
 type AdminAiToolResult =
   | { ok: true; data: unknown }
+  | {
+      ok: true;
+      dry_run: true;
+      preview?: unknown;
+      message?: string;
+      data?: unknown;
+    }
   | { ok: false; error: string; message: string };
 
 function adminAiClampLimit(raw: unknown, fallback = 10): number {
@@ -4094,7 +5374,12 @@ async function adminAiResolveClientId(
   args: Record<string, unknown>,
   scopedAffiliateIds?: number[],
 ): Promise<
-  | { ok: true; clientId: number; caseId: number | null; caseNumber: string | null }
+  | {
+      ok: true;
+      clientId: number;
+      caseId: number | null;
+      caseNumber: string | null;
+    }
   | { ok: false; error: "invalid_args" | "not_found"; message: string }
 > {
   const clientId =
@@ -4112,7 +5397,7 @@ async function adminAiResolveClientId(
       `SELECT c.id FROM clients c WHERE ${where.join(" AND ")} LIMIT 1`,
       params,
     );
-            if (!rows[0]) {
+    if (!rows[0]) {
       return {
         ok: false,
         error: "not_found",
@@ -4165,10 +5450,12 @@ function adminAiWriteConfirmed(
     return {
       ok: false,
       message:
-        "Dry-run only. After the user approves, re-call with confirm=true and confirm_phrase=\"CONFIRM\".",
+        'Dry-run only. After the user approves, re-call with confirm=true and confirm_phrase="CONFIRM".',
     };
   }
-  if (String(args.confirm_phrase || "").trim() !== ADMIN_AI_WRITE_CONFIRM_PHRASE) {
+  if (
+    String(args.confirm_phrase || "").trim() !== ADMIN_AI_WRITE_CONFIRM_PHRASE
+  ) {
     return {
       ok: false,
       message: `confirm=true also requires confirm_phrase=\"${ADMIN_AI_WRITE_CONFIRM_PHRASE}\" (exact).`,
@@ -4301,16 +5588,12 @@ function adminOnProspectBoard(row: {
   case_status?: unknown;
 }): boolean {
   const status = String(row.status || "");
-  const stage = String(
-    row.pipeline_stage || row.client_pipeline_stage || "",
-  );
+  const stage = String(row.pipeline_stage || row.client_pipeline_stage || "");
   const caseStage = row.case_stage != null ? String(row.case_stage) : "";
   const caseStatus = row.case_status != null ? String(row.case_status) : "";
   if (status === "cancelled" || status === "funding") return false;
   const enrolled =
-    !!caseStage &&
-    caseStage !== "prospect" &&
-    caseStatus !== "cancelled";
+    !!caseStage && caseStage !== "prospect" && caseStatus !== "cancelled";
   if (enrolled) return false;
   return status === "prospect" || stage === "prospect";
 }
@@ -4328,7 +5611,9 @@ async function executeAdminAiTool(
     const scopedIds = scope?.scopedAffiliateIds;
 
     if (name === "search_clients") {
-      const q = String(args.q || "").trim().slice(0, 120);
+      const q = String(args.q || "")
+        .trim()
+        .slice(0, 120);
       if (!q) {
         return { ok: false, error: "invalid_args", message: "q is required" };
       }
@@ -4375,6 +5660,22 @@ async function executeAdminAiTool(
          LIMIT ?`,
         [...params, limit],
       );
+      const fundingWhere: string[] = [];
+      const fundingParams: any[] = [];
+      {
+        const s = fundingApplicationSearchSql(q);
+        fundingWhere.push(s.sql);
+        fundingParams.push(...s.params);
+      }
+      const [fundingRows] = await pool.query<RowDataPacket[]>(
+        `SELECT fa.id, fa.funding_type, fa.status, fa.first_name, fa.last_name,
+                fa.email, fa.phone, fa.preferred_language, fa.client_id, fa.created_at
+         FROM funding_applications fa
+         WHERE ${fundingWhere.join(" AND ")}
+         ORDER BY fa.updated_at DESC, fa.id DESC
+         LIMIT ?`,
+        [...fundingParams, limit],
+      );
       return {
         ok: true,
         data: {
@@ -4397,12 +5698,25 @@ async function executeAdminAiTool(
             }),
             href: adminPipelineHref(Number(r.id), r.case_id),
           })),
+          funding_applications: fundingRows.map((r) => ({
+            id: Number(r.id),
+            funding_type: r.funding_type,
+            status: r.status,
+            name: `${r.first_name || ""} ${r.last_name || ""}`.trim(),
+            email: r.email,
+            phone: r.phone || null,
+            preferred_language: r.preferred_language,
+            client_id: r.client_id ? Number(r.client_id) : null,
+            href: `/admin/funding?id=${r.id}`,
+          })),
         },
       };
     }
 
     if (name === "search_referrers") {
-      const q = String(args.q || "").trim().slice(0, 120);
+      const q = String(args.q || "")
+        .trim()
+        .slice(0, 120);
       if (!q) {
         return { ok: false, error: "invalid_args", message: "q is required" };
       }
@@ -4443,8 +5757,7 @@ async function executeAdminAiTool(
     }
 
     if (name === "get_case") {
-      const hasId =
-        args.case_id != null && Number(args.case_id) > 0;
+      const hasId = args.case_id != null && Number(args.case_id) > 0;
       const hasNumber =
         typeof args.case_number === "string" && !!args.case_number.trim();
       if (!hasId && !hasNumber) {
@@ -4514,9 +5827,7 @@ async function executeAdminAiTool(
           preferred_language: row.preferred_language,
           tasks_approved: Number(taskRows[0]?.tasks_approved || 0),
           tasks_required: Number(taskRows[0]?.tasks_required || 0),
-          tasks_pending_review: Number(
-            taskRows[0]?.tasks_pending_review || 0,
-          ),
+          tasks_pending_review: Number(taskRows[0]?.tasks_pending_review || 0),
           payment_badge,
           href: `/admin/pipeline?case=${row.id}`,
         },
@@ -4526,12 +5837,9 @@ async function executeAdminAiTool(
     if (name === "pipeline_summary") {
       const search =
         typeof args.search === "string" ? args.search.trim().slice(0, 120) : "";
-      const stage =
-        typeof args.stage === "string" ? args.stage.trim() : "";
+      const stage = typeof args.stage === "string" ? args.stage.trim() : "";
       const language =
-        args.language === "en" || args.language === "es"
-          ? args.language
-          : "";
+        args.language === "en" || args.language === "es" ? args.language : "";
 
       const caseWhere = [
         "cr.status NOT IN ('cancelled')",
@@ -4562,7 +5870,8 @@ async function executeAdminAiTool(
         prospectArgs.push(...ident.params);
       }
 
-      const includeProspects = !stage || stage === "prospect" || stage === "all";
+      const includeProspects =
+        !stage || stage === "prospect" || stage === "all";
       const includeCases = stage !== "prospect";
 
       let prospectTotal = 0;
@@ -4590,7 +5899,9 @@ async function executeAdminAiTool(
         const where = stageFilter
           ? [...caseWhere, "cr.pipeline_stage = ?"]
           : [...caseWhere];
-        const argsSql = stageFilter ? [...caseArgs, stageFilter] : [...caseArgs];
+        const argsSql = stageFilter
+          ? [...caseArgs, stageFilter]
+          : [...caseArgs];
         const [rows] = await pool.query<RowDataPacket[]>(
           `SELECT cr.pipeline_stage AS stage, COUNT(*) AS total
            FROM credit_repair_cases cr
@@ -4614,9 +5925,616 @@ async function executeAdminAiTool(
       };
     }
 
+    if (
+      name === "list_funding_applications" ||
+      name === "get_funding_application" ||
+      name === "update_funding_status" ||
+      name === "funding_pipeline_summary" ||
+      name === "create_funding_application" ||
+      name === "convert_funding_application" ||
+      name === "upload_funding_document"
+    ) {
+      if (name === "funding_pipeline_summary") {
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT fa.status AS status, COUNT(*) AS total
+           FROM funding_applications fa
+           GROUP BY fa.status`,
+        );
+        const statuses = [
+          "draft",
+          "awaiting_docs",
+          "submitted",
+          "under_review",
+          "complete",
+          "converted",
+          "cancelled",
+        ] as const;
+        const columns: Record<string, { total: number }> = {};
+        for (const st of statuses) columns[st] = { total: 0 };
+        let total = 0;
+        for (const r of rows) {
+          const st = String(r.status || "");
+          const n = Number(r.total || 0);
+          total += n;
+          if (columns[st]) columns[st] = { total: n };
+          else columns[st] = { total: n };
+        }
+        return {
+          ok: true,
+          data: {
+            columns,
+            total,
+            href: "/admin/funding",
+          },
+        };
+      }
+
+      if (name === "list_funding_applications") {
+        const limit = Math.min(50, Math.max(1, Number(args.limit) || 20));
+        const where: string[] = ["1=1"];
+        const qArgs: unknown[] = [];
+        const st = String(args.status || "").trim();
+        if (st) {
+          where.push("fa.status = ?");
+          qArgs.push(st);
+        }
+        const search = String(args.search || "").trim();
+        if (search) {
+          const s = fundingApplicationSearchSql(search);
+          where.push(s.sql);
+          qArgs.push(...s.params);
+        }
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT fa.id, fa.funding_type, fa.status, fa.first_name, fa.last_name,
+                  fa.email, fa.phone, fa.preferred_language, fa.created_at, fa.submitted_at
+           FROM funding_applications fa
+           WHERE ${where.join(" AND ")}
+           ORDER BY fa.created_at DESC
+           LIMIT ${limit}`,
+          qArgs,
+        );
+        return {
+          ok: true,
+          data: {
+            applications: rows,
+            href: "/admin/funding",
+          },
+        };
+      }
+
+      if (name === "create_funding_application") {
+        let firstName = String(args.first_name || "").trim();
+        let lastName = String(args.last_name || "").trim();
+        let email = String(args.email || "")
+          .trim()
+          .toLowerCase();
+        let phone = args.phone ? String(args.phone).trim() : null;
+        const fundingType =
+          args.funding_type === "credit_card_stacking"
+            ? "credit_card_stacking"
+            : args.funding_type === "bank_statements"
+              ? "bank_statements"
+              : null;
+        let preferredLanguage =
+          args.preferred_language === "es" ? ("es" as const) : ("en" as const);
+        const statusRaw = String(args.status || "awaiting_docs");
+        const allowedInitial = new Set([
+          "awaiting_docs",
+          "submitted",
+          "under_review",
+          "complete",
+        ]);
+        const status = allowedInitial.has(statusRaw)
+          ? statusRaw
+          : "awaiting_docs";
+        let postalCode =
+          args.postal_code != null
+            ? String(args.postal_code).trim() || null
+            : null;
+        let state =
+          args.state != null ? String(args.state).trim() || null : null;
+        const llcName =
+          args.llc_name != null ? String(args.llc_name).trim() || null : null;
+        const llcAddress =
+          args.llc_address != null
+            ? String(args.llc_address).trim() || null
+            : null;
+        const linkedClientId =
+          args.client_id != null && Number(args.client_id) > 0
+            ? Number(args.client_id)
+            : null;
+
+        if (linkedClientId) {
+          const [cRows] = await pool.query<RowDataPacket[]>(
+            `SELECT id, first_name, last_name, email, phone, zip, state, preferred_language
+             FROM clients WHERE id = ? LIMIT 1`,
+            [linkedClientId],
+          );
+          if (!cRows[0]) {
+            return {
+              ok: false,
+              error: "not_found",
+              message: "client_id not found",
+            };
+          }
+          if (scopedIds && scopedIds.length > 0) {
+            const [aff] = await pool.query<RowDataPacket[]>(
+              `SELECT affiliate_id FROM clients WHERE id = ? LIMIT 1`,
+              [linkedClientId],
+            );
+            const affId = aff[0]?.affiliate_id
+              ? Number(aff[0].affiliate_id)
+              : null;
+            if (affId == null || !scopedIds.includes(affId)) {
+              return {
+                ok: false,
+                error: "forbidden",
+                message: "Client outside affiliate scope",
+              };
+            }
+          }
+          const c = cRows[0];
+          if (!firstName) firstName = String(c.first_name || "").trim();
+          if (!lastName) lastName = String(c.last_name || "").trim();
+          if (!email && c.email) email = String(c.email).trim().toLowerCase();
+          if (!phone && c.phone) phone = String(c.phone).trim();
+          if (!postalCode && c.zip) postalCode = String(c.zip).trim();
+          if (!state && c.state) state = String(c.state).trim();
+          if (args.preferred_language == null && c.preferred_language === "es") {
+            preferredLanguage = "es";
+          }
+        }
+
+        if (!fundingType) {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message:
+              "funding_type must be credit_card_stacking or bank_statements",
+          };
+        }
+        if (!firstName || !lastName || !email) {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message:
+              "first_name, last_name, and email are required (or pass client_id)",
+          };
+        }
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message: "Invalid email address",
+          };
+        }
+
+        const preview = {
+          first_name: firstName,
+          last_name: lastName,
+          email,
+          phone,
+          funding_type: fundingType,
+          preferred_language: preferredLanguage,
+          status,
+          client_id: linkedClientId,
+          postal_code: postalCode,
+          state,
+          llc_name: llcName,
+          llc_address: llcAddress,
+        };
+        if (!adminAiWriteConfirmed(args).ok) {
+          return {
+            ok: true,
+            data: {
+              dry_run: true,
+              ready: true,
+              preview,
+              required_confirm_phrase: ADMIN_AI_WRITE_CONFIRM_PHRASE,
+              guidance: `Show this funding application preview. After approval, re-call with confirm=true and confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`,
+            },
+          };
+        }
+
+        const clientId = await ensureFundingClientId({
+          email,
+          firstName,
+          lastName,
+          phone,
+          preferredLanguage,
+          postalCode,
+          state,
+        });
+        const publicToken = crypto.randomUUID();
+        const submittedAt =
+          status === "submitted" ||
+          status === "under_review" ||
+          status === "complete"
+            ? new Date()
+            : null;
+        const [ins] = await pool.query<ResultSetHeader>(
+          `INSERT INTO funding_applications
+             (public_token, funding_type, status, first_name, last_name, email, phone,
+              postal_code, state, preferred_language, llc_name, llc_address, client_id,
+              submitted_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            publicToken,
+            fundingType,
+            status,
+            firstName,
+            lastName,
+            email,
+            phone,
+            postalCode,
+            state,
+            preferredLanguage,
+            llcName,
+            llcAddress,
+            clientId,
+            submittedAt,
+          ],
+        );
+        const applicationId = Number(ins.insertId);
+        await notifyFundingApplicationCreated({
+          applicationId,
+          clientId,
+          clientName: `${firstName} ${lastName}`.trim(),
+          clientEmail: email,
+          firstName,
+          preferredLanguage,
+          fundingType,
+          status,
+          publicToken,
+        });
+        const [created] = await pool.query<RowDataPacket[]>(
+          `SELECT id, funding_type, status, first_name, last_name, email, phone,
+                  preferred_language, client_id, created_at
+           FROM funding_applications WHERE id = ? LIMIT 1`,
+          [applicationId],
+        );
+        return {
+          ok: true,
+          data: {
+            application: created[0],
+            client_id: clientId,
+            href: `/admin/funding?id=${applicationId}`,
+          },
+        };
+      }
+
+      const appId = Number(args.funding_application_id);
+      if (!Number.isFinite(appId) || appId <= 0) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message: "funding_application_id required",
+        };
+      }
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, funding_type, status, first_name, last_name, email, phone,
+                preferred_language, llc_name, state, postal_code, client_id,
+                submitted_at, created_at, updated_at, public_token,
+                docs_complete_notified_at
+         FROM funding_applications WHERE id = ? LIMIT 1`,
+        [appId],
+      );
+      if (!rows[0]) {
+        return {
+          ok: false,
+          error: "not_found",
+          message: "Funding application not found",
+        };
+      }
+      if (name === "get_funding_application") {
+        const docs = await listFundingDocsUploaded(appId);
+        return {
+          ok: true,
+          data: {
+            application: rows[0],
+            docs_uploaded: docs,
+            href: `/admin/funding?id=${appId}`,
+          },
+        };
+      }
+
+      if (name === "convert_funding_application") {
+        if (String(rows[0].status) === "converted") {
+          return {
+            ok: false,
+            error: "conflict",
+            message: "Application already converted",
+          };
+        }
+        const preview = {
+          funding_application_id: appId,
+          from_status: rows[0].status,
+          to_status: "converted",
+          client: `${rows[0].first_name} ${rows[0].last_name}`.trim(),
+          email: rows[0].email,
+          existing_client_id: rows[0].client_id
+            ? Number(rows[0].client_id)
+            : null,
+          will_set_client_status: "prospect",
+        };
+        if (!adminAiWriteConfirmed(args).ok) {
+          return {
+            ok: true,
+            data: {
+              dry_run: true,
+              ready: true,
+              preview,
+              required_confirm_phrase: ADMIN_AI_WRITE_CONFIRM_PHRASE,
+              guidance: `Show convert preview (funding → CR prospect). After approval, re-call with confirm=true and confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`,
+            },
+          };
+        }
+        let clientId = rows[0].client_id ? Number(rows[0].client_id) : null;
+        if (!clientId) {
+          clientId = await ensureFundingClientId({
+            email: String(rows[0].email),
+            firstName: String(rows[0].first_name),
+            lastName: String(rows[0].last_name),
+            phone: rows[0].phone ? String(rows[0].phone) : null,
+            preferredLanguage:
+              rows[0].preferred_language === "es" ? "es" : "en",
+            postalCode: rows[0].postal_code
+              ? String(rows[0].postal_code)
+              : null,
+            state: rows[0].state ? String(rows[0].state) : null,
+          });
+        }
+        await pool.query<ResultSetHeader>(
+          `UPDATE clients SET status = 'prospect', pipeline_stage = 'prospect'
+           WHERE id = ?`,
+          [clientId],
+        );
+        await attachLabelsBySlug(clientId, ["funding_convert"]).catch(() => {});
+        await pool.query<ResultSetHeader>(
+          `UPDATE funding_applications SET
+             status = 'converted',
+             client_id = ?,
+             converted_prospect_client_id = ?,
+             converted_at = NOW(),
+             converted_by_admin_id = ?
+           WHERE id = ?`,
+          [clientId, clientId, ctx.adminId || null, appId],
+        );
+        const [updated] = await pool.query<RowDataPacket[]>(
+          `SELECT id, funding_type, status, first_name, last_name, email, client_id,
+                  converted_at FROM funding_applications WHERE id = ?`,
+          [appId],
+        );
+        return {
+          ok: true,
+          data: {
+            application: updated[0],
+            client_id: clientId,
+            href: `/admin/pipeline?client=${clientId}`,
+            funding_href: `/admin/funding?id=${appId}`,
+          },
+        };
+      }
+
+      if (name === "upload_funding_document") {
+        const docTypeRaw = String(args.doc_type || "").trim();
+        const docType = (FUNDING_DOC_SLOTS as readonly string[]).includes(
+          docTypeRaw,
+        )
+          ? (docTypeRaw as FundingDocSlot)
+          : null;
+        const fileName = String(args.file_name || "")
+          .trim()
+          .replace(/[/\\]/g, "_")
+          .slice(0, 255);
+        const mimeType = adminAiDocMimeFromFilename(
+          fileName,
+          typeof args.mime_type === "string" ? args.mime_type : null,
+        );
+        const fileBase64Raw =
+          typeof args.file_base64 === "string" ? args.file_base64 : "";
+        const fileBuffer = fileBase64Raw
+          ? adminAiDecodeFileBase64(fileBase64Raw)
+          : null;
+
+        if (isFundingApplicationLocked(String(rows[0].status))) {
+          return {
+            ok: false,
+            error: "conflict",
+            message: `Application is locked (status=${rows[0].status})`,
+          };
+        }
+
+        const validationErrors: string[] = [];
+        if (!docType) {
+          validationErrors.push(
+            `doc_type must be one of ${FUNDING_DOC_SLOTS.join(", ")}`,
+          );
+        }
+        if (!fileName) validationErrors.push("file_name is required");
+        if (!mimeType) {
+          validationErrors.push(
+            "Unsupported file type. Use JPEG, PNG, HEIC, or PDF.",
+          );
+        }
+        if (fileBase64Raw && !fileBuffer) {
+          validationErrors.push("file_base64 is not valid base64");
+        }
+        if (fileBuffer && fileBuffer.length > ADMIN_AI_DOC_MAX_BYTES) {
+          validationErrors.push(
+            `File exceeds ${ADMIN_AI_DOC_MAX_BYTES} bytes (~3MB)`,
+          );
+        }
+
+        const preview = {
+          funding_application_id: appId,
+          client: `${rows[0].first_name} ${rows[0].last_name}`.trim(),
+          doc_type: docType,
+          file_name: fileName || null,
+          mime_type: mimeType,
+          file_bytes: fileBuffer ? fileBuffer.length : null,
+          has_file_base64: !!fileBase64Raw,
+          validation_errors: validationErrors,
+        };
+        const uploadReady =
+          validationErrors.length === 0 &&
+          !!docType &&
+          !!fileBuffer &&
+          !!mimeType;
+        if (!uploadReady || !adminAiWriteConfirmed(args).ok) {
+          return {
+            ok: true,
+            data: {
+              dry_run: true,
+              ready: uploadReady,
+              preview,
+              missing_fields: !fileBase64Raw
+                ? ["file_base64"]
+                : validationErrors.length
+                  ? validationErrors
+                  : undefined,
+              required_confirm_phrase: ADMIN_AI_WRITE_CONFIRM_PHRASE,
+              guidance: uploadReady
+                ? `Show doc_type and filename. After approval, re-call with confirm=true and confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`
+                : "Fix validation / provide file_base64, then confirm.",
+            },
+          };
+        }
+
+        if (!docType || !fileBuffer || !mimeType) {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message: "Upload validation failed",
+          };
+        }
+
+        let clientId = rows[0].client_id ? Number(rows[0].client_id) : null;
+        if (!clientId) {
+          clientId = await ensureFundingClientId({
+            email: String(rows[0].email),
+            firstName: String(rows[0].first_name),
+            lastName: String(rows[0].last_name),
+            phone: rows[0].phone ? String(rows[0].phone) : null,
+            preferredLanguage:
+              rows[0].preferred_language === "es" ? "es" : "en",
+            postalCode: rows[0].postal_code
+              ? String(rows[0].postal_code)
+              : null,
+            state: rows[0].state ? String(rows[0].state) : null,
+          });
+          await pool.query<ResultSetHeader>(
+            `UPDATE funding_applications SET client_id = ? WHERE id = ?`,
+            [clientId, appId],
+          );
+        }
+
+        const multerLike = {
+          buffer: fileBuffer,
+          originalname: fileName,
+          mimetype: mimeType,
+          size: fileBuffer.length,
+        } as Express.Multer.File;
+
+        const docId = await persistFundingDocument({
+          clientId,
+          fundingApplicationId: appId,
+          docType,
+          file: multerLike,
+        });
+        const docs = await listFundingDocsUploaded(appId);
+        const allComplete = FUNDING_DOC_SLOTS.every((s) => docs.includes(s));
+        const clientName =
+          `${rows[0].first_name || ""} ${rows[0].last_name || ""}`.trim();
+        await notifyFundingDocUpload({
+          applicationId: appId,
+          clientId,
+          clientName,
+          clientEmail: String(rows[0].email),
+          docType,
+          allDocsComplete: allComplete,
+        });
+        await maybeNotifyFundingClientDocsComplete({
+          applicationId: appId,
+          clientId,
+          email: String(rows[0].email),
+          phone: rows[0].phone ? String(rows[0].phone) : null,
+          firstName: String(rows[0].first_name || ""),
+          preferredLanguage:
+            rows[0].preferred_language === "es" ? "es" : "en",
+          docsCompleteNotifiedAt: rows[0].docs_complete_notified_at
+            ? String(rows[0].docs_complete_notified_at)
+            : null,
+        });
+        return {
+          ok: true,
+          data: {
+            document_id: docId,
+            docs_uploaded: docs,
+            all_docs_complete: allComplete,
+            href: `/admin/funding?id=${appId}`,
+          },
+        };
+      }
+
+      // update_funding_status
+      const nextStatus = String(args.status || "").trim();
+      const allowed = [
+        "draft",
+        "awaiting_docs",
+        "submitted",
+        "under_review",
+        "complete",
+        "cancelled",
+      ];
+      if (!allowed.includes(nextStatus)) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message: `status must be one of ${allowed.join(", ")}`,
+        };
+      }
+      if (String(rows[0].status) === "converted") {
+        return {
+          ok: false,
+          error: "conflict",
+          message: "Converted applications cannot change status",
+        };
+      }
+      const preview = {
+        funding_application_id: appId,
+        from_status: rows[0].status,
+        to_status: nextStatus,
+        client: `${rows[0].first_name} ${rows[0].last_name}`.trim(),
+      };
+      if (!adminAiWriteConfirmed(args).ok) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: true,
+            preview,
+            required_confirm_phrase: ADMIN_AI_WRITE_CONFIRM_PHRASE,
+            guidance: `Show status change. After approval, re-call with confirm=true and confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`,
+          },
+        };
+      }
+      await pool.query(
+        `UPDATE funding_applications SET status = ? WHERE id = ? AND status <> 'converted'`,
+        [nextStatus, appId],
+      );
+      const [updated] = await pool.query<RowDataPacket[]>(
+        `SELECT id, status, first_name, last_name, email FROM funding_applications WHERE id = ?`,
+        [appId],
+      );
+      return {
+        ok: true,
+        data: { application: updated[0], href: `/admin/funding?id=${appId}` },
+      };
+    }
+
     if (name === "list_progress_reports" || name === "get_progress_report") {
-      const hasId =
-        args.case_id != null && Number(args.case_id) > 0;
+      const hasId = args.case_id != null && Number(args.case_id) > 0;
       const hasNumber =
         typeof args.case_number === "string" && !!args.case_number.trim();
       if (!hasId && !hasNumber) {
@@ -4723,13 +6641,13 @@ async function executeAdminAiTool(
     }
 
     if (name === "search_work_tasks") {
-      const q = String(args.q || "").trim().slice(0, 120);
+      const q = String(args.q || "")
+        .trim()
+        .slice(0, 120);
       const limit = adminAiClampLimit(args.limit, 10);
       const statusRaw = String(args.status || "").trim();
       const status =
-        statusRaw === "backlog" ||
-        statusRaw === "doing" ||
-        statusRaw === "done"
+        statusRaw === "backlog" || statusRaw === "doing" || statusRaw === "done"
           ? statusRaw
           : null;
       if (!q && !status) {
@@ -4853,6 +6771,46 @@ async function executeAdminAiTool(
         return { ok: false, error: "not_found", message: "Client not found" };
       }
       const r = rows[0];
+      const partnerLinks = await listClientReferrerLinks(Number(r.id));
+      let referrersPayload = partnerLinks
+        .map(mapClientReferrerLinkRow)
+        .map((link) => ({
+          id: link.referrer_id,
+          role: link.role,
+          sort_order: link.sort_order,
+          notify_on_round: link.notify_on_round,
+          name: link.referrer
+            ? `${link.referrer.first_name || ""} ${link.referrer.last_name || ""}`.trim()
+            : "",
+          email: link.referrer?.email ?? null,
+          phone: link.referrer?.phone ?? null,
+          company: link.referrer?.company ?? null,
+          category: link.referrer?.category ?? null,
+          status: link.referrer?.status ?? null,
+          preferred_language: link.referrer?.preferred_language ?? null,
+          has_email: !!(
+            link.referrer?.email && String(link.referrer.email).trim()
+          ),
+        }));
+      // Legacy clients may only have clients.referrer_id until backfilled/synced
+      if (!referrersPayload.length && r.referrer_id) {
+        referrersPayload = [
+          {
+            id: Number(r.referrer_id),
+            role: "primary",
+            sort_order: 0,
+            notify_on_round: true,
+            name: `${r.ref_first || ""} ${r.ref_last || ""}`.trim(),
+            email: r.ref_email || null,
+            phone: r.ref_phone || null,
+            company: r.ref_company || null,
+            category: null,
+            status: r.ref_status || null,
+            preferred_language: r.ref_lang || null,
+            has_email: !!(r.ref_email && String(r.ref_email).trim()),
+          },
+        ];
+      }
       return {
         ok: true,
         data: {
@@ -4875,6 +6833,7 @@ async function executeAdminAiTool(
           contract_signed_at: r.contract_signed_at,
           notes_excerpt: r.notes_excerpt || null,
           referral_category: r.referral_category || null,
+          /** @deprecated Prefer `referrers[]` — primary partner only (legacy). */
           referrer: r.referrer_id
             ? {
                 id: Number(r.referrer_id),
@@ -4887,6 +6846,7 @@ async function executeAdminAiTool(
                 has_email: !!(r.ref_email && String(r.ref_email).trim()),
               }
             : null,
+          referrers: referrersPayload,
           case_id: r.case_id,
           case_number: r.case_number,
           case_stage: r.case_stage,
@@ -4898,6 +6858,29 @@ async function executeAdminAiTool(
             case_status: r.case_status,
           }),
           href: adminPipelineHref(Number(r.id), r.case_id),
+          funding_applications: (
+            await pool.query<RowDataPacket[]>(
+              `SELECT fa.id, fa.funding_type, fa.status, fa.first_name, fa.last_name,
+                      fa.email, fa.preferred_language, fa.created_at, fa.submitted_at,
+                      fa.converted_at
+               FROM funding_applications fa
+               WHERE fa.client_id = ?
+               ORDER BY fa.updated_at DESC, fa.id DESC
+               LIMIT 20`,
+              [r.id],
+            )
+          )[0].map((fa) => ({
+            id: Number(fa.id),
+            funding_type: fa.funding_type,
+            status: fa.status,
+            name: `${fa.first_name || ""} ${fa.last_name || ""}`.trim(),
+            email: fa.email,
+            preferred_language: fa.preferred_language,
+            created_at: fa.created_at,
+            submitted_at: fa.submitted_at || null,
+            converted_at: fa.converted_at || null,
+            href: `/admin/funding?id=${fa.id}`,
+          })),
         },
       };
     }
@@ -5040,7 +7023,9 @@ async function executeAdminAiTool(
         };
       }
       const limit = adminAiClampLimit(args.limit, 15);
-      const statusRaw = String(args.status || "").trim().toLowerCase();
+      const statusRaw = String(args.status || "")
+        .trim()
+        .toLowerCase();
       const where = ["ps.client_id = ?"];
       const params: any[] = [resolved.clientId];
       if (resolved.caseId) {
@@ -5115,7 +7100,9 @@ async function executeAdminAiTool(
 
     if (name === "list_clients_owing") {
       const limit = adminAiClampLimit(args.limit, 15);
-      const modeRaw = String(args.mode || "overdue").trim().toLowerCase();
+      const modeRaw = String(args.mode || "overdue")
+        .trim()
+        .toLowerCase();
       const mode =
         modeRaw === "pending" || modeRaw === "open" || modeRaw === "overdue"
           ? modeRaw
@@ -5291,17 +7278,28 @@ async function executeAdminAiTool(
     }
 
     if (name === "create_prospect") {
-      const firstName = String(args.first_name || "").trim().slice(0, 100);
-      const lastName = String(args.last_name || "").trim().slice(0, 100);
+      const firstName = String(args.first_name || "")
+        .trim()
+        .slice(0, 100);
+      const lastName = String(args.last_name || "")
+        .trim()
+        .slice(0, 100);
       // clients.phone / referrers.phone are VARCHAR(20)
-      const phoneRaw = String(args.phone || "").trim().slice(0, 20);
-      const emailRaw = String(args.email || "").trim().toLowerCase().slice(0, 255);
+      const phoneRaw = String(args.phone || "")
+        .trim()
+        .slice(0, 20);
+      const emailRaw = String(args.email || "")
+        .trim()
+        .toLowerCase()
+        .slice(0, 255);
       const langExplicit =
         args.preferred_language === "es" || args.preferred_language === "en"
           ? (args.preferred_language as "en" | "es")
           : null;
       const lang = langExplicit || "en";
-      const notes = String(args.notes || "").trim().slice(0, 2000);
+      const notes = String(args.notes || "")
+        .trim()
+        .slice(0, 2000);
       const refCatRaw = String(args.referral_category || "").trim();
       const allowedRef = ["realtor_broker", "one_off", "affiliate_partner"];
       const refCategory = allowedRef.includes(refCatRaw) ? refCatRaw : null;
@@ -5309,9 +7307,15 @@ async function executeAdminAiTool(
         args.referrer_id != null && Number(args.referrer_id) > 0
           ? Number(args.referrer_id)
           : null;
-      const refFirst = String(args.referrer_first_name || "").trim().slice(0, 100);
-      const refLast = String(args.referrer_last_name || "").trim().slice(0, 100);
-      const refPhone = String(args.referrer_phone || "").trim().slice(0, 20);
+      const refFirst = String(args.referrer_first_name || "")
+        .trim()
+        .slice(0, 100);
+      const refLast = String(args.referrer_last_name || "")
+        .trim()
+        .slice(0, 100);
+      const refPhone = String(args.referrer_phone || "")
+        .trim()
+        .slice(0, 20);
       const refEmailRaw = String(args.referrer_email || "")
         .trim()
         .toLowerCase()
@@ -5324,7 +7328,11 @@ async function executeAdminAiTool(
       if (!langExplicit) {
         missing.push("preferred_language (en or es)");
       }
-      if (refCategory === "realtor_broker" && !refIdArg && (!refFirst || !refLast)) {
+      if (
+        refCategory === "realtor_broker" &&
+        !refIdArg &&
+        (!refFirst || !refLast)
+      ) {
         missing.push(
           "referrer_first_name + referrer_last_name (realtor is the partner, not the client)",
         );
@@ -5440,7 +7448,10 @@ async function executeAdminAiTool(
         };
       }
 
-      if (duplicates.length > 0 && !adminAiConfirmTrue(args.confirm_duplicate)) {
+      if (
+        duplicates.length > 0 &&
+        !adminAiConfirmTrue(args.confirm_duplicate)
+      ) {
         return {
           ok: false,
           error: "duplicate_phone",
@@ -5493,7 +7504,14 @@ async function executeAdminAiTool(
             `INSERT INTO referrers
                (category, first_name, last_name, phone, email, preferred_language, status)
              VALUES (?, ?, ?, ?, ?, ?, 'active')`,
-            [cat, refFirst, refLast, refPhone || null, refEmailRaw || null, lang],
+            [
+              cat,
+              refFirst,
+              refLast,
+              refPhone || null,
+              refEmailRaw || null,
+              lang,
+            ],
           );
           referrerId = Number(refIns.insertId);
         }
@@ -5548,8 +7566,12 @@ async function executeAdminAiTool(
     }
 
     if (name === "create_work_task") {
-      const title = String(args.title || "").trim().slice(0, 255);
-      const description = String(args.description || "").trim().slice(0, 5000);
+      const title = String(args.title || "")
+        .trim()
+        .slice(0, 255);
+      const description = String(args.description || "")
+        .trim()
+        .slice(0, 5000);
       const missing: string[] = [];
       if (!title) missing.push("title");
 
@@ -5587,7 +7609,9 @@ async function executeAdminAiTool(
       const dueRaw = args.due_at != null ? String(args.due_at).trim() : "";
       let dueAt: string | null = null;
       if (dueRaw) {
-        const d = new Date(dueRaw.length === 10 ? `${dueRaw}T12:00:00Z` : dueRaw);
+        const d = new Date(
+          dueRaw.length === 10 ? `${dueRaw}T12:00:00Z` : dueRaw,
+        );
         if (isNaN(d.getTime())) {
           return {
             ok: false,
@@ -5614,9 +7638,7 @@ async function executeAdminAiTool(
           return { ok: false, error: "not_found", message: "Case not found" };
         }
         caseId = Number(caseRow.id);
-        caseNumber = caseRow.case_number
-          ? String(caseRow.case_number)
-          : null;
+        caseNumber = caseRow.case_number ? String(caseRow.case_number) : null;
         clientId = Number(caseRow.client_id);
       } else if (args.client_id != null && Number(args.client_id) > 0) {
         clientId = Number(args.client_id);
@@ -5627,12 +7649,7 @@ async function executeAdminAiTool(
         if (!cRows[0]) {
           return { ok: false, error: "not_found", message: "Client not found" };
         }
-        if (
-          !(await assertClientInAffiliateScope(
-            clientId,
-            scope,
-          ))
-        ) {
+        if (!(await assertClientInAffiliateScope(clientId, scope))) {
           return { ok: false, error: "not_found", message: "Client not found" };
         }
         const [cr] = await pool.query<RowDataPacket[]>(
@@ -5643,9 +7660,7 @@ async function executeAdminAiTool(
         );
         if (cr[0]) {
           caseId = Number(cr[0].id);
-          caseNumber = cr[0].case_number
-            ? String(cr[0].case_number)
-            : null;
+          caseNumber = cr[0].case_number ? String(cr[0].case_number) : null;
         }
       }
 
@@ -5862,7 +7877,9 @@ async function executeAdminAiTool(
     }
 
     if (name === "add_case_note") {
-      const note = String(args.note || "").trim().slice(0, 4000);
+      const note = String(args.note || "")
+        .trim()
+        .slice(0, 4000);
       const sourceRaw = String(args.source || "other").toLowerCase();
       const source = ["sms", "call", "email", "other"].includes(sourceRaw)
         ? sourceRaw
@@ -5975,7 +7992,9 @@ async function executeAdminAiTool(
 
     if (name === "upload_case_document") {
       const docTypeRaw = String(args.doc_type || "").trim();
-      const docType = CASE_DOC_TYPES.includes(docTypeRaw as (typeof CASE_DOC_TYPES)[number])
+      const docType = CASE_DOC_TYPES.includes(
+        docTypeRaw as (typeof CASE_DOC_TYPES)[number],
+      )
         ? docTypeRaw
         : "";
       const fileName = String(args.file_name || "")
@@ -6023,7 +8042,10 @@ async function executeAdminAiTool(
         caseNumber = resolved.caseNumber;
 
         if (!caseId) {
-          const primaryCaseId = await resolvePrimaryActiveCaseId(pool, clientId);
+          const primaryCaseId = await resolvePrimaryActiveCaseId(
+            pool,
+            clientId,
+          );
           if (primaryCaseId) {
             const [cr] = await pool.query<RowDataPacket[]>(
               `SELECT id, case_number, pipeline_stage FROM credit_repair_cases
@@ -6032,9 +8054,7 @@ async function executeAdminAiTool(
             );
             if (cr[0]) {
               caseId = Number(cr[0].id);
-              caseNumber = cr[0].case_number
-                ? String(cr[0].case_number)
-                : null;
+              caseNumber = cr[0].case_number ? String(cr[0].case_number) : null;
               pipelineRound = (cr[0].pipeline_stage as string) || null;
             }
           }
@@ -6200,8 +8220,12 @@ async function executeAdminAiTool(
     }
 
     if (name === "send_email") {
-      const subject = String(args.subject || "").trim().slice(0, 200);
-      const body = String(args.body || "").trim().slice(0, 8000);
+      const subject = String(args.subject || "")
+        .trim()
+        .slice(0, 200);
+      const body = String(args.body || "")
+        .trim()
+        .slice(0, 8000);
       const referrerIdArg =
         args.referrer_id != null && Number(args.referrer_id) > 0
           ? Number(args.referrer_id)
@@ -6333,9 +8357,7 @@ async function executeAdminAiTool(
           );
           if (cr[0]) {
             caseId = Number(cr[0].id);
-            caseNumber = cr[0].case_number
-              ? String(cr[0].case_number)
-              : null;
+            caseNumber = cr[0].case_number ? String(cr[0].case_number) : null;
           }
         }
         if (audience === "client") {
@@ -6479,10 +8501,7 @@ async function executeAdminAiTool(
         );
       }
 
-      const ts = new Date()
-        .toISOString()
-        .slice(0, 16)
-        .replace("T", " ");
+      const ts = new Date().toISOString().slice(0, 16).replace("T", " ");
       const noteParts = [`Subject: ${subject}`, body.slice(0, 1500)];
       if (portalUrl) noteParts.push(`Doc upload link: ${portalUrl}`);
       let clientNoteAppended = false;
@@ -6832,9 +8851,7 @@ async function executeAdminAiTool(
             );
             if (cr[0]) {
               caseId = Number(cr[0].id);
-              caseNumber = cr[0].case_number
-                ? String(cr[0].case_number)
-                : null;
+              caseNumber = cr[0].case_number ? String(cr[0].case_number) : null;
             }
           }
           if (audience === "client") {
@@ -6953,7 +8970,10 @@ async function executeAdminAiTool(
           }
         } catch (e: any) {
           const msg = String(e?.message || e);
-          if (msg === "conversation_closed" || e?.code === "conversation_closed") {
+          if (
+            msg === "conversation_closed" ||
+            e?.code === "conversation_closed"
+          ) {
             return {
               ok: false,
               error: "conversation_closed",
@@ -7085,9 +9105,13 @@ async function executeAdminAiTool(
         "completed",
         "cancelled",
       ];
-      const notes = String(args.notes || "").trim().slice(0, 2000) || null;
+      const notes =
+        String(args.notes || "")
+          .trim()
+          .slice(0, 2000) || null;
       const missing: string[] = [];
-      if (!allowed.includes(stage)) missing.push("stage (valid pipeline stage)");
+      if (!allowed.includes(stage))
+        missing.push("stage (valid pipeline stage)");
       if (
         !(args.client_id != null && Number(args.client_id) > 0) &&
         !(args.case_id != null && Number(args.case_id) > 0) &&
@@ -7159,10 +9183,7 @@ async function executeAdminAiTool(
         };
       }
 
-      if (
-        fromStage === "prospect" ||
-        clientStatus === "prospect"
-      ) {
+      if (fromStage === "prospect" || clientStatus === "prospect") {
         if (stage !== "cancelled") {
           return {
             ok: false,
@@ -7287,7 +9308,10 @@ async function executeAdminAiTool(
         args.package_id != null && Number(args.package_id) > 0
           ? Number(args.package_id)
           : null;
-      const notes = String(args.notes || "").trim().slice(0, 2000) || null;
+      const notes =
+        String(args.notes || "")
+          .trim()
+          .slice(0, 2000) || null;
       if (!clientId) {
         return {
           ok: true,
@@ -7483,7 +9507,10 @@ async function executeAdminAiTool(
         "paused",
         "cancelled",
       ];
-      const notes = String(args.notes || "").trim().slice(0, 2000) || null;
+      const notes =
+        String(args.notes || "")
+          .trim()
+          .slice(0, 2000) || null;
       const missing: string[] = [];
       if (!allowed.includes(status)) missing.push("status");
       if (
@@ -7609,7 +9636,9 @@ async function executeAdminAiTool(
 
     if (name === "upsert_progress_report") {
       const round = Number(args.round);
-      const summary = String(args.summary_md || "").trim().slice(0, 20000);
+      const summary = String(args.summary_md || "")
+        .trim()
+        .slice(0, 20000);
       const missing: string[] = [];
       if (!Number.isFinite(round) || round < 1 || round > 5) {
         missing.push("round (1–5)");
@@ -7644,9 +9673,7 @@ async function executeAdminAiTool(
               `SELECT case_number FROM credit_repair_cases WHERE id = ? LIMIT 1`,
               [caseId],
             );
-            caseNumber = cr[0]?.case_number
-              ? String(cr[0].case_number)
-              : null;
+            caseNumber = cr[0]?.case_number ? String(cr[0].case_number) : null;
           }
         }
       }
@@ -7659,7 +9686,8 @@ async function executeAdminAiTool(
           ? Number(args.score_after)
           : null;
       const itemsRemoved =
-        args.items_removed != null && Number.isFinite(Number(args.items_removed))
+        args.items_removed != null &&
+        Number.isFinite(Number(args.items_removed))
           ? Number(args.items_removed)
           : 0;
       const itemsDisputed =
@@ -7877,9 +9905,13 @@ async function executeAdminAiTool(
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       const normalized = parsed.map((s, i) => {
-        const label = String(s.label || `Payment ${i + 1}`).trim().slice(0, 200);
+        const label = String(s.label || `Payment ${i + 1}`)
+          .trim()
+          .slice(0, 200);
         const amount = Number(s.amount_cents);
-        const due = String(s.due_date || "").trim().slice(0, 10);
+        const due = String(s.due_date || "")
+          .trim()
+          .slice(0, 10);
         let status = String(s.status || "").trim();
         const allowedSt = [
           "pending",
@@ -8052,8 +10084,7 @@ async function executeAdminAiTool(
         return { ok: false, error: "not_found", message: "Split not found" };
       }
       const cur = rows[0];
-      const statusRaw =
-        args.status != null ? String(args.status).trim() : null;
+      const statusRaw = args.status != null ? String(args.status).trim() : null;
       const allowedSt = [
         "pending",
         "processing",
@@ -8071,7 +10102,9 @@ async function executeAdminAiTool(
       const amount =
         args.amount_cents != null ? Number(args.amount_cents) : null;
       const due =
-        args.due_date != null ? String(args.due_date).trim().slice(0, 10) : null;
+        args.due_date != null
+          ? String(args.due_date).trim().slice(0, 10)
+          : null;
       const notes =
         args.notes !== undefined
           ? String(args.notes || "").slice(0, 2000)
@@ -8114,11 +10147,7 @@ async function executeAdminAiTool(
         };
       }
       // Don't leave orphan succeeded payments rows when leaving paid
-      if (
-        statusRaw &&
-        statusRaw !== "paid" &&
-        String(cur.status) === "paid"
-      ) {
+      if (statusRaw && statusRaw !== "paid" && String(cur.status) === "paid") {
         return {
           ok: false,
           error: "cannot_unpay",
@@ -8133,7 +10162,9 @@ async function executeAdminAiTool(
         params.push(statusRaw);
         if (statusRaw === "paid") {
           updates.push("paid_at = COALESCE(paid_at, NOW())");
-          updates.push("completion_source = COALESCE(completion_source, 'manual')");
+          updates.push(
+            "completion_source = COALESCE(completion_source, 'manual')",
+          );
         }
       }
       if (amount != null && Number.isFinite(amount) && amount > 0) {
@@ -8210,11 +10241,7 @@ async function executeAdminAiTool(
   }
 }
 
-type AdminAiAuditStatus =
-  | "success"
-  | "failure"
-  | "rate_limited"
-  | "disabled";
+type AdminAiAuditStatus = "success" | "failure" | "rate_limited" | "disabled";
 
 async function insertAdminAiAuditLog(opts: {
   adminId: number;
@@ -8298,11 +10325,7 @@ async function runAdminAiChatWithTools(opts: {
   const seenHref = new Set<string>();
   const startedAt = Date.now();
 
-  const pushCitation = (c: {
-    type: string;
-    href: string;
-    label?: string;
-  }) => {
+  const pushCitation = (c: { type: string; href: string; label?: string }) => {
     if (!c.href || seenHref.has(c.href)) return;
     seenHref.add(c.href);
     citations.push(c);
@@ -8421,6 +10444,16 @@ async function runAdminAiChatWithTools(opts: {
                 type: "client",
                 href: c.href,
                 label: c.case_number || c.name,
+              });
+          }
+        }
+        if (Array.isArray(d.funding_applications)) {
+          for (const f of d.funding_applications.slice(0, 5)) {
+            if (f?.href)
+              pushCitation({
+                type: "other",
+                href: f.href,
+                label: f.name || `Funding #${f.id}`,
               });
           }
         }
@@ -9069,7 +11102,13 @@ export function extractNegativeAccounts(text: string): NegativeAccount[] {
     if (seen.has(key)) continue;
     seen.add(key);
 
-    const window = [lines[i - 2], lines[i - 1], line, lines[i + 1], lines[i + 2]]
+    const window = [
+      lines[i - 2],
+      lines[i - 1],
+      line,
+      lines[i + 1],
+      lines[i + 2],
+    ]
       .filter(Boolean)
       .join(" ");
     let bureaus = detectBureausInText(window);
@@ -9108,9 +11147,7 @@ export function diffNegativeAccounts(
   before: NegativeAccount[],
   after: NegativeAccount[],
 ): { removed: NegativeAccount[]; remaining: NegativeAccount[] } {
-  const removed = before.filter(
-    (b) => !after.some((a) => accountsMatch(a, b)),
-  );
+  const removed = before.filter((b) => !after.some((a) => accountsMatch(a, b)));
   return { removed, remaining: after };
 }
 
@@ -9481,7 +11518,9 @@ async function extractFromCreditReportPdfs(
 
   const mergedRemoved = mergeRemovedWins(removed, lineRemoved);
   const matchingMethod =
-    removed.length > 0 && lineRemoved.length > 0 && mergedRemoved.length > removed.length
+    removed.length > 0 &&
+    lineRemoved.length > 0 &&
+    mergedRemoved.length > removed.length
       ? "account_fingerprint+line_diff"
       : removed.length > 0
         ? "account_fingerprint"
@@ -10469,6 +12508,269 @@ function decryptJsonSecrets(
   }
 }
 
+const CLIENT_REFERRER_ROLES = ["primary", "secondary", "tertiary"] as const;
+const MAX_CLIENT_REFERRERS = 3;
+
+type ClientReferrerRoleName = (typeof CLIENT_REFERRER_ROLES)[number];
+
+function roleForSortOrder(sortOrder: number): ClientReferrerRoleName {
+  if (sortOrder <= 0) return "primary";
+  if (sortOrder === 1) return "secondary";
+  return "tertiary";
+}
+
+async function listClientReferrerLinks(
+  clientId: number,
+): Promise<RowDataPacket[]> {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT cr.id, cr.client_id, cr.referrer_id, cr.role, cr.sort_order,
+            cr.notify_on_round, cr.created_at,
+            r.category, r.first_name, r.last_name, r.email, r.phone, r.company,
+            r.affiliate_id, r.preferred_language, r.notes, r.status
+     FROM client_referrers cr
+     INNER JOIN referrers r ON r.id = cr.referrer_id
+     WHERE cr.client_id = ?
+     ORDER BY cr.sort_order ASC, cr.id ASC`,
+    [clientId],
+  );
+  return rows;
+}
+
+function mapClientReferrerLinkRow(row: RowDataPacket) {
+  return {
+    id: Number(row.id),
+    client_id: Number(row.client_id),
+    referrer_id: Number(row.referrer_id),
+    role: String(row.role) as ClientReferrerRoleName,
+    sort_order: Number(row.sort_order),
+    notify_on_round: Number(row.notify_on_round) === 1,
+    created_at: row.created_at,
+    referrer: {
+      id: Number(row.referrer_id),
+      category: row.category,
+      first_name: row.first_name,
+      last_name: row.last_name,
+      email: row.email ?? null,
+      phone: row.phone ?? null,
+      company: row.company ?? null,
+      affiliate_id: row.affiliate_id ?? null,
+      preferred_language: row.preferred_language ?? "en",
+      notes: row.notes ?? null,
+      status: row.status,
+    },
+  };
+}
+
+/**
+ * Replace client_referrers for a client (max 3). Mirrors primary into
+ * clients.referrer_id for backward compatibility.
+ */
+async function replaceClientReferrers(
+  clientId: number,
+  links: Array<{
+    referrer_id: number;
+    notify_on_round?: boolean;
+    role?: string;
+  }>,
+  conn?: Pool | import("mysql2/promise").PoolConnection,
+): Promise<void> {
+  const db = conn || pool;
+  if (links.length > MAX_CLIENT_REFERRERS) {
+    throw Object.assign(new Error("At most 3 referral partners allowed"), {
+      status: 400,
+      code: "too_many_referrers",
+    });
+  }
+  const ids = links.map((l) => Number(l.referrer_id));
+  if (ids.some((id) => !Number.isFinite(id) || id <= 0)) {
+    throw Object.assign(new Error("Invalid referrer_id"), {
+      status: 400,
+      code: "invalid_referrer_id",
+    });
+  }
+  if (new Set(ids).size !== ids.length) {
+    throw Object.assign(new Error("Duplicate referrer_id"), {
+      status: 400,
+      code: "duplicate_referrer",
+    });
+  }
+  if (ids.length) {
+    const [found] = await db.query<RowDataPacket[]>(
+      `SELECT id FROM referrers WHERE id IN (${ids.map(() => "?").join(",")}) AND status = 'active'`,
+      ids,
+    );
+    if (found.length !== ids.length) {
+      throw Object.assign(new Error("One or more referrers not found/active"), {
+        status: 400,
+        code: "referrer_not_found",
+      });
+    }
+  }
+  await db.query(`DELETE FROM client_referrers WHERE client_id = ?`, [
+    clientId,
+  ]);
+  for (let i = 0; i < links.length; i++) {
+    const link = links[i];
+    const role = CLIENT_REFERRER_ROLES.includes(
+      link.role as ClientReferrerRoleName,
+    )
+      ? (link.role as ClientReferrerRoleName)
+      : roleForSortOrder(i);
+    await db.query(
+      `INSERT INTO client_referrers (client_id, referrer_id, role, sort_order, notify_on_round)
+       VALUES (?,?,?,?,?)`,
+      [
+        clientId,
+        link.referrer_id,
+        role,
+        i,
+        link.notify_on_round === false ? 0 : 1,
+      ],
+    );
+  }
+  const primaryId = links[0]?.referrer_id ?? null;
+  await db.query(`UPDATE clients SET referrer_id = ? WHERE id = ?`, [
+    primaryId,
+    clientId,
+  ]);
+}
+
+/** Validate partner name/phone/email when intake is marked referred. */
+function validateReferredPartnerRequirements(
+  referralCategory: string | null | undefined,
+  partners: Array<{
+    first_name?: string | null;
+    last_name?: string | null;
+    email?: string | null;
+    phone?: string | null;
+  }>,
+): string | null {
+  if (!referralCategory) return null;
+  if (!partners.length) {
+    return "At least one referral partner is required when referral category is set";
+  }
+  for (const p of partners) {
+    if (
+      !String(p.first_name || "").trim() ||
+      !String(p.last_name || "").trim()
+    ) {
+      return "Each referral partner needs first_name and last_name";
+    }
+    if (!String(p.email || "").trim() || !String(p.email || "").includes("@")) {
+      return "Each referral partner needs a valid email";
+    }
+    if (!String(p.phone || "").trim()) {
+      return "Each referral partner needs a phone number";
+    }
+  }
+  return null;
+}
+
+type CmsVaultPayload = {
+  smart_credit?: { email?: string | null; password?: string | null };
+  myfreescorenow?: { email?: string | null; password?: string | null };
+};
+
+function readClientCmsVault(row: RowDataPacket): CmsVaultPayload {
+  if (
+    !row.cms_secrets_ciphertext ||
+    !row.cms_secrets_iv ||
+    !row.cms_secrets_tag
+  ) {
+    return {};
+  }
+  try {
+    const buf = Buffer.isBuffer(row.cms_secrets_ciphertext)
+      ? row.cms_secrets_ciphertext
+      : Buffer.from(row.cms_secrets_ciphertext);
+    return decryptJsonSecrets(
+      buf,
+      String(row.cms_secrets_iv),
+      String(row.cms_secrets_tag),
+    ) as CmsVaultPayload;
+  } catch {
+    return {};
+  }
+}
+
+async function upsertClientCmsCredentials(
+  clientId: number,
+  input: CmsVaultPayload,
+): Promise<void> {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT smart_credit_email, myfreescorenow_email,
+            cms_secrets_ciphertext, cms_secrets_iv, cms_secrets_tag
+     FROM clients WHERE id = ? LIMIT 1`,
+    [clientId],
+  );
+  const row = rows[0];
+  if (!row) throw Object.assign(new Error("Client not found"), { status: 404 });
+
+  const existing = readClientCmsVault(row);
+  const next: CmsVaultPayload = {
+    smart_credit: {
+      email:
+        input.smart_credit?.email !== undefined
+          ? input.smart_credit.email
+          : (existing.smart_credit?.email ?? row.smart_credit_email ?? null),
+      password:
+        input.smart_credit?.password !== undefined
+          ? input.smart_credit.password
+          : (existing.smart_credit?.password ?? null),
+    },
+    myfreescorenow: {
+      email:
+        input.myfreescorenow?.email !== undefined
+          ? input.myfreescorenow.email
+          : (existing.myfreescorenow?.email ??
+            row.myfreescorenow_email ??
+            null),
+      password:
+        input.myfreescorenow?.password !== undefined
+          ? input.myfreescorenow.password
+          : (existing.myfreescorenow?.password ?? null),
+    },
+  };
+
+  const scEmail =
+    String(next.smart_credit?.email || "")
+      .trim()
+      .toLowerCase() || null;
+  const mfsnEmail =
+    String(next.myfreescorenow?.email || "")
+      .trim()
+      .toLowerCase() || null;
+
+  const hasAnySecret =
+    !!String(next.smart_credit?.password || "") ||
+    !!String(next.myfreescorenow?.password || "");
+
+  let ciphertext: Buffer | null = null;
+  let iv: string | null = null;
+  let tag: string | null = null;
+  if (hasAnySecret || scEmail || mfsnEmail) {
+    const enc = encryptJsonSecrets(next as Record<string, unknown>);
+    ciphertext = enc.ciphertext;
+    iv = enc.iv;
+    tag = enc.tag;
+  }
+
+  await pool.query(
+    `UPDATE clients SET
+       smart_credit_email = ?,
+       myfreescorenow_email = ?,
+       cms_secrets_ciphertext = ?,
+       cms_secrets_iv = ?,
+       cms_secrets_tag = ?,
+       smart_credit_connected_at = CASE
+         WHEN ? IS NOT NULL AND smart_credit_connected_at IS NULL THEN NOW()
+         ELSE smart_credit_connected_at
+       END
+     WHERE id = ?`,
+    [scEmail, mfsnEmail, ciphertext, iv, tag, scEmail, clientId],
+  );
+}
+
 /**
  * Upload a file buffer to the Disrupting Labs CDN and return the full public URL.
  * The URL is stored as storage_key in the DB and is never sent directly to the browser —
@@ -11048,7 +13350,8 @@ function formatDateYmd(d: Date): string {
  *  always read Y/M/D via UTC getters for Date objects.
  */
 export function mysqlDateToYmd(v: unknown): string {
-  if (typeof v === "string" && /^\d{4}-\d{2}-\d{2}/.test(v)) return v.slice(0, 10);
+  if (typeof v === "string" && /^\d{4}-\d{2}-\d{2}/.test(v))
+    return v.slice(0, 10);
   if (v instanceof Date && !Number.isNaN(v.getTime())) {
     const y = v.getUTCFullYear();
     const m = String(v.getUTCMonth() + 1).padStart(2, "0");
@@ -11093,7 +13396,10 @@ export function buildDefaultRoundScheduleDates(
   const base = new Date(
     Date.UTC(start.getFullYear(), start.getMonth(), start.getDate()),
   );
-  const days = Math.max(1, Math.min(120, Number(intervalDays) || DEFAULT_ROUND_INTERVAL_DAYS));
+  const days = Math.max(
+    1,
+    Math.min(120, Number(intervalDays) || DEFAULT_ROUND_INTERVAL_DAYS),
+  );
   const out: string[] = [];
   for (let i = 1; i <= 5; i++) {
     const d = new Date(base);
@@ -11354,7 +13660,10 @@ async function upsertCaseRoundSchedule(
         caseId,
       ],
     );
-    return { calendar_uid_ns: rows[0].calendar_uid_ns as string, is_new: false };
+    return {
+      calendar_uid_ns: rows[0].calendar_uid_ns as string,
+      is_new: false,
+    };
   }
   const uidNs = `case${caseId}-${crypto.randomBytes(6).toString("hex")}`;
   await q.query(
@@ -11387,12 +13696,10 @@ async function resolveRoundCalendarRecipients(clientId: number): Promise<
 > {
   const [rows] = await pool.query<RowDataPacket[]>(
     `SELECT c.first_name AS client_first, c.last_name AS client_last, c.email AS client_email,
-            c.preferred_language AS client_lang,
-            r.first_name AS ref_first, r.email AS ref_email, r.preferred_language AS ref_lang,
+            c.preferred_language AS client_lang, c.referrer_id,
             a.id AS admin_id, a.first_name AS admin_first, a.email AS admin_email,
             a.preferred_language AS admin_lang, a.notification_prefs_json AS admin_prefs
      FROM clients c
-     LEFT JOIN referrers r ON r.id = c.referrer_id AND r.status = 'active'
      LEFT JOIN admins a ON a.id = c.assigned_admin_id AND a.status = 'active'
      WHERE c.id = ? LIMIT 1`,
     [clientId],
@@ -11428,7 +13735,35 @@ async function resolveRoundCalendarRecipients(clientId: number): Promise<
     });
   };
   push(row.client_email, row.client_first, "client", row.client_lang);
-  push(row.ref_email, row.ref_first, "referrer", row.ref_lang || row.client_lang);
+
+  const [refRows] = await pool.query<RowDataPacket[]>(
+    `SELECT r.first_name AS ref_first, r.email AS ref_email, r.preferred_language AS ref_lang
+     FROM client_referrers cr
+     INNER JOIN referrers r ON r.id = cr.referrer_id AND r.status = 'active'
+     WHERE cr.client_id = ? AND cr.notify_on_round = 1
+     ORDER BY cr.sort_order ASC`,
+    [clientId],
+  );
+  if (refRows.length) {
+    for (const r of refRows) {
+      push(r.ref_email, r.ref_first, "referrer", r.ref_lang || row.client_lang);
+    }
+  } else if (row.referrer_id) {
+    const [legacy] = await pool.query<RowDataPacket[]>(
+      `SELECT first_name AS ref_first, email AS ref_email, preferred_language AS ref_lang
+       FROM referrers WHERE id = ? AND status = 'active' LIMIT 1`,
+      [row.referrer_id],
+    );
+    if (legacy[0]) {
+      push(
+        legacy[0].ref_email,
+        legacy[0].ref_first,
+        "referrer",
+        legacy[0].ref_lang || row.client_lang,
+      );
+    }
+  }
+
   if (row.admin_id) {
     const prefs = parseAdminNotificationPrefs(row.admin_prefs);
     if (adminNotifyPrefOn(prefs, "email", "round_calendar")) {
@@ -11480,7 +13815,9 @@ async function sendCaseRoundCalendarInvites(opts: {
       [opts.clientId],
     );
     if (aRows[0]) {
-      const prefs = parseAdminNotificationPrefs(aRows[0].notification_prefs_json);
+      const prefs = parseAdminNotificationPrefs(
+        aRows[0].notification_prefs_json,
+      );
       if (adminNotifyPrefOn(prefs, "in_app", "round_calendar")) {
         await insertAdminInAppNotification({
           adminId: Number(aRows[0].id),
@@ -11568,10 +13905,7 @@ async function persistAndMaybeSendRoundSchedule(opts: {
   const sendCalendar = !!raw.send_calendar;
   const intervalDays = Math.max(
     1,
-    Math.min(
-      120,
-      Number(raw.interval_days) || DEFAULT_ROUND_INTERVAL_DAYS,
-    ),
+    Math.min(120, Number(raw.interval_days) || DEFAULT_ROUND_INTERVAL_DAYS),
   );
   let datesInput = raw;
   const hasAnyDate =
@@ -12124,6 +14458,78 @@ async function loadWizardSession(
   return rows[0] ?? null;
 }
 
+async function runClaudeProgressReportQa(opts: {
+  profile: RowDataPacket;
+  afterPdfText: string;
+  targets: OfGReportData["targets"];
+  wins: OfGReportData["wins"];
+}): Promise<ProgressReportAlert[]> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return [];
+  const model = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
+  const system = `You are a credit-repair QA assistant for Optimum Financial Group.
+Return ONLY a JSON array of alerts (max 10). Each alert:
+{"type":"personal_info_mismatch"|"closed_still_reporting"|"hard_inquiry_open","severity":"warning"|"critical","title":"...","detail":"..."}
+Only flag clear issues: profile vs report PII mismatches, closed/paid accounts still reporting, hard inquiries still open.
+If none, return [].`;
+  const user = JSON.stringify({
+    profile: {
+      first_name: opts.profile.first_name,
+      last_name: opts.profile.last_name,
+      phone: opts.profile.phone,
+      address_line1: opts.profile.address_line1,
+      city: opts.profile.city,
+      state: opts.profile.state,
+      zip: opts.profile.zip,
+    },
+    wins: opts.wins,
+    targets: opts.targets,
+    after_pdf_excerpt: opts.afterPdfText,
+  });
+  const resp = await axios.post(
+    "https://api.anthropic.com/v1/messages",
+    {
+      model,
+      max_tokens: 1200,
+      temperature: 0,
+      system,
+      messages: [{ role: "user", content: user }],
+    },
+    {
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      timeout: 25_000,
+    },
+  );
+  const text = String(resp.data?.content?.[0]?.text || "").trim();
+  const jsonMatch = text.match(/\[[\s\S]*\]/);
+  if (!jsonMatch) return [];
+  const parsed = JSON.parse(jsonMatch[0]) as ProgressReportAlert[];
+  if (!Array.isArray(parsed)) return [];
+  const allowed = new Set([
+    "personal_info_mismatch",
+    "closed_still_reporting",
+    "hard_inquiry_open",
+  ]);
+  return parsed
+    .filter(
+      (a) =>
+        a &&
+        allowed.has(String(a.type)) &&
+        typeof a.title === "string" &&
+        typeof a.detail === "string",
+    )
+    .map((a) => ({
+      type: a.type,
+      severity: a.severity === "critical" ? "critical" : "warning",
+      title: String(a.title).slice(0, 120),
+      detail: String(a.detail).slice(0, 400),
+    }));
+}
+
 async function loadWizardSourcePdfBuffer(
   pool: Pool,
   pdfId: number,
@@ -12151,10 +14557,90 @@ function parseWizardJsonField<T>(val: unknown): T | null {
   }
 }
 
+async function runClaudeOfgReportNarrative(opts: {
+  data: OfGReportData;
+  afterPdfText?: string;
+}): Promise<{ data: OfGReportData; enhanced: boolean; error?: string }> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return {
+      data: opts.data,
+      enhanced: false,
+      error: "ANTHROPIC_API_KEY not set",
+    };
+  }
+  const model = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
+  const payload = {
+    locale: opts.data.locale || "en",
+    client: opts.data.client,
+    reportDate: opts.data.reportDate,
+    bureauScores: opts.data.bureauScores,
+    middleScore: opts.data.middleScore,
+    wins: opts.data.wins,
+    targets: opts.data.targets,
+    utilization: opts.data.utilization,
+    positiveAccounts: opts.data.positiveAccounts,
+    actionNeeded: opts.data.actionNeeded,
+    roadmap: opts.data.roadmap,
+    actionPlan: opts.data.actionPlan,
+    fileStrengthScore: opts.data.fileStrengthScore,
+    fundingReadinessNote: opts.data.fundingReadinessNote ?? null,
+    tradelineRecommendation: opts.data.tradelineRecommendation ?? null,
+    after_pdf_excerpt: (opts.afterPdfText || "").slice(0, 10000),
+  };
+  try {
+    const resp = await axios.post(
+      "https://api.anthropic.com/v1/messages",
+      {
+        model,
+        max_tokens: 2500,
+        temperature: 0.2,
+        system: OFG_CLAUDE_NARRATIVE_SYSTEM,
+        messages: [
+          {
+            role: "user",
+            content:
+              "Enhance this OFG progress report narrative. Keep all facts grounded in the JSON.\n\n" +
+              JSON.stringify(payload),
+          },
+        ],
+      },
+      {
+        headers: {
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json",
+        },
+        timeout: 45_000,
+      },
+    );
+    const text = String(resp.data?.content?.[0]?.text || "");
+    const draft = parseClaudeNarrativeJson(text);
+    if (!draft) {
+      return {
+        data: opts.data,
+        enhanced: false,
+        error: "Claude returned no parseable narrative JSON",
+      };
+    }
+    return {
+      data: mergeClaudeNarrativeEnhancement(opts.data, draft),
+      enhanced: true,
+    };
+  } catch (e: any) {
+    return {
+      data: opts.data,
+      enhanced: false,
+      error: String(e?.message || e).slice(0, 200),
+    };
+  }
+}
+
 async function runWizardSessionExtraction(
   pool: Pool,
   session: RowDataPacket,
   decrypt: (encrypted: Buffer, ivHex: string, tagHex: string) => Buffer,
+  opts?: { enhanceWithClaude?: boolean },
 ): Promise<{ data: OfGReportData; meta: Record<string, unknown> }> {
   const beforePdfId = session.before_pdf_id as number | null;
   const afterPdfId = session.after_pdf_id as number | null;
@@ -12187,6 +14673,28 @@ async function runWizardSessionExtraction(
   meta.before_reused_from_session_id =
     session.before_reused_from_session_id ?? null;
 
+  // Default on when key is set; pass enhanceWithClaude=false to skip
+  const wantEnhance = opts?.enhanceWithClaude !== false;
+  if (wantEnhance && process.env.ANTHROPIC_API_KEY) {
+    let afterText = "";
+    try {
+      const pdfParse = await loadPdfParse();
+      const parsed = await pdfParse(afterBuf);
+      afterText = String(parsed?.text || "");
+    } catch {
+      /* optional context */
+    }
+    const narrative = await runClaudeOfgReportNarrative({
+      data,
+      afterPdfText: afterText,
+    });
+    meta.claude_narrative = narrative.enhanced;
+    meta.claude_narrative_error = narrative.error ?? null;
+    meta.claude_narrative_at = new Date().toISOString();
+    return { data: narrative.data, meta };
+  }
+
+  meta.claude_narrative = false;
   return { data, meta };
 }
 
@@ -12655,6 +15163,8 @@ const ADMIN_NOTIFY_EVENT_KEYS: AdminNotifyEventKey[] = [
   "voicemail",
   "funding_doc_upload",
   "funding_application_created",
+  "progress_report_alerts",
+  "morning_digest",
 ];
 
 function allAdminNotifyEventsOn(): AdminNotifyEventToggles {
@@ -12673,14 +15183,18 @@ function allAdminNotifyEventsOn(): AdminNotifyEventToggles {
     voicemail: true,
     funding_doc_upload: true,
     funding_application_created: true,
+    progress_report_alerts: true,
+    morning_digest: true,
   };
 }
 
 function defaultAdminNotificationPrefs(): AdminNotificationPrefs {
+  const all = allAdminNotifyEventsOn();
   return {
-    email: allAdminNotifyEventsOn(),
-    in_app: allAdminNotifyEventsOn(),
-    sms: allAdminNotifyEventsOn(),
+    email: { ...all },
+    in_app: { ...all },
+    // Morning digest is email/in-app — SMS body would be too long
+    sms: { ...all, morning_digest: false },
   };
 }
 
@@ -12741,9 +15255,7 @@ async function adminSmsChannelAvailable(adminId: number): Promise<boolean> {
   return phones.length > 0;
 }
 
-async function resolveAssignedSmsFrom(
-  adminId: number,
-): Promise<string | null> {
+async function resolveAssignedSmsFrom(adminId: number): Promise<string | null> {
   const phones = await listAssignedPhoneNumbers(adminId);
   return phones[0] ? String(phones[0].e164) : null;
 }
@@ -12798,7 +15310,10 @@ async function appendClientFileSmsNote(
 async function adminNotifyChannelMetaForAdmin(
   adminId: number,
 ): Promise<
-  Record<AdminNotifyChannel, { available: boolean; disabled_reason?: string | null }>
+  Record<
+    AdminNotifyChannel,
+    { available: boolean; disabled_reason?: string | null }
+  >
 > {
   const twilioOk = isTwilioConfigured();
   const hasNumber = twilioOk
@@ -12947,9 +15462,10 @@ async function notifyAdminInboundSms(opts: {
     }
   }
 
-  const adminEmail = String(aRows[0].email || "").trim().toLowerCase();
-  const adminLang =
-    aRows[0].preferred_language === "es" ? "es" : "en";
+  const adminEmail = String(aRows[0].email || "")
+    .trim()
+    .toLowerCase();
+  const adminLang = aRows[0].preferred_language === "es" ? "es" : "en";
   const emailTpl = tplAdminInboundSmsAlert({
     adminFirstName: String(aRows[0].first_name || "Team"),
     fromLabel: opts.fromLabel,
@@ -13016,9 +15532,7 @@ function tplAdminInboundSmsAlert(opts: {
        </p>
        ${emailButton(opts.linkUrl, "Open conversations")}`;
   return {
-    subject: isEs
-      ? `SMS de ${opts.fromLabel}`
-      : `SMS from ${opts.fromLabel}`,
+    subject: isEs ? `SMS de ${opts.fromLabel}` : `SMS from ${opts.fromLabel}`,
     html: emailLayout({
       title: headline,
       preheader: opts.preview.slice(0, 80),
@@ -13096,7 +15610,9 @@ async function listActiveNotifyExtraEmails(): Promise<
       events: AdminNotifyEventKey[] | null;
     }[] = [];
     for (const r of rows) {
-      const email = String(r.email || "").trim().toLowerCase();
+      const email = String(r.email || "")
+        .trim()
+        .toLowerCase();
       if (!email || !isValidEmail(email)) continue;
       out.push({
         id: Number(r.id),
@@ -13139,10 +15655,7 @@ async function emailAdminNotifyExtraRecipients(opts: {
         sent += 1;
         skip.add(row.email);
       } catch (e: any) {
-        console.error(
-          `[notify:extra_email] ${row.email}:`,
-          e?.message ?? e,
-        );
+        console.error(`[notify:extra_email] ${row.email}:`, e?.message ?? e);
       }
     }),
   );
@@ -13175,6 +15688,311 @@ async function listActiveTeamAdmins(): Promise<TeamAdminRecipient[]> {
     preferred_language: (r.preferred_language as string) || "en",
     prefs: parseAdminNotificationPrefs(r.notification_prefs_json),
   }));
+}
+
+async function gatherMorningDigestSnapshot(
+  admin: TeamAdminRecipient,
+): Promise<MorningDigestSnapshot> {
+  const adminId = admin.id;
+  const lang: MorningDigestLang =
+    admin.preferred_language === "es" ? "es" : "en";
+  const dateLabel = new Intl.DateTimeFormat(lang === "es" ? "es-US" : "en-US", {
+    timeZone: "America/Denver",
+    weekday: "long",
+    month: "short",
+    day: "numeric",
+  }).format(new Date());
+
+  const [stageRows] = await pool.query<RowDataPacket[]>(
+    `SELECT pipeline_stage AS stage, COUNT(*) AS cnt
+     FROM clients
+     WHERE assigned_admin_id = ?
+       AND status <> 'cancelled'
+     GROUP BY pipeline_stage
+     ORDER BY cnt DESC`,
+    [adminId],
+  );
+
+  const [statusRows] = await pool.query<RowDataPacket[]>(
+    `SELECT
+       SUM(status = 'prospect') AS prospects,
+       SUM(status = 'active') AS active_clients,
+       SUM(status = 'onboarding') AS onboarding,
+       SUM(status = 'pending_payment') AS pending_payment
+     FROM clients
+     WHERE assigned_admin_id = ?
+       AND status <> 'cancelled'`,
+    [adminId],
+  );
+
+  const [prospectRows] = await pool.query<RowDataPacket[]>(
+    `SELECT id, first_name, last_name, phone, pipeline_stage
+     FROM clients
+     WHERE assigned_admin_id = ?
+       AND status = 'prospect'
+     ORDER BY updated_at DESC
+     LIMIT 8`,
+    [adminId],
+  );
+
+  const [clientRows] = await pool.query<RowDataPacket[]>(
+    `SELECT id, first_name, last_name, status, pipeline_stage
+     FROM clients
+     WHERE assigned_admin_id = ?
+       AND status IN ('active', 'onboarding', 'pending_payment', 'funding')
+     ORDER BY updated_at DESC
+     LIMIT 12`,
+    [adminId],
+  );
+
+  const [taskRows] = await pool.query<RowDataPacket[]>(
+    `SELECT id, title, status, priority, due_at
+     FROM admin_work_tasks
+     WHERE assignee_admin_id = ?
+       AND status <> 'done'
+     ORDER BY
+       CASE WHEN due_at IS NOT NULL AND due_at < NOW() THEN 0 ELSE 1 END,
+       due_at IS NULL, due_at ASC
+     LIMIT 15`,
+    [adminId],
+  );
+
+  const [convRows] = await pool.query<RowDataPacket[]>(
+    `SELECT cv.id, cv.client_id, cv.unread_count, cv.last_message_preview,
+            cv.last_message_at, cv.status,
+            c.first_name, c.last_name
+     FROM conversations cv
+     LEFT JOIN clients c ON c.id = cv.client_id
+     WHERE cv.assigned_admin_id = ?
+       AND cv.status IN ('open', 'snoozed')
+     ORDER BY cv.unread_count DESC, cv.last_message_at DESC
+     LIMIT 10`,
+    [adminId],
+  );
+
+  const tasks = taskRows.map((t) => {
+    const due = t.due_at ? new Date(t.due_at as string) : null;
+    const overdue = !!(due && due.getTime() < Date.now());
+    return {
+      id: Number(t.id),
+      title: String(t.title || "Task"),
+      status: String(t.status || ""),
+      priority: t.priority != null ? String(t.priority) : null,
+      due_at: t.due_at ? String(t.due_at) : null,
+      overdue,
+    };
+  });
+
+  const conversations = convRows.map((cv) => ({
+    id: Number(cv.id),
+    client_id: cv.client_id != null ? Number(cv.client_id) : null,
+    who:
+      `${cv.first_name || ""} ${cv.last_name || ""}`.trim() ||
+      (lang === "es" ? "Contacto" : "Contact"),
+    unread: Number(cv.unread_count || 0),
+    preview: cv.last_message_preview
+      ? String(cv.last_message_preview).slice(0, 140)
+      : null,
+    status: String(cv.status || ""),
+  }));
+
+  const st = (statusRows[0] || {}) as {
+    prospects?: number | string | null;
+    active_clients?: number | string | null;
+    onboarding?: number | string | null;
+    pending_payment?: number | string | null;
+  };
+  return {
+    admin: {
+      id: adminId,
+      first_name: admin.first_name,
+      preferred_language: lang,
+    },
+    date_label: dateLabel,
+    counts: {
+      prospects: Number(st.prospects || 0),
+      active_clients: Number(st.active_clients || 0),
+      onboarding: Number(st.onboarding || 0),
+      pending_payment: Number(st.pending_payment || 0),
+      open_tasks: tasks.length,
+      overdue_tasks: tasks.filter((t) => t.overdue).length,
+      open_conversations: conversations.length,
+      unread_messages: conversations.reduce((n, c) => n + c.unread, 0),
+    },
+    pipeline_stages: stageRows.map((r) => ({
+      stage: String(r.stage || ""),
+      count: Number(r.cnt || 0),
+    })),
+    prospects: prospectRows.map((p) => ({
+      id: Number(p.id),
+      name: `${p.first_name || ""} ${p.last_name || ""}`.trim(),
+      phone: p.phone ? String(p.phone) : null,
+      stage: p.pipeline_stage ? String(p.pipeline_stage) : null,
+    })),
+    clients: clientRows.map((c) => ({
+      id: Number(c.id),
+      name: `${c.first_name || ""} ${c.last_name || ""}`.trim(),
+      status: String(c.status || ""),
+      stage: String(c.pipeline_stage || ""),
+    })),
+    tasks,
+    conversations,
+    app_url: APP_URL,
+  };
+}
+
+async function runClaudeMorningDigestBrief(
+  snapshot: MorningDigestSnapshot,
+): Promise<{
+  brief: MorningDigestClaudeBrief;
+  enhanced: boolean;
+  error?: string;
+}> {
+  const fallback = buildDeterministicMorningBrief(snapshot);
+  const apiKey = String(process.env.ANTHROPIC_API_KEY || "").trim();
+  if (!apiKey) {
+    return {
+      brief: fallback,
+      enhanced: false,
+      error: "ANTHROPIC_API_KEY not set",
+    };
+  }
+  const model =
+    String(process.env.ANTHROPIC_MODEL || "").trim() || "claude-sonnet-4-6";
+  try {
+    const resp = await axios.post(
+      "https://api.anthropic.com/v1/messages",
+      {
+        model,
+        max_tokens: 1200,
+        temperature: 0.4,
+        system: ADMIN_MORNING_DIGEST_SYSTEM,
+        messages: [
+          {
+            role: "user",
+            content: JSON.stringify({
+              preferred_language: snapshot.admin.preferred_language,
+              first_name: snapshot.admin.first_name,
+              date_label: snapshot.date_label,
+              counts: snapshot.counts,
+              pipeline_stages: snapshot.pipeline_stages,
+              prospects: snapshot.prospects,
+              clients: snapshot.clients,
+              tasks: snapshot.tasks,
+              conversations: snapshot.conversations,
+            }),
+          },
+        ],
+      },
+      {
+        headers: {
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json",
+        },
+        timeout: 22_000,
+      },
+    );
+    const text = String(resp.data?.content?.[0]?.text || "").trim();
+    const parsed = parseClaudeMorningDigestJson(text);
+    if (!parsed) {
+      return {
+        brief: fallback,
+        enhanced: false,
+        error: "Claude JSON parse failed",
+      };
+    }
+    return { brief: parsed, enhanced: true };
+  } catch (e: any) {
+    return {
+      brief: fallback,
+      enhanced: false,
+      error: String(e?.message || e).slice(0, 200),
+    };
+  }
+}
+
+async function morningDigestAlreadySent(
+  adminId: number,
+  denverYmd: string,
+): Promise<boolean> {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT id FROM audit_logs
+     WHERE actor_type = 'system'
+       AND action = 'morning_digest.sent'
+       AND entity_type = 'admin'
+       AND entity_id = ?
+       AND JSON_UNQUOTE(JSON_EXTRACT(changes_json, '$.denver_ymd')) = ?
+     LIMIT 1`,
+    [adminId, denverYmd],
+  );
+  return !!rows[0];
+}
+
+/**
+ * Atomically claim today's digest slot for an admin (one row per Denver day).
+ * Returns audit_logs.id when claimed, or null if already sent/claimed today.
+ */
+async function claimMorningDigestDay(
+  adminId: number,
+  denverYmd: string,
+): Promise<number | null> {
+  const [result] = await pool.query<ResultSetHeader>(
+    `INSERT INTO audit_logs
+       (actor_type, actor_id, action, entity_type, entity_id, changes_json, status)
+     SELECT 'system', NULL, 'morning_digest.sent', 'admin', ?, ?, 'success'
+     FROM DUAL
+     WHERE NOT EXISTS (
+       SELECT 1 FROM audit_logs
+       WHERE actor_type = 'system'
+         AND action = 'morning_digest.sent'
+         AND entity_type = 'admin'
+         AND entity_id = ?
+         AND JSON_UNQUOTE(JSON_EXTRACT(changes_json, '$.denver_ymd')) = ?
+       LIMIT 1
+     )`,
+    [
+      adminId,
+      JSON.stringify({
+        denver_ymd: denverYmd,
+        claimed_at: new Date().toISOString(),
+        pending: true,
+      }),
+      adminId,
+      denverYmd,
+    ],
+  );
+  if (!Number(result.affectedRows || 0)) return null;
+  return Number(result.insertId);
+}
+
+async function finalizeMorningDigestSent(
+  auditId: number,
+  denverYmd: string,
+  meta: Record<string, unknown>,
+): Promise<void> {
+  await pool.query(
+    `UPDATE audit_logs
+     SET changes_json = ?, status = 'success'
+     WHERE id = ?`,
+    [
+      JSON.stringify({ denver_ymd: denverYmd, pending: false, ...meta }),
+      auditId,
+    ],
+  );
+}
+
+async function markMorningDigestSent(
+  adminId: number,
+  denverYmd: string,
+  meta: Record<string, unknown>,
+): Promise<void> {
+  await pool.query(
+    `INSERT INTO audit_logs
+       (actor_type, actor_id, action, entity_type, entity_id, changes_json, status)
+     VALUES ('system', NULL, 'morning_digest.sent', 'admin', ?, ?, 'success')`,
+    [adminId, JSON.stringify({ denver_ymd: denverYmd, ...meta })],
+  );
 }
 
 type TeamAdminNotifyBuild = {
@@ -13234,18 +16052,14 @@ async function deliverAdminNotificationChannels(opts: {
     }
   }
 
-  if (
-    adminNotifyPrefOn(admin.prefs, "sms", eventKey) &&
-    admin.phone
-  ) {
+  if (adminNotifyPrefOn(admin.prefs, "sms", eventKey) && admin.phone) {
     try {
       const from = await resolveAssignedSmsFrom(admin.id);
       if (!from) {
         // No OFG number → SMS notifications stay off for this staff member
       } else {
         const smsText =
-          tpl.smsBody ||
-          `${tpl.inAppTitle}: ${tpl.inAppBody}`.slice(0, 320);
+          tpl.smsBody || `${tpl.inAppTitle}: ${tpl.inAppBody}`.slice(0, 320);
         await sendSms({ to: admin.phone, body: smsText, from });
         result.sms = true;
       }
@@ -13372,9 +16186,7 @@ async function notifyLanguageOwnerDocUploadLink(opts: {
       subject: tplEmail.subject,
       html: tplEmail.html,
       inAppTitle:
-        adminLang === "es"
-          ? "Enlace de carga enviado"
-          : "Upload link sent",
+        adminLang === "es" ? "Enlace de carga enviado" : "Upload link sent",
       inAppBody:
         adminLang === "es"
           ? `Se envió el enlace del portal a ${clientName}.`
@@ -13590,8 +16402,7 @@ async function notifyAdminsClientSubmission(opts: {
   );
   if (!rows[0]) return;
   const clientName =
-    `${rows[0].first_name || ""} ${rows[0].last_name || ""}`.trim() ||
-    "Client";
+    `${rows[0].first_name || ""} ${rows[0].last_name || ""}`.trim() || "Client";
   const pipelineUrl = `${APP_URL}/admin/pipeline?case=${opts.caseId}`;
   const eventKey: AdminNotifyEventKey = opts.allRequiredDone
     ? "submission_ready_review"
@@ -13603,9 +16414,7 @@ async function notifyAdminsClientSubmission(opts: {
     const emailTpl = tplAdminClientSubmissionAlert({
       adminFirstName: admin.first_name,
       clientName,
-      clientEmail: rows[0].email
-        ? String(rows[0].email)
-        : "(no email on file)",
+      clientEmail: rows[0].email ? String(rows[0].email) : "(no email on file)",
       summary: opts.summary,
       pipelineUrl,
       allRequiredDone: opts.allRequiredDone,
@@ -13672,7 +16481,11 @@ function mapFundingApplicationRow(
     llc_name: row.llc_name ? String(row.llc_name) : null,
     llc_address: row.llc_address ? String(row.llc_address) : null,
     client_id: row.client_id != null ? Number(row.client_id) : null,
-    has_secrets: !!(row.secrets_ciphertext && row.secrets_iv && row.secrets_tag),
+    has_secrets: !!(
+      row.secrets_ciphertext &&
+      row.secrets_iv &&
+      row.secrets_tag
+    ),
     docs_uploaded: docsUploaded,
     docs_complete: docsComplete,
     docs_complete_notified_at: row.docs_complete_notified_at
@@ -13849,8 +16662,7 @@ async function notifyFundingApplicationCreated(opts: {
     lang === "es"
       ? `Hola ${opts.firstName}, iniciamos tu solicitud de funding con Optimum Financial Group. Usa el enlace para subir tus documentos y completar la información restante.`
       : `Hi ${opts.firstName}, we started your funding application with Optimum Financial Group. Use the link below to upload your documents and complete the remaining information.`;
-  const cta =
-    lang === "es" ? "Continuar solicitud" : "Continue application";
+  const cta = lang === "es" ? "Continuar solicitud" : "Continue application";
   const html = emailLayout({
     title: subject,
     preheader: bodyText.slice(0, 120),
@@ -14007,40 +16819,82 @@ async function countRequiredOnboardingProgress(
 }
 
 /**
- * Phase 2: auto-email Realtor/Broker referrers on round stage changes.
+ * Phase 2: auto-email referral partners on round stage changes.
+ * Fans out to all client_referrers with notify_on_round=1 (falls back to
+ * legacy clients.referrer_id when junction empty).
  */
 async function notifyReferrerRoundUpdate(
   clientId: number,
   stage: string,
 ): Promise<void> {
   if (!ROUND_STAGE_LABELS[stage]) return;
-  const [rows] = await pool.query<RowDataPacket[]>(
-    `SELECT c.first_name, c.last_name, c.referral_category, c.preferred_language,
-            r.id AS referrer_id, r.first_name AS ref_first, r.last_name AS ref_last,
-            r.email AS ref_email, r.preferred_language AS ref_lang, r.category AS ref_category
-     FROM clients c
-     LEFT JOIN referrers r ON r.id = c.referrer_id AND r.status = 'active'
-     WHERE c.id = ? LIMIT 1`,
+  const [clientRows] = await pool.query<RowDataPacket[]>(
+    `SELECT first_name, last_name, preferred_language, referral_category, referrer_id
+     FROM clients WHERE id = ? LIMIT 1`,
     [clientId],
   );
-  const row = rows[0];
-  if (!row) return;
-  if (row.referral_category !== "realtor_broker") return;
-  if (!row.ref_email) return;
-  const lang =
-    row.ref_lang === "es" || row.preferred_language === "es" ? "es" : "en";
+  const client = clientRows[0];
+  if (!client) return;
+
+  const [linkRows] = await pool.query<RowDataPacket[]>(
+    `SELECT r.id AS referrer_id, r.first_name AS ref_first, r.last_name AS ref_last,
+            r.email AS ref_email, r.preferred_language AS ref_lang, r.category AS ref_category,
+            cr.notify_on_round
+     FROM client_referrers cr
+     INNER JOIN referrers r ON r.id = cr.referrer_id AND r.status = 'active'
+     WHERE cr.client_id = ? AND cr.notify_on_round = 1
+     ORDER BY cr.sort_order ASC, cr.id ASC`,
+    [clientId],
+  );
+
+  let partners = linkRows;
+  if (!partners.length && client.referrer_id) {
+    const [legacy] = await pool.query<RowDataPacket[]>(
+      `SELECT id AS referrer_id, first_name AS ref_first, last_name AS ref_last,
+              email AS ref_email, preferred_language AS ref_lang, category AS ref_category,
+              1 AS notify_on_round
+       FROM referrers WHERE id = ? AND status = 'active' LIMIT 1`,
+      [client.referrer_id],
+    );
+    partners = legacy;
+  }
+
+  // Preserve legacy gate: round-update emails only when the client is
+  // realtor/broker-referred. When that gate passes, fan out to every linked
+  // partner with notify_on_round (multi-partner).
+  if (client.referral_category !== "realtor_broker") return;
+
   const labels = ROUND_STAGE_LABELS[stage];
-  const tpl = tplReferrerRoundUpdate({
-    referrerFirstName: String(row.ref_first || "Partner"),
-    clientName: `${row.first_name} ${row.last_name}`.trim(),
-    stageLabel: lang === "es" ? labels.es : labels.en,
-    lang,
-  });
-  await sendEmail({
-    to: String(row.ref_email),
-    subject: tpl.subject,
-    html: tpl.html,
-  });
+  const clientName = `${client.first_name} ${client.last_name}`.trim();
+  const seen = new Set<string>();
+  for (const row of partners) {
+    const email = String(row.ref_email || "")
+      .trim()
+      .toLowerCase();
+    if (!email || !email.includes("@") || seen.has(email)) continue;
+    seen.add(email);
+    const lang =
+      row.ref_lang === "es" || client.preferred_language === "es" ? "es" : "en";
+    const tpl = tplReferrerRoundUpdate({
+      referrerFirstName: String(row.ref_first || "Partner"),
+      clientName,
+      stageLabel: lang === "es" ? labels.es : labels.en,
+      lang,
+    });
+    try {
+      await sendEmail({
+        to: email,
+        subject: tpl.subject,
+        html: tpl.html,
+      });
+    } catch (err) {
+      console.error(
+        "[notifyReferrerRoundUpdate] send failed:",
+        email,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
 }
 
 // ============================================================================
@@ -14429,7 +17283,10 @@ async function persistMmsMedia(opts: {
   );
 
   const base = mmsPublicBaseUrl();
-  if (!base) throw new Error("OPTIMUM_API_BASE_URL / PUBLIC_APP_URL is required for MMS");
+  if (!base)
+    throw new Error(
+      "OPTIMUM_API_BASE_URL / PUBLIC_APP_URL is required for MMS",
+    );
   return {
     id,
     publicUrl: `${base}/api/conversations/media/public/${id}`,
@@ -14463,7 +17320,9 @@ async function fetchTwilioMediaAsBuffer(
 }
 
 /** Re-host inbound Twilio MediaUrl0 so the admin UI can display without Twilio auth. */
-async function ingestInboundTwilioMedia(reqBody: Record<string, unknown>): Promise<{
+async function ingestInboundTwilioMedia(
+  reqBody: Record<string, unknown>,
+): Promise<{
   mediaUrl: string | null;
   mediaContentType: string | null;
   numMedia: number;
@@ -14480,7 +17339,11 @@ async function ingestInboundTwilioMedia(reqBody: Record<string, unknown>): Promi
     return { mediaUrl: null, mediaContentType: null, numMedia };
   }
   const fetched = await fetchTwilioMediaAsBuffer(twilioUrl).catch(() => null);
-  if (fetched && fetched.buffer.length > 0 && fetched.buffer.length <= MMS_MAX_BYTES) {
+  if (
+    fetched &&
+    fetched.buffer.length > 0 &&
+    fetched.buffer.length <= MMS_MAX_BYTES
+  ) {
     const stored = await persistMmsMedia({
       buffer: fetched.buffer,
       contentType: fetched.contentType || twilioType,
@@ -14528,9 +17391,7 @@ async function sendClientSmsFromAdmin(opts: {
  */
 function twilioWebhookCandidateUrls(req: Request): string[] {
   const pathAndQuery = String(req.originalUrl || req.url || "/");
-  const path = pathAndQuery.startsWith("/")
-    ? pathAndQuery
-    : `/${pathAndQuery}`;
+  const path = pathAndQuery.startsWith("/") ? pathAndQuery : `/${pathAndQuery}`;
   const urls = new Set<string>();
   const add = (base: string) => {
     const b = String(base || "")
@@ -14933,8 +17794,7 @@ async function setContactConversationStatus(opts: {
   contact: Record<string, unknown> | null;
 }> {
   const hasClient = opts.clientId != null && opts.clientId > 0;
-  const hasUnknown =
-    opts.unknownContactId != null && opts.unknownContactId > 0;
+  const hasUnknown = opts.unknownContactId != null && opts.unknownContactId > 0;
   if (!hasClient && !hasUnknown) {
     throw new Error("client_id or unknown_contact_id required");
   }
@@ -14943,10 +17803,10 @@ async function setContactConversationStatus(opts: {
   const status = opts.status === "archived" ? "closed" : opts.status;
 
   if (hasClient) {
-    await pool.query(`UPDATE conversations SET status = ? WHERE client_id = ?`, [
-      status,
-      opts.clientId,
-    ]);
+    await pool.query(
+      `UPDATE conversations SET status = ? WHERE client_id = ?`,
+      [status, opts.clientId],
+    );
   } else {
     await pool.query(
       `UPDATE conversations SET status = ? WHERE unknown_contact_id = ?`,
@@ -14980,10 +17840,7 @@ async function setContactConversationStatus(opts: {
           : `INSERT INTO conversations
                (unknown_contact_id, channel, status, assigned_admin_id)
              VALUES (?, 'sms', 'closed', ?)`,
-        [
-          hasClient ? opts.clientId : opts.unknownContactId,
-          opts.adminId,
-        ],
+        [hasClient ? opts.clientId : opts.unknownContactId, opts.adminId],
       );
       primaryId = Number(ins.insertId);
     }
@@ -15087,12 +17944,7 @@ async function getOrCreateClientChannelConversation(opts: {
     `INSERT INTO conversations
        (client_id, channel, status, assigned_admin_id, ofg_number_id)
      VALUES (?, ?, 'open', ?, ?)`,
-    [
-      opts.clientId,
-      opts.channel,
-      opts.assignedAdminId ?? null,
-      ofgId,
-    ],
+    [opts.clientId, opts.channel, opts.assignedAdminId ?? null, ofgId],
   );
   return Number(ins.insertId);
 }
@@ -15141,7 +17993,11 @@ async function getOrCreateUnknownSmsConversation(opts: {
     `INSERT INTO conversations
        (client_id, channel, status, assigned_admin_id, ofg_number_id, unknown_contact_id)
      VALUES (NULL, 'sms', 'open', ?, ?, ?)`,
-    [opts.assignedAdminId ?? null, opts.ofgNumberId ?? null, opts.unknownContactId],
+    [
+      opts.assignedAdminId ?? null,
+      opts.ofgNumberId ?? null,
+      opts.unknownContactId,
+    ],
   );
   return Number(insC.insertId);
 }
@@ -15247,14 +18103,11 @@ async function deliverHubConversationMessage(opts: {
   unknown_contact_id?: number;
 }> {
   const hasClient = opts.clientId != null && opts.clientId > 0;
-  const hasUnknown =
-    opts.unknownContactId != null && opts.unknownContactId > 0;
+  const hasUnknown = opts.unknownContactId != null && opts.unknownContactId > 0;
   if (!hasClient && !hasUnknown) {
     throw new Error("client_id or unknown_contact_id required");
   }
-  const ch = opts.isInternalNote
-    ? "internal"
-    : String(opts.channel || "sms");
+  const ch = opts.isInternalNote ? "internal" : String(opts.channel || "sms");
   if (!["sms", "internal"].includes(ch)) {
     throw new Error("Unsupported channel");
   }
@@ -16372,16 +19225,15 @@ async function setAdminLanguageOwnerFor(
        WHERE language_owner_for = ? AND id <> ?`,
       [lang, adminId],
     );
-    await pool.query(
-      `UPDATE admins SET language_owner_for = ? WHERE id = ?`,
-      [lang, adminId],
-    );
+    await pool.query(`UPDATE admins SET language_owner_for = ? WHERE id = ?`, [
+      lang,
+      adminId,
+    ]);
     return;
   }
-  await pool.query(
-    `UPDATE admins SET language_owner_for = NULL WHERE id = ?`,
-    [adminId],
-  );
+  await pool.query(`UPDATE admins SET language_owner_for = NULL WHERE id = ?`, [
+    adminId,
+  ]);
 }
 
 /** Map referral_category → source label slug(s) for the hybrid label system. */
@@ -16904,7 +19756,10 @@ function affiliateInviteLinkIsOpen(row: RowDataPacket): boolean {
     const expMs = new Date(row.expires_at as string).getTime();
     if (!Number.isNaN(expMs) && expMs < Date.now()) return false;
   }
-  if (row.max_uses != null && Number(row.use_count || 0) >= Number(row.max_uses)) {
+  if (
+    row.max_uses != null &&
+    Number(row.use_count || 0) >= Number(row.max_uses)
+  ) {
     return false;
   }
   return true;
@@ -17682,7 +20537,6 @@ const CRC_STAGE_MAP: Record<string, string> = {
   "deleted client": "completed",
 };
 
-
 // ============================================================================
 // REMOTE MCP (Streamable HTTP) + OAuth 2.1 PKCE — inline (Vercel)
 // ============================================================================
@@ -17706,10 +20560,7 @@ type ExecuteTool = (
   name: string,
   args: Record<string, unknown>,
   ctx: { adminId: number },
-) => Promise<
-  | { ok: true; data: unknown }
-  | { ok: false; error: string; message: string }
->;
+) => Promise<AdminAiToolResult>;
 
 type MountOptimumMcpOpts = {
   app: Express;
@@ -17773,6 +20624,10 @@ const ADMIN_AI_MCP_WRITE_TOOLS = new Set([
   "upsert_progress_report",
   "upsert_payment_splits",
   "update_payment_split",
+  "update_funding_status",
+  "create_funding_application",
+  "convert_funding_application",
+  "upload_funding_document",
 ]);
 
 /** MCP tool annotations — always readOnlyHint so Claude does not gate dry-runs.
@@ -17787,9 +20642,7 @@ function adminAiMcpToolAnnotations(toolName: string): {
 } {
   const isWrite = ADMIN_AI_MCP_WRITE_TOOLS.has(toolName);
   return {
-    title: isWrite
-      ? `${toolName} (dry-run safe; confirm gated)`
-      : toolName,
+    title: isWrite ? `${toolName} (dry-run safe; confirm gated)` : toolName,
     readOnlyHint: true,
     destructiveHint: false,
     idempotentHint: !isWrite,
@@ -17812,9 +20665,7 @@ function adminAiInputSchemaToZod(
       ? (inputSchema.properties as Record<string, Record<string, unknown>>)
       : {};
   const required = new Set(
-    Array.isArray(inputSchema.required)
-      ? inputSchema.required.map(String)
-      : [],
+    Array.isArray(inputSchema.required) ? inputSchema.required.map(String) : [],
   );
   const shape: Record<string, z.ZodTypeAny> = {};
   for (const [key, prop] of Object.entries(props)) {
@@ -17907,7 +20758,9 @@ function loopbackRedirectOk(requested: string, registered: string): boolean {
 }
 
 function redirectUriAllowed(requested: string, registered: string[]): boolean {
-  if (registered.some((r) => r === requested || loopbackRedirectOk(requested, r))) {
+  if (
+    registered.some((r) => r === requested || loopbackRedirectOk(requested, r))
+  ) {
     return true;
   }
   // Allow known Claude / Cursor callbacks when DCR was skipped or raced
@@ -18004,7 +20857,10 @@ function mountOptimumMcpRoutes(opts: MountOptimumMcpOpts): void {
       [hash],
     );
     if (!rows[0]) return null;
-    if (rows[0].status !== "active" || !adminAiRoleAllowed(String(rows[0].role))) {
+    if (
+      rows[0].status !== "active" ||
+      !adminAiRoleAllowed(String(rows[0].role))
+    ) {
       return null;
     }
     await pool.query(
@@ -18196,7 +21052,12 @@ function mountOptimumMcpRoutes(opts: MountOptimumMcpOpts): void {
     const resourceParam =
       req.query.resource != null ? String(req.query.resource) : resource;
 
-    if (!clientId || !redirectUri || responseType !== "code" || !codeChallenge) {
+    if (
+      !clientId ||
+      !redirectUri ||
+      responseType !== "code" ||
+      !codeChallenge
+    ) {
       return res.status(400).send("invalid_request");
     }
     if (codeChallengeMethod !== "S256") {
@@ -18249,7 +21110,11 @@ function mountOptimumMcpRoutes(opts: MountOptimumMcpOpts): void {
     async (req: McpAuthedReq, res) => {
       const adminId = req.auth!.id;
       const admin = await loadAdminRole(adminId);
-      if (!admin || admin.status !== "active" || !adminAiRoleAllowed(admin.role)) {
+      if (
+        !admin ||
+        admin.status !== "active" ||
+        !adminAiRoleAllowed(admin.role)
+      ) {
         return res.status(403).json({
           error: "MCP is limited to super_admin and admin roles",
         });
@@ -18562,7 +21427,9 @@ function mountOptimumMcpRoutes(opts: MountOptimumMcpOpts): void {
         async (args) => {
           const started = Date.now();
           const cleaned: Record<string, unknown> = {};
-          for (const [k, v] of Object.entries(args as Record<string, unknown>)) {
+          for (const [k, v] of Object.entries(
+            args as Record<string, unknown>,
+          )) {
             if (v !== undefined) cleaned[k] = v;
           }
           const ip = String(req.ip || "").slice(0, 45) || null;
@@ -18998,7 +21865,9 @@ function buildApp() {
         .trim()
         .toLowerCase();
       const channel =
-        String(req.body?.channel || "email").trim().toLowerCase() === "sms"
+        String(req.body?.channel || "email")
+          .trim()
+          .toLowerCase() === "sms"
           ? "sms"
           : "email";
       if (!email) return res.status(400).json({ error: "Email required" });
@@ -19049,8 +21918,7 @@ function buildApp() {
         if (assigned.length === 0 || !isTwilioConfigured()) {
           return res.status(400).json({
             error: "sms_otp_unavailable",
-            message:
-              "SMS sign-in requires an assigned OFG phone number.",
+            message: "SMS sign-in requires an assigned OFG phone number.",
           });
         }
       }
@@ -19238,8 +22106,7 @@ function buildApp() {
         [req.auth!.id],
       );
       const role = String(rows[0]?.role || "");
-      const enabled =
-        adminAiFeatureEnabled() && adminAiRoleAllowed(role);
+      const enabled = adminAiFeatureEnabled() && adminAiRoleAllowed(role);
       res.json({
         enabled,
         role_allowed: adminAiRoleAllowed(role),
@@ -19283,13 +22150,7 @@ function buildApp() {
 
       // Rate limit non–super_admin staff (super_admin uncapped in-app; Anthropic still bills)
       if (role !== "super_admin") {
-        if (
-          hitRateLimit(
-            `admin-ai:chat:${adminId}`,
-            30,
-            60 * 60 * 1000,
-          )
-        ) {
+        if (hitRateLimit(`admin-ai:chat:${adminId}`, 30, 60 * 60 * 1000)) {
           await insertAdminAiAuditLog({
             adminId,
             question: String(
@@ -19320,7 +22181,10 @@ function buildApp() {
           content: content.slice(0, 4000),
         });
       }
-      if (messages.length === 0 || messages[messages.length - 1].role !== "user") {
+      if (
+        messages.length === 0 ||
+        messages[messages.length - 1].role !== "user"
+      ) {
         return res.status(400).json({
           error: "messages must end with a non-empty user turn",
         });
@@ -19518,9 +22382,7 @@ function buildApp() {
       const resolvedToolName = resolveAdminAiToolName(toolName);
 
       if (role !== "super_admin") {
-        if (
-          hitRateLimit(`admin-ai:tools:${adminId}`, 120, 60 * 60 * 1000)
-        ) {
+        if (hitRateLimit(`admin-ai:tools:${adminId}`, 120, 60 * 60 * 1000)) {
           await insertAdminAiAuditLog({
             adminId,
             question: `[mcp/tool] ${toolName}`,
@@ -19582,7 +22444,8 @@ function buildApp() {
     adminAiFeatureEnabled,
     adminAiRoleAllowed,
     extractToken,
-    legacyMasterToken: String(process.env.ADMIN_AI_MCP_TOKEN || "").trim() || null,
+    legacyMasterToken:
+      String(process.env.ADMIN_AI_MCP_TOKEN || "").trim() || null,
     legacyMasterAdminId: Number(process.env.ADMIN_AI_MCP_ADMIN_ID || 0) || null,
   });
 
@@ -19671,10 +22534,7 @@ function buildApp() {
     requireAdmin,
     denyAffiliateAccess,
     async (req: AuthedRequest, res) => {
-      const limit = Math.min(
-        50,
-        Math.max(1, Number(req.query.limit) || 20),
-      );
+      const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
       const adminId = req.auth!.id;
       const [rows] = await pool.query<RowDataPacket[]>(
         `SELECT id, event_key, title, body, link_url, read_at, created_at
@@ -20311,11 +23171,9 @@ function buildApp() {
       } catch (err: any) {
         if (sendFriendlyError(res, err, { duplicateLabel: "email" })) return;
         console.error("[public:credit-analysis] error:", err?.message ?? err);
-        res
-          .status(500)
-          .json({
-            error: "We couldn't generate your analysis. Please try again.",
-          });
+        res.status(500).json({
+          error: "We couldn't generate your analysis. Please try again.",
+        });
       }
     },
   );
@@ -20419,7 +23277,9 @@ function buildApp() {
         15 * 60 * 1000,
       )
     ) {
-      return res.status(429).json({ error: "Too many requests. Try again later." });
+      return res
+        .status(429)
+        .json({ error: "Too many requests. Try again later." });
     }
     const b = req.body || {};
     const firstName = String(b.first_name || "").trim();
@@ -20439,8 +23299,7 @@ function buildApp() {
 
     if (!firstName || !lastName || !email || !fundingType) {
       return res.status(400).json({
-        error:
-          "first_name, last_name, email and funding_type are required",
+        error: "first_name, last_name, email and funding_type are required",
       });
     }
     if (!PUBLIC_EMAIL_RE.test(email)) {
@@ -20488,13 +23347,11 @@ function buildApp() {
 
   app.get("/api/public/funding/:token", async (req, res) => {
     if (
-      hitRateLimit(
-        rateLimitKey(req, "public-funding-get"),
-        60,
-        15 * 60 * 1000,
-      )
+      hitRateLimit(rateLimitKey(req, "public-funding-get"), 60, 15 * 60 * 1000)
     ) {
-      return res.status(429).json({ error: "Too many requests. Try again later." });
+      return res
+        .status(429)
+        .json({ error: "Too many requests. Try again later." });
     }
     try {
       const token = String(req.params.token || "").trim();
@@ -20519,7 +23376,9 @@ function buildApp() {
         15 * 60 * 1000,
       )
     ) {
-      return res.status(429).json({ error: "Too many requests. Try again later." });
+      return res
+        .status(429)
+        .json({ error: "Too many requests. Try again later." });
     }
     const token = String(req.params.token || "").trim();
     const b = req.body || {};
@@ -20680,9 +23539,7 @@ function buildApp() {
         if (isFundingApplicationLocked(String(rows[0].status))) {
           return res.status(409).json({ error: "application_locked" });
         }
-        let clientId = rows[0].client_id
-          ? Number(rows[0].client_id)
-          : null;
+        let clientId = rows[0].client_id ? Number(rows[0].client_id) : null;
         if (!clientId) {
           clientId = await ensureFundingClientId({
             email: String(rows[0].email),
@@ -20729,8 +23586,7 @@ function buildApp() {
           email: String(rows[0].email),
           phone: rows[0].phone ? String(rows[0].phone) : null,
           firstName: String(rows[0].first_name || ""),
-          preferredLanguage:
-            rows[0].preferred_language === "es" ? "es" : "en",
+          preferredLanguage: rows[0].preferred_language === "es" ? "es" : "en",
           docsCompleteNotifiedAt: rows[0].docs_complete_notified_at
             ? String(rows[0].docs_complete_notified_at)
             : null,
@@ -20762,7 +23618,9 @@ function buildApp() {
         15 * 60 * 1000,
       )
     ) {
-      return res.status(429).json({ error: "Too many requests. Try again later." });
+      return res
+        .status(429)
+        .json({ error: "Too many requests. Try again later." });
     }
     const token = String(req.params.token || "").trim();
     try {
@@ -20797,8 +23655,7 @@ function buildApp() {
           email: String(rows[0].email),
           phone: rows[0].phone ? String(rows[0].phone) : null,
           firstName: String(rows[0].first_name || ""),
-          preferredLanguage:
-            rows[0].preferred_language === "es" ? "es" : "en",
+          preferredLanguage: rows[0].preferred_language === "es" ? "es" : "en",
           docsCompleteNotifiedAt: rows[0].docs_complete_notified_at
             ? String(rows[0].docs_complete_notified_at)
             : null,
@@ -20835,8 +23692,7 @@ function buildApp() {
         : b.funding_type === "bank_statements"
           ? "bank_statements"
           : null;
-    const preferredLanguage =
-      b.preferred_language === "es" ? "es" : "en";
+    const preferredLanguage = b.preferred_language === "es" ? "es" : "en";
     const statusRaw = String(b.status || "awaiting_docs");
     const allowedInitial = new Set([
       "awaiting_docs",
@@ -20847,8 +23703,7 @@ function buildApp() {
     const status = allowedInitial.has(statusRaw) ? statusRaw : "awaiting_docs";
     const postalCode =
       b.postal_code != null ? String(b.postal_code).trim() || null : null;
-    const state =
-      b.state != null ? String(b.state).trim() || null : null;
+    const state = b.state != null ? String(b.state).trim() || null : null;
     const llcName =
       b.llc_name != null ? String(b.llc_name).trim() || null : null;
     const llcAddress =
@@ -20881,8 +23736,7 @@ function buildApp() {
 
     if (!firstName || !lastName || !email || !fundingType) {
       return res.status(400).json({
-        error:
-          "first_name, last_name, email and funding_type are required",
+        error: "first_name, last_name, email and funding_type are required",
       });
     }
     if (!PUBLIC_EMAIL_RE.test(email)) {
@@ -20971,9 +23825,7 @@ function buildApp() {
         req.query.language === "en" || req.query.language === "es"
           ? req.query.language
           : null;
-      const statusFilter = req.query.status
-        ? String(req.query.status)
-        : null;
+      const statusFilter = req.query.status ? String(req.query.status) : null;
 
       const limitRaw = Number(req.query.limit);
       const limit = Math.min(
@@ -21123,129 +23975,143 @@ function buildApp() {
     }
   });
 
-  app.post("/api/admin/funding/:id/status", requireStaffManager, async (req, res) => {
-    try {
-      const id = Number(req.params.id);
-      const status = String(req.body?.status || "").trim();
-      const allowed = [
-        "awaiting_docs",
-        "submitted",
-        "under_review",
-        "complete",
-        "cancelled",
-      ];
-      if (!allowed.includes(status)) {
-        return res.status(400).json({ error: "invalid_status" });
-      }
-      const [result] = await pool.query<ResultSetHeader>(
-        `UPDATE funding_applications SET status = ? WHERE id = ? AND status <> 'converted'`,
-        [status, id],
-      );
-      if (!result.affectedRows) {
-        return res.status(404).json({ error: "not_found_or_converted" });
-      }
-      const [rows] = await pool.query<RowDataPacket[]>(
-        `SELECT * FROM funding_applications WHERE id = ? LIMIT 1`,
-        [id],
-      );
-      res.json({
-        application: mapFundingApplicationRow(
-          rows[0],
-          await listFundingDocsUploaded(id),
-        ),
-      });
-    } catch (err: any) {
-      console.error("[admin:funding:status]", err?.message ?? err);
-      res.status(500).json({ error: "Could not update status" });
-    }
-  });
-
-  app.post("/api/admin/funding/:id/convert", requireStaffManager, async (req, res) => {
-    try {
-      const id = Number(req.params.id);
-      const adminId = Number((req as any).admin?.id || 0);
-      const [rows] = await pool.query<RowDataPacket[]>(
-        `SELECT * FROM funding_applications WHERE id = ? LIMIT 1`,
-        [id],
-      );
-      if (!rows[0]) return res.status(404).json({ error: "not_found" });
-      if (String(rows[0].status) === "converted") {
-        return res.status(409).json({ error: "already_converted" });
-      }
-      let clientId = rows[0].client_id ? Number(rows[0].client_id) : null;
-      if (!clientId) {
-        clientId = await ensureFundingClientId({
-          email: String(rows[0].email),
-          firstName: String(rows[0].first_name),
-          lastName: String(rows[0].last_name),
-          phone: rows[0].phone ? String(rows[0].phone) : null,
-          preferredLanguage:
-            rows[0].preferred_language === "es" ? "es" : "en",
-          postalCode: rows[0].postal_code
-            ? String(rows[0].postal_code)
-            : null,
-          state: rows[0].state ? String(rows[0].state) : null,
+  app.post(
+    "/api/admin/funding/:id/status",
+    requireStaffManager,
+    async (req, res) => {
+      try {
+        const id = Number(req.params.id);
+        const status = String(req.body?.status || "").trim();
+        const allowed = [
+          "awaiting_docs",
+          "submitted",
+          "under_review",
+          "complete",
+          "cancelled",
+        ];
+        if (!allowed.includes(status)) {
+          return res.status(400).json({ error: "invalid_status" });
+        }
+        const [result] = await pool.query<ResultSetHeader>(
+          `UPDATE funding_applications SET status = ? WHERE id = ? AND status <> 'converted'`,
+          [status, id],
+        );
+        if (!result.affectedRows) {
+          return res.status(404).json({ error: "not_found_or_converted" });
+        }
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT * FROM funding_applications WHERE id = ? LIMIT 1`,
+          [id],
+        );
+        res.json({
+          application: mapFundingApplicationRow(
+            rows[0],
+            await listFundingDocsUploaded(id),
+          ),
         });
+      } catch (err: any) {
+        console.error("[admin:funding:status]", err?.message ?? err);
+        res.status(500).json({ error: "Could not update status" });
       }
-      // Move into CR Prospect column (no enrolled case yet)
-      await pool.query<ResultSetHeader>(
-        `UPDATE clients SET status = 'prospect', pipeline_stage = 'prospect'
+    },
+  );
+
+  app.post(
+    "/api/admin/funding/:id/convert",
+    requireStaffManager,
+    async (req, res) => {
+      try {
+        const id = Number(req.params.id);
+        const adminId = Number((req as any).admin?.id || 0);
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT * FROM funding_applications WHERE id = ? LIMIT 1`,
+          [id],
+        );
+        if (!rows[0]) return res.status(404).json({ error: "not_found" });
+        if (String(rows[0].status) === "converted") {
+          return res.status(409).json({ error: "already_converted" });
+        }
+        let clientId = rows[0].client_id ? Number(rows[0].client_id) : null;
+        if (!clientId) {
+          clientId = await ensureFundingClientId({
+            email: String(rows[0].email),
+            firstName: String(rows[0].first_name),
+            lastName: String(rows[0].last_name),
+            phone: rows[0].phone ? String(rows[0].phone) : null,
+            preferredLanguage:
+              rows[0].preferred_language === "es" ? "es" : "en",
+            postalCode: rows[0].postal_code
+              ? String(rows[0].postal_code)
+              : null,
+            state: rows[0].state ? String(rows[0].state) : null,
+          });
+        }
+        // Move into CR Prospect column (no enrolled case yet)
+        await pool.query<ResultSetHeader>(
+          `UPDATE clients SET status = 'prospect', pipeline_stage = 'prospect'
          WHERE id = ?`,
-        [clientId],
-      );
-      await attachLabelsBySlug(clientId, ["funding_convert"]).catch(() => {});
-      await pool.query<ResultSetHeader>(
-        `UPDATE funding_applications SET
+          [clientId],
+        );
+        await attachLabelsBySlug(clientId, ["funding_convert"]).catch(() => {});
+        await pool.query<ResultSetHeader>(
+          `UPDATE funding_applications SET
            status = 'converted',
            client_id = ?,
            converted_prospect_client_id = ?,
            converted_at = NOW(),
            converted_by_admin_id = ?
          WHERE id = ?`,
-        [clientId, clientId, adminId || null, id],
-      );
-      const [updated] = await pool.query<RowDataPacket[]>(
-        `SELECT * FROM funding_applications WHERE id = ? LIMIT 1`,
-        [id],
-      );
-      res.json({
-        application: mapFundingApplicationRow(
-          updated[0],
-          await listFundingDocsUploaded(id),
-        ),
-        client_id: clientId,
-      });
-    } catch (err: any) {
-      console.error("[admin:funding:convert]", err?.message ?? err);
-      res.status(500).json({ error: "Could not convert funding application" });
-    }
-  });
+          [clientId, clientId, adminId || null, id],
+        );
+        const [updated] = await pool.query<RowDataPacket[]>(
+          `SELECT * FROM funding_applications WHERE id = ? LIMIT 1`,
+          [id],
+        );
+        res.json({
+          application: mapFundingApplicationRow(
+            updated[0],
+            await listFundingDocsUploaded(id),
+          ),
+          client_id: clientId,
+        });
+      } catch (err: any) {
+        console.error("[admin:funding:convert]", err?.message ?? err);
+        res
+          .status(500)
+          .json({ error: "Could not convert funding application" });
+      }
+    },
+  );
 
   // Portal funding
-  app.get("/api/portal/funding", requireClient, async (req: AuthedRequest, res) => {
-    try {
-      const clientId = Number(req.auth!.id || 0);
-      const [rows] = await pool.query<RowDataPacket[]>(
-        `SELECT * FROM funding_applications
+  app.get(
+    "/api/portal/funding",
+    requireClient,
+    async (req: AuthedRequest, res) => {
+      try {
+        const clientId = Number(req.auth!.id || 0);
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT * FROM funding_applications
          WHERE client_id = ? AND status <> 'cancelled'
          ORDER BY updated_at DESC LIMIT 5`,
-        [clientId],
-      );
-      const applications = [];
-      for (const row of rows) {
-        applications.push(
-          mapFundingApplicationRow(
-            row,
-            await listFundingDocsUploaded(Number(row.id)),
-          ),
+          [clientId],
         );
+        const applications = [];
+        for (const row of rows) {
+          applications.push(
+            mapFundingApplicationRow(
+              row,
+              await listFundingDocsUploaded(Number(row.id)),
+            ),
+          );
+        }
+        res.json({ applications });
+      } catch (err: any) {
+        console.error("[portal:funding:list]", err?.message ?? err);
+        res.status(500).json({ error: "Could not load funding applications" });
       }
-      res.json({ applications });
-    } catch (err: any) {
-      console.error("[portal:funding:list]", err?.message ?? err);
-      res.status(500).json({ error: "Could not load funding applications" });
-    }
-  });
+    },
+  );
 
   app.post(
     "/api/portal/funding/:id/documents",
@@ -21293,8 +24159,7 @@ function buildApp() {
           email: String(rows[0].email),
           phone: rows[0].phone ? String(rows[0].phone) : null,
           firstName: String(rows[0].first_name || ""),
-          preferredLanguage:
-            rows[0].preferred_language === "es" ? "es" : "en",
+          preferredLanguage: rows[0].preferred_language === "es" ? "es" : "en",
           docsCompleteNotifiedAt: rows[0].docs_complete_notified_at
             ? String(rows[0].docs_complete_notified_at)
             : null,
@@ -21491,9 +24356,7 @@ function buildApp() {
       b.agreed_terms === "true" ||
       b.agreed_terms === "1";
     const agreedSms =
-      b.agreed_sms === true ||
-      b.agreed_sms === "true" ||
-      b.agreed_sms === "1";
+      b.agreed_sms === true || b.agreed_sms === "true" || b.agreed_sms === "1";
     if (!agreedTerms || !agreedSms) {
       return res.status(400).json({
         error: "You must accept the Terms of Service and SMS / Privacy consent",
@@ -23344,8 +26207,7 @@ function buildApp() {
           days_until: Number(r.days_until),
         })),
         my_work_tasks: myWorkTasks.map((r) => {
-          const daysUntil =
-            r.days_until == null ? null : Number(r.days_until);
+          const daysUntil = r.days_until == null ? null : Number(r.days_until);
           return {
             id: Number(r.id),
             title: String(r.title),
@@ -23709,9 +26571,7 @@ function buildApp() {
       }
 
       if (hasNotes === "yes") {
-        pushClientFilter(
-          "(c.admin_notes IS NOT NULL AND c.admin_notes != '')",
-        );
+        pushClientFilter("(c.admin_notes IS NOT NULL AND c.admin_notes != '')");
       } else if (hasNotes === "no") {
         pushClientFilter("(c.admin_notes IS NULL OR c.admin_notes = '')");
       }
@@ -23967,7 +26827,10 @@ function buildApp() {
         pageOffset: number,
         pageLimit: number,
       ) {
-        if (!includeProspects || (prospectIncompatible && stage !== "prospect")) {
+        if (
+          !includeProspects ||
+          (prospectIncompatible && stage !== "prospect")
+        ) {
           return {
             items: [] as RowDataPacket[],
             total: 0,
@@ -24068,9 +26931,7 @@ function buildApp() {
         }
       }
 
-      const cases = CASE_BOARD_STAGES.flatMap(
-        (st) => columns[st]?.items || [],
-      );
+      const cases = CASE_BOARD_STAGES.flatMap((st) => columns[st]?.items || []);
       const prospects = columns.prospect?.items || [];
 
       res.json({
@@ -24324,10 +27185,7 @@ function buildApp() {
           );
         }
       } catch (e: any) {
-        console.error(
-          "[prospects:convert] round schedule failed:",
-          e?.message,
-        );
+        console.error("[prospects:convert] round schedule failed:", e?.message);
       }
 
       const lang = (client.preferred_language as string) || "en";
@@ -25860,6 +28718,21 @@ function buildApp() {
       if (refId != null && (!Number.isFinite(refId) || refId <= 0)) {
         return res.status(400).json({ error: "Invalid referrer_id" });
       }
+      const bodyReferrersPreview = Array.isArray(req.body?.referrers)
+        ? req.body.referrers
+        : null;
+      if (
+        !scope &&
+        refCategory &&
+        !refId &&
+        !(bodyReferrersPreview && bodyReferrersPreview.length)
+      ) {
+        return res.status(400).json({
+          error:
+            "At least one referral partner is required when referral category is set",
+          code: "referrer_required",
+        });
+      }
       let assignedAdminId: number | null = null;
       if (!scope) {
         if (assigned_admin_id != null && assigned_admin_id !== "") {
@@ -25905,6 +28778,124 @@ function buildApp() {
           ],
         );
         const clientId = result.insertId;
+
+        // Multi-partner links (body.referrers[]) or legacy single referrer_id
+        const bodyReferrers = Array.isArray(req.body?.referrers)
+          ? req.body.referrers
+          : null;
+        const createdInlineReferrerIds: number[] = [];
+        try {
+          if (bodyReferrers && bodyReferrers.length) {
+            const links: Array<{
+              referrer_id: number;
+              notify_on_round?: boolean;
+            }> = [];
+            for (const item of bodyReferrers) {
+              if (item?.referrer_id) {
+                links.push({
+                  referrer_id: Number(item.referrer_id),
+                  notify_on_round: item.notify_on_round !== false,
+                });
+              } else if (item?.first_name && item?.last_name) {
+                const cat = item.category || refCategory || "realtor_broker";
+                const [ins] = await pool.query<ResultSetHeader>(
+                  `INSERT INTO referrers
+                     (category, first_name, last_name, email, phone, preferred_language)
+                   VALUES (?,?,?,?,?,?)`,
+                  [
+                    cat,
+                    String(item.first_name).trim(),
+                    String(item.last_name).trim(),
+                    item.email ? String(item.email).trim().toLowerCase() : null,
+                    item.phone ? String(item.phone).trim() : null,
+                    item.preferred_language === "es" ? "es" : lang,
+                  ],
+                );
+                const newId = Number(ins.insertId);
+                createdInlineReferrerIds.push(newId);
+                links.push({
+                  referrer_id: newId,
+                  notify_on_round: item.notify_on_round !== false,
+                });
+              }
+            }
+            if (refCategory) {
+              const partners = await Promise.all(
+                links.map(async (l) => {
+                  const [r] = await pool.query<RowDataPacket[]>(
+                    `SELECT first_name, last_name, email, phone FROM referrers WHERE id = ?`,
+                    [l.referrer_id],
+                  );
+                  return r[0] || {};
+                }),
+              );
+              const vErr = validateReferredPartnerRequirements(
+                refCategory,
+                partners,
+              );
+              if (vErr) {
+                await pool.query(`DELETE FROM clients WHERE id = ?`, [
+                  clientId,
+                ]);
+                if (createdInlineReferrerIds.length) {
+                  await pool.query(
+                    `DELETE FROM referrers WHERE id IN (${createdInlineReferrerIds.map(() => "?").join(",")})`,
+                    createdInlineReferrerIds,
+                  );
+                }
+                return res.status(400).json({ error: vErr });
+              }
+            }
+            await replaceClientReferrers(clientId, links);
+          } else if (refId) {
+            await replaceClientReferrers(clientId, [
+              { referrer_id: refId, notify_on_round: true },
+            ]);
+          }
+        } catch (refErr: any) {
+          await pool.query(`DELETE FROM clients WHERE id = ?`, [clientId]);
+          if (createdInlineReferrerIds.length) {
+            await pool
+              .query(
+                `DELETE FROM referrers WHERE id IN (${createdInlineReferrerIds.map(() => "?").join(",")})`,
+                createdInlineReferrerIds,
+              )
+              .catch(() => null);
+          }
+          return res.status(Number(refErr?.status) || 400).json({
+            error: refErr?.message || "Failed to link referral partners",
+            code: refErr?.code,
+          });
+        }
+
+        if (req.body?.cms_credentials && !scope) {
+          try {
+            await upsertClientCmsCredentials(
+              clientId,
+              req.body.cms_credentials,
+            );
+          } catch (cmsErr: any) {
+            console.error("[admin/clients] cms credentials:", cmsErr);
+            await pool
+              .query(`DELETE FROM clients WHERE id = ?`, [clientId])
+              .catch(() => null);
+            if (createdInlineReferrerIds.length) {
+              await pool
+                .query(
+                  `DELETE FROM referrers WHERE id IN (${createdInlineReferrerIds.map(() => "?").join(",")})`,
+                  createdInlineReferrerIds,
+                )
+                .catch(() => null);
+            }
+            return res.status(Number(cmsErr?.status) || 500).json({
+              error:
+                cmsErr?.message ||
+                "Failed to save CMS credentials; client was not created",
+              code: "cms_credentials_failed",
+            });
+          }
+        }
+
         const labelSlugs = [
           ...(affiliateId ? ["affiliate_referral"] : []),
           ...referralCategoryLabelSlugs(refCategory),
@@ -26155,8 +29146,11 @@ function buildApp() {
               : Number(referrer_id),
           );
         }
+        if (Array.isArray(req.body?.referrers)) {
+          // Handled after UPDATE — keep referrer_id in sync via replaceClientReferrers
+        }
       }
-      if (updates.length === 0)
+      if (updates.length === 0 && !Array.isArray(req.body?.referrers))
         return res.status(400).json({ error: "No valid fields to update" });
 
       // Ensure the client still has at least one contact channel after update.
@@ -26167,7 +29161,9 @@ function buildApp() {
         );
         const nextEmail =
           email !== undefined
-            ? String(email ?? "").trim().toLowerCase() || null
+            ? String(email ?? "")
+                .trim()
+                .toLowerCase() || null
             : (cur[0]?.email as string | null) || null;
         const nextPhone =
           phone !== undefined
@@ -26183,14 +29179,124 @@ function buildApp() {
 
       args.push(id);
       try {
-        await pool.query<ResultSetHeader>(
-          `UPDATE clients SET ${updates.join(", ")} WHERE id = ?`,
-          args,
-        );
+        if (updates.length > 0) {
+          await pool.query<ResultSetHeader>(
+            `UPDATE clients SET ${updates.join(", ")} WHERE id = ?`,
+            args,
+          );
+        }
       } catch (err: any) {
         if (sendFriendlyError(res, err, { duplicateLabel: "email" })) return;
         throw err;
       }
+
+      if (!scope && Array.isArray(req.body?.referrers)) {
+        try {
+          const bodyLinks = req.body.referrers as any[];
+          const [catRow] = await pool.query<RowDataPacket[]>(
+            `SELECT referral_category FROM clients WHERE id = ? LIMIT 1`,
+            [id],
+          );
+          const category = catRow[0]?.referral_category as string | null;
+          const normalized: Array<{
+            referrer_id: number;
+            notify_on_round?: boolean;
+            role?: string;
+          }> = [];
+          for (const item of bodyLinks) {
+            if (item?.referrer_id) {
+              normalized.push({
+                referrer_id: Number(item.referrer_id),
+                notify_on_round: item.notify_on_round !== false,
+                role: item.role,
+              });
+              continue;
+            }
+            if (item?.first_name && item?.last_name) {
+              const cat = item.category || category || "realtor_broker";
+              const allowed = [
+                "realtor_broker",
+                "one_off",
+                "affiliate_partner",
+              ];
+              if (!allowed.includes(cat)) {
+                return res
+                  .status(400)
+                  .json({ error: "Invalid partner category" });
+              }
+              const [ins] = await pool.query<ResultSetHeader>(
+                `INSERT INTO referrers
+                   (category, first_name, last_name, email, phone, preferred_language)
+                 VALUES (?,?,?,?,?,?)`,
+                [
+                  cat,
+                  String(item.first_name).trim(),
+                  String(item.last_name).trim(),
+                  item.email ? String(item.email).trim().toLowerCase() : null,
+                  item.phone ? String(item.phone).trim() : null,
+                  item.preferred_language === "es" ? "es" : "en",
+                ],
+              );
+              normalized.push({
+                referrer_id: Number(ins.insertId),
+                notify_on_round: item.notify_on_round !== false,
+                role: item.role,
+              });
+            }
+          }
+          if (category) {
+            const partners = await Promise.all(
+              normalized.map(async (l) => {
+                const [r] = await pool.query<RowDataPacket[]>(
+                  `SELECT first_name, last_name, email, phone FROM referrers WHERE id = ?`,
+                  [l.referrer_id],
+                );
+                return r[0] || {};
+              }),
+            );
+            const vErr = validateReferredPartnerRequirements(
+              category,
+              partners,
+            );
+            if (vErr) return res.status(400).json({ error: vErr });
+          }
+          await replaceClientReferrers(id, normalized);
+        } catch (e: any) {
+          return res.status(Number(e?.status) || 400).json({
+            error: e?.message || "Failed to update referrers",
+            code: e?.code,
+          });
+        }
+      } else if (!scope && referrer_id !== undefined) {
+        const rid =
+          referrer_id === null || referrer_id === ""
+            ? null
+            : Number(referrer_id);
+        try {
+          await replaceClientReferrers(
+            id,
+            rid ? [{ referrer_id: rid, notify_on_round: true }] : [],
+          );
+        } catch (e: any) {
+          return res.status(Number(e?.status) || 400).json({
+            error: e?.message || "Failed to sync referrer",
+            code: e?.code,
+          });
+        }
+      }
+
+      if (req.body?.cms_credentials && !scope) {
+        try {
+          await upsertClientCmsCredentials(id, req.body.cms_credentials);
+        } catch (cmsErr: any) {
+          console.error("[admin/clients:update] cms:", cmsErr);
+          return res.status(Number(cmsErr?.status) || 500).json({
+            error: cmsErr?.message || "Failed to save CMS credentials",
+            code: "cms_credentials_failed",
+          });
+        }
+      }
+
       // `suspended` isn't a valid client status today, but check for it too
       // in case the enum grows — cancelled is the one that exists now.
       if (status === "cancelled" || status === "suspended") {
@@ -26297,6 +29403,341 @@ function buildApp() {
     },
   );
 
+  app.put(
+    "/api/admin/referrers/:id",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id)) {
+        return res.status(400).json({ error: "Invalid referrer id" });
+      }
+      const {
+        category,
+        first_name,
+        last_name,
+        email,
+        phone,
+        company,
+        affiliate_id,
+        preferred_language,
+        notes,
+        status,
+      } = req.body || {};
+      const [existing] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM referrers WHERE id = ? LIMIT 1`,
+        [id],
+      );
+      if (!existing[0])
+        return res.status(404).json({ error: "Referrer not found" });
+
+      const sets: string[] = [];
+      const args: unknown[] = [];
+      if (category != null) {
+        const allowed = ["realtor_broker", "one_off", "affiliate_partner"];
+        if (!allowed.includes(category)) {
+          return res.status(400).json({ error: "Invalid category" });
+        }
+        sets.push("category = ?");
+        args.push(category);
+      }
+      if (first_name != null) {
+        const v = String(first_name).trim();
+        if (!v) return res.status(400).json({ error: "first_name required" });
+        sets.push("first_name = ?");
+        args.push(v);
+      }
+      if (last_name != null) {
+        const v = String(last_name).trim();
+        if (!v) return res.status(400).json({ error: "last_name required" });
+        sets.push("last_name = ?");
+        args.push(v);
+      }
+      if (email !== undefined) {
+        sets.push("email = ?");
+        args.push(email ? String(email).trim().toLowerCase() : null);
+      }
+      if (phone !== undefined) {
+        sets.push("phone = ?");
+        args.push(phone ? String(phone).trim() : null);
+      }
+      if (company !== undefined) {
+        sets.push("company = ?");
+        args.push(company ? String(company).trim() : null);
+      }
+      if (affiliate_id !== undefined) {
+        sets.push("affiliate_id = ?");
+        args.push(affiliate_id ? Number(affiliate_id) : null);
+      }
+      if (preferred_language != null) {
+        sets.push("preferred_language = ?");
+        args.push(preferred_language === "es" ? "es" : "en");
+      }
+      if (notes !== undefined) {
+        sets.push("notes = ?");
+        args.push(notes ? String(notes).trim() : null);
+      }
+      if (status != null) {
+        if (status !== "active" && status !== "inactive") {
+          return res.status(400).json({ error: "Invalid status" });
+        }
+        sets.push("status = ?");
+        args.push(status);
+      }
+      if (!sets.length) {
+        return res.status(400).json({ error: "No fields to update" });
+      }
+      args.push(id);
+      await pool.query(
+        `UPDATE referrers SET ${sets.join(", ")} WHERE id = ?`,
+        args,
+      );
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM referrers WHERE id = ? LIMIT 1`,
+        [id],
+      );
+      res.json({ referrer: rows[0] });
+    },
+  );
+
+  app.get(
+    "/api/admin/clients/:id/referrers",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const clientId = Number(req.params.id);
+      if (!clientId || isNaN(clientId)) {
+        return res.status(400).json({ error: "Invalid client id" });
+      }
+      const links = await listClientReferrerLinks(clientId);
+      res.json({ referrers: links.map(mapClientReferrerLinkRow) });
+    },
+  );
+
+  app.put(
+    "/api/admin/clients/:id/referrers",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const clientId = Number(req.params.id);
+      if (!clientId || isNaN(clientId)) {
+        return res.status(400).json({ error: "Invalid client id" });
+      }
+      const [cRows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, referral_category FROM clients WHERE id = ? LIMIT 1`,
+        [clientId],
+      );
+      if (!cRows[0]) return res.status(404).json({ error: "Client not found" });
+
+      const bodyLinks = Array.isArray(req.body?.referrers)
+        ? req.body.referrers
+        : Array.isArray(req.body?.links)
+          ? req.body.links
+          : null;
+      if (!bodyLinks) {
+        return res.status(400).json({ error: "referrers array required" });
+      }
+
+      // Optional: create inline partners then link
+      const normalized: Array<{
+        referrer_id: number;
+        notify_on_round?: boolean;
+        role?: string;
+      }> = [];
+      for (const item of bodyLinks) {
+        if (item?.referrer_id) {
+          normalized.push({
+            referrer_id: Number(item.referrer_id),
+            notify_on_round: item.notify_on_round !== false,
+            role: item.role,
+          });
+          continue;
+        }
+        if (item?.first_name && item?.last_name) {
+          const category =
+            item.category || cRows[0].referral_category || "realtor_broker";
+          const allowed = ["realtor_broker", "one_off", "affiliate_partner"];
+          if (!allowed.includes(category)) {
+            return res.status(400).json({ error: "Invalid partner category" });
+          }
+          const [ins] = await pool.query<ResultSetHeader>(
+            `INSERT INTO referrers
+               (category, first_name, last_name, email, phone, company, preferred_language)
+             VALUES (?,?,?,?,?,?,?)`,
+            [
+              category,
+              String(item.first_name).trim(),
+              String(item.last_name).trim(),
+              item.email ? String(item.email).trim().toLowerCase() : null,
+              item.phone ? String(item.phone).trim() : null,
+              item.company ? String(item.company).trim() : null,
+              item.preferred_language === "es" ? "es" : "en",
+            ],
+          );
+          normalized.push({
+            referrer_id: Number(ins.insertId),
+            notify_on_round: item.notify_on_round !== false,
+            role: item.role,
+          });
+        }
+      }
+
+      const reqErr = validateReferredPartnerRequirements(
+        cRows[0].referral_category,
+        await Promise.all(
+          normalized.map(async (n) => {
+            const [r] = await pool.query<RowDataPacket[]>(
+              `SELECT first_name, last_name, email, phone FROM referrers WHERE id = ?`,
+              [n.referrer_id],
+            );
+            return r[0] || {};
+          }),
+        ),
+      );
+      if (reqErr) return res.status(400).json({ error: reqErr });
+
+      try {
+        await replaceClientReferrers(clientId, normalized);
+      } catch (e: any) {
+        const status = Number(e?.status) || 500;
+        return res.status(status).json({
+          error: e?.message || "Failed to update referrers",
+          code: e?.code,
+        });
+      }
+      const links = await listClientReferrerLinks(clientId);
+      res.json({ referrers: links.map(mapClientReferrerLinkRow) });
+    },
+  );
+
+  app.get(
+    "/api/admin/clients/:id/cms-credentials",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const clientId = Number(req.params.id);
+      if (!clientId || isNaN(clientId)) {
+        return res.status(400).json({ error: "Invalid client id" });
+      }
+      const includeSecrets =
+        String(req.query.include_secrets || "") === "1" ||
+        String(req.query.include_secrets || "") === "true";
+      const confirmReveal =
+        String(req.query.confirm_reveal || "") === "1" ||
+        String(req.query.confirm_reveal || "") === "true";
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT smart_credit_email, myfreescorenow_email,
+                cms_secrets_ciphertext, cms_secrets_iv, cms_secrets_tag
+         FROM clients WHERE id = ? LIMIT 1`,
+        [clientId],
+      );
+      if (!rows[0]) return res.status(404).json({ error: "Client not found" });
+      const vault = readClientCmsVault(rows[0]);
+      const publicPayload = {
+        smart_credit_email: rows[0].smart_credit_email ?? null,
+        myfreescorenow_email: rows[0].myfreescorenow_email ?? null,
+        has_smart_credit_password: !!String(vault.smart_credit?.password || ""),
+        has_myfreescorenow_password: !!String(
+          vault.myfreescorenow?.password || "",
+        ),
+      };
+      if (!includeSecrets) {
+        return res.json({ credentials: publicPayload });
+      }
+      if (!confirmReveal) {
+        return res.status(400).json({
+          error:
+            "confirm_reveal=1 is required together with include_secrets=1 to reveal CMS passwords",
+          code: "confirm_reveal_required",
+        });
+      }
+      const adminId = Number(req.auth?.id) || null;
+      const ip =
+        (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ||
+        req.socket?.remoteAddress ||
+        null;
+      const ua = String(req.headers["user-agent"] || "").slice(0, 500) || null;
+      await pool
+        .query(
+          `INSERT INTO audit_logs
+             (actor_type, actor_id, action, entity_type, entity_id, changes_json, ip_address, user_agent, status)
+           VALUES ('admin', ?, 'cms_credentials.revealed', 'client', ?, ?, ?, ?, 'success')`,
+          [
+            adminId,
+            clientId,
+            JSON.stringify({
+              include_secrets: true,
+              has_smart_credit_password:
+                publicPayload.has_smart_credit_password,
+              has_myfreescorenow_password:
+                publicPayload.has_myfreescorenow_password,
+            }),
+            ip,
+            ua,
+          ],
+        )
+        .catch((e) =>
+          console.error("[cms-credentials] audit log failed:", e?.message ?? e),
+        );
+      res.json({
+        credentials: publicPayload,
+        secrets: {
+          smart_credit: {
+            email: vault.smart_credit?.email ?? rows[0].smart_credit_email,
+            password: vault.smart_credit?.password ?? null,
+          },
+          myfreescorenow: {
+            email: vault.myfreescorenow?.email ?? rows[0].myfreescorenow_email,
+            password: vault.myfreescorenow?.password ?? null,
+          },
+        },
+      });
+    },
+  );
+
+  app.put(
+    "/api/admin/clients/:id/cms-credentials",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const clientId = Number(req.params.id);
+      if (!clientId || isNaN(clientId)) {
+        return res.status(400).json({ error: "Invalid client id" });
+      }
+      const body = req.body || {};
+      try {
+        await upsertClientCmsCredentials(clientId, {
+          smart_credit: body.smart_credit,
+          myfreescorenow: body.myfreescorenow,
+        });
+      } catch (e: any) {
+        const status = Number(e?.status) || 500;
+        return res
+          .status(status)
+          .json({ error: e?.message || "Failed to save CMS credentials" });
+      }
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT smart_credit_email, myfreescorenow_email,
+                cms_secrets_ciphertext, cms_secrets_iv, cms_secrets_tag
+         FROM clients WHERE id = ? LIMIT 1`,
+        [clientId],
+      );
+      const vault = readClientCmsVault((rows[0] || {}) as RowDataPacket);
+      res.json({
+        credentials: {
+          smart_credit_email: rows[0]?.smart_credit_email ?? null,
+          myfreescorenow_email: rows[0]?.myfreescorenow_email ?? null,
+          has_smart_credit_password: !!String(
+            vault.smart_credit?.password || "",
+          ),
+          has_myfreescorenow_password: !!String(
+            vault.myfreescorenow?.password || "",
+          ),
+        },
+      });
+    },
+  );
+
   // ── Admin manual document upload (same AES-GCM encryption as portal) ─────
   app.post(
     "/api/admin/cases/:id/documents",
@@ -26309,7 +29750,9 @@ function buildApp() {
         return res.status(400).json({ error: "Invalid case id" });
       }
       const docType = String(req.body?.doc_type || "");
-      if (!CASE_DOC_TYPES.includes(docType as (typeof CASE_DOC_TYPES)[number])) {
+      if (
+        !CASE_DOC_TYPES.includes(docType as (typeof CASE_DOC_TYPES)[number])
+      ) {
         return res.status(400).json({ error: "Invalid doc_type" });
       }
       const [caseRows] = await pool.query<RowDataPacket[]>(
@@ -26814,11 +30257,9 @@ function buildApp() {
           [JSON.stringify({ results, error: String(err) }), jobId],
         );
         console.error("[bulk-import/commit]", err);
-        res
-          .status(500)
-          .json({
-            error: "Failed to commit the import job. Please try again.",
-          });
+        res.status(500).json({
+          error: "Failed to commit the import job. Please try again.",
+        });
       }
     },
   );
@@ -27838,7 +31279,8 @@ function buildApp() {
       );
       res.json({
         unread_total:
-          Number(clientRows[0]?.unread || 0) + Number(unknownRows[0]?.unread || 0),
+          Number(clientRows[0]?.unread || 0) +
+          Number(unknownRows[0]?.unread || 0),
       });
     },
   );
@@ -27895,6 +31337,74 @@ function buildApp() {
     },
   );
 
+  /** Upsert Twilio IncomingPhoneNumbers into admin_phone_numbers (super_admin). */
+  app.post(
+    "/api/admin/phone-numbers/sync-twilio",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const [roleRows] = await pool.query<RowDataPacket[]>(
+        `SELECT role FROM admins WHERE id = ? LIMIT 1`,
+        [req.auth!.id],
+      );
+      if (String(roleRows[0]?.role || "") !== "super_admin") {
+        return res.status(403).json({ error: "super_admin required" });
+      }
+      if (!twilioClient) {
+        return res.status(503).json({ error: "Twilio not configured" });
+      }
+      try {
+        const list = await twilioClient.incomingPhoneNumbers.list({
+          limit: 200,
+        });
+        let upserted = 0;
+        for (const n of list) {
+          const e164 = String(n.phoneNumber || "").trim();
+          if (!e164.startsWith("+")) continue;
+          const caps = {
+            sms: !!(n.capabilities as any)?.sms,
+            mms: !!(n.capabilities as any)?.mms,
+            voice: !!(n.capabilities as any)?.voice,
+          };
+          await pool.query(
+            `INSERT INTO admin_phone_numbers
+               (e164, friendly_name, twilio_sid, capabilities_json, is_active)
+             VALUES (?, ?, ?, ?, 1)
+             ON DUPLICATE KEY UPDATE
+               friendly_name = VALUES(friendly_name),
+               twilio_sid = VALUES(twilio_sid),
+               capabilities_json = VALUES(capabilities_json),
+               is_active = 1,
+               updated_at = NOW()`,
+            [
+              e164,
+              n.friendlyName || null,
+              n.sid || null,
+              JSON.stringify(caps),
+            ],
+          );
+          upserted++;
+        }
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT n.*, CONCAT(a.first_name,' ',a.last_name) AS assigned_admin_name
+           FROM admin_phone_numbers n
+           LEFT JOIN admins a ON a.id = n.assigned_admin_id
+           ORDER BY n.id ASC`,
+        );
+        res.json({
+          ok: true,
+          upserted,
+          numbers: rows.map(mapPhoneNumberRow),
+        });
+      } catch (e: any) {
+        console.error("[phone-numbers:sync-twilio]", e?.message ?? e);
+        res.status(500).json({
+          error: e?.message || "Twilio sync failed",
+        });
+      }
+    },
+  );
+
   app.patch(
     "/api/admin/phone-numbers/:id",
     requireAdmin,
@@ -27911,19 +31421,42 @@ function buildApp() {
       const id = Number(req.params.id);
       const assignedRaw = req.body?.assigned_admin_id;
       const assignedAdminId =
-        assignedRaw === null || assignedRaw === ""
-          ? null
-          : Number(assignedRaw);
+        assignedRaw === null || assignedRaw === "" ? null : Number(assignedRaw);
       if (
         assignedAdminId != null &&
         (!Number.isFinite(assignedAdminId) || assignedAdminId <= 0)
       ) {
         return res.status(400).json({ error: "Invalid assigned_admin_id" });
       }
-      await pool.query(
-        `UPDATE admin_phone_numbers SET assigned_admin_id = ? WHERE id = ?`,
-        [assignedAdminId, id],
-      );
+      if (assignedAdminId != null) {
+        const [aRows] = await pool.query<RowDataPacket[]>(
+          `SELECT id FROM admins
+           WHERE id = ? AND status = 'active'
+             AND role IN ('super_admin','admin','agent')
+           LIMIT 1`,
+          [assignedAdminId],
+        );
+        if (!aRows[0]) {
+          return res.status(400).json({ error: "Assignee admin not found" });
+        }
+      }
+      const friendly =
+        req.body?.friendly_name !== undefined
+          ? String(req.body.friendly_name || "").trim() || null
+          : undefined;
+      if (friendly !== undefined) {
+        await pool.query(
+          `UPDATE admin_phone_numbers
+           SET assigned_admin_id = ?, friendly_name = COALESCE(?, friendly_name)
+           WHERE id = ?`,
+          [assignedAdminId, friendly, id],
+        );
+      } else {
+        await pool.query(
+          `UPDATE admin_phone_numbers SET assigned_admin_id = ? WHERE id = ?`,
+          [assignedAdminId, id],
+        );
+      }
       const [rows] = await pool.query<RowDataPacket[]>(
         `SELECT n.*, CONCAT(a.first_name,' ',a.last_name) AS assigned_admin_name
          FROM admin_phone_numbers n
@@ -27943,7 +31476,9 @@ function buildApp() {
     async (req: AuthedRequest, res) => {
       if (!(await requireConversationsAccess(req, res))) return;
       const view = String(req.query.view || "all");
-      const q = String(req.query.q || "").trim().slice(0, 120);
+      const q = String(req.query.q || "")
+        .trim()
+        .slice(0, 120);
       const page = Math.max(1, parseInt((req.query.page as string) || "1", 10));
       const limit = Math.min(
         100,
@@ -28084,7 +31619,11 @@ function buildApp() {
                    AND cvu.status IN ('closed','archived')
                )`,
             );
-          } else if (view === "open" || view === "unassigned" || view === "mine") {
+          } else if (
+            view === "open" ||
+            view === "unassigned" ||
+            view === "mine"
+          ) {
             unkWhere.push(
               `(
                  NOT EXISTS (
@@ -28107,7 +31646,11 @@ function buildApp() {
               );
               unkArgs.push(adminId);
             }
-          } else if (view === "unknown" || view === "all" || view === "unread") {
+          } else if (
+            view === "unknown" ||
+            view === "all" ||
+            view === "unread"
+          ) {
             // Default inbox: hide closed/archived unknown threads
             unkWhere.push(
               `(
@@ -28187,8 +31730,7 @@ function buildApp() {
         }
       }
 
-      const items =
-        view === "unknown" ? unknowns : [...unknowns, ...contacts];
+      const items = view === "unknown" ? unknowns : [...unknowns, ...contacts];
       items.sort((a, b) => {
         const ta = a.last_message_at
           ? new Date(a.last_message_at).getTime()
@@ -28356,7 +31898,9 @@ function buildApp() {
     if (!rows[0]) {
       return res.status(404).json({ error: "Media not found or expired" });
     }
-    const contentType = String(rows[0].content_type || "application/octet-stream");
+    const contentType = String(
+      rows[0].content_type || "application/octet-stream",
+    );
     const raw = rows[0].data;
     let buf: Buffer;
     if (Buffer.isBuffer(raw)) buf = raw;
@@ -28417,7 +31961,9 @@ function buildApp() {
           upstream.status,
           rawUrl.slice(0, 120),
         );
-        return res.status(upstream.status).json({ error: "Media fetch failed" });
+        return res
+          .status(upstream.status)
+          .json({ error: "Media fetch failed" });
       }
       const contentType =
         upstream.headers.get("content-type") || "application/octet-stream";
@@ -28470,9 +32016,7 @@ function buildApp() {
         const result = await deliverHubConversationMessage({
           adminId: req.auth!.id,
           clientId: hasClient ? Number(client_id) : undefined,
-          unknownContactId: hasUnknown
-            ? Number(unknown_contact_id)
-            : undefined,
+          unknownContactId: hasUnknown ? Number(unknown_contact_id) : undefined,
           channel: String(channel || "sms"),
           textBody,
           isInternalNote: !!is_internal_note,
@@ -28484,13 +32028,18 @@ function buildApp() {
         return res.json(result);
       } catch (e: any) {
         const msg = String(e?.message || e);
-        if (e?.code === "conversation_closed" || msg === "conversation_closed") {
+        if (
+          e?.code === "conversation_closed" ||
+          msg === "conversation_closed"
+        ) {
           return res.status(409).json({ error: "conversation_closed" });
         }
         if (/not found/i.test(msg)) {
           return res.status(404).json({ error: msg });
         }
-        if (/required|unsupported|internal notes|invalid media|expired/i.test(msg)) {
+        if (
+          /required|unsupported|internal notes|invalid media|expired/i.test(msg)
+        ) {
           return res.status(400).json({ error: msg });
         }
         console.error("[conversations:send]", msg);
@@ -28588,7 +32137,10 @@ function buildApp() {
         });
       } catch (e: any) {
         const msg = String(e?.message || e);
-        if (e?.code === "conversation_closed" || msg === "conversation_closed") {
+        if (
+          e?.code === "conversation_closed" ||
+          msg === "conversation_closed"
+        ) {
           return res.status(409).json({ error: "conversation_closed" });
         }
         if (/not found/i.test(msg)) {
@@ -28612,12 +32164,10 @@ function buildApp() {
       const kind = String(req.body?.kind || "").trim();
       const contactId = Number(req.body?.contact_id);
       const recentMessages = Array.isArray(req.body?.recent_messages)
-        ? req.body.recent_messages
-            .slice(-8)
-            .map((m: any) => ({
-              direction: String(m?.direction || ""),
-              body: String(m?.body || "").slice(0, 400),
-            }))
+        ? req.body.recent_messages.slice(-8).map((m: any) => ({
+            direction: String(m?.direction || ""),
+            body: String(m?.body || "").slice(0, 400),
+          }))
         : [];
       if (!["client", "unknown"].includes(kind) || !contactId) {
         return res.status(400).json({ error: "Invalid kind or contact_id" });
@@ -28637,7 +32187,8 @@ function buildApp() {
            FROM clients WHERE id = ? LIMIT 1`,
           [contactId],
         );
-        if (!rows[0]) return res.status(404).json({ error: "Client not found" });
+        if (!rows[0])
+          return res.status(404).json({ error: "Client not found" });
         const c = rows[0];
         context = {
           displayName:
@@ -28707,9 +32258,8 @@ function buildApp() {
             },
           );
           if (aiRes.status >= 200 && aiRes.status < 300) {
-            const text = (Array.isArray(aiRes.data?.content)
-              ? aiRes.data.content
-              : []
+            const text = (
+              Array.isArray(aiRes.data?.content) ? aiRes.data.content : []
             )
               .filter((b: any) => b?.type === "text")
               .map((b: any) => b.text)
@@ -28719,8 +32269,12 @@ function buildApp() {
               const parsed = JSON.parse(jsonMatch[0]) as {
                 suggestions?: Array<{ label?: string; body?: string }>;
               };
-              for (const [i, s] of (parsed.suggestions || []).slice(0, 3).entries()) {
-                const body = String(s.body || "").trim().slice(0, 480);
+              for (const [i, s] of (parsed.suggestions || [])
+                .slice(0, 3)
+                .entries()) {
+                const body = String(s.body || "")
+                  .trim()
+                  .slice(0, 480);
                 if (!body) continue;
                 aiSuggestions.push({
                   id: `ai-${i}`,
@@ -28839,7 +32393,8 @@ function buildApp() {
         return res.status(404).json({ error: "Unknown contact not found" });
       }
       const clientId = Number(req.body?.client_id);
-      if (!clientId) return res.status(400).json({ error: "client_id required" });
+      if (!clientId)
+        return res.status(400).json({ error: "client_id required" });
       const [urows] = await pool.query<RowDataPacket[]>(
         `SELECT * FROM conversation_unknown_contacts WHERE id = ? LIMIT 1`,
         [unknownId],
@@ -28876,8 +32431,7 @@ function buildApp() {
         [unknownId],
       );
       if (!urows[0]) return res.status(404).json({ error: "Not found" });
-      const first =
-        String(req.body?.first_name || "").trim() || "Unknown";
+      const first = String(req.body?.first_name || "").trim() || "Unknown";
       const last = String(req.body?.last_name || "").trim() || "Lead";
       const phone = urows[0].phone_e164 || null;
       const emailRaw = String(req.body?.email || urows[0].email || "")
@@ -29044,7 +32598,8 @@ function buildApp() {
       }
       if (!["sms", "internal"].includes(channel)) {
         return res.status(400).json({
-          error: "Invalid channel — use sms or internal (email is a separate module)",
+          error:
+            "Invalid channel — use sms or internal (email is a separate module)",
         });
       }
       const [ins] = await pool.query<ResultSetHeader>(
@@ -29234,7 +32789,9 @@ function buildApp() {
         const like = likeContains(search);
         args.push(like, like, like, like);
       }
-      const where = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
+      const where = whereParts.length
+        ? `WHERE ${whereParts.join(" AND ")}`
+        : "";
       const fromSql = `FROM support_tickets t JOIN clients c ON c.id = t.client_id`;
 
       const [countRow] = await pool.query<RowDataPacket[]>(
@@ -30478,9 +34035,10 @@ function buildApp() {
       const email = String(req.body?.email || "")
         .trim()
         .toLowerCase();
-      const label = String(req.body?.label || "")
-        .trim()
-        .slice(0, 100) || null;
+      const label =
+        String(req.body?.label || "")
+          .trim()
+          .slice(0, 100) || null;
       if (!email || !isValidEmail(email)) {
         return res.status(400).json({ error: "Valid email required" });
       }
@@ -30555,9 +34113,7 @@ function buildApp() {
       if (req.body?.events !== undefined) {
         const eventsIn = normalizeNotifyExtraEventsInput(req.body.events);
         updates.push("events_json = ?");
-        params.push(
-          eventsIn === null ? null : JSON.stringify(eventsIn ?? []),
-        );
+        params.push(eventsIn === null ? null : JSON.stringify(eventsIn ?? []));
       }
       if (!updates.length) {
         return res.status(400).json({ error: "No fields to update" });
@@ -31174,7 +34730,8 @@ function buildApp() {
         const normalized = normalizeAffiliateSlug(String(b.slug || ""));
         if (!isValidAffiliateSlug(normalized)) {
           return res.status(400).json({
-            error: "slug must be 2–64 chars: lowercase letters, numbers, hyphens",
+            error:
+              "slug must be 2–64 chars: lowercase letters, numbers, hyphens",
           });
         }
         const [clash] = await pool.query<RowDataPacket[]>(
@@ -31279,7 +34836,9 @@ function buildApp() {
               [normalized, normalized, id],
             );
             if (clash[0]) {
-              return res.status(409).json({ error: "That slug is already in use" });
+              return res
+                .status(409)
+                .json({ error: "That slug is already in use" });
             }
             updates.push("slug = ?");
             args.push(normalized);
@@ -31369,11 +34928,9 @@ function buildApp() {
           [parentAffiliateId],
         );
         if (parentRows.length === 0 || parentRows[0].plan !== "master") {
-          return res
-            .status(400)
-            .json({
-              error: "parent_affiliate_id must reference a master affiliate",
-            });
+          return res.status(400).json({
+            error: "parent_affiliate_id must reference a master affiliate",
+          });
         }
       }
 
@@ -31553,11 +35110,9 @@ function buildApp() {
           [parentId],
         );
         if (parentRows.length === 0 || parentRows[0].plan !== "master") {
-          return res
-            .status(400)
-            .json({
-              error: "parent_affiliate_id must reference a master affiliate",
-            });
+          return res.status(400).json({
+            error: "parent_affiliate_id must reference a master affiliate",
+          });
         }
       }
 
@@ -32208,7 +35763,10 @@ function buildApp() {
              OR REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(phone_e164,''),'+',''),'-',''),'(',''),')','') IN (${phoneVariants.map(() => "?").join(",")})
            )
            LIMIT 1`,
-          [...phoneVariants, ...phoneVariants.map((v) => normalizePhoneDigits(v))],
+          [
+            ...phoneVariants,
+            ...phoneVariants.map((v) => normalizePhoneDigits(v)),
+          ],
         );
         existingU = found;
       }
@@ -32392,9 +35950,7 @@ function buildApp() {
         linkUrl: `/admin/conversations?client=${clientId}`,
         providerMessageId: sid || null,
         clientId,
-      }).catch((e) =>
-        console.warn("[notify:inbound_sms]", e?.message ?? e),
-      );
+      }).catch((e) => console.warn("[notify:inbound_sms]", e?.message ?? e));
     }
 
     res.set("Content-Type", "text/xml");
@@ -32411,7 +35967,9 @@ function buildApp() {
       return res.status(403).send("forbidden");
     }
     const sid = String(req.body?.MessageSid || "").trim();
-    const status = String(req.body?.MessageStatus || "").trim().toLowerCase();
+    const status = String(req.body?.MessageStatus || "")
+      .trim()
+      .toLowerCase();
     const errorCode = String(req.body?.ErrorCode || "").trim();
     const errorMessage = String(
       req.body?.ErrorMessage || req.body?.ErrorCode || "",
@@ -32464,7 +36022,8 @@ function buildApp() {
         type: "message_status",
         adminIds: adminId ? [adminId] : undefined,
         payload: {
-          client_id: rows[0].client_id != null ? Number(rows[0].client_id) : null,
+          client_id:
+            rows[0].client_id != null ? Number(rows[0].client_id) : null,
           conversation_id: Number(rows[0].conversation_id),
           message_id: Number(rows[0].message_id),
           provider_status: status,
@@ -33123,6 +36682,205 @@ function buildApp() {
   app.get("/api/cron/process-queue", handleProcessNotificationQueue);
   app.post("/api/cron/process-queue", handleProcessNotificationQueue);
 
+  // ── Cron: weekday morning admin digest (Claude + email) ─────────────────
+  // Vercel: Mon–Fri 13:00 and 14:00 UTC; handler gates on America/Denver hour===7.
+  const handleAdminMorningDigest = async (req: any, res: any) => {
+    const started = Date.now();
+    try {
+      const secret = process.env.CRON_SECRET;
+      if (!secret) {
+        return res
+          .status(503)
+          .json({ error: "CRON_SECRET not configured on server" });
+      }
+      const headerSecret = String(req.headers["x-cron-secret"] || "");
+      const auth = String(req.headers.authorization || "");
+      const bearer = auth.toLowerCase().startsWith("bearer ")
+        ? auth.slice(7).trim()
+        : "";
+      const provided = headerSecret || bearer;
+      if (!timingSafeStringEqual(String(provided || ""), secret)) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      const force =
+        String(req.query.force || "") === "1" ||
+        String(req.query.force || "") === "true" ||
+        req.body?.force === true;
+      // force = bypass Denver 7am window only. force_resend = allow a 2nd email same day (tests).
+      const forceResend =
+        String(req.query.force_resend || "") === "1" ||
+        String(req.query.force_resend || "") === "true" ||
+        req.body?.force_resend === true;
+      const filterEmail = String(
+        req.query.admin_email || req.body?.admin_email || "",
+      )
+        .trim()
+        .toLowerCase();
+      const denver = denverParts();
+      if (
+        !force &&
+        !forceResend &&
+        !isDenverWeekdayMorningWindow(new Date(), 7)
+      ) {
+        return res.json({
+          ok: true,
+          skipped: true,
+          reason: "outside_denver_weekday_7am_window",
+          denver,
+        });
+      }
+
+      let admins = await listActiveTeamAdmins();
+      if (filterEmail) {
+        admins = admins.filter(
+          (a) => a.email.trim().toLowerCase() === filterEmail,
+        );
+        if (!admins.length) {
+          return res.status(404).json({
+            error: "No active admin with that email",
+            admin_email: filterEmail,
+          });
+        }
+      }
+      const results: Array<{
+        admin_id: number;
+        email: string;
+        status: string;
+        claude?: boolean;
+      }> = [];
+      const wallMs = 52_000;
+
+      for (const admin of admins) {
+        if (Date.now() - started > wallMs) {
+          results.push({
+            admin_id: admin.id,
+            email: admin.email,
+            status: "skipped_wall_clock",
+          });
+          continue;
+        }
+        if (
+          !adminNotifyPrefOn(admin.prefs, "email", "morning_digest") &&
+          !adminNotifyPrefOn(admin.prefs, "in_app", "morning_digest")
+        ) {
+          results.push({
+            admin_id: admin.id,
+            email: admin.email,
+            status: "prefs_off",
+          });
+          continue;
+        }
+        let claimId: number | null = null;
+        if (!forceResend) {
+          claimId = await claimMorningDigestDay(admin.id, denver.ymd);
+          if (!claimId) {
+            results.push({
+              admin_id: admin.id,
+              email: admin.email,
+              status: "already_sent",
+            });
+            continue;
+          }
+        }
+
+        try {
+          const snapshot = await gatherMorningDigestSnapshot(admin);
+          const remaining = wallMs - (Date.now() - started);
+          let brief: MorningDigestClaudeBrief;
+          let enhanced = false;
+          let claudeErr: string | undefined;
+          if (remaining > 18_000 && process.env.ANTHROPIC_API_KEY) {
+            const out = await runClaudeMorningDigestBrief(snapshot);
+            brief = out.brief;
+            enhanced = out.enhanced;
+            claudeErr = out.error;
+          } else {
+            brief = buildDeterministicMorningBrief(snapshot);
+            claudeErr =
+              remaining <= 18_000 ? "wall_clock_skip_claude" : undefined;
+          }
+
+          const lang = snapshot.admin.preferred_language;
+          const bodyHtml = renderMorningDigestBodyHtml({
+            snapshot,
+            brief,
+            escapeHtmlFn: escapeHtml,
+          });
+          const subject = morningDigestSubject(brief, lang);
+          const html = emailLayout({
+            title: subject,
+            preheader: brief.energy_note.slice(0, 120),
+            bodyHtml,
+            lang,
+          });
+
+          const delivered = await deliverAdminNotificationChannels({
+            admin,
+            eventKey: "morning_digest",
+            tpl: {
+              subject,
+              html,
+              inAppTitle: subject.slice(0, 120),
+              inAppBody: brief.energy_note.slice(0, 280),
+              linkUrl: `${APP_URL}/admin/my-tasks`,
+            },
+          });
+
+          const meta = {
+            claude: enhanced,
+            claude_error: claudeErr ?? null,
+            email: delivered.email,
+            in_app: delivered.in_app,
+            counts: snapshot.counts,
+            force_resend: forceResend || undefined,
+          };
+          if (claimId) {
+            await finalizeMorningDigestSent(claimId, denver.ymd, meta);
+          } else {
+            await markMorningDigestSent(admin.id, denver.ymd, meta);
+          }
+
+          results.push({
+            admin_id: admin.id,
+            email: admin.email,
+            status:
+              delivered.email || delivered.in_app ? "sent" : "no_channel",
+            claude: enhanced,
+          });
+        } catch (e: any) {
+          console.error(
+            `[cron:morning-digest] admin ${admin.id}:`,
+            e?.message ?? e,
+          );
+          results.push({
+            admin_id: admin.id,
+            email: admin.email,
+            status: "error",
+          });
+        }
+      }
+
+      return res.json({
+        ok: true,
+        denver,
+        elapsed_ms: Date.now() - started,
+        admins: results.length,
+        sent: results.filter((r) => r.status === "sent").length,
+        results,
+      });
+    } catch (e: any) {
+      console.error("[cron:morning-digest]", e?.message ?? e);
+      return res.status(500).json({
+        error: "Morning digest failed",
+        message: String(e?.message || e).slice(0, 300),
+      });
+    }
+  };
+
+  app.get("/api/cron/admin-morning-digest", handleAdminMorningDigest);
+  app.post("/api/cron/admin-morning-digest", handleAdminMorningDigest);
+
   // ============================================================================
   // ONBOARDING TASK TEMPLATES (admin + portal)
   // ============================================================================
@@ -33521,7 +37279,9 @@ function buildApp() {
     requireAdmin,
     denyAffiliateAccess,
     async (req, res) => {
-      const q = String(req.query.q || "").trim().slice(0, 120);
+      const q = String(req.query.q || "")
+        .trim()
+        .slice(0, 120);
       const limitRaw = Number(req.query.limit);
       const limit = Math.min(
         50,
@@ -34273,8 +38033,7 @@ function buildApp() {
       );
       res.json({
         permissions: rows.map((r) => {
-          const canExtract =
-            Boolean(r.can_extract) || r.role === "super_admin";
+          const canExtract = Boolean(r.can_extract) || r.role === "super_admin";
           // Service Key is account-wide: "connected" means extract is permitted.
           const connected = serviceKeyMode
             ? canExtract
@@ -34574,7 +38333,8 @@ function buildApp() {
 
       // Snapshot progress before upsert so we only alert when the client
       // *becomes* ready for review (avoids per-task spam + re-submit noise).
-      const progressBefore = await countRequiredOnboardingProgress(activeCaseId);
+      const progressBefore =
+        await countRequiredOnboardingProgress(activeCaseId);
 
       await pool.query<ResultSetHeader>(
         `INSERT INTO client_task_completions
@@ -34859,9 +38619,7 @@ function buildApp() {
           adminId: req.auth!.id,
           to: String(kase.phone),
           body: smsBody,
-        }).catch((e) =>
-          console.error("[info-request:sms]", e?.message),
-        );
+        }).catch((e) => console.error("[info-request:sms]", e?.message));
       }
 
       const [created] = await pool.query<RowDataPacket[]>(
@@ -35005,9 +38763,7 @@ function buildApp() {
           adminId: req.auth!.id,
           to: String(rows[0].phone),
           body: smsBody,
-        }).catch((e) =>
-          console.error("[info-request:review:sms]", e?.message),
-        );
+        }).catch((e) => console.error("[info-request:review:sms]", e?.message));
       }
 
       res.json({ ok: true, status });
@@ -35517,7 +39273,8 @@ function buildApp() {
          WHERE cr.id = ? LIMIT 1`,
         [caseId],
       );
-      if (!caseRows[0]) return res.status(404).json({ error: "Case not found" });
+      if (!caseRows[0])
+        return res.status(404).json({ error: "Case not found" });
       const row = caseRows[0];
       if (!row.email) {
         return res.status(422).json({ error: "Client has no email on file" });
@@ -35547,7 +39304,10 @@ function buildApp() {
       );
 
       const ttlHours = ONBOARDING_TOKEN_TTL_HOURS;
-      const token = await createOnboardingToken(Number(row.client_id), ttlHours);
+      const token = await createOnboardingToken(
+        Number(row.client_id),
+        ttlHours,
+      );
       const portalUrl = `${APP_URL}/portal/onboarding/${token}?task=${encodeURIComponent(String(tpl.slug))}`;
       const expiresAt = new Date(Date.now() + ttlHours * 60 * 60 * 1000);
 
@@ -35826,6 +39586,11 @@ function buildApp() {
         tradeline_rec: req.body?.tradeline_rec === "true",
         funding_note: req.body?.funding_note === "true",
         spanish: req.body?.spanish === "true",
+        // Default on (OFG always wants Claude narrative); only skip on explicit false
+        enhance_with_claude: !(
+          req.body?.enhance_with_claude === "false" ||
+          req.body?.enhance_with_claude === false
+        ),
       };
 
       const [caseRows] = await pool.query<RowDataPacket[]>(
@@ -35968,7 +39733,7 @@ function buildApp() {
         );
         const firstName = String(clientRows[0]?.first_name || "Client");
 
-        const { data, meta } = await extractFromCreditReportPdfs(
+        const { data: extracted, meta } = await extractFromCreditReportPdfs(
           beforeBuffer,
           afterFile.buffer,
           firstName,
@@ -35982,6 +39747,31 @@ function buildApp() {
         );
         meta.before_source = beforeSource;
         meta.before_reused_from_session_id = beforeReusedFrom;
+
+        let data = extracted;
+        if (options.enhance_with_claude && process.env.ANTHROPIC_API_KEY) {
+          let afterText = "";
+          try {
+            const pdfParse = await loadPdfParse();
+            const parsed = await pdfParse(afterFile.buffer);
+            afterText = String(parsed?.text || "");
+          } catch {
+            /* optional */
+          }
+          const narrative = await runClaudeOfgReportNarrative({
+            data: extracted,
+            afterPdfText: afterText,
+          });
+          data = narrative.data;
+          meta.claude_narrative = narrative.enhanced;
+          meta.claude_narrative_error = narrative.error ?? null;
+          meta.claude_narrative_at = new Date().toISOString();
+        } else {
+          meta.claude_narrative = false;
+          if (options.enhance_with_claude && !process.env.ANTHROPIC_API_KEY) {
+            meta.claude_narrative_error = "ANTHROPIC_API_KEY not set";
+          }
+        }
 
         await pool.query(
           `UPDATE report_wizard_sessions
@@ -36045,10 +39835,23 @@ function buildApp() {
       );
 
       try {
+        const sessionOpts =
+          parseWizardJsonField<OfGReportWizardOptions>(session.options_json) ??
+          {};
+        // Default on; body false or session options_json.enhance_with_claude=false skips
+        let enhanceWithClaude = true;
+        if (req.body?.enhance_with_claude === false) {
+          enhanceWithClaude = false;
+        } else if (req.body?.enhance_with_claude === true) {
+          enhanceWithClaude = true;
+        } else if (sessionOpts.enhance_with_claude === false) {
+          enhanceWithClaude = false;
+        }
         const { data, meta } = await runWizardSessionExtraction(
           pool,
           session,
           decryptFile,
+          { enhanceWithClaude },
         );
         await pool.query(
           `UPDATE report_wizard_sessions
@@ -36075,6 +39878,94 @@ function buildApp() {
         console.error("[report-wizard:extract]", e);
         res.status(500).json({ error: e?.message || "Re-extraction failed" });
       }
+    },
+  );
+
+  /** Claude narrative polish on current review/extracted data (scores untouched). */
+  app.post(
+    "/api/admin/report-wizard/sessions/:id/enhance",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const sessionId = Number(req.params.id);
+      const session = await loadWizardSession(pool, sessionId);
+      if (!session) return res.status(404).json({ error: "Session not found" });
+      if (session.status === "published") {
+        return res
+          .status(400)
+          .json({ error: "Cannot enhance published session" });
+      }
+      if (!process.env.ANTHROPIC_API_KEY) {
+        return res.status(503).json({
+          error: "Claude narrative enhance unavailable (ANTHROPIC_API_KEY)",
+          code: "claude_unavailable",
+        });
+      }
+
+      const incoming = req.body?.reviewed_json as OfGReportData | undefined;
+      const base =
+        incoming ??
+        parseWizardJsonField<OfGReportData>(session.reviewed_json) ??
+        parseWizardJsonField<OfGReportData>(session.extracted_json);
+      if (!base?.middleScore) {
+        return res.status(400).json({ error: "No report data to enhance" });
+      }
+
+      let afterText = "";
+      try {
+        const afterPdfId = Number(session.after_pdf_id);
+        if (afterPdfId) {
+          const buf = await loadWizardSourcePdfBuffer(
+            pool,
+            afterPdfId,
+            decryptFile,
+          );
+          const pdfParse = await loadPdfParse();
+          const parsed = await pdfParse(buf);
+          afterText = String(parsed?.text || "");
+        }
+      } catch {
+        /* optional */
+      }
+
+      const narrative = await runClaudeOfgReportNarrative({
+        data: base,
+        afterPdfText: afterText,
+      });
+      if (!narrative.enhanced) {
+        return res.status(502).json({
+          error: narrative.error || "Claude narrative enhance failed",
+          code: "claude_enhance_failed",
+        });
+      }
+
+      const meta =
+        parseWizardJsonField<Record<string, unknown>>(
+          session.extraction_meta,
+        ) ?? {};
+      meta.claude_narrative = true;
+      meta.claude_narrative_at = new Date().toISOString();
+      meta.claude_narrative_error = null;
+      meta.claude_narrative_manual = true;
+
+      await pool.query(
+        `UPDATE report_wizard_sessions
+         SET reviewed_json = ?, extracted_json = COALESCE(extracted_json, ?),
+             extraction_meta = ?, status = 'review', updated_at = NOW()
+         WHERE id = ?`,
+        [
+          JSON.stringify(narrative.data),
+          JSON.stringify(narrative.data),
+          JSON.stringify(meta),
+          sessionId,
+        ],
+      );
+
+      const updated = await loadWizardSession(pool, sessionId);
+      res.json({
+        session: formatWizardSessionResponse(updated!),
+        enhanced: true,
+      });
     },
   );
 
@@ -36301,6 +40192,96 @@ function buildApp() {
         const locale = data.locale === "es" ? "es" : "en";
         newStage = pipelineStageAfterRoundReport(roundNumber);
 
+        // Progress QA alerts (deterministic + optional Claude enrichment)
+        const [profileRows] = await pool.query<RowDataPacket[]>(
+          `SELECT first_name, last_name, phone, address_line1, city, state, zip
+           FROM clients WHERE id = ? LIMIT 1`,
+          [clientId],
+        );
+        const profile = (profileRows[0] || {}) as RowDataPacket;
+        let afterPdfText = "";
+        try {
+          const afterPdfId = Number(session.after_pdf_id);
+          if (afterPdfId) {
+            const buf = await loadWizardSourcePdfBuffer(
+              pool,
+              afterPdfId,
+              decryptFile,
+            );
+            const pdfParse = await loadPdfParse();
+            const parsed = await pdfParse(buf);
+            afterPdfText = String(parsed?.text || "");
+          }
+        } catch (e) {
+          console.warn("[report-wizard] after PDF text for alerts:", e);
+        }
+
+        const afterAccounts = (data.targets || []).map((t, i) => {
+          const itemLabel = String(
+            (t as { item?: string; label?: string }).item ||
+              (t as { label?: string }).label ||
+              "",
+          );
+          return {
+            key: `target-${i}-${itemLabel.slice(0, 40)}`,
+            label: itemLabel,
+            type: /inquir/i.test(itemLabel)
+              ? "inquiry"
+              : /closed|paid|charge.?off|collection/i.test(itemLabel)
+                ? "collection"
+                : "other",
+            bureaus: Array.isArray(t.bureaus) ? t.bureaus.map(String) : [],
+          };
+        });
+
+        let progressAlerts: ProgressReportAlert[] =
+          buildDeterministicProgressAlerts({
+            profile: {
+              first_name: profile.first_name,
+              last_name: profile.last_name,
+              phone: profile.phone,
+              address_line1: profile.address_line1,
+              city: profile.city,
+              state: profile.state,
+              zip: profile.zip,
+            },
+            afterPdfText,
+            afterAccounts,
+            priorWins: (data.wins || []).map((w) => ({
+              label: String(
+                (w as { itemRemoved?: string; label?: string }).itemRemoved ||
+                  (w as { label?: string }).label ||
+                  "",
+              ),
+            })),
+          });
+
+        // Optional Claude QA enrichment (best-effort, never blocks publish)
+        if (process.env.ANTHROPIC_API_KEY && afterPdfText.length > 200) {
+          try {
+            const claudeAlerts = await runClaudeProgressReportQa({
+              profile,
+              afterPdfText: afterPdfText.slice(0, 12000),
+              targets: data.targets,
+              wins: data.wins,
+            });
+            if (claudeAlerts.length) {
+              const seen = new Set(
+                progressAlerts.map((a) => `${a.type}|${a.detail}`),
+              );
+              for (const a of claudeAlerts) {
+                const k = `${a.type}|${a.detail}`;
+                if (!seen.has(k)) {
+                  seen.add(k);
+                  progressAlerts.push(a);
+                }
+              }
+            }
+          } catch (e) {
+            console.warn("[report-wizard] Claude QA skipped:", e);
+          }
+        }
+
         const conn = await pool.getConnection();
         try {
           await conn.beginTransaction();
@@ -36309,10 +40290,10 @@ function buildApp() {
             `INSERT INTO client_round_reports
                (client_id, case_id, round_number, score_before, score_after,
                 items_removed, items_disputed, summary_md,
-                bureau_scores_json, wins_json, targets_json, utilization_json,
+                bureau_scores_json, wins_json, targets_json, alerts_json, utilization_json,
                 action_plan_json, file_strength_score, wizard_session_id, report_locale,
                 created_by_admin_id, delivered_via_email, delivered_via_sms)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)
              ON DUPLICATE KEY UPDATE
                case_id = VALUES(case_id),
                score_before = VALUES(score_before),
@@ -36323,6 +40304,7 @@ function buildApp() {
                bureau_scores_json = VALUES(bureau_scores_json),
                wins_json = VALUES(wins_json),
                targets_json = VALUES(targets_json),
+               alerts_json = VALUES(alerts_json),
                utilization_json = VALUES(utilization_json),
                action_plan_json = VALUES(action_plan_json),
                file_strength_score = VALUES(file_strength_score),
@@ -36341,6 +40323,7 @@ function buildApp() {
               JSON.stringify(data.bureauScores),
               JSON.stringify(data.wins),
               JSON.stringify(data.targets),
+              JSON.stringify(progressAlerts),
               JSON.stringify(data.utilization),
               JSON.stringify(data.actionPlan),
               data.fileStrengthScore,
@@ -36448,6 +40431,38 @@ function buildApp() {
           console.error("[referrer:wizard-publish]", e?.message ?? e),
         );
 
+        if (progressAlerts.length > 0) {
+          const alertSummary = progressAlerts
+            .slice(0, 8)
+            .map((a) => `• [${a.type}] ${a.title}: ${a.detail}`)
+            .join("\n");
+          const clientName =
+            `${profile.first_name || ""} ${profile.last_name || ""}`.trim() ||
+            `Client #${clientId}`;
+          const boardUrl = `${APP_URL}/admin/pipeline?client=${clientId}`;
+          notifyAllTeamAdmins("progress_report_alerts", (admin) => {
+            const lang = admin.preferred_language === "es" ? "es" : "en";
+            const subject =
+              lang === "es"
+                ? `Alertas de reporte R${roundNumber} — ${clientName}`
+                : `Progress report alerts R${roundNumber} — ${clientName}`;
+            const body =
+              lang === "es"
+                ? `${progressAlerts.length} alerta(s) al publicar Round ${roundNumber}:\n${alertSummary}`
+                : `${progressAlerts.length} alert(s) on Round ${roundNumber} publish:\n${alertSummary}`;
+            return {
+              subject,
+              html: `<p><strong>${progressAlerts.length}</strong> progress-report alert(s) for <strong>${clientName}</strong> Round ${roundNumber}.</p><pre style="white-space:pre-wrap;font-size:13px">${alertSummary.replace(/</g, "&lt;")}</pre><p><a href="${boardUrl}">Open client</a></p>`,
+              inAppTitle: subject,
+              inAppBody: body.slice(0, 280),
+              linkUrl: boardUrl,
+              smsBody: `${subject}`.slice(0, 320),
+            };
+          }).catch((e: any) =>
+            console.error("[progress_report_alerts]", e?.message ?? e),
+          );
+        }
+
         if (process.env.CRC_SYNC_STAGES !== "false") {
           crcSyncClient(clientId).catch((e) =>
             console.error("[crc:wizard-publish]", e?.message),
@@ -36460,6 +40475,8 @@ function buildApp() {
           round_report_id: roundReportId,
           output_pdf_id: outputPdfId,
           pipeline_stage: newStage,
+          alerts: progressAlerts,
+          alerts_count: progressAlerts.length,
         });
       } catch (e: any) {
         if (cdnUrl) {
@@ -36573,7 +40590,12 @@ function buildApp() {
         tpl,
       });
     },
-    emailNotifyExtraRecipients: async ({ subject, html, eventKey, skipEmails }) =>
+    emailNotifyExtraRecipients: async ({
+      subject,
+      html,
+      eventKey,
+      skipEmails,
+    }) =>
       emailAdminNotifyExtraRecipients({
         subject,
         html,
@@ -36707,7 +40729,6 @@ export default function handler(req: VercelRequest, res: VercelResponse) {
   }
 }
 
-
 // ============================================================
 // VOICE HANDLERS (inlined — Vercel serverless cannot resolve ./voiceHandlers)
 // Inbound: ring ONLY the admin assigned to the dialled OFG number
@@ -36801,8 +40822,7 @@ type VoiceRouteDeps = {
   appUrl: string;
 };
 
-let cachedTwimlAppSid: string | null =
-  process.env.TWILIO_TWIML_APP_SID || null;
+let cachedTwimlAppSid: string | null = process.env.TWILIO_TWIML_APP_SID || null;
 let twimlAppVerified = false;
 
 /** CallSids that reached dial-status before the inbound log INSERT finished. */
@@ -36935,7 +40955,11 @@ async function publishVoiceIncomingAbly(payload: {
   const key = String(process.env.ABLY_API_KEY || "")
     .trim()
     .replace(/^["']|["']$/g, "");
-  if (!key || !/^[-\w]+\.[-\w]+:.+$/.test(key) || process.env.VITEST === "true") {
+  if (
+    !key ||
+    !/^[-\w]+\.[-\w]+:.+$/.test(key) ||
+    process.env.VITEST === "true"
+  ) {
     return;
   }
   try {
@@ -36984,9 +41008,7 @@ async function getSystemSetting(
     `SELECT setting_value FROM system_settings WHERE setting_key = ? LIMIT 1`,
     [key],
   );
-  return rows[0]?.setting_value != null
-    ? String(rows[0].setting_value)
-    : null;
+  return rows[0]?.setting_value != null ? String(rows[0].setting_value) : null;
 }
 
 async function resolveVoicemailSettings(
@@ -37210,10 +41232,7 @@ async function insertCallMessage(
     if (dup[0]) {
       // Never clobber a terminal dial status with a later "ringing" insert
       // (dial-status may have upserted the row before /voice/incoming).
-      if (
-        opts.providerStatus &&
-        opts.providerStatus !== "ringing"
-      ) {
+      if (opts.providerStatus && opts.providerStatus !== "ringing") {
         await deps.pool.query(
           `UPDATE conversation_messages SET provider_status = ? WHERE id = ?`,
           [opts.providerStatus, Number(dup[0].id)],
@@ -37613,82 +41632,74 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
   });
 
   // ── GET/PUT /api/voice/call-forwarding ──────────────────────────────────
-  app.get(
-    "/api/voice/call-forwarding",
-    ...withConvAccess,
-    async (req, res) => {
-      try {
-        const adminId = (req as AuthedRequest).auth!.id;
-        const [rows] = await pool.query<RowDataPacket[]>(
-          `SELECT call_forwarding_enabled, call_forwarding_phone, phone
+  app.get("/api/voice/call-forwarding", ...withConvAccess, async (req, res) => {
+    try {
+      const adminId = (req as AuthedRequest).auth!.id;
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT call_forwarding_enabled, call_forwarding_phone, phone
            FROM admins WHERE id = ? LIMIT 1`,
-          [adminId],
-        );
-        if (!rows[0]) {
-          return res
-            .status(404)
-            .json({ success: false, error: "Admin not found" });
-        }
-        const phone =
-          (rows[0].call_forwarding_phone as string | null) ??
-          (rows[0].phone as string | null) ??
-          null;
-        return res.json({
-          success: true,
-          call_forwarding_enabled: !!rows[0].call_forwarding_enabled,
-          call_forwarding_phone: phone,
-          call_forwarding_number: phone,
-        });
-      } catch (err) {
-        console.error("[voice:call-forwarding:get]", err);
-        return res.status(500).json({
-          success: false,
-          error: "Failed to get call forwarding settings",
-        });
+        [adminId],
+      );
+      if (!rows[0]) {
+        return res
+          .status(404)
+          .json({ success: false, error: "Admin not found" });
       }
-    },
-  );
+      const phone =
+        (rows[0].call_forwarding_phone as string | null) ??
+        (rows[0].phone as string | null) ??
+        null;
+      return res.json({
+        success: true,
+        call_forwarding_enabled: !!rows[0].call_forwarding_enabled,
+        call_forwarding_phone: phone,
+        call_forwarding_number: phone,
+      });
+    } catch (err) {
+      console.error("[voice:call-forwarding:get]", err);
+      return res.status(500).json({
+        success: false,
+        error: "Failed to get call forwarding settings",
+      });
+    }
+  });
 
-  app.put(
-    "/api/voice/call-forwarding",
-    ...withConvAccess,
-    async (req, res) => {
-      try {
-        const adminId = (req as AuthedRequest).auth!.id;
-        const { enabled, phone } = req.body as {
-          enabled: boolean;
-          phone?: string;
-        };
-        if (typeof enabled !== "boolean") {
-          return res
-            .status(400)
-            .json({ success: false, error: "enabled (boolean) is required" });
-        }
-        let normalizedPhone: string | null = null;
-        if (phone && phone.trim()) {
-          normalizedPhone = deps.toSmsE164(phone);
-        }
-        await pool.query(
-          `UPDATE admins
+  app.put("/api/voice/call-forwarding", ...withConvAccess, async (req, res) => {
+    try {
+      const adminId = (req as AuthedRequest).auth!.id;
+      const { enabled, phone } = req.body as {
+        enabled: boolean;
+        phone?: string;
+      };
+      if (typeof enabled !== "boolean") {
+        return res
+          .status(400)
+          .json({ success: false, error: "enabled (boolean) is required" });
+      }
+      let normalizedPhone: string | null = null;
+      if (phone && phone.trim()) {
+        normalizedPhone = deps.toSmsE164(phone);
+      }
+      await pool.query(
+        `UPDATE admins
            SET call_forwarding_enabled = ?, call_forwarding_phone = ?, updated_at = NOW()
            WHERE id = ?`,
-          [enabled ? 1 : 0, normalizedPhone, adminId],
-        );
-        return res.json({
-          success: true,
-          call_forwarding_enabled: enabled,
-          call_forwarding_phone: normalizedPhone,
-          call_forwarding_number: normalizedPhone,
-        });
-      } catch (err) {
-        console.error("[voice:call-forwarding:put]", err);
-        return res.status(500).json({
-          success: false,
-          error: "Failed to update call forwarding settings",
-        });
-      }
-    },
-  );
+        [enabled ? 1 : 0, normalizedPhone, adminId],
+      );
+      return res.json({
+        success: true,
+        call_forwarding_enabled: enabled,
+        call_forwarding_phone: normalizedPhone,
+        call_forwarding_number: normalizedPhone,
+      });
+    } catch (err) {
+      console.error("[voice:call-forwarding:put]", err);
+      return res.status(500).json({
+        success: false,
+        error: "Failed to update call forwarding settings",
+      });
+    }
+  });
 
   // ── GET/PUT /api/voice/voicemail-settings ───────────────────────────────
   app.get(
@@ -37826,14 +41837,19 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
             .json({ success: false, error: "Admin access required" });
         }
 
-        const { enabled, greeting_text, greeting_url, max_seconds, transcribe } =
-          req.body as {
-            enabled?: boolean;
-            greeting_text?: string | null;
-            greeting_url?: string | null;
-            max_seconds?: number;
-            transcribe?: boolean;
-          };
+        const {
+          enabled,
+          greeting_text,
+          greeting_url,
+          max_seconds,
+          transcribe,
+        } = req.body as {
+          enabled?: boolean;
+          greeting_text?: string | null;
+          greeting_url?: string | null;
+          max_seconds?: number;
+          transcribe?: boolean;
+        };
 
         const upserts: Array<[string, string]> = [];
         if (typeof enabled === "boolean") {
@@ -37858,10 +41874,7 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
           upserts.push(["voice_voicemail_max_seconds", String(clamped)]);
         }
         if (typeof transcribe === "boolean") {
-          upserts.push([
-            "voice_voicemail_transcribe",
-            transcribe ? "1" : "0",
-          ]);
+          upserts.push(["voice_voicemail_transcribe", transcribe ? "1" : "0"]);
         }
         if (!upserts.length) {
           return res
@@ -37891,21 +41904,15 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
   app.post("/api/voice/log", ...withConvAccess, async (req, res) => {
     try {
       const adminId = (req as AuthedRequest).auth!.id;
-      const {
-        client_id,
-        phone,
-        duration,
-        call_status,
-        call_sid,
-        direction,
-      } = req.body as {
-        client_id?: number;
-        phone?: string;
-        duration?: number;
-        call_status?: string;
-        call_sid?: string;
-        direction?: "inbound" | "outbound";
-      };
+      const { client_id, phone, duration, call_status, call_sid, direction } =
+        req.body as {
+          client_id?: number;
+          phone?: string;
+          duration?: number;
+          call_status?: string;
+          call_sid?: string;
+          direction?: "inbound" | "outbound";
+        };
       if (!phone) {
         return res
           .status(400)
@@ -38045,24 +42052,20 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
   });
 
   // ── POST /api/voice/call-answered ───────────────────────────────────────
-  app.post(
-    "/api/voice/call-answered",
-    ...withConvAccess,
-    async (req, res) => {
-      try {
-        const { callSid } = req.body as { callSid?: string };
-        if (callSid) {
-          await publishVoiceIncomingAbly({ callSid });
-        }
-        return res.json({ success: true });
-      } catch (error) {
-        console.error("[voice:call-answered]", error);
-        return res
-          .status(500)
-          .json({ success: false, error: "Failed to broadcast call-answered" });
+  app.post("/api/voice/call-answered", ...withConvAccess, async (req, res) => {
+    try {
+      const { callSid } = req.body as { callSid?: string };
+      if (callSid) {
+        await publishVoiceIncomingAbly({ callSid });
       }
-    },
-  );
+      return res.json({ success: true });
+    } catch (error) {
+      console.error("[voice:call-answered]", error);
+      return res
+        .status(500)
+        .json({ success: false, error: "Failed to broadcast call-answered" });
+    }
+  });
 
   // ── GET /api/voice/recording-check/:callSid ─────────────────────────────
   app.get(
@@ -38106,8 +42109,7 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
               });
               const completed = recordings.find(
                 (r: any) =>
-                  String(r.status || "")
-                    .toLowerCase() === "completed",
+                  String(r.status || "").toLowerCase() === "completed",
               );
               if (completed?.sid) {
                 const recordingUrl = `https://api.twilio.com/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Recordings/${completed.sid}.mp3`;
@@ -38250,7 +42252,12 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
         redirect: "follow",
       });
       if (!upstream.ok && upstream.status !== 206) {
-        return res.status(upstream.status).json({
+        // Never forward Twilio 401/403 — clients would treat it as a session failure.
+        const status =
+          upstream.status === 401 || upstream.status === 403
+            ? 502
+            : upstream.status;
+        return res.status(status).json({
           success: false,
           error: "Failed to fetch recording from Twilio",
         });
@@ -38601,9 +42608,7 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
           },
         });
 
-        if (
-          await claimCallNotifyFlag(pool, externalId, "voicemail_notified")
-        ) {
+        if (await claimCallNotifyFlag(pool, externalId, "voicemail_notified")) {
           const admin = await loadNotifyAdmin(pool, assignedAdminId);
           const conversationsUrl = `${deps.appUrl}/admin/conversations`;
           await notifyAssignedAdmin(deps, {
@@ -38745,84 +42750,80 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
   });
 
   // ── POST /api/voice/fix-call-setup ─────────────────────────────────────
-  app.post(
-    "/api/voice/fix-call-setup",
-    ...withConvAccess,
-    async (req, res) => {
-      try {
-        if (!twilioClient) {
-          return res
-            .status(503)
-            .json({ success: false, error: "Twilio not configured" });
-        }
-        cachedTwimlAppSid = process.env.TWILIO_TWIML_APP_SID || null;
-        twimlAppVerified = false;
-        const sid = await getOrCreateTwimlAppSid(deps);
-        if (!sid) {
-          return res.status(500).json({
-            success: false,
-            error: "Could not create or find TwiML App",
+  app.post("/api/voice/fix-call-setup", ...withConvAccess, async (req, res) => {
+    try {
+      if (!twilioClient) {
+        return res
+          .status(503)
+          .json({ success: false, error: "Twilio not configured" });
+      }
+      cachedTwimlAppSid = process.env.TWILIO_TWIML_APP_SID || null;
+      twimlAppVerified = false;
+      const sid = await getOrCreateTwimlAppSid(deps);
+      if (!sid) {
+        return res.status(500).json({
+          success: false,
+          error: "Could not create or find TwiML App",
+        });
+      }
+      const voiceUrl = `${getVoiceBaseUrl(deps)}/api/voice/twiml`;
+      const incomingUrl = `${getVoiceBaseUrl(deps)}/api/voice/incoming`;
+      const smsUrl = `${getVoiceBaseUrl(deps)}/api/webhooks/twilio/sms`;
+
+      const [ofgRows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, e164, twilio_sid FROM admin_phone_numbers
+           WHERE is_active = 1 AND twilio_sid IS NOT NULL AND twilio_sid != ''`,
+      );
+      const configured: Array<{
+        id: number;
+        e164: string;
+        twilio_sid: string;
+        ok: boolean;
+        error?: string;
+      }> = [];
+      for (const row of ofgRows) {
+        const phoneSid = String(row.twilio_sid);
+        try {
+          await twilioClient.incomingPhoneNumbers(phoneSid).update({
+            voiceUrl: incomingUrl,
+            voiceMethod: "POST",
+            smsUrl,
+            smsMethod: "POST",
+          });
+          configured.push({
+            id: Number(row.id),
+            e164: String(row.e164),
+            twilio_sid: phoneSid,
+            ok: true,
+          });
+        } catch (e: any) {
+          configured.push({
+            id: Number(row.id),
+            e164: String(row.e164),
+            twilio_sid: phoneSid,
+            ok: false,
+            error: String(e?.message || e),
           });
         }
-        const voiceUrl = `${getVoiceBaseUrl(deps)}/api/voice/twiml`;
-        const incomingUrl = `${getVoiceBaseUrl(deps)}/api/voice/incoming`;
-        const smsUrl = `${getVoiceBaseUrl(deps)}/api/webhooks/twilio/sms`;
-
-        const [ofgRows] = await pool.query<RowDataPacket[]>(
-          `SELECT id, e164, twilio_sid FROM admin_phone_numbers
-           WHERE is_active = 1 AND twilio_sid IS NOT NULL AND twilio_sid != ''`,
-        );
-        const configured: Array<{
-          id: number;
-          e164: string;
-          twilio_sid: string;
-          ok: boolean;
-          error?: string;
-        }> = [];
-        for (const row of ofgRows) {
-          const phoneSid = String(row.twilio_sid);
-          try {
-            await twilioClient.incomingPhoneNumbers(phoneSid).update({
-              voiceUrl: incomingUrl,
-              voiceMethod: "POST",
-              smsUrl,
-              smsMethod: "POST",
-            });
-            configured.push({
-              id: Number(row.id),
-              e164: String(row.e164),
-              twilio_sid: phoneSid,
-              ok: true,
-            });
-          } catch (e: any) {
-            configured.push({
-              id: Number(row.id),
-              e164: String(row.e164),
-              twilio_sid: phoneSid,
-              ok: false,
-              error: String(e?.message || e),
-            });
-          }
-        }
-
-        return res.json({
-          success: true,
-          twimlAppSid: sid,
-          voiceUrl,
-          incomingUrl,
-          smsUrl,
-          numbers: configured,
-          message:
-            "TwiML App verified; OFG number voice/SMS webhooks updated where Twilio SID is set",
-        });
-      } catch (error) {
-        console.error("[voice:fix-call-setup]", error);
-        return res
-          .status(500)
-          .json({ success: false, error: "Failed to fix call setup" });
       }
-    },
-  );
+
+      return res.json({
+        success: true,
+        twimlAppSid: sid,
+        voiceUrl,
+        incomingUrl,
+        smsUrl,
+        numbers: configured,
+        message:
+          "TwiML App verified; OFG number voice/SMS webhooks updated where Twilio SID is set",
+      });
+    } catch (error) {
+      console.error("[voice:fix-call-setup]", error);
+      return res
+        .status(500)
+        .json({ success: false, error: "Failed to fix call setup" });
+    }
+  });
 
   // ── GET /api/admin/conversations/lookup-contact ─────────────────────────
   const handleLookupContact: RequestHandler = async (req, res) => {
@@ -38876,9 +42877,7 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
       const calledNumber =
         (req.body?.To as string) || (req.body?.Called as string) || "";
       const callerNumber =
-        (req.body?.From as string) ||
-        (req.body?.Caller as string) ||
-        "Unknown";
+        (req.body?.From as string) || (req.body?.Caller as string) || "Unknown";
       const callSid = (req.body?.CallSid as string) || null;
 
       const ofg = calledNumber
@@ -38906,8 +42905,7 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
         [assignedAdminId],
       );
       const fwdPhone =
-        fwdRows[0]?.call_forwarding_enabled &&
-        fwdRows[0]?.call_forwarding_phone
+        fwdRows[0]?.call_forwarding_enabled && fwdRows[0]?.call_forwarding_phone
           ? String(fwdRows[0].call_forwarding_phone)
           : null;
 
@@ -38948,9 +42946,7 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
             assignedAdminId,
           });
         const body = `Incoming call from ${callerNumber}`;
-        const pendingStatus = callSid
-          ? takePendingDialStatus(callSid)
-          : null;
+        const pendingStatus = callSid ? takePendingDialStatus(callSid) : null;
         const inserted = await insertCallMessage(deps, {
           conversationId,
           direction: "inbound",
@@ -38994,7 +42990,6 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
   app.post("/api/voice/incoming", guard, handleVoiceIncoming);
   app.post("/api/webhooks/twilio/voice", guard, handleVoiceIncoming);
 }
-
 
 export function createServer() {
   return buildApp();

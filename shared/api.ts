@@ -95,7 +95,9 @@ export type AdminNotifyEventKey =
   | "missed_call"
   | "voicemail"
   | "funding_doc_upload"
-  | "funding_application_created";
+  | "funding_application_created"
+  | "progress_report_alerts"
+  | "morning_digest";
 
 export type AdminNotifyChannel = "email" | "in_app" | "sms";
 
@@ -567,6 +569,12 @@ export interface AdminClientListItem {
     | "affiliate_partner"
     | null;
   referrer_id?: number | null;
+  /** Up to 3 linked partners (when loaded by detail endpoints). */
+  referrers?: ClientReferrerLink[];
+  smart_credit_email?: string | null;
+  myfreescorenow_email?: string | null;
+  /** True when encrypted CMS passwords are stored (never returns plaintext in lists). */
+  cms_credentials_stored?: boolean;
   // payment summary (from clients list endpoint)
   total_paid_cents?: number;
   payment_count?: number;
@@ -598,6 +606,50 @@ export interface AdminReferrer {
   notes?: string | null;
   status: string;
   created_at?: string;
+}
+
+export type ClientReferrerRole = "primary" | "secondary" | "tertiary";
+
+/** Junction row: partner linked to a client (max 3). */
+export interface ClientReferrerLink {
+  id: number;
+  client_id: number;
+  referrer_id: number;
+  role: ClientReferrerRole;
+  sort_order: number;
+  notify_on_round: boolean;
+  referrer?: AdminReferrer;
+}
+
+export type ProgressReportAlertType =
+  | "personal_info_mismatch"
+  | "closed_still_reporting"
+  | "hard_inquiry_open";
+
+export interface ProgressReportAlert {
+  type: ProgressReportAlertType;
+  severity: "warning" | "critical";
+  title: string;
+  detail: string;
+  meta?: Record<string, string | number | boolean | null>;
+}
+
+export interface ClientCmsCredentialsPublic {
+  smart_credit_email: string | null;
+  myfreescorenow_email: string | null;
+  has_smart_credit_password: boolean;
+  has_myfreescorenow_password: boolean;
+}
+
+export interface ClientCmsCredentialsSecrets {
+  smart_credit?: {
+    email?: string | null;
+    password?: string | null;
+  };
+  myfreescorenow?: {
+    email?: string | null;
+    password?: string | null;
+  };
 }
 
 // ============================================================
@@ -1642,6 +1694,8 @@ export interface OfGReportWizardOptions {
   tradeline_rec?: boolean;
   funding_note?: boolean;
   spanish?: boolean;
+  /** Claude narrative polish during extract (default true when omitted). */
+  enhance_with_claude?: boolean;
 }
 
 export interface OfGReportData {

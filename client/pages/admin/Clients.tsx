@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   Search,
@@ -58,13 +58,24 @@ import {
   createAdminClient,
   updateAdminClient,
   deleteAdminClient,
-  fetchReferrers,
+  fetchClientReferrers,
 } from "@/store/slices/adminSlice";
 import { fetchLabels } from "@/store/slices/prospectsSlice";
 import { openBulkImportWizard } from "@/store/slices/bulkImportSlice";
 import BulkImportWizard from "@/components/bulk-import/BulkImportWizard";
 import { LabelMultiSelect } from "@/components/admin/LabelMultiSelect";
 import { LabelChips } from "@/components/admin/LabelChips";
+import ClientReferrersEditor, {
+  emptyReferrerSlots,
+  linksToReferrerSlots,
+  referrerSlotsToApiPayload,
+  type ClientReferrerSlotDraft,
+} from "@/components/admin/ClientReferrersEditor";
+import ClientCmsCredentialsCard, {
+  ClientCmsCredentialsFields,
+  cmsFormToApiPayload,
+  emptyCmsFormState,
+} from "@/components/admin/ClientCmsCredentialsCard";
 import RoundCalendarScheduleFields, {
   emptyRoundScheduleInput,
 } from "@/components/admin/RoundCalendarScheduleFields";
@@ -203,12 +214,6 @@ const STATUS_COLORS: Record<string, string> = {
 
 type LeadType = "prospect" | "client";
 
-const REFERRAL_CATEGORIES: ReferralCategory[] = [
-  "realtor_broker",
-  "one_off",
-  "affiliate_partner",
-];
-
 function buildClientSchema(isEditing: boolean) {
   return Yup.object({
     lead_type: Yup.string().oneOf(["prospect", "client"]),
@@ -231,7 +236,6 @@ function buildClientSchema(isEditing: boolean) {
       .oneOf(["en", "es"])
       .required("Language is required"),
     referral_category: Yup.string(),
-    referrer_id: Yup.mixed(),
     status: isEditing
       ? Yup.string()
       : Yup.string().when("lead_type", {
@@ -267,17 +271,22 @@ function ClientFormDialog({
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
   const { toast } = useToast();
-  const { saving, referrers, referrersLoading } = useAppSelector((s) => s.admin);
+  const { saving } = useAppSelector((s) => s.admin);
   const { t } = useTranslation();
   const [roundSchedule, setRoundSchedule] = useState<RoundScheduleInput>(
     emptyRoundScheduleInput(),
   );
+  const [referrerSlots, setReferrerSlots] = useState<ClientReferrerSlotDraft[]>(
+    () => emptyReferrerSlots(1),
+  );
+  const [cmsForm, setCmsForm] = useState(emptyCmsFormState);
 
   const isProspectEdit = editing?.status === "prospect";
   const showStatusDropdown =
     !!editing && !isProspectEdit && !isAffiliate;
   const showLeadTypeToggle = !editing && !isAffiliate;
   const showReferralFields = !isAffiliate;
+  const showCmsFields = !isAffiliate;
 
   const form = useFormik({
     enableReinitialize: true,
@@ -293,14 +302,28 @@ function ClientFormDialog({
       phone: editing?.phone ?? "",
       status: (editing?.status ?? "pending_payment") as ClientStatus,
       preferred_language: editing?.preferred_language ?? "en",
-      referral_category: editing?.referral_category ?? "",
-      referrer_id: editing?.referrer_id ? String(editing.referrer_id) : "",
+      referral_category: (editing?.referral_category ?? "") as
+        | ReferralCategory
+        | "",
       admin_notes: editing?.admin_notes ?? "",
     },
     validationSchema: buildClientSchema(!!editing),
     onSubmit: async (values, helpers) => {
       const isProspectCreate =
         !editing && (isAffiliate || values.lead_type === "prospect");
+
+      const referrersPayload =
+        showReferralFields && values.referral_category
+          ? referrerSlotsToApiPayload(
+              referrerSlots,
+              values.referral_category as ReferralCategory,
+            )
+          : showReferralFields
+            ? []
+            : undefined;
+
+      const cmsPayload =
+        showCmsFields && !editing ? cmsFormToApiPayload(cmsForm) : undefined;
 
       const payload = {
         first_name: values.first_name,
@@ -314,11 +337,12 @@ function ClientFormDialog({
               referral_category: values.referral_category
                 ? (values.referral_category as ReferralCategory)
                 : null,
-              referrer_id: values.referrer_id
-                ? Number(values.referrer_id)
-                : null,
+              ...(referrersPayload !== undefined
+                ? { referrers: referrersPayload }
+                : {}),
             }
           : {}),
+        ...(cmsPayload ? { cms_credentials: cmsPayload } : {}),
         ...(!editing
           ? {
               status: isProspectCreate
@@ -367,35 +391,44 @@ function ClientFormDialog({
 
       helpers.resetForm();
       setRoundSchedule(emptyRoundScheduleInput());
+      setReferrerSlots(emptyReferrerSlots(1));
+      setCmsForm(emptyCmsFormState());
       onSaved?.();
       onClose();
     },
   });
 
   useEffect(() => {
-    if (open) {
-      setRoundSchedule(emptyRoundScheduleInput());
+    if (!open) return;
+    setRoundSchedule(emptyRoundScheduleInput());
+    setCmsForm(emptyCmsFormState());
+    if (editing?.referrers?.length) {
+      setReferrerSlots(linksToReferrerSlots(editing.referrers));
+    } else if (editing?.id && showReferralFields) {
+      setReferrerSlots(emptyReferrerSlots(1));
+      void (async () => {
+        const res = await dispatch(
+          fetchClientReferrers({ clientId: editing.id }),
+        );
+        if (fetchClientReferrers.fulfilled.match(res) && res.payload.length) {
+          setReferrerSlots(linksToReferrerSlots(res.payload));
+        } else if (editing.referrer_id) {
+          setReferrerSlots([
+            {
+              referrer_id: editing.referrer_id,
+              first_name: "",
+              last_name: "",
+              email: "",
+              phone: "",
+              notify_on_round: true,
+            },
+          ]);
+        }
+      })();
+    } else {
+      setReferrerSlots(emptyReferrerSlots(1));
     }
-  }, [open, editing]);
-
-  useEffect(() => {
-    if (open && showReferralFields) {
-      dispatch(
-        fetchReferrers(
-          form.values.referral_category
-            ? { category: form.values.referral_category }
-            : undefined,
-        ),
-      );
-    }
-  }, [open, showReferralFields, form.values.referral_category, dispatch]);
-
-  const filteredReferrers = useMemo(() => {
-    if (!form.values.referral_category) return referrers;
-    return referrers.filter(
-      (r) => r.category === form.values.referral_category,
-    );
-  }, [referrers, form.values.referral_category]);
+  }, [open, editing, showReferralFields, dispatch]);
 
   const isProspectMode =
     isProspectEdit ||
@@ -460,6 +493,21 @@ function ClientFormDialog({
               )}
             </div>
           </div>
+
+          <div>
+            <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground block mb-1">
+              {t("adminHelpers.phoneLabel")}{" "}
+              <span className="text-muted-foreground font-normal normal-case">
+                ({t("common.optional")})
+              </span>
+            </label>
+            <input
+              type="tel"
+              {...form.getFieldProps("phone")}
+              className="w-full h-10 px-3 rounded-lg border border-input bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+            />
+          </div>
+
           <div>
             <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground block mb-1">
               {t("adminHelpers.emailLabel")}{" "}
@@ -482,25 +530,37 @@ function ClientFormDialog({
               <FieldHint>{t("adminHelpers.emailChangeHint")}</FieldHint>
             )}
           </div>
-          <div>
-            <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground block mb-1">
-              {t("adminHelpers.phoneLabel")}{" "}
-              <span className="text-muted-foreground font-normal normal-case">
-                ({t("common.optional")})
-              </span>
-            </label>
-            <input
-              type="tel"
-              {...form.getFieldProps("phone")}
-              className="w-full h-10 px-3 rounded-lg border border-input bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
-            />
-          </div>
 
           {!String(form.values.email ?? "").trim() && (
             <NoEmailWarning
               hasPhone={!!String(form.values.phone ?? "").trim()}
             />
           )}
+
+          {showCmsFields &&
+            (editing ? (
+              <ClientCmsCredentialsCard clientId={editing.id} />
+            ) : (
+              <ClientCmsCredentialsFields
+                value={cmsForm}
+                onChange={setCmsForm}
+                disabled={form.isSubmitting || saving}
+              />
+            ))}
+
+          {showReferralFields && (
+            <ClientReferrersEditor
+              value={referrerSlots}
+              onChange={setReferrerSlots}
+              referralCategory={form.values.referral_category}
+              onCategoryChange={(next) =>
+                form.setFieldValue("referral_category", next)
+              }
+              disabled={form.isSubmitting || saving}
+            />
+          )}
+
+          <FieldHint>{t("adminHelpers.intakeDocumentsHint")}</FieldHint>
 
           <div>
             <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground block mb-1">
@@ -521,59 +581,6 @@ function ClientFormDialog({
                 </p>
               )}
           </div>
-
-          {showReferralFields && (
-            <>
-              <div>
-                <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground block mb-1">
-                  {t("adminHelpers.referralCategoryLabel")}
-                </label>
-                <select
-                  {...form.getFieldProps("referral_category")}
-                  onChange={(e) => {
-                    form.handleChange(e);
-                    form.setFieldValue("referrer_id", "");
-                  }}
-                  className="w-full h-10 px-3 rounded-lg border border-input bg-background text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
-                >
-                  <option value="">
-                    {t("adminHelpers.referralCategoryNone")}
-                  </option>
-                  {REFERRAL_CATEGORIES.map((cat) => (
-                    <option key={cat} value={cat}>
-                      {cat === "realtor_broker"
-                        ? t("adminHelpers.referralCategoryRealtor")
-                        : cat === "one_off"
-                          ? t("adminHelpers.referralCategoryOneOff")
-                          : t("adminHelpers.referralCategoryAffiliate")}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground block mb-1">
-                  {t("adminHelpers.referrerLabel")}{" "}
-                  <span className="text-muted-foreground font-normal normal-case">
-                    (optional)
-                  </span>
-                </label>
-                <select
-                  {...form.getFieldProps("referrer_id")}
-                  disabled={referrersLoading}
-                  className="w-full h-10 px-3 rounded-lg border border-input bg-background text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 disabled:opacity-50"
-                >
-                  <option value="">—</option>
-                  {filteredReferrers.map((r) => (
-                    <option key={r.id} value={r.id}>
-                      {r.first_name} {r.last_name}
-                      {r.company ? ` · ${r.company}` : ""}
-                    </option>
-                  ))}
-                </select>
-                <FieldHint>{t("adminHelpers.referrerHint")}</FieldHint>
-              </div>
-            </>
-          )}
 
           {showStatusDropdown && (
             <div>
@@ -682,6 +689,8 @@ function ClientFormDialog({
               onClick={() => {
                 form.resetForm();
                 setRoundSchedule(emptyRoundScheduleInput());
+                setReferrerSlots(emptyReferrerSlots(1));
+                setCmsForm(emptyCmsFormState());
                 onClose();
               }}
               className="h-9 px-4 rounded-lg border border-input bg-background text-sm font-medium text-foreground hover:bg-muted transition-colors"

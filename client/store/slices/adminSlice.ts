@@ -10,6 +10,9 @@ import type {
   AdminDocumentsStatusCounts,
   AdminTicketsListResponse,
   AdminReferrer,
+  ClientReferrerLink,
+  ClientCmsCredentialsPublic,
+  ClientCmsCredentialsSecrets,
   AdminDashboardStats,
   AdminDashboardTicket,
   AdminDashboardPayment,
@@ -159,6 +162,9 @@ interface AdminState {
   clientSearchLoading: boolean;
   referrers: AdminReferrer[];
   referrersLoading: boolean;
+  clientReferrers: ClientReferrerLink[];
+  clientReferrersLoading: boolean;
+  clientReferrersSaving: boolean;
   caseDocuments: any[];
   caseDocumentsLoading: boolean;
   caseDocumentsUploading: boolean;
@@ -244,6 +250,9 @@ const initialState: AdminState = {
   clientSearchLoading: false,
   referrers: [],
   referrersLoading: false,
+  clientReferrers: [],
+  clientReferrersLoading: false,
+  clientReferrersSaving: false,
   caseDocuments: [],
   caseDocumentsLoading: false,
   caseDocumentsUploading: false,
@@ -869,6 +878,141 @@ export const fetchReferrers = createAsyncThunk<
   }
 });
 
+export type UpdateReferrerPayload = {
+  id: number;
+  category?: ReferralCategory;
+  first_name?: string;
+  last_name?: string;
+  email?: string | null;
+  phone?: string | null;
+  company?: string | null;
+  affiliate_id?: number | null;
+  preferred_language?: "en" | "es";
+  notes?: string | null;
+  status?: "active" | "inactive";
+};
+
+export const updateReferrer = createAsyncThunk<
+  AdminReferrer,
+  UpdateReferrerPayload,
+  { rejectValue: string }
+>("admin/referrers/update", async ({ id, ...rest }, { rejectWithValue }) => {
+  try {
+    const { data } = await api.put(`/admin/referrers/${id}`, rest);
+    return data.referrer as AdminReferrer;
+  } catch (err: unknown) {
+    return rejectWithValue(
+      formatAxiosError(err, "Failed to update referrer"),
+    );
+  }
+});
+
+/** Payload item for linking partners (existing id or inline create). */
+export type ClientReferrerWriteItem = {
+  referrer_id?: number;
+  notify_on_round?: boolean;
+  role?: string;
+  category?: ReferralCategory;
+  first_name?: string;
+  last_name?: string;
+  email?: string | null;
+  phone?: string | null;
+  company?: string | null;
+  preferred_language?: "en" | "es";
+};
+
+export type ClientCmsCredentialsWrite = {
+  smart_credit?: { email?: string | null; password?: string | null };
+  myfreescorenow?: { email?: string | null; password?: string | null };
+};
+
+export const fetchClientReferrers = createAsyncThunk<
+  ClientReferrerLink[],
+  { clientId: number },
+  { rejectValue: string }
+>("admin/clients/referrers/fetch", async ({ clientId }, { rejectWithValue }) => {
+  try {
+    const { data } = await api.get(`/admin/clients/${clientId}/referrers`);
+    return data.referrers as ClientReferrerLink[];
+  } catch (err: unknown) {
+    return rejectWithValue(
+      formatAxiosError(err, "Failed to load client referrers"),
+    );
+  }
+});
+
+export const replaceClientReferrers = createAsyncThunk<
+  ClientReferrerLink[],
+  { clientId: number; referrers: ClientReferrerWriteItem[] },
+  { rejectValue: string }
+>(
+  "admin/clients/referrers/replace",
+  async ({ clientId, referrers }, { rejectWithValue }) => {
+    try {
+      const { data } = await api.put(`/admin/clients/${clientId}/referrers`, {
+        referrers,
+      });
+      return data.referrers as ClientReferrerLink[];
+    } catch (err: unknown) {
+      return rejectWithValue(
+        formatAxiosError(err, "Failed to save referral partners"),
+      );
+    }
+  },
+);
+
+export const fetchClientCmsCredentials = createAsyncThunk<
+  {
+    credentials: ClientCmsCredentialsPublic;
+    secrets?: ClientCmsCredentialsSecrets;
+  },
+  { clientId: number; includeSecrets?: boolean },
+  { rejectValue: string }
+>(
+  "admin/clients/cmsCredentials/fetch",
+  async ({ clientId, includeSecrets }, { rejectWithValue }) => {
+    try {
+      const { data } = await api.get(
+        `/admin/clients/${clientId}/cms-credentials`,
+        {
+          params: includeSecrets
+            ? { include_secrets: 1, confirm_reveal: 1 }
+            : undefined,
+        },
+      );
+      return {
+        credentials: data.credentials as ClientCmsCredentialsPublic,
+        secrets: data.secrets as ClientCmsCredentialsSecrets | undefined,
+      };
+    } catch (err: unknown) {
+      return rejectWithValue(
+        formatAxiosError(err, "Failed to load CMS credentials"),
+      );
+    }
+  },
+);
+
+export const saveClientCmsCredentials = createAsyncThunk<
+  ClientCmsCredentialsPublic,
+  { clientId: number; credentials: ClientCmsCredentialsWrite },
+  { rejectValue: string }
+>(
+  "admin/clients/cmsCredentials/save",
+  async ({ clientId, credentials }, { rejectWithValue }) => {
+    try {
+      const { data } = await api.put(
+        `/admin/clients/${clientId}/cms-credentials`,
+        credentials,
+      );
+      return data.credentials as ClientCmsCredentialsPublic;
+    } catch (err: unknown) {
+      return rejectWithValue(
+        formatAxiosError(err, "Failed to save CMS credentials"),
+      );
+    }
+  },
+);
+
 export const createAdminClient = createAsyncThunk<
   AdminClientListItem,
   {
@@ -882,6 +1026,8 @@ export const createAdminClient = createAsyncThunk<
     preferred_language?: "en" | "es";
     referral_category?: ReferralCategory | null;
     referrer_id?: number | null;
+    referrers?: ClientReferrerWriteItem[];
+    cms_credentials?: ClientCmsCredentialsWrite;
     /** When true (or when round_schedule has dates), create a credit repair case. */
     create_case?: boolean;
     round_schedule?: RoundScheduleInput | null;
@@ -910,6 +1056,8 @@ export const updateAdminClient = createAsyncThunk<
     preferred_language?: "en" | "es";
     referral_category?: ReferralCategory | null;
     referrer_id?: number | null;
+    referrers?: ClientReferrerWriteItem[];
+    cms_credentials?: ClientCmsCredentialsWrite;
   },
   { rejectValue: string }
 >("admin/clients/update", async ({ id, ...rest }, { rejectWithValue }) => {
@@ -1315,6 +1463,35 @@ const slice = createSlice({
     b.addCase(fetchReferrers.fulfilled, (s, a) => {
       s.referrersLoading = false;
       s.referrers = a.payload;
+    });
+    b.addCase(updateReferrer.fulfilled, (s, a) => {
+      const idx = s.referrers.findIndex((r) => r.id === a.payload.id);
+      if (idx !== -1) s.referrers[idx] = a.payload;
+      s.clientReferrers = s.clientReferrers.map((link) =>
+        link.referrer_id === a.payload.id
+          ? { ...link, referrer: a.payload }
+          : link,
+      );
+    });
+    b.addCase(fetchClientReferrers.pending, (s) => {
+      s.clientReferrersLoading = true;
+    });
+    b.addCase(fetchClientReferrers.rejected, (s) => {
+      s.clientReferrersLoading = false;
+    });
+    b.addCase(fetchClientReferrers.fulfilled, (s, a) => {
+      s.clientReferrersLoading = false;
+      s.clientReferrers = a.payload;
+    });
+    b.addCase(replaceClientReferrers.pending, (s) => {
+      s.clientReferrersSaving = true;
+    });
+    b.addCase(replaceClientReferrers.rejected, (s) => {
+      s.clientReferrersSaving = false;
+    });
+    b.addCase(replaceClientReferrers.fulfilled, (s, a) => {
+      s.clientReferrersSaving = false;
+      s.clientReferrers = a.payload;
     });
     b.addCase(fetchAdminClient.fulfilled, (s, a) => {
       s.selectedClient = a.payload;

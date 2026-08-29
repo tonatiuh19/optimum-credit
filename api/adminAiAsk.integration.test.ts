@@ -181,6 +181,13 @@ describe("admin AI Ask", () => {
     expect(names).toContain("upsert_progress_report");
     expect(names).toContain("upsert_payment_splits");
     expect(names).toContain("update_payment_split");
+    expect(names).toContain("list_funding_applications");
+    expect(names).toContain("get_funding_application");
+    expect(names).toContain("funding_pipeline_summary");
+    expect(names).toContain("create_funding_application");
+    expect(names).toContain("convert_funding_application");
+    expect(names).toContain("upload_funding_document");
+    expect(names).toContain("update_funding_status");
   }, 30_000);
 
   it("executes pipeline_summary via tools API", async () => {

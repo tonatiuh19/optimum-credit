@@ -36,6 +36,9 @@ import {
   fetchCaseRoundSchedule,
   saveCaseRoundSchedule,
   sendCaseRoundCalendar,
+  fetchClientReferrers,
+  replaceClientReferrers,
+  updateAdminClient,
 } from "@/store/slices/adminSlice";
 import {
   fetchCaseTaskCompletions,
@@ -44,10 +47,22 @@ import {
   sendTaskReminder,
   reopenTaskCompletion,
 } from "@/store/slices/adminTasksSlice";
-import type { OnboardingTaskType, Prospect, RoundScheduleInput } from "@shared/api";
+import type {
+  OnboardingTaskType,
+  Prospect,
+  ReferralCategory,
+  RoundScheduleInput,
+} from "@shared/api";
 import AdminSplitActions from "@/components/admin/AdminSplitActions";
 import { AdminAskCaseButton } from "@/components/admin/AdminAskDrawer";
 import { ClientPanelConversationButton } from "@/components/admin/ClientPanelConversationButton";
+import ClientReferrersEditor, {
+  emptyReferrerSlots,
+  linksToReferrerSlots,
+  referrerSlotsToApiPayload,
+  type ClientReferrerSlotDraft,
+} from "@/components/admin/ClientReferrersEditor";
+import ClientCmsCredentialsCard from "@/components/admin/ClientCmsCredentialsCard";
 import InstallmentDraftFields, {
   emptyInstallmentDraft,
   draftToCreateSplitPayload,
@@ -790,6 +805,100 @@ function ReportsTab({
 
 function OverviewTab({ client, payments }: { client: any; payments: any[] }) {
   const { t } = useTranslation();
+  const dispatch = useAppDispatch();
+  const { toast } = useToast();
+  const { user } = useAppSelector((s) => s.adminAuth);
+  const isAffiliate = user?.role === "affiliate";
+  const { clientReferrersLoading, clientReferrersSaving } = useAppSelector(
+    (s) => s.admin,
+  );
+  const [referralCategory, setReferralCategory] = useState<
+    ReferralCategory | ""
+  >((client?.referral_category as ReferralCategory | null) ?? "");
+  const [referrerSlots, setReferrerSlots] = useState<ClientReferrerSlotDraft[]>(
+    () => emptyReferrerSlots(1),
+  );
+  const [partnersLoaded, setPartnersLoaded] = useState(false);
+
+  useEffect(() => {
+    if (isAffiliate) return;
+    setReferralCategory(
+      (client?.referral_category as ReferralCategory | null) ?? "",
+    );
+    setPartnersLoaded(false);
+    let cancelled = false;
+    (async () => {
+      if (!client?.id) return;
+      const res = await dispatch(
+        fetchClientReferrers({ clientId: Number(client.id) }),
+      );
+      if (cancelled) return;
+      if (fetchClientReferrers.fulfilled.match(res) && res.payload.length) {
+        setReferrerSlots(linksToReferrerSlots(res.payload));
+      } else if (client.referrer_id) {
+        setReferrerSlots([
+          {
+            referrer_id: Number(client.referrer_id),
+            first_name: "",
+            last_name: "",
+            email: "",
+            phone: "",
+            notify_on_round: true,
+          },
+        ]);
+      } else {
+        setReferrerSlots(emptyReferrerSlots(1));
+      }
+      setPartnersLoaded(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    client?.id,
+    client?.referral_category,
+    client?.referrer_id,
+    dispatch,
+    isAffiliate,
+  ]);
+
+  const handleSavePartners = async () => {
+    if (!client?.id) return;
+    const referrers = referralCategory
+      ? referrerSlotsToApiPayload(referrerSlots, referralCategory)
+      : [];
+    const catRes = await dispatch(
+      updateAdminClient({
+        id: Number(client.id),
+        referral_category: referralCategory || null,
+      }),
+    );
+    if (!updateAdminClient.fulfilled.match(catRes)) {
+      toast({
+        title: t("adminPipeline.partnersSaveError"),
+        description: String(catRes.payload || ""),
+        variant: "destructive",
+      });
+      return;
+    }
+    const res = await dispatch(
+      replaceClientReferrers({
+        clientId: Number(client.id),
+        referrers,
+      }),
+    );
+    if (!replaceClientReferrers.fulfilled.match(res)) {
+      toast({
+        title: t("adminPipeline.partnersSaveError"),
+        description: String(res.payload || ""),
+        variant: "destructive",
+      });
+      return;
+    }
+    setReferrerSlots(linksToReferrerSlots(res.payload));
+    toast({ title: t("adminPipeline.partnersSaveSuccess") });
+  };
+
   return (
     <div className="space-y-4">
       <ClientLabelsEditor clientId={client.id} initialLabels={client.labels} />
@@ -823,6 +932,41 @@ function OverviewTab({ client, payments }: { client: any; payments: any[] }) {
           </div>
         </div>
       </div>
+
+      {!isAffiliate && (
+        <>
+          <ClientCmsCredentialsCard clientId={Number(client.id)} />
+
+          <div className="space-y-3">
+            {clientReferrersLoading && !partnersLoaded ? (
+              <div className="flex justify-center py-6">
+                <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+              </div>
+            ) : (
+              <ClientReferrersEditor
+                value={referrerSlots}
+                onChange={setReferrerSlots}
+                referralCategory={referralCategory}
+                onCategoryChange={setReferralCategory}
+                disabled={clientReferrersSaving}
+              />
+            )}
+            <Button
+              type="button"
+              size="sm"
+              className="w-full sm:w-auto"
+              disabled={clientReferrersSaving || clientReferrersLoading}
+              onClick={() => void handleSavePartners()}
+            >
+              {clientReferrersSaving ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" />
+              ) : null}
+              {t("adminPipeline.partnersSave")}
+            </Button>
+          </div>
+        </>
+      )}
+
       <div className="bg-muted/40 rounded-xl p-4 space-y-2">
         <h3 className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
           Package

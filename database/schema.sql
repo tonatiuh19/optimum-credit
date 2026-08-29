@@ -347,9 +347,13 @@ CREATE TABLE IF NOT EXISTS `clients` (
   `referral_category` ENUM('realtor_broker','one_off','affiliate_partner') DEFAULT NULL
     COMMENT 'How this lead was referred; drives round-update routing',
   `referrer_id` INT UNSIGNED DEFAULT NULL COMMENT 'Partner who referred this client',
-  -- Smart Credit
+  -- Smart Credit / CMS logins
   `smart_credit_email` VARCHAR(255) DEFAULT NULL,
   `smart_credit_connected_at` DATETIME DEFAULT NULL,
+  `myfreescorenow_email` VARCHAR(255) DEFAULT NULL,
+  `cms_secrets_ciphertext` MEDIUMBLOB DEFAULT NULL COMMENT 'AES-GCM JSON: smart_credit + myfreescorenow passwords',
+  `cms_secrets_iv` VARCHAR(64) DEFAULT NULL,
+  `cms_secrets_tag` VARCHAR(64) DEFAULT NULL,
   -- Contract / e-signature
   `contract_signed_at` DATETIME DEFAULT NULL,
   `contract_signature_name` VARCHAR(150) DEFAULT NULL,
@@ -382,6 +386,29 @@ CREATE TABLE IF NOT EXISTS `clients` (
   CONSTRAINT `fk_clients_affiliate` FOREIGN KEY (`affiliate_id`) REFERENCES `affiliates`(`id`) ON DELETE SET NULL,
   CONSTRAINT `fk_clients_assigned_admin` FOREIGN KEY (`assigned_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL,
   CONSTRAINT `fk_clients_referrer` FOREIGN KEY (`referrer_id`) REFERENCES `referrers`(`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================================
+-- CLIENT REFERRERS (up to 3 partners per client; clients.referrer_id kept as primary mirror)
+-- Applied by: 20260828_183000_client_referrers_cms_report_alerts.sql
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `client_referrers` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `client_id` INT UNSIGNED NOT NULL,
+  `referrer_id` INT UNSIGNED NOT NULL,
+  `role` ENUM('primary','secondary','tertiary') NOT NULL DEFAULT 'primary',
+  `sort_order` TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '0–2 display order',
+  `notify_on_round` TINYINT(1) NOT NULL DEFAULT 1,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_client_referrers_pair` (`client_id`, `referrer_id`),
+  KEY `idx_client_referrers_client` (`client_id`),
+  KEY `idx_client_referrers_referrer` (`referrer_id`),
+  CONSTRAINT `fk_client_referrers_client`
+    FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_client_referrers_referrer`
+    FOREIGN KEY (`referrer_id`) REFERENCES `referrers`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `client_otp_codes` (
@@ -637,6 +664,7 @@ CREATE TABLE IF NOT EXISTS `client_round_reports` (
   `bureau_scores_json` JSON DEFAULT NULL,
   `wins_json` JSON DEFAULT NULL COMMENT 'removed items table rows',
   `targets_json` JSON DEFAULT NULL COMMENT 'round targets still on report',
+  `alerts_json` JSON DEFAULT NULL COMMENT 'Progress QA alerts: PII / closed still reporting / hard inquiries',
   `utilization_json` JSON DEFAULT NULL,
   `action_plan_json` JSON DEFAULT NULL,
   `file_strength_score` TINYINT UNSIGNED DEFAULT NULL,
