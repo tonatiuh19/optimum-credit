@@ -135,9 +135,13 @@ export default function AdminCaseDocUploadDialog({
       onOpenChange(false);
     } catch (err) {
       logger.error("[AdminCaseDocUpload] failed", err);
+      const detail =
+        typeof err === "string" && err.trim()
+          ? err
+          : t("adminHelpers.uploadFailedHint");
       toast({
         title: t("adminHelpers.uploadFailed"),
-        description: t("adminHelpers.uploadFailedHint"),
+        description: detail,
         variant: "destructive",
       });
     }
@@ -155,6 +159,9 @@ export default function AdminCaseDocUploadDialog({
         </DialogHeader>
 
         <div className="space-y-4 py-1">
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            {t("adminHelpers.uploadSizeLimitHint")}
+          </p>
           {showCaseIdField && (
             <div className="space-y-1.5">
               <Label htmlFor="case-doc-case-id">{t("adminHelpers.selectCase")}</Label>
@@ -216,6 +223,9 @@ export default function AdminCaseDocUploadDialog({
                   >
                     <FileText className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
                     <span className="truncate flex-1">{file.name}</span>
+                    <span className="text-muted-foreground shrink-0">
+                      {(file.size / (1024 * 1024)).toFixed(2)} MB
+                    </span>
                     <button
                       type="button"
                       onClick={() => removeFile(i)}

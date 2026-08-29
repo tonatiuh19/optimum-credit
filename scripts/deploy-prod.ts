@@ -3,6 +3,7 @@ import "dotenv/config";
 import { spawn } from "child_process";
 import { createInterface } from "readline/promises";
 import mysql from "mysql2/promise";
+import { checkApiIndexInline } from "./check-api-inline";
 
 function requireEnv(name: string): string {
   const value = process.env[name]?.trim();
@@ -63,9 +64,21 @@ async function runCommand(command: string, args: string[]) {
   });
 }
 
-/** Typecheck + vitest — must pass before production deploy. */
+/**
+ * Typecheck + Vercel inline monolith gate + vitest — must pass before prod.
+ * Relative runtime imports from api/index.ts → ERR_MODULE_NOT_FOUND on Vercel.
+ */
 async function runPreDeployChecks() {
-  console.log("\n🧪 Pre-deploy checks: typecheck + tests...\n");
+  console.log("\n🧪 Pre-deploy checks: api inline + typecheck + tests...\n");
+
+  const inline = checkApiIndexInline();
+  console.log(inline.report);
+  if (!inline.ok) {
+    throw new Error(
+      "api/index.ts has relative runtime imports — inline the logic before deploying to Vercel.",
+    );
+  }
+
   await runCommand("npm", ["run", "typecheck"]);
   console.log("\n✅ Typecheck passed.\n");
   await runCommand("npm", ["test"]);

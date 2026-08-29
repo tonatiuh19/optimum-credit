@@ -684,6 +684,7 @@ const slice = createSlice({
       const isClosed = status === "closed" || status === "archived";
       const viewHidesClosed =
         state.view === "mine" ||
+        state.view === "all" ||
         state.view === "open" ||
         state.view === "unassigned" ||
         state.view === "unread" ||
@@ -937,6 +938,7 @@ const slice = createSlice({
       );
       const viewHidesClosed =
         view === "mine" ||
+        view === "all" ||
         view === "open" ||
         view === "unassigned" ||
         view === "unread" ||

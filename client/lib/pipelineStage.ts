@@ -33,6 +33,28 @@ export const STAGE_LABELS: Record<PipelineStage, string> = {
   cancelled: "Cancelled",
 };
 
+const REPORT_ROUND_STAGES = [
+  "round_1",
+  "round_2",
+  "round_3",
+  "round_4",
+  "round_5",
+  "completed",
+] as const;
+
+/** Reports timeline: Docs Verified unlocks R1; later rounds follow pipeline stage. */
+export function isReportRoundActive(
+  roundNumber: number,
+  pipelineStage: string,
+): boolean {
+  if (pipelineStage === "docs_ready") return roundNumber === 1;
+  const stageIndex = REPORT_ROUND_STAGES.indexOf(
+    pipelineStage as (typeof REPORT_ROUND_STAGES)[number],
+  );
+  if (stageIndex === -1) return false;
+  return stageIndex >= roundNumber - 1;
+}
+
 export type StageMoveDirection = "forward" | "back" | "jump-forward" | "jump-back" | "same";
 
 export function getStageMoveDirection(

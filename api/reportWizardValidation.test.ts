@@ -48,11 +48,19 @@ describe("validatePdfUploadPair", () => {
   });
 
   it("rejects oversize files", () => {
-    const big = Buffer.alloc(16 * 1024 * 1024, 0);
+    const big = Buffer.alloc(5 * 1024 * 1024, 0);
     big.write("%PDF", 0);
     expect(validatePdfUploadPair(big, Buffer.from("%PDF-1.4"))).toMatch(
-      /15 MB/,
+      /4 MB/,
     );
+  });
+
+  it("rejects combined size over the platform total limit", () => {
+    const a = Buffer.alloc(3 * 1024 * 1024);
+    const b = Buffer.alloc(2 * 1024 * 1024);
+    a.write("%PDF", 0);
+    b.write("%PDF", 0);
+    expect(validatePdfUploadPair(a, b)).toMatch(/Combined PDF/i);
   });
 });
 

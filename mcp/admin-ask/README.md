@@ -52,11 +52,13 @@ Claude must collect fields, call with `confirm=false` (preview), show the user, 
 | `create_prospect` | first/last/phone/`preferred_language`; realtor → `referral_category=realtor_broker` + referrer name/phone/email; phone dup check |
 | `create_work_task` | title + `preferred_language` (routes via `admins.language_owner_for`); OFG-only by default — set `push_hubspot=true` to also create a HubSpot task |
 | `add_case_note` | OFG `client_id` (not HubSpot) + note; dry-run is safe preview (does not email — use `send_email`) |
-| `upload_case_document` | Attach ID/SSN/utility/PDF to client file via `file_base64` + `doc_type`; dry-run then confirm; JPEG/PNG/HEIC/PDF ~3MB max |
-| `create_funding_application` | Funding board intake; `funding_type` + name/email (or `client_id` for dual); dry-run then confirm |
+| `upload_case_document` | Attach ID/SSN/utility/PDF to client file via `file_base64` + `doc_type`; dry-run then confirm; JPEG/PNG/HEIC/PDF ~3MB max; returns `source_sha256` / `integrity_ok`; optional `expected_byte_length` / `expected_sha256`. On refuse: `crm_required` with `user_message` + `crm_href` (finish in CRM) |
+| `create_funding_application` | Funding board intake; `funding_type` + name + (email **or** phone), or `client_id` for dual; dry-run then confirm |
 | `update_funding_status` | Move funding card status (not converted) |
 | `convert_funding_application` | Funding → CR prospect (`status=prospect` + `funding_convert` label) |
 | `upload_funding_document` | Funding doc slots (`funding_drivers_license`, corp, bank_m1–m6) via `file_base64` |
+| `update_referrer` | Patch partner email/phone/company/name (fixes “no email on file”) |
+| `attach_referrer` | Attach existing or inline-create partner onto a client (max 3 slots) |
 | `send_email` | subject + body → branded email to a **client** (`client_id`) or **referrer** (`referrer_id` from `search_referrers` / `get_client`); auto-logs (client `admin_notes` and/or `referrers.notes`); optional `include_doc_upload_link=true` for client portal upload magic link only (never minted for partners); body is message-only (Hi/Hola greeting added automatically); dry-run never mints tokens or sends |
 | `send_sms` | body → Twilio SMS from the acting admin’s OFG number to a **client** (`client_id`) or **referrer** (`referrer_id`); logs Conversations hub + SMS case note; returns `message_id`, Twilio SID, `provider_status`, `sent_at` for HubSpot; closed threads reopen on confirm |
 | `send_text` | **Alias for `send_sms`** (ATLAS texting spec) — same dry-run → confirm flow; accepts `body` or `message` |
@@ -69,8 +71,9 @@ Claude must collect fields, call with `confirm=false` (preview), show the user, 
 | `convert_prospect` | After preview: `confirm=true` + `CONFIRM` → New Client / onboarding (tasks yes, welcome email no) |
 | `update_client_status` | `cancelled` / `paused` / `active` / etc. (not `prospect`) |
 | `upsert_progress_report` | staff analysis; portal only shows PDF-published rows; `replace_published` to overwrite wizard PDF |
-| `upsert_payment_splits` | `splits_json`; use `replace_open=true` on HubSpot backfill to avoid duplicate owing |
+| `upsert_payment_splits` | `splits_json`; optional `send_payment_link` mints `/pay/:token` URLs; `replace_open=true` on HubSpot backfill |
 | `update_payment_split` | mark paid / overdue / pending (cannot un-pay after ledger write) |
+| `list_installments` | Includes `payment_link` when a token exists |
 
 **Payment backfill:** export HubSpot balances → for each OFG client call `upsert_payment_splits` with `replace_open=true` (dry-run then confirm) → verify `list_clients_owing`.
 

@@ -661,33 +661,13 @@ export default function AdminConversations() {
 
   useEffect(() => {
     if (!isDialerCallActive || !dialerNumber.trim()) return;
-    if (isThreadClosed && activeContact?.phone) {
-      const a = dialerNumber.replace(/\D/g, "").slice(-10);
-      const b = String(activeContact.phone).replace(/\D/g, "").slice(-10);
-      if (a && b && a === b) {
-        setIsDialerCallActive(false);
-        dispatch(
-          setConversationsSendError(
-            t("conversations.conversationClosedError"),
-          ),
-        );
-        return;
-      }
-    }
     dispatch(
       startOutboundCall({ phone: dialerNumber.trim(), clientName: null }),
     );
     setIsDialerCallActive(false);
     setIsDialerOpen(false);
     setDialerNumber("");
-  }, [
-    isDialerCallActive,
-    dialerNumber,
-    dispatch,
-    isThreadClosed,
-    activeContact?.phone,
-    t,
-  ]);
+  }, [isDialerCallActive, dialerNumber, dispatch]);
 
   const mergeContext = useMemo(() => {
     const c = timeline?.contact || {};
@@ -1271,6 +1251,11 @@ export default function AdminConversations() {
                             {ch}
                           </span>
                         ))}
+                        {rowClosed && (
+                          <span className="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded bg-secondary text-secondary-foreground">
+                            {t("conversations.closedBadge")}
+                          </span>
+                        )}
                         {!c.assigned_admin_id && c.kind === "client" && (
                           <span className="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded bg-primary/10 text-primary">
                             {t("conversations.unassignedBadge")}
@@ -1788,19 +1773,16 @@ export default function AdminConversations() {
 
               {(activeKind === "client" || activeKind === "unknown") && (
                 <div className="shrink-0 border-t border-border">
-                  {isThreadClosed ? (
+                  {isThreadClosed && (
                     <div
-                      className="px-4 py-5 flex flex-col items-center justify-center gap-3 text-center"
+                      className="px-4 pt-3 pb-0 flex items-start gap-2"
                       data-testid="conversation-closed-banner"
                     >
-                      <div className="flex items-center justify-center w-10 h-10 rounded-full bg-muted">
-                        <Lock className="h-4 w-4 text-muted-foreground" />
-                      </div>
-                      <div>
-                        <p className="text-sm font-medium text-foreground">
+                      <div className="flex-1 rounded-lg border border-border bg-muted/40 px-3 py-2">
+                        <p className="text-xs font-medium text-foreground">
                           {t("conversations.closedBannerTitle")}
                         </p>
-                        <p className="text-xs text-muted-foreground mt-0.5 max-w-sm">
+                        <p className="text-[11px] text-muted-foreground mt-0.5">
                           {t("conversations.closedBannerBody")}
                         </p>
                       </div>
@@ -1808,7 +1790,7 @@ export default function AdminConversations() {
                         type="button"
                         variant="outline"
                         size="sm"
-                        className="gap-2 mt-1"
+                        className="gap-1.5 shrink-0"
                         onClick={() =>
                           dispatch(
                             setConversationContactStatus({
@@ -1823,40 +1805,39 @@ export default function AdminConversations() {
                         {t("conversations.reopen")}
                       </Button>
                     </div>
-                  ) : (
-                    <ConversationMessageComposer
-                      channel={activeKind === "unknown" ? "sms" : channel}
-                      onChannelChange={
-                        activeKind === "unknown" ? () => {} : setChannel
-                      }
-                      body={body}
-                      onBodyChange={setBody}
-                      templates={templates}
-                      mergeContext={mergeContext}
-                      attachment={attachment}
-                      onAttachmentChange={(next) => {
-                        if (!next) clearAttachment();
-                        else setAttachment(next);
-                      }}
-                      onPickMedia={(file) =>
-                        pickMedia(file, setAttachment, attachment)
-                      }
-                      uploadingMedia={uploadingMedia}
-                      sending={sending}
-                      sendError={
-                        sendError === "conversation_closed"
-                          ? t("conversations.conversationClosedError")
-                          : sendError
-                      }
-                      suggestedReplies={composerSuggestions}
-                      onSuggestAi={loadAiSuggestions}
-                      aiSuggestionsLoading={aiSuggestionsLoading}
-                      allowedChannels={
-                        activeKind === "unknown" ? ["sms"] : undefined
-                      }
-                      onSend={() => void send()}
-                    />
                   )}
+                  <ConversationMessageComposer
+                    channel={activeKind === "unknown" ? "sms" : channel}
+                    onChannelChange={
+                      activeKind === "unknown" ? () => {} : setChannel
+                    }
+                    body={body}
+                    onBodyChange={setBody}
+                    templates={templates}
+                    mergeContext={mergeContext}
+                    attachment={attachment}
+                    onAttachmentChange={(next) => {
+                      if (!next) clearAttachment();
+                      else setAttachment(next);
+                    }}
+                    onPickMedia={(file) =>
+                      pickMedia(file, setAttachment, attachment)
+                    }
+                    uploadingMedia={uploadingMedia}
+                    sending={sending}
+                    sendError={
+                      sendError === "conversation_closed"
+                        ? t("conversations.conversationClosedError")
+                        : sendError
+                    }
+                    suggestedReplies={composerSuggestions}
+                    onSuggestAi={loadAiSuggestions}
+                    aiSuggestionsLoading={aiSuggestionsLoading}
+                    allowedChannels={
+                      activeKind === "unknown" ? ["sms"] : undefined
+                    }
+                    onSend={() => void send()}
+                  />
                 </div>
               )}
             </>
@@ -2054,9 +2035,16 @@ export default function AdminConversations() {
       />
 
       {isDialerOpen && (
-        <div className="fixed bottom-6 right-6 z-50 w-80 animate-in slide-in-from-bottom-4 duration-300">
-          <div className="bg-card border border-border shadow-2xl rounded-2xl overflow-hidden">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+        <div
+          className={cn(
+            "fixed z-50 animate-in duration-300",
+            // iPhone Safari: bottom sheet so Call stays above the home indicator
+            "inset-x-0 bottom-0 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]",
+            "sm:inset-x-auto sm:bottom-6 sm:right-6 sm:p-0 sm:w-80 sm:animate-in sm:slide-in-from-bottom-4",
+          )}
+        >
+          <div className="bg-card border border-border shadow-2xl rounded-2xl overflow-hidden max-h-[min(85dvh,36rem)] flex flex-col">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
               <div className="flex items-center gap-2">
                 <div className="p-1.5 bg-primary/10 rounded-lg">
                   <PhoneCall className="h-4 w-4 text-primary" />
@@ -2079,53 +2067,57 @@ export default function AdminConversations() {
               </Button>
             </div>
 
-            <div className="px-4 pt-4 pb-2">
-              <div className="flex items-center gap-2 bg-muted rounded-xl px-4 py-3">
-                <input
-                  type="tel"
-                  value={dialerNumber}
-                  onChange={(e) => setDialerNumber(e.target.value)}
-                  placeholder={t("conversations.voice.dialpadPlaceholder")}
-                  className="flex-1 bg-transparent text-lg font-mono tracking-wider text-foreground outline-none placeholder:text-muted-foreground/50"
-                />
-                {dialerNumber && (
-                  <button
-                    type="button"
-                    onClick={() => setDialerNumber((n) => n.slice(0, -1))}
-                    className="p-1 rounded hover:bg-muted-foreground/10 transition-colors"
-                    aria-label={t("conversations.voice.dialpadBackspace")}
-                  >
-                    <Delete className="h-4 w-4 text-muted-foreground" />
-                  </button>
-                )}
+            <div className="overflow-y-auto overscroll-contain flex-1 min-h-0">
+              <div className="px-4 pt-4 pb-2">
+                <div className="flex items-center gap-2 bg-muted rounded-xl px-4 py-3">
+                  <input
+                    type="tel"
+                    inputMode="tel"
+                    autoComplete="tel"
+                    value={dialerNumber}
+                    onChange={(e) => setDialerNumber(e.target.value)}
+                    placeholder={t("conversations.voice.dialpadPlaceholder")}
+                    className="flex-1 bg-transparent text-lg font-mono tracking-wider text-foreground outline-none placeholder:text-muted-foreground/50"
+                  />
+                  {dialerNumber && (
+                    <button
+                      type="button"
+                      onClick={() => setDialerNumber((n) => n.slice(0, -1))}
+                      className="p-1 rounded hover:bg-muted-foreground/10 transition-colors"
+                      aria-label={t("conversations.voice.dialpadBackspace")}
+                    >
+                      <Delete className="h-4 w-4 text-muted-foreground" />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="px-4 pb-2">
+                {[
+                  ["1", "2", "3"],
+                  ["4", "5", "6"],
+                  ["7", "8", "9"],
+                  ["*", "0", "#"],
+                ].map((row, rowIdx) => (
+                  <div key={rowIdx} className="grid grid-cols-3 gap-2 mb-2">
+                    {row.map((key) => (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => setDialerNumber((n) => n + key)}
+                        className="flex flex-col items-center justify-center h-14 rounded-xl bg-muted hover:bg-muted/70 active:scale-95 transition-all duration-100 select-none"
+                      >
+                        <span className="text-lg font-semibold text-foreground leading-none">
+                          {key}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                ))}
               </div>
             </div>
 
-            <div className="px-4 pb-2">
-              {[
-                ["1", "2", "3"],
-                ["4", "5", "6"],
-                ["7", "8", "9"],
-                ["*", "0", "#"],
-              ].map((row, rowIdx) => (
-                <div key={rowIdx} className="grid grid-cols-3 gap-2 mb-2">
-                  {row.map((key) => (
-                    <button
-                      key={key}
-                      type="button"
-                      onClick={() => setDialerNumber((n) => n + key)}
-                      className="flex flex-col items-center justify-center h-14 rounded-xl bg-muted hover:bg-muted/70 active:scale-95 transition-all duration-100 select-none"
-                    >
-                      <span className="text-lg font-semibold text-foreground leading-none">
-                        {key}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              ))}
-            </div>
-
-            <div className="px-4 pb-4">
+            <div className="px-4 pt-2 pb-4 border-t border-border/60 shrink-0 bg-card">
               <Button
                 className="w-full h-12 rounded-xl bg-accent hover:bg-accent/90 text-accent-foreground gap-2 text-base font-semibold shadow-md"
                 disabled={!dialerNumber.trim()}
@@ -2136,6 +2128,11 @@ export default function AdminConversations() {
                 <Phone className="h-5 w-5" />
                 {t("conversations.voice.call")}
               </Button>
+              {!isAvailable && (
+                <p className="text-[11px] text-muted-foreground text-center mt-2 leading-snug">
+                  {t("conversations.voice.dialpadNeedAvailable")}
+                </p>
+              )}
             </div>
           </div>
         </div>

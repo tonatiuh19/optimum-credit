@@ -535,7 +535,7 @@ CREATE TABLE IF NOT EXISTS `funding_applications` (
   ) NOT NULL DEFAULT 'draft',
   `first_name` VARCHAR(100) NOT NULL,
   `last_name` VARCHAR(100) NOT NULL,
-  `email` VARCHAR(255) NOT NULL,
+  `email` VARCHAR(255) DEFAULT NULL,
   `phone` VARCHAR(30) DEFAULT NULL,
   `postal_code` VARCHAR(20) DEFAULT NULL,
   `state` VARCHAR(50) DEFAULT NULL,

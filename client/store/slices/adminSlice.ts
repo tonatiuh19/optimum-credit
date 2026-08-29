@@ -468,15 +468,34 @@ export const fetchCaseDocuments = createAsyncThunk<
 
 export const uploadCaseDocuments = createAsyncThunk<
   { caseId: number; documents: any[] },
-  { caseId: number; doc_type: string; files: File[] }
->("admin/uploadCaseDocuments", async ({ caseId, doc_type, files }) => {
-  const fd = new FormData();
-  fd.append("doc_type", doc_type);
-  files.forEach((f) => fd.append("files", f));
-  const { data } = await api.post(`/admin/cases/${caseId}/documents`, fd, {
-    headers: { "Content-Type": "multipart/form-data" },
-  });
-  return { caseId, documents: data.documents };
+  { caseId: number; doc_type: string; files: File[] },
+  { rejectValue: string }
+>("admin/uploadCaseDocuments", async ({ caseId, doc_type, files }, { rejectWithValue }) => {
+  const { assertFilesUnderUploadLimit } = await import("@/lib/uploadLimits");
+  const sizeCheck = assertFilesUnderUploadLimit(files);
+  if (sizeCheck.ok === false) {
+    return rejectWithValue(sizeCheck.message);
+  }
+  // One file per request so each stays under the Vercel ~4.5MB body limit.
+  const documents: any[] = [];
+  try {
+    for (const file of files) {
+      const fd = new FormData();
+      fd.append("doc_type", doc_type);
+      fd.append("files", file);
+      const { data } = await api.post(`/admin/cases/${caseId}/documents`, fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      if (Array.isArray(data?.documents)) {
+        documents.push(...data.documents);
+      }
+    }
+    return { caseId, documents };
+  } catch (err) {
+    return rejectWithValue(
+      formatAxiosError(err, "Could not upload document"),
+    );
+  }
 });
 
 export const deleteRoundReportPdf = createAsyncThunk<

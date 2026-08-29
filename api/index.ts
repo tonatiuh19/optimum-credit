@@ -59,6 +59,7 @@ import type {
 // INLINED HELPERS (Vercel serverless — do NOT runtime-import sibling api/*.ts)
 // Unit tests import from ./progressReportAlerts, ./ofgReportClaudeEnhance,
 // ./adminMorningDigest directly. Keep those files in sync when editing below.
+// Deploy gate: `npm run check:api-inline` (also in deploy:prod pre-checks).
 // ============================================================================
 
 type ProgressReportAlertType =
@@ -3667,7 +3668,22 @@ function mapFriendlyError(
   context?: { duplicateLabel?: string },
 ): { status: number; error: string } | null {
   if (!err) return null;
-  const e = err as { status?: number; message?: string; code?: string };
+  const e = err as {
+    status?: number;
+    message?: string;
+    code?: string;
+    name?: string;
+  };
+  if (e.name === "MulterError" || e.code === "LIMIT_FILE_SIZE") {
+    const mb = Math.round(VERCEL_SAFE_UPLOAD_MAX_BYTES / (1024 * 1024));
+    return {
+      status: 413,
+      error: `Each file must be ${mb} MB or smaller (platform upload limit). Compress the PDF or upload one file at a time.`,
+    };
+  }
+  if (e.code === "LIMIT_UNEXPECTED_FILE") {
+    return { status: 400, error: "Unexpected file field in upload" };
+  }
   if (typeof e.status === "number" && e.status >= 400 && e.status < 600) {
     return {
       status: e.status,
@@ -4299,6 +4315,13 @@ const IS_LOCAL =
   (process.env.ALLOW_INSECURE_DEFAULTS === "true" || !process.env.VERCEL);
 
 /**
+ * Stay under Vercel serverless request body limits (~4.5MB including multipart
+ * overhead). Shared by MMS, admin case docs, report-wizard PDFs, and related
+ * multipart routes. MCP base64 tools use a tighter ~3MB decoded cap.
+ */
+const VERCEL_SAFE_UPLOAD_MAX_BYTES = 4 * 1024 * 1024;
+
+/**
  * Affiliates feature flag. Set AFFILIATES_ENABLED=0|false to hide the admin
  * Affiliates / My Affiliate sections (lock icon), block those routes' APIs,
  * and disable public /r/:slug resolve until subscription pricing is ready.
@@ -4346,7 +4369,8 @@ WRITE TOOLS (create_prospect, create_work_task, add_case_note, upload_case_docum
 - Collections: upsert_payment_splits / update_payment_split so list_clients_owing reflects reality (OFG is source of truth once synced).
 - Email: use send_email (after confirm) via the platform mailer (Resend). Target a client with client_id (auto EMAIL case note; include_doc_upload_link mints a portal upload link) OR a realtor/loan-officer with referrer_id (logs on the referrer record; pass client_id too to also stamp the client's file). include_doc_upload_link is client-only — never mint portal links for referrers.
 - SMS: use send_sms or send_text (aliases; after confirm) via Twilio from the acting admin's assigned OFG number. Target a client with client_id (logs into Conversations hub + SMS case note) OR a referrer with referrer_id. Use list_sms, get_texts, or get_conversation to read recent SMS/call timeline before replying. list_ofg_phone_numbers verifies which OFG business numbers are live. Inbound client replies auto-log to the case file. Do NOT charge cards.
-- Documents: when a user shares an ID/SSN/utility bill/PDF in chat, use upload_case_document (dry-run then confirm) to attach it to the client's OFG file. Use list_case_documents to see what's already on file. Pick doc_type (id_front, id_back, ssn_card, proof_of_address, other). JPEG/PNG/HEIC/PDF only; max ~3MB.
+- Documents: when a user shares an ID/SSN/utility bill/PDF in chat, use upload_case_document (dry-run then confirm) to attach it to the client's OFG file. Use list_case_documents to see what's already on file. Pick doc_type (id_front, id_back, ssn_card, proof_of_address, other). JPEG/PNG/HEIC/PDF only; max ~3MB. Pass expected_byte_length (and ideally expected_sha256) from the source file; refuse if integrity_ok is false.
+- CRM HANDOFF: If a tool result includes crm_required: true (or error=\"crm_required\"), STOP retrying that action via MCP. Immediately tell the staff the exact user_message and share the crm_href path. Do not invent alternate MCP workarounds for size limits, Report Wizard PDF generation, document deletes, or other CRM-only flows.
 - Language routing: English/Spanish clients and tasks assign to the admin with matching language_owner_for in the DB. Prefer preferred_language en|es on the client; do not hardcode assignee names unless the user says so.
 - Realtor/agent referrals: capture as referral partner (referrer), NOT as the client. Use referral_category=realtor_broker plus referrer_first_name/referrer_last_name (+ referrer_phone, referrer_email). To email that partner later, use send_email with referrer_id.
 - create_work_task creates the task on OFG only by default (source of truth). Do NOT also create a HubSpot task in Claude — that duplicates work. Set push_hubspot=true only when the user explicitly asks to sync that task to HubSpot.
@@ -4424,6 +4448,57 @@ const ADMIN_AI_TOOLS: Array<{
         },
       },
       required: ["q"],
+    },
+  },
+  {
+    name: "update_referrer",
+    description:
+      "Update an existing referral partner (email, phone, company, name, status). Use when send_email fails with \"no email on file\". ALWAYS dry-run first (confirm=false), then confirm=true + confirm_phrase=CONFIRM.",
+    input_schema: {
+      type: "object",
+      properties: {
+        referrer_id: { type: "integer" },
+        email: { type: "string" },
+        phone: { type: "string" },
+        company: { type: "string" },
+        first_name: { type: "string" },
+        last_name: { type: "string" },
+        status: { type: "string", enum: ["active", "inactive"] },
+        confirm: { type: "boolean" },
+        confirm_phrase: { type: "string" },
+      },
+      required: ["referrer_id"],
+    },
+  },
+  {
+    name: "attach_referrer",
+    description:
+      "Attach a referral partner to an existing client (multi-referrer, max 3 slots). Pass referrer_id from search_referrers, or create inline with referrer_first_name/last_name (+ email/phone). role: primary|secondary|tertiary. ALWAYS dry-run then confirm=true + confirm_phrase=CONFIRM.",
+    input_schema: {
+      type: "object",
+      properties: {
+        client_id: { type: "integer" },
+        referrer_id: { type: "integer" },
+        referrer_first_name: { type: "string" },
+        referrer_last_name: { type: "string" },
+        referrer_email: { type: "string" },
+        referrer_phone: { type: "string" },
+        referrer_company: { type: "string" },
+        referral_category: {
+          type: "string",
+          enum: ["realtor_broker", "one_off", "affiliate_partner"],
+          description: "Required when creating a new referrer inline",
+        },
+        role: {
+          type: "string",
+          enum: ["primary", "secondary", "tertiary"],
+          description: "Default secondary if client already has a primary",
+        },
+        notify_on_round: { type: "boolean" },
+        confirm: { type: "boolean" },
+        confirm_phrase: { type: "string" },
+      },
+      required: ["client_id"],
     },
   },
   {
@@ -4524,14 +4599,20 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "create_funding_application",
     description:
-      "Create a business funding application (ATLAS Funding board). Links/creates a clients row via email. Pass client_id to dual-link an existing CR client (name/email filled from client if omitted). ALWAYS dry-run first (confirm=false), then confirm=true + confirm_phrase=CONFIRM. funding_type: credit_card_stacking | bank_statements.",
+      "Create a business funding application (ATLAS Funding board). Pass client_id to dual-link an existing CR client, OR first_name+last_name with email and/or phone (phone-only OK for household/spouse leads). ALWAYS dry-run first (confirm=false), then confirm=true + confirm_phrase=CONFIRM. funding_type: credit_card_stacking | bank_statements.",
     input_schema: {
       type: "object",
       properties: {
         first_name: { type: "string" },
         last_name: { type: "string" },
-        email: { type: "string" },
-        phone: { type: "string" },
+        email: {
+          type: "string",
+          description: "Optional when phone is provided with name",
+        },
+        phone: {
+          type: "string",
+          description: "Optional when email is provided; required if no email",
+        },
         funding_type: {
           type: "string",
           enum: ["credit_card_stacking", "bank_statements"],
@@ -4677,7 +4758,7 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "list_installments",
     description:
-      "List payment-split installments for a client/case (due dates, pending/overdue/paid).",
+      "List payment-split installments for a client/case (due dates, pending/overdue/paid) including payment_link when a pay token exists (Authorize.net /pay/:token).",
     input_schema: {
       type: "object",
       properties: {
@@ -4869,7 +4950,7 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "upload_case_document",
     description:
-      'Upload a client document (ID, SSN card, proof of address, PDF bank statement, etc.) into the OFG case file — same encryption/CDN path as the admin portal. ALWAYS dry-run first with confirm=false (safe preview — does not upload); only confirm=true with confirm_phrase="CONFIRM" after the user approves. client_id must be OFG id from search_clients (not HubSpot). Pass file_base64 (raw base64 or data: URL) + file_name; optional mime_type. Supported: JPEG, PNG, HEIC/HEIF, PDF (max ~3MB). doc_type: id_front | id_back | ssn_card | proof_of_address | other. Resolves latest active case when only client_id is given.',
+      'Upload a client document (ID, SSN card, proof of address, PDF bank statement, etc.) into the OFG case file — same encryption/CDN path as the admin portal. ALWAYS dry-run first with confirm=false (safe preview — does not upload); only confirm=true with confirm_phrase="CONFIRM" after the user approves. client_id must be OFG id from search_clients (not HubSpot). Pass file_base64 (raw base64 or data: URL) + file_name; optional mime_type. Supported: JPEG, PNG, HEIC/HEIF, PDF (max ~3MB decoded). Optional expected_byte_length / expected_sha256 — if provided, the server rejects mismatches before storing (detects truncated base64). Response always includes source_byte_length, source_sha256, stored_byte_length, integrity_ok. doc_type: id_front | id_back | ssn_card | proof_of_address | other. Resolves latest active case when only client_id is given.',
     input_schema: {
       type: "object",
       properties: {
@@ -4904,6 +4985,16 @@ const ADMIN_AI_TOOLS: Array<{
           type: "string",
           description:
             "Optional MIME override (image/jpeg, image/png, image/heic, image/heif, application/pdf)",
+        },
+        expected_byte_length: {
+          type: "integer",
+          description:
+            "Optional source file size in bytes. If set, must match decoded file_base64 length or the tool refuses to upload.",
+        },
+        expected_sha256: {
+          type: "string",
+          description:
+            "Optional lowercase hex SHA-256 of the source file. If set, must match decoded bytes or the tool refuses to upload.",
         },
         confirm: {
           type: "boolean",
@@ -5254,7 +5345,7 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "upsert_payment_splits",
     description:
-      "Create payment installment (payment_splits) rows so list_clients_owing reflects real balances. ALWAYS dry-run first. Match client by OFG client_id or case. Does not charge cards. Pass splits_json as a JSON array. Set replace_open=true to cancel existing pending/overdue splits on the case before insert (safe HubSpot backfill).",
+      "Create payment installment (payment_splits) rows so list_clients_owing reflects real balances. ALWAYS dry-run first. Match client by OFG client_id or case. Does not charge cards. Pass splits_json as a JSON array. Optional send_payment_link=true mints Authorize.net /pay/:token URLs (returned as payment_links). Set replace_open=true to cancel existing pending/overdue splits on the case before insert (safe HubSpot backfill).",
     input_schema: {
       type: "object",
       properties: {
@@ -5264,7 +5355,12 @@ const ADMIN_AI_TOOLS: Array<{
         splits_json: {
           type: "string",
           description:
-            "JSON array of {label, amount_cents, due_date (YYYY-MM-DD), status?: pending|paid|overdue|cancelled, notes?}. Max 20.",
+            "JSON array of {label, amount_cents, due_date (YYYY-MM-DD), status?: pending|paid|overdue|cancelled, notes?, send_payment_link?: boolean}. Max 20.",
+        },
+        send_payment_link: {
+          type: "boolean",
+          description:
+            "If true, mint a payment link for each non-paid split (unless overridden per row)",
         },
         replace_open: {
           type: "boolean",
@@ -5309,7 +5405,66 @@ type AdminAiToolResult =
       message?: string;
       data?: unknown;
     }
-  | { ok: false; error: string; message: string };
+  | {
+      ok: false;
+      error: string;
+      message: string;
+      /** Present when the action must be finished in the OFG CRM admin UI. */
+      crm_required?: AdminAiCrmRequiredPayload;
+    };
+
+/** Standardized MCP → human handoff when a tool cannot complete the request. */
+type AdminAiCrmRequiredPayload = {
+  crm_required: true;
+  reason: string;
+  /** Paste-ready instruction for the staff user — surface this verbatim. */
+  user_message: string;
+  crm_href: string;
+  crm_action: string;
+  details?: Record<string, unknown>;
+};
+
+function adminAiBuildCrmHref(opts: {
+  clientId?: number | null;
+  caseId?: number | null;
+  fundingId?: number | null;
+}): string {
+  if (opts.fundingId != null && Number(opts.fundingId) > 0) {
+    return `/admin/funding?id=${Number(opts.fundingId)}`;
+  }
+  if (opts.clientId != null && Number(opts.clientId) > 0) {
+    return `/admin/pipeline?client=${Number(opts.clientId)}`;
+  }
+  if (opts.caseId != null && Number(opts.caseId) > 0) {
+    return `/admin/pipeline?case=${Number(opts.caseId)}`;
+  }
+  return "/admin/pipeline";
+}
+
+function adminAiCrmRequired(opts: {
+  reason: string;
+  userMessage: string;
+  clientId?: number | null;
+  caseId?: number | null;
+  fundingId?: number | null;
+  crmAction?: string;
+  details?: Record<string, unknown>;
+}): AdminAiCrmRequiredPayload {
+  const href = adminAiBuildCrmHref(opts);
+  const base = String(opts.userMessage || "").trim();
+  const user_message = base.includes(href)
+    ? base
+    : `${base}${base.endsWith(".") ? "" : "."} Open CRM: ${href}`;
+  return {
+    crm_required: true,
+    reason: opts.reason,
+    user_message,
+    crm_href: href,
+    crm_action:
+      opts.crmAction || "Complete this in the OFG CRM (admin portal)",
+    ...(opts.details ? { details: opts.details } : {}),
+  };
+}
 
 function adminAiClampLimit(raw: unknown, fallback = 10): number {
   const n = Number(raw);
@@ -5756,6 +5911,324 @@ async function executeAdminAiTool(
       };
     }
 
+    if (name === "update_referrer") {
+      const referrerId = Number(args.referrer_id);
+      if (!Number.isFinite(referrerId) || referrerId <= 0) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message: "referrer_id is required",
+        };
+      }
+      const [existing] = await pool.query<RowDataPacket[]>(
+        `SELECT id, first_name, last_name, email, phone, company, status
+         FROM referrers WHERE id = ? LIMIT 1`,
+        [referrerId],
+      );
+      if (!existing[0]) {
+        return {
+          ok: false,
+          error: "not_found",
+          message: "Referrer not found",
+        };
+      }
+      const patch: Record<string, string | null> = {};
+      if (args.email !== undefined) {
+        const email = String(args.email || "")
+          .trim()
+          .toLowerCase();
+        if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message: "Invalid email address",
+          };
+        }
+        patch.email = email || null;
+      }
+      if (args.phone !== undefined) {
+        patch.phone = String(args.phone || "").trim() || null;
+      }
+      if (args.company !== undefined) {
+        patch.company = String(args.company || "").trim() || null;
+      }
+      if (args.first_name !== undefined) {
+        const v = String(args.first_name || "").trim();
+        if (!v) {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message: "first_name cannot be empty",
+          };
+        }
+        patch.first_name = v;
+      }
+      if (args.last_name !== undefined) {
+        const v = String(args.last_name || "").trim();
+        if (!v) {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message: "last_name cannot be empty",
+          };
+        }
+        patch.last_name = v;
+      }
+      if (args.status !== undefined) {
+        const status = String(args.status || "").trim();
+        if (status !== "active" && status !== "inactive") {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message: "status must be active or inactive",
+          };
+        }
+        patch.status = status;
+      }
+      if (Object.keys(patch).length === 0) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message:
+            "Provide at least one of email, phone, company, first_name, last_name, status",
+        };
+      }
+      const preview = {
+        referrer_id: referrerId,
+        current: {
+          name: `${existing[0].first_name || ""} ${existing[0].last_name || ""}`.trim(),
+          email: existing[0].email,
+          phone: existing[0].phone,
+          company: existing[0].company,
+          status: existing[0].status,
+        },
+        patch,
+      };
+      if (!adminAiWriteConfirmed(args).ok) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: true,
+            preview,
+            required_confirm_phrase: ADMIN_AI_WRITE_CONFIRM_PHRASE,
+            guidance: `Show referrer update. After approval, re-call with confirm=true and confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`,
+          },
+        };
+      }
+      const sets = Object.keys(patch).map((k) => `${k} = ?`);
+      await pool.query(
+        `UPDATE referrers SET ${sets.join(", ")} WHERE id = ?`,
+        [...Object.values(patch), referrerId],
+      );
+      const [updated] = await pool.query<RowDataPacket[]>(
+        `SELECT id, first_name, last_name, email, phone, company, category, status
+         FROM referrers WHERE id = ? LIMIT 1`,
+        [referrerId],
+      );
+      return {
+        ok: true,
+        data: { referrer: updated[0], href: `/admin/referrers` },
+      };
+    }
+
+    if (name === "attach_referrer") {
+      const clientId = Number(args.client_id);
+      if (!Number.isFinite(clientId) || clientId <= 0) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message: "client_id is required",
+        };
+      }
+      if (scopedIds && scopedIds.length > 0) {
+        const [aff] = await pool.query<RowDataPacket[]>(
+          `SELECT affiliate_id FROM clients WHERE id = ? LIMIT 1`,
+          [clientId],
+        );
+        const affId = aff[0]?.affiliate_id ? Number(aff[0].affiliate_id) : null;
+        if (affId == null || !scopedIds.includes(affId)) {
+          return {
+            ok: false,
+            error: "forbidden",
+            message: "Client outside affiliate scope",
+          };
+        }
+      }
+      const [clientRows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, first_name, last_name FROM clients WHERE id = ? LIMIT 1`,
+        [clientId],
+      );
+      if (!clientRows[0]) {
+        return { ok: false, error: "not_found", message: "Client not found" };
+      }
+      let referrerId =
+        args.referrer_id != null && Number(args.referrer_id) > 0
+          ? Number(args.referrer_id)
+          : null;
+      const inlineFirst = String(args.referrer_first_name || "").trim();
+      const inlineLast = String(args.referrer_last_name || "").trim();
+      const inlineEmail = String(args.referrer_email || "")
+        .trim()
+        .toLowerCase();
+      const inlinePhone = String(args.referrer_phone || "").trim();
+      const inlineCompany = String(args.referrer_company || "").trim();
+      const categoryRaw = String(args.referral_category || "").trim();
+      const allowedCat = ["realtor_broker", "one_off", "affiliate_partner"];
+      let createInline = false;
+      if (!referrerId) {
+        if (!inlineFirst || !inlineLast) {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message:
+              "referrer_id OR referrer_first_name + referrer_last_name required",
+          };
+        }
+        if (!allowedCat.includes(categoryRaw)) {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message:
+              "referral_category (realtor_broker|one_off|affiliate_partner) required when creating a referrer",
+          };
+        }
+        if (inlineEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(inlineEmail)) {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message: "Invalid referrer_email",
+          };
+        }
+        createInline = true;
+      } else {
+        const [refRows] = await pool.query<RowDataPacket[]>(
+          `SELECT id, status FROM referrers WHERE id = ? LIMIT 1`,
+          [referrerId],
+        );
+        if (!refRows[0] || String(refRows[0].status) !== "active") {
+          return {
+            ok: false,
+            error: "not_found",
+            message: "referrer_id not found or inactive",
+          };
+        }
+      }
+      const existing = await listClientReferrerLinks(clientId);
+      if (
+        referrerId &&
+        existing.some((l) => Number(l.referrer_id) === referrerId)
+      ) {
+        return {
+          ok: false,
+          error: "conflict",
+          message: "Referrer already attached to this client",
+        };
+      }
+      if (existing.length >= MAX_CLIENT_REFERRERS) {
+        return {
+          ok: false,
+          error: "conflict",
+          message: `Client already has ${MAX_CLIENT_REFERRERS} referral partners (max)`,
+        };
+      }
+      const roleRaw = String(args.role || "").trim().toLowerCase();
+      const hasPrimary = existing.some((l) => String(l.role) === "primary");
+      let role =
+        roleRaw === "primary" ||
+        roleRaw === "secondary" ||
+        roleRaw === "tertiary"
+          ? roleRaw
+          : hasPrimary
+            ? "secondary"
+            : "primary";
+      const notifyOnRound = args.notify_on_round === false ? false : true;
+      const preview = {
+        client_id: clientId,
+        client_name:
+          `${clientRows[0].first_name || ""} ${clientRows[0].last_name || ""}`.trim(),
+        referrer_id: referrerId,
+        create_referrer: createInline
+          ? {
+              first_name: inlineFirst,
+              last_name: inlineLast,
+              email: inlineEmail || null,
+              phone: inlinePhone || null,
+              company: inlineCompany || null,
+              category: categoryRaw,
+            }
+          : null,
+        role,
+        notify_on_round: notifyOnRound,
+        existing_slots: existing.length,
+      };
+      if (!adminAiWriteConfirmed(args).ok) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: true,
+            preview,
+            required_confirm_phrase: ADMIN_AI_WRITE_CONFIRM_PHRASE,
+            guidance: `Show attach preview. After approval, re-call with confirm=true and confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`,
+          },
+        };
+      }
+      if (createInline) {
+        const [ins] = await pool.query<ResultSetHeader>(
+          `INSERT INTO referrers
+             (category, first_name, last_name, email, phone, company, preferred_language, status)
+           VALUES (?, ?, ?, ?, ?, ?, 'en', 'active')`,
+          [
+            categoryRaw,
+            inlineFirst,
+            inlineLast,
+            inlineEmail || null,
+            inlinePhone || null,
+            inlineCompany || null,
+          ],
+        );
+        referrerId = Number(ins.insertId);
+      }
+      const links = existing.map((l) => ({
+        referrer_id: Number(l.referrer_id),
+        role: String(l.role || "secondary"),
+        notify_on_round: Number(l.notify_on_round) !== 0,
+      }));
+      if (role === "primary") {
+        for (const l of links) {
+          if (l.role === "primary") l.role = "secondary";
+        }
+        links.unshift({
+          referrer_id: referrerId!,
+          role: "primary",
+          notify_on_round: notifyOnRound,
+        });
+      } else {
+        links.push({
+          referrer_id: referrerId!,
+          role,
+          notify_on_round: notifyOnRound,
+        });
+      }
+      const normalized = links.slice(0, MAX_CLIENT_REFERRERS).map((l, i) => ({
+        referrer_id: l.referrer_id,
+        role: roleForSortOrder(i),
+        notify_on_round: l.notify_on_round,
+      }));
+      await replaceClientReferrers(clientId, normalized);
+      const partnerLinks = await listClientReferrerLinks(clientId);
+      return {
+        ok: true,
+        data: {
+          client_id: clientId,
+          attached_referrer_id: referrerId,
+          referrers: partnerLinks.map(mapClientReferrerLinkRow),
+          href: `/admin/pipeline?client=${clientId}`,
+        },
+      };
+    }
+
     if (name === "get_case") {
       const hasId = args.case_id != null && Number(args.case_id) > 0;
       const hasNumber =
@@ -6093,26 +6566,41 @@ async function executeAdminAiTool(
               "funding_type must be credit_card_stacking or bank_statements",
           };
         }
-        if (!firstName || !lastName || !email) {
+        if (!firstName || !lastName) {
           return {
             ok: false,
             error: "invalid_args",
             message:
-              "first_name, last_name, and email are required (or pass client_id)",
+              "first_name and last_name are required (or pass client_id with those on file)",
           };
         }
-        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        if (!email && !phone) {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message:
+              "email or phone is required with name (or pass client_id)",
+          };
+        }
+        if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
           return {
             ok: false,
             error: "invalid_args",
             message: "Invalid email address",
           };
         }
+        if (phone && !normalizePhoneLast10(phone)) {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message: "Invalid phone number",
+          };
+        }
 
         const preview = {
           first_name: firstName,
           last_name: lastName,
-          email,
+          email: email || null,
           phone,
           funding_type: fundingType,
           preferred_language: preferredLanguage,
@@ -6137,7 +6625,7 @@ async function executeAdminAiTool(
         }
 
         const clientId = await ensureFundingClientId({
-          email,
+          email: email || null,
           firstName,
           lastName,
           phone,
@@ -6164,7 +6652,7 @@ async function executeAdminAiTool(
             status,
             firstName,
             lastName,
-            email,
+            email || null,
             phone,
             postalCode,
             state,
@@ -6180,7 +6668,7 @@ async function executeAdminAiTool(
           applicationId,
           clientId,
           clientName: `${firstName} ${lastName}`.trim(),
-          clientEmail: email,
+          clientEmail: email || phone || "no-email",
           firstName,
           preferredLanguage,
           fundingType,
@@ -6366,6 +6854,23 @@ async function executeAdminAiTool(
           );
         }
 
+        const fundingCrmRequired =
+          fileBuffer && fileBuffer.length > ADMIN_AI_DOC_MAX_BYTES
+            ? adminAiCrmRequired({
+                reason: "file_too_large",
+                userMessage: `This funding document is too large for ATLAS (~${Math.round(ADMIN_AI_DOC_MAX_BYTES / (1024 * 1024))}MB max). Compress under 4MB and upload on the Funding board in CRM.`,
+                fundingId: appId,
+                clientId: rows[0].client_id
+                  ? Number(rows[0].client_id)
+                  : null,
+                crmAction: "Upload on Funding board in CRM",
+                details: {
+                  source_byte_length: fileBuffer.length,
+                  atlas_max_bytes: ADMIN_AI_DOC_MAX_BYTES,
+                },
+              })
+            : null;
+
         const preview = {
           funding_application_id: appId,
           client: `${rows[0].first_name} ${rows[0].last_name}`.trim(),
@@ -6393,10 +6898,15 @@ async function executeAdminAiTool(
                 : validationErrors.length
                   ? validationErrors
                   : undefined,
+              ...(fundingCrmRequired
+                ? { crm_required: fundingCrmRequired }
+                : {}),
               required_confirm_phrase: ADMIN_AI_WRITE_CONFIRM_PHRASE,
-              guidance: uploadReady
-                ? `Show doc_type and filename. After approval, re-call with confirm=true and confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`
-                : "Fix validation / provide file_base64, then confirm.",
+              guidance: fundingCrmRequired
+                ? fundingCrmRequired.user_message
+                : uploadReady
+                  ? `Show doc_type and filename. After approval, re-call with confirm=true and confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`
+                  : "Fix validation / provide file_base64, then confirm.",
             },
           };
         }
@@ -7047,9 +7557,11 @@ async function executeAdminAiTool(
       const [rows] = await pool.query<RowDataPacket[]>(
         `SELECT ps.id, ps.case_id, ps.label, ps.amount_cents, ps.currency,
                 ps.due_date, ps.status, ps.paid_at, ps.completion_source,
-                cr.case_number
+                ps.send_payment_link, cr.case_number,
+                pst.token AS payment_token
          FROM payment_splits ps
          LEFT JOIN credit_repair_cases cr ON cr.id = ps.case_id
+         LEFT JOIN payment_split_tokens pst ON pst.split_id = ps.id AND pst.used_at IS NULL
          WHERE ${where.join(" AND ")}
          ORDER BY
            FIELD(ps.status, 'overdue', 'pending', 'processing', 'paid', 'cancelled'),
@@ -7092,6 +7604,10 @@ async function executeAdminAiTool(
             status: r.status,
             paid_at: r.paid_at,
             completion_source: r.completion_source,
+            send_payment_link: !!r.send_payment_link,
+            payment_link: r.payment_token
+              ? `${APP_URL}/pay/${r.payment_token}`
+              : null,
           })),
           href: `/admin/pipeline?client=${resolved.clientId}`,
         },
@@ -8076,23 +8592,108 @@ async function executeAdminAiTool(
       }
 
       const validationErrors: string[] = [];
+      let crmRequired: AdminAiCrmRequiredPayload | null = null;
       if (!caseId) {
         validationErrors.push(
           "No active case found for this client. Convert the prospect or enroll a case first.",
         );
+        crmRequired = adminAiCrmRequired({
+          reason: "no_active_case",
+          userMessage:
+            "ATLAS cannot attach a case document until this lead has an enrolled OFG case. Convert the prospect in CRM first (Pipeline → Convert), then retry upload or upload from the client panel.",
+          clientId,
+          crmAction: "Convert prospect / enroll case in Pipeline",
+        });
       }
       if (!mimeType) {
         validationErrors.push(
           "Unsupported file type. Use JPEG, PNG, HEIC, or PDF with a matching extension or mime_type.",
         );
+        crmRequired = adminAiCrmRequired({
+          reason: "unsupported_mime",
+          userMessage:
+            "ATLAS only accepts JPEG, PNG, HEIC, or PDF for case documents. Upload this file in the CRM client panel instead (or convert to PDF first).",
+          clientId,
+          caseId,
+          crmAction: "Upload documents in Pipeline → client panel",
+          details: { file_name: fileName || null },
+        });
       }
       if (fileBase64Raw && !fileBuffer) {
         validationErrors.push("file_base64 is not valid base64");
       }
       if (fileBuffer && fileBuffer.length > ADMIN_AI_DOC_MAX_BYTES) {
+        const mb = (fileBuffer.length / (1024 * 1024)).toFixed(1);
+        const limitMb = Math.round(ADMIN_AI_DOC_MAX_BYTES / (1024 * 1024));
         validationErrors.push(
-          `File exceeds ${ADMIN_AI_DOC_MAX_BYTES} bytes (~3MB). Ask the user for a smaller scan or use the portal upload link.`,
+          `File exceeds ${ADMIN_AI_DOC_MAX_BYTES} bytes (~${limitMb}MB). Use the CRM upload (max ~4MB) or compress the file.`,
         );
+        crmRequired = adminAiCrmRequired({
+          reason: "file_too_large",
+          userMessage: `This file is ~${mb}MB — too large for ATLAS (~${limitMb}MB max). Compress it under 4MB and upload in the CRM (Pipeline → client panel → Upload documents), or use Report Wizard for credit-report PDFs.`,
+          clientId,
+          caseId,
+          crmAction: "Upload in Pipeline → client panel (max 4MB)",
+          details: {
+            source_byte_length: fileBuffer.length,
+            atlas_max_bytes: ADMIN_AI_DOC_MAX_BYTES,
+            crm_max_bytes: VERCEL_SAFE_UPLOAD_MAX_BYTES,
+          },
+        });
+      }
+      const expectedBytes =
+        args.expected_byte_length != null
+          ? Number(args.expected_byte_length)
+          : null;
+      if (
+        fileBuffer &&
+        expectedBytes != null &&
+        Number.isFinite(expectedBytes) &&
+        expectedBytes > 0 &&
+        fileBuffer.length !== expectedBytes
+      ) {
+        validationErrors.push(
+          `Integrity check failed: decoded file_base64 is ${fileBuffer.length} bytes but expected_byte_length=${expectedBytes}. Re-encode the full file (truncated base64).`,
+        );
+        crmRequired = adminAiCrmRequired({
+          reason: "integrity_failed",
+          userMessage: `ATLAS received a truncated file (${fileBuffer.length} bytes vs expected ${expectedBytes}). Re-send the complete attachment in chat, or upload the original file in the CRM client panel.`,
+          clientId,
+          caseId,
+          crmAction: "Re-send full file via ATLAS, or upload in CRM",
+          details: {
+            decoded_bytes: fileBuffer.length,
+            expected_byte_length: expectedBytes,
+          },
+        });
+      }
+      const expectedSha =
+        typeof args.expected_sha256 === "string"
+          ? String(args.expected_sha256).trim().toLowerCase()
+          : "";
+      const sourceSha = fileBuffer ? sha256BufferHex(fileBuffer) : null;
+      if (fileBuffer && expectedSha) {
+        if (!/^[a-f0-9]{64}$/.test(expectedSha)) {
+          validationErrors.push(
+            "expected_sha256 must be a 64-character lowercase hex SHA-256 digest",
+          );
+        } else if (sourceSha !== expectedSha) {
+          validationErrors.push(
+            `Integrity check failed: SHA-256 mismatch (got ${sourceSha}, expected ${expectedSha}). Re-send the complete file_base64.`,
+          );
+          crmRequired = adminAiCrmRequired({
+            reason: "integrity_failed",
+            userMessage:
+              "ATLAS SHA-256 check failed — the file bytes do not match the source. Re-send the complete attachment, or upload the original file in the CRM client panel.",
+            clientId,
+            caseId,
+            crmAction: "Re-send full file via ATLAS, or upload in CRM",
+            details: {
+              source_sha256: sourceSha,
+              expected_sha256: expectedSha,
+            },
+          });
+        }
       }
 
       const preview = {
@@ -8104,7 +8705,18 @@ async function executeAdminAiTool(
         file_name: fileName || null,
         mime_type: mimeType,
         file_size_bytes: fileBuffer?.length ?? null,
+        source_byte_length: fileBuffer?.length ?? null,
+        source_sha256: sourceSha,
         has_file_bytes: !!fileBuffer,
+        expected_byte_length: expectedBytes,
+        expected_sha256: expectedSha || null,
+        integrity_ok:
+          !!fileBuffer &&
+          (expectedBytes == null ||
+            !Number.isFinite(expectedBytes) ||
+            expectedBytes <= 0 ||
+            fileBuffer.length === expectedBytes) &&
+          (!expectedSha || sourceSha === expectedSha),
       };
 
       if (missing.length > 0) {
@@ -8129,7 +8741,10 @@ async function executeAdminAiTool(
             ready: false,
             validation_errors: validationErrors,
             preview,
-            guidance: validationErrors.join(" "),
+            ...(crmRequired ? { crm_required: crmRequired } : {}),
+            guidance: crmRequired
+              ? crmRequired.user_message
+              : validationErrors.join(" "),
           },
         };
       }
@@ -8207,6 +8822,10 @@ async function executeAdminAiTool(
             uploaded_at: uploadedRow[0]?.uploaded_at ?? null,
             task_synced: inserted.task_synced,
             auto_advanced_docs_ready: autoAdvanced,
+            source_byte_length: fileBuffer!.length,
+            source_sha256: sha256BufferHex(fileBuffer!),
+            stored_byte_length: inserted.file_size,
+            integrity_ok: inserted.file_size === fileBuffer!.length,
             href: `/admin/pipeline?client=${clientId}`,
           },
         };
@@ -9216,24 +9835,12 @@ async function executeAdminAiTool(
       }
 
       if (stage === "docs_ready" && caseId) {
-        const [[requiredRow]] = await pool.query<RowDataPacket[]>(
-          `SELECT COUNT(*) AS required_total FROM onboarding_task_templates
-           WHERE is_active = 1 AND is_required = 1`,
-        );
-        const requiredTotal = Number(requiredRow.required_total);
-        const [[approvedRow]] = await pool.query<RowDataPacket[]>(
-          `SELECT COUNT(*) AS approved_count
-           FROM client_task_completions ctc
-           JOIN onboarding_task_templates ott ON ott.id = ctc.task_template_id
-           WHERE ctc.case_id = ? AND ctc.admin_review_status = 'approved'
-             AND ott.is_required = 1 AND ott.is_active = 1`,
-          [caseId],
-        );
-        if (Number(approvedRow.approved_count) < requiredTotal) {
+        const gate = await assertDocsReadyTaskGate(caseId);
+        if (gate.ok === false) {
           return {
             ok: false,
             error: "tasks_incomplete",
-            message: `Cannot advance to docs_ready — ${requiredTotal - Number(approvedRow.approved_count)} required task(s) still need approval.`,
+            message: gate.message,
           };
         }
       }
@@ -9825,6 +10432,56 @@ async function executeAdminAiTool(
         `SELECT id FROM client_round_reports WHERE client_id = ? AND round_number = ? LIMIT 1`,
         [clientId, round],
       );
+      let alertsCount = 0;
+      try {
+        const [profRows] = await pool.query<RowDataPacket[]>(
+          `SELECT first_name, last_name, phone, address_line1, city, state, zip
+           FROM clients WHERE id = ? LIMIT 1`,
+          [clientId],
+        );
+        const profile = (profRows[0] || {}) as ClientProfileForAlerts;
+        // MCP upserts lack bureau PDF/accounts — run personal-info scan on summary_md.
+        const progressAlerts = buildDeterministicProgressAlerts({
+          profile,
+          afterPdfText: summary,
+          afterAccounts: [],
+          priorWins: [],
+        });
+        alertsCount = progressAlerts.length;
+        if (progressAlerts.length > 0) {
+          const alertSummary = progressAlerts
+            .slice(0, 8)
+            .map((a) => `• [${a.type}] ${a.title}: ${a.detail}`)
+            .join("\n");
+          const clientName =
+            `${profile.first_name || ""} ${profile.last_name || ""}`.trim() ||
+            `Client #${clientId}`;
+          const boardUrl = `${APP_URL}/admin/pipeline?client=${clientId}`;
+          notifyAllTeamAdmins("progress_report_alerts", (admin) => {
+            const lang = admin.preferred_language === "es" ? "es" : "en";
+            const subject =
+              lang === "es"
+                ? `Alertas de reporte R${round} — ${clientName}`
+                : `Progress report alerts R${round} — ${clientName}`;
+            const body =
+              lang === "es"
+                ? `${progressAlerts.length} alerta(s) al guardar Round ${round} (MCP):\n${alertSummary}`
+                : `${progressAlerts.length} alert(s) on Round ${round} save (MCP):\n${alertSummary}`;
+            return {
+              subject,
+              html: `<p><strong>${progressAlerts.length}</strong> progress-report alert(s) for <strong>${clientName}</strong> Round ${round}.</p><pre style="white-space:pre-wrap;font-size:13px">${alertSummary.replace(/</g, "&lt;")}</pre><p><a href="${boardUrl}">Open client</a></p>`,
+              inAppTitle: subject,
+              inAppBody: body.slice(0, 280),
+              linkUrl: boardUrl,
+              smsBody: `${subject}`.slice(0, 320),
+            };
+          }).catch((e: any) =>
+            console.error("[progress_report_alerts:mcp]", e?.message ?? e),
+          );
+        }
+      } catch (e: any) {
+        console.error("[progress_report_alerts:mcp]", e?.message ?? e);
+      }
       return {
         ok: true,
         data: {
@@ -9833,6 +10490,7 @@ async function executeAdminAiTool(
           client_id: clientId,
           case_id: caseId,
           round,
+          alerts_count: alertsCount,
           href: `/admin/pipeline?client=${clientId}`,
         },
       };
@@ -9931,6 +10589,12 @@ async function executeAdminAiTool(
           due_date: due,
           status,
           notes: s.notes != null ? String(s.notes).slice(0, 2000) : null,
+          send_payment_link:
+            s.send_payment_link === true ||
+            s.send_payment_link === 1 ||
+            s.send_payment_link === "true" ||
+            (adminAiConfirmTrue(args.send_payment_link) &&
+              s.send_payment_link !== false),
           valid:
             !!label &&
             Number.isFinite(amount) &&
@@ -10013,13 +10677,18 @@ async function executeAdminAiTool(
       }
 
       const createdIds: number[] = [];
+      const paymentLinks: Array<{
+        split_id: number;
+        payment_link: string | null;
+      }> = [];
       for (const s of normalized) {
         const markPaid = s.status === "paid";
+        const wantLink = !markPaid && !!s.send_payment_link;
         const [ins] = await pool.query<ResultSetHeader>(
           `INSERT INTO payment_splits
              (case_id, client_id, label, amount_cents, due_date,
-              status, completion_source, paid_at, notes, created_by_admin_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ${markPaid ? "NOW()" : "NULL"}, ?, ?)`,
+              status, completion_source, paid_at, send_payment_link, notes, created_by_admin_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ${markPaid ? "NOW()" : "NULL"}, ?, ?, ?)`,
           [
             caseId,
             clientId,
@@ -10028,12 +10697,29 @@ async function executeAdminAiTool(
             s.due_date,
             s.status,
             markPaid ? "manual" : null,
+            wantLink ? 1 : 0,
             s.notes,
             ctx.adminId,
           ],
         );
         const newId = Number(ins.insertId);
         createdIds.push(newId);
+        let paymentLink: string | null = null;
+        if (wantLink) {
+          const tokenStr = crypto.randomUUID();
+          const expiresAt = new Date(`${s.due_date}T12:00:00`);
+          if (!isNaN(expiresAt.getTime())) {
+            expiresAt.setDate(expiresAt.getDate() + 7);
+          } else {
+            expiresAt.setTime(Date.now() + 7 * 24 * 60 * 60 * 1000);
+          }
+          await pool.query(
+            `INSERT INTO payment_split_tokens (split_id, token, expires_at) VALUES (?, ?, ?)`,
+            [newId, tokenStr, expiresAt],
+          );
+          paymentLink = `${APP_URL}/pay/${tokenStr}`;
+        }
+        paymentLinks.push({ split_id: newId, payment_link: paymentLink });
         if (markPaid) {
           await adminAiRecordManualSplitPayment({
             splitId: newId,
@@ -10049,6 +10735,7 @@ async function executeAdminAiTool(
         data: {
           created: true,
           split_ids: createdIds,
+          payment_links: paymentLinks,
           count: createdIds.length,
           client_id: clientId,
           case_id: caseId,
@@ -10784,14 +11471,19 @@ function isPdfBuffer(buf: Buffer): boolean {
 function validatePdfUploadPair(
   before: Buffer,
   after: Buffer,
-  maxBytes = 15 * 1024 * 1024,
+  maxBytes = VERCEL_SAFE_UPLOAD_MAX_BYTES,
+  maxTotalBytes = VERCEL_SAFE_UPLOAD_MAX_BYTES,
 ): string | null {
   if (!before?.length || !after?.length) {
     return "Both PDF files are required";
   }
   if (before.length > maxBytes || after.length > maxBytes) {
     const mb = Math.round(maxBytes / (1024 * 1024));
-    return `Each PDF must be ${mb} MB or smaller`;
+    return `Each PDF must be ${mb} MB or smaller (platform upload limit)`;
+  }
+  if (before.length + after.length > maxTotalBytes) {
+    const mb = Math.round(maxTotalBytes / (1024 * 1024));
+    return `Combined PDF size must be ${mb} MB or smaller. Compress files or reuse a prior-round Before PDF.`;
   }
   if (!isPdfBuffer(before) || !isPdfBuffer(after)) {
     return "Invalid PDF file — files must start with %PDF header";
@@ -12771,10 +13463,57 @@ async function upsertClientCmsCredentials(
   );
 }
 
+/** HostGator/DisruptingLabs shared hosting — transient network/SSL/5xx blips. */
+const CDN_UPLOAD_TIMEOUT_MS = Math.max(
+  3_000,
+  Number(process.env.CDN_UPLOAD_TIMEOUT_MS || 15_000) || 15_000,
+);
+const CDN_UPLOAD_MAX_ATTEMPTS = Math.max(
+  1,
+  Math.min(5, Number(process.env.CDN_UPLOAD_MAX_ATTEMPTS || 3) || 3),
+);
+
+function isTransientCdnFailure(err: unknown, status?: number): boolean {
+  if (
+    status === 408 ||
+    status === 429 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504
+  ) {
+    return true;
+  }
+  const msg = String(
+    (err as { message?: string })?.message ?? err ?? "",
+  ).toLowerCase();
+  return (
+    msg.includes("fetch failed") ||
+    msg.includes("network") ||
+    msg.includes("timeout") ||
+    msg.includes("timed out") ||
+    msg.includes("aborted") ||
+    msg.includes("econnreset") ||
+    msg.includes("etimedout") ||
+    msg.includes("econnrefused") ||
+    msg.includes("socket") ||
+    msg.includes("tls") ||
+    msg.includes("cert")
+  );
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * Upload a file buffer to the Disrupting Labs CDN and return the full public URL.
  * The URL is stored as storage_key in the DB and is never sent directly to the browser —
  * all access is proxied through the authenticated Express file-serve endpoints.
+ *
+ * External dependency: HostGator-hosted disruptinglabs.com (historically flaky SSL /
+ * AutoSSL). Production uses timeout + retries; VITEST never calls the live host so CI
+ * does not fail on outside CDN blips.
  */
 async function uploadToCDN(
   buffer: Buffer,
@@ -12792,27 +13531,102 @@ async function uploadToCDN(
   // only in our DB metadata / storage_key, never in a URL pattern an
   // attacker could iterate.
   const folderId = `c-${clientId}-${crypto.randomUUID().slice(0, 8)}`;
-  const formData = new FormData();
-  formData.append("main_folder", CDN_MAIN_FOLDER);
-  formData.append("id", folderId);
-  formData.append(
-    "files[]",
-    new Blob([new Uint8Array(buffer)], { type: mimetype }),
-    originalname,
-  );
-  const res = await fetch(CDN_UPLOAD_URL, {
-    method: "POST",
-    headers: { "X-Api-Key": CDN_UPLOAD_SECRET },
-    body: formData,
-  });
-  if (!res.ok) throw new Error(`CDN upload failed: ${res.status}`);
-  const data = (await res.json()) as any;
-  const uploaded = data?.uploaded?.[0];
-  if (!uploaded?.url)
-    throw new Error(
-      "CDN upload returned no URL: " + (data?.error ?? "unknown"),
+
+  // CI/integration: never depend on HostGator reachability (same pattern as Twilio dry-run).
+  if (process.env.VITEST === "true") {
+    return `vitest://cdn/${CDN_MAIN_FOLDER}/${folderId}/${encodeURIComponent(originalname)}`;
+  }
+
+  let lastErr: Error | null = null;
+  for (let attempt = 1; attempt <= CDN_UPLOAD_MAX_ATTEMPTS; attempt++) {
+    const formData = new FormData();
+    formData.append("main_folder", CDN_MAIN_FOLDER);
+    formData.append("id", folderId);
+    formData.append(
+      "files[]",
+      new Blob([new Uint8Array(buffer)], { type: mimetype }),
+      originalname,
     );
-  return uploaded.url as string;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), CDN_UPLOAD_TIMEOUT_MS);
+    try {
+      const res = await fetch(CDN_UPLOAD_URL, {
+        method: "POST",
+        headers: { "X-Api-Key": CDN_UPLOAD_SECRET },
+        body: formData,
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const bodySnippet = (await res.text().catch(() => "")).slice(0, 200);
+        const err = new Error(
+          `CDN upload failed: ${res.status}${bodySnippet ? ` — ${bodySnippet}` : ""}`,
+        );
+        lastErr = err;
+        if (
+          attempt < CDN_UPLOAD_MAX_ATTEMPTS &&
+          isTransientCdnFailure(err, res.status)
+        ) {
+          console.warn(
+            `[cdn:upload] attempt ${attempt}/${CDN_UPLOAD_MAX_ATTEMPTS} HTTP ${res.status}; retrying`,
+          );
+          await sleepMs(250 * attempt);
+          continue;
+        }
+        throw err;
+      }
+      const data = (await res.json()) as {
+        uploaded?: Array<{ url?: string }>;
+        error?: string;
+        errors?: Array<{ error?: string }>;
+      };
+      const uploaded = data?.uploaded?.[0];
+      if (!uploaded?.url) {
+        throw new Error(
+          "CDN upload returned no URL: " +
+            (data?.error ??
+              data?.errors?.[0]?.error ??
+              "unknown"),
+        );
+      }
+      if (attempt > 1) {
+        console.warn(
+          `[cdn:upload] succeeded on attempt ${attempt}/${CDN_UPLOAD_MAX_ATTEMPTS}`,
+        );
+      }
+      return uploaded.url as string;
+    } catch (e: unknown) {
+      const raw = e instanceof Error ? e : new Error(String(e));
+      const err =
+        raw.name === "AbortError"
+          ? new Error(
+              `CDN upload timed out after ${CDN_UPLOAD_TIMEOUT_MS}ms`,
+            )
+          : raw;
+      lastErr = err;
+      // Non-retryable API shape errors (unsupported type, missing URL) stop immediately.
+      const msg = err.message || "";
+      if (
+        msg.includes("CDN upload returned no URL") &&
+        !isTransientCdnFailure(err)
+      ) {
+        throw err;
+      }
+      if (
+        attempt < CDN_UPLOAD_MAX_ATTEMPTS &&
+        isTransientCdnFailure(err)
+      ) {
+        console.warn(
+          `[cdn:upload] attempt ${attempt}/${CDN_UPLOAD_MAX_ATTEMPTS} failed: ${err.message}; retrying`,
+        );
+        await sleepMs(250 * attempt);
+        continue;
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastErr ?? new Error("CDN upload failed");
 }
 
 /** Best-effort CDN cleanup when DB writes fail after upload (requires CDN_DELETE_URL). */
@@ -15402,8 +16216,9 @@ async function publishAdminBellRealtime(
   }
 }
 
-/** In-app bell (+ optional Ably push) when a client/unknown sends inbound SMS.
- * Also emails the assignee (if email pref on) and Settings → extra notify emails.
+/** In-app bell (+ optional Ably), email, and SMS alert when inbound SMS hits an OFG line.
+ * SMS alert = notify staff cell (not a relay); replies stay in Conversations.
+ * Also fans out Settings → extra notify emails.
  */
 async function notifyAdminInboundSms(opts: {
   adminId: number;
@@ -15429,7 +16244,7 @@ async function notifyAdminInboundSms(opts: {
   }
 
   const [aRows] = await pool.query<RowDataPacket[]>(
-    `SELECT id, email, first_name, preferred_language, notification_prefs_json FROM admins
+    `SELECT id, email, first_name, phone, preferred_language, notification_prefs_json FROM admins
      WHERE id = ? AND status = 'active' LIMIT 1`,
     [adminId],
   );
@@ -15501,6 +16316,44 @@ async function notifyAdminInboundSms(opts: {
     eventKey: "inbound_sms",
     skipEmails: emailed,
   });
+
+  // Alert SMS to personal cell (same pattern as missed_call / voicemail).
+  if (adminNotifyPrefOn(prefs, "sms", "inbound_sms")) {
+    const adminPhone = String(aRows[0].phone || "").trim();
+    if (adminPhone) {
+      try {
+        const from = await resolveAssignedSmsFrom(adminId);
+        if (!from) {
+          // No OFG From number — skip (same as deliverAdminNotificationChannels)
+        } else {
+          const toDigits = normalizePhoneDigits(adminPhone);
+          const fromDigits = normalizePhoneDigits(from);
+          if (toDigits && fromDigits && toDigits === fromDigits) {
+            // Never SMS an OFG line to itself
+          } else {
+            const prefix =
+              adminLang === "es"
+                ? `OFG SMS de ${opts.fromLabel}: ${body}`
+                : `OFG SMS from ${opts.fromLabel}: ${body}`;
+            const smsBody = `${prefix.slice(0, 260)}\n${absoluteLink}`.slice(
+              0,
+              320,
+            );
+            await sendSms({
+              to: adminPhone,
+              body: smsBody,
+              from,
+            });
+          }
+        }
+      } catch (e: any) {
+        console.error(
+          `[notify:inbound_sms:sms] admin ${adminId}:`,
+          e?.message ?? e,
+        );
+      }
+    }
+  }
 }
 
 function tplAdminInboundSmsAlert(opts: {
@@ -16515,7 +17368,7 @@ async function listFundingDocsUploaded(
 }
 
 async function ensureFundingClientId(opts: {
-  email: string;
+  email: string | null;
   firstName: string;
   lastName: string;
   phone: string | null;
@@ -16523,45 +17376,83 @@ async function ensureFundingClientId(opts: {
   postalCode?: string | null;
   state?: string | null;
 }): Promise<number> {
-  const email = opts.email.trim().toLowerCase();
-  const [existing] = await pool.query<RowDataPacket[]>(
-    `SELECT id, status, phone, zip, state FROM clients WHERE email = ? LIMIT 1`,
-    [email],
-  );
-  if (existing[0]) {
-    const id = Number(existing[0].id);
-    const status = String(existing[0].status || "");
-    // Attach funding to existing CR/funding clients; never demote active clients.
-    if (status === "funding" || status === "prospect") {
-      await pool.query<ResultSetHeader>(
-        `UPDATE clients SET
-           phone = COALESCE(?, phone),
-           zip = COALESCE(?, zip),
-           state = COALESCE(?, state),
-           preferred_language = COALESCE(?, preferred_language),
-           status = IF(status = 'prospect', 'funding', status),
-           pipeline_stage = IF(status = 'prospect', 'prospect', pipeline_stage)
-         WHERE id = ?`,
-        [
-          opts.phone,
-          opts.postalCode || null,
-          opts.state || null,
-          opts.preferredLanguage,
-          id,
-        ],
-      );
-    } else if (opts.phone || opts.postalCode || opts.state) {
-      await pool.query<ResultSetHeader>(
-        `UPDATE clients SET
-           phone = COALESCE(phone, ?),
-           zip = COALESCE(zip, ?),
-           state = COALESCE(state, ?)
-         WHERE id = ?`,
-        [opts.phone, opts.postalCode || null, opts.state || null, id],
-      );
+  const email = opts.email?.trim().toLowerCase() || null;
+  if (email) {
+    const [existing] = await pool.query<RowDataPacket[]>(
+      `SELECT id, status, phone, zip, state FROM clients WHERE email = ? LIMIT 1`,
+      [email],
+    );
+    if (existing[0]) {
+      const id = Number(existing[0].id);
+      const status = String(existing[0].status || "");
+      // Attach funding to existing CR/funding clients; never demote active clients.
+      if (status === "funding" || status === "prospect") {
+        await pool.query<ResultSetHeader>(
+          `UPDATE clients SET
+             phone = COALESCE(?, phone),
+             zip = COALESCE(?, zip),
+             state = COALESCE(?, state),
+             preferred_language = COALESCE(?, preferred_language),
+             status = IF(status = 'prospect', 'funding', status),
+             pipeline_stage = IF(status = 'prospect', 'prospect', pipeline_stage)
+           WHERE id = ?`,
+          [
+            opts.phone,
+            opts.postalCode || null,
+            opts.state || null,
+            opts.preferredLanguage,
+            id,
+          ],
+        );
+      } else if (opts.phone || opts.postalCode || opts.state) {
+        await pool.query<ResultSetHeader>(
+          `UPDATE clients SET
+             phone = COALESCE(phone, ?),
+             zip = COALESCE(zip, ?),
+             state = COALESCE(state, ?)
+           WHERE id = ?`,
+          [opts.phone, opts.postalCode || null, opts.state || null, id],
+        );
+      }
+      return id;
     }
-    return id;
   }
+
+  const phoneLast10 = opts.phone ? normalizePhoneLast10(opts.phone) : null;
+  if (phoneLast10) {
+    const [byPhone] = await pool.query<RowDataPacket[]>(
+      `SELECT id, status, email, phone FROM clients
+       WHERE phone IS NOT NULL AND phone <> ''
+       ORDER BY id DESC LIMIT 40`,
+    );
+    const match = byPhone.find(
+      (r) => normalizePhoneLast10(String(r.phone || "")) === phoneLast10,
+    );
+    if (match) {
+      const id = Number(match.id);
+      const status = String(match.status || "");
+      if (status === "funding" || status === "prospect") {
+        await pool.query<ResultSetHeader>(
+          `UPDATE clients SET
+             email = COALESCE(email, ?),
+             zip = COALESCE(?, zip),
+             state = COALESCE(?, state),
+             preferred_language = COALESCE(?, preferred_language),
+             status = IF(status = 'prospect', 'funding', status)
+           WHERE id = ?`,
+          [
+            email,
+            opts.postalCode || null,
+            opts.state || null,
+            opts.preferredLanguage,
+            id,
+          ],
+        );
+      }
+      return id;
+    }
+  }
+
   const ownerId = await resolveLanguageOwnerAdminId(opts.preferredLanguage);
   const [ins] = await pool.query<ResultSetHeader>(
     `INSERT INTO clients
@@ -16760,6 +17651,7 @@ async function persistFundingDocument(opts: {
       opts.file.mimetype,
       opts.clientId,
     );
+    if (storageKey.startsWith("vitest://")) storageProvider = "local";
   } catch (e: any) {
     if (process.env.VITEST !== "true") throw e;
     console.warn(
@@ -17203,7 +18095,7 @@ const MMS_ALLOWED_CONTENT_TYPES = new Set([
   "application/pdf",
 ]);
 /** Stay under Vercel serverless request body limits (~4.5MB). */
-const MMS_MAX_BYTES = 4 * 1024 * 1024;
+const MMS_MAX_BYTES = VERCEL_SAFE_UPLOAD_MAX_BYTES;
 const MMS_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Keep hub timeline previews; Twilio only needs the URL for minutes after send. */
@@ -17529,6 +18421,152 @@ async function adminCanAccessUnknownContact(
   return rows.length > 0;
 }
 
+/**
+ * Client inbox / timeline visibility: threads on my OFG line(s) OR assigned to me.
+ * Matches badge/recording intent — never a company-wide SMS CRM for numbered staff.
+ */
+function adminClientConversationScopeSql(
+  alias: string,
+  adminId: number,
+  ofgIds: number[],
+): { sql: string; params: any[] } {
+  if (ofgIds.length > 0) {
+    return {
+      sql: `(${alias}.assigned_admin_id = ? OR ${alias}.ofg_number_id IN (${ofgIds.map(() => "?").join(",")}))`,
+      params: [adminId, ...ofgIds],
+    };
+  }
+  return {
+    sql: `${alias}.assigned_admin_id = ?`,
+    params: [adminId],
+  };
+}
+
+async function adminCanAccessClientConversations(
+  adminId: number,
+  clientId: number,
+): Promise<boolean> {
+  const ofgIds = await adminAssignedPhoneNumberIds(adminId);
+  const scope = adminClientConversationScopeSql("cv", adminId, ofgIds);
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT cv.id FROM conversations cv
+     WHERE cv.client_id = ? AND ${scope.sql}
+     LIMIT 1`,
+    [clientId, ...scope.params],
+  );
+  return rows.length > 0;
+}
+
+/**
+ * Status/assign: allow when in scope, or when the client has no threads yet
+ * (bootstrap close / first assign). Never when only another staff's threads exist.
+ */
+async function adminCanMutateClientConversations(
+  adminId: number,
+  clientId: number,
+): Promise<boolean> {
+  if (await adminCanAccessClientConversations(adminId, clientId)) return true;
+  if (!(await adminHasConversationsAccess(adminId))) return false;
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT id FROM conversations WHERE client_id = ? LIMIT 1`,
+    [clientId],
+  );
+  return rows.length === 0;
+}
+
+/** Admins who should receive Ably updates for a conversation event (OFG owner + assignee). */
+async function resolveConversationRealtimeAdminIds(
+  payload: Record<string, unknown>,
+): Promise<number[]> {
+  const ids = new Set<number>();
+  const add = (raw: unknown) => {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) ids.add(n);
+  };
+
+  const contact =
+    payload.contact && typeof payload.contact === "object"
+      ? (payload.contact as Record<string, unknown>)
+      : null;
+  add(payload.assigned_admin_id);
+  add(contact?.assigned_admin_id);
+
+  const conversationId = Number(payload.conversation_id || 0);
+  const clientId = Number(
+    payload.client_id ||
+      (payload.kind === "client" ? payload.contact_id : 0) ||
+      contact?.client_id ||
+      0,
+  );
+  const unknownId = Number(
+    payload.unknown_contact_id ||
+      (payload.kind === "unknown" ? payload.contact_id : 0) ||
+      contact?.unknown_contact_id ||
+      0,
+  );
+
+  if (conversationId > 0) {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT assigned_admin_id, ofg_number_id FROM conversations WHERE id = ? LIMIT 1`,
+      [conversationId],
+    );
+    if (rows[0]) {
+      add(rows[0].assigned_admin_id);
+      if (rows[0].ofg_number_id != null) {
+        const [owners] = await pool.query<RowDataPacket[]>(
+          `SELECT assigned_admin_id FROM admin_phone_numbers
+           WHERE id = ? AND is_active = 1 LIMIT 1`,
+          [Number(rows[0].ofg_number_id)],
+        );
+        add(owners[0]?.assigned_admin_id);
+      }
+    }
+  } else if (clientId > 0) {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT DISTINCT cv.assigned_admin_id, cv.ofg_number_id
+       FROM conversations cv
+       WHERE cv.client_id = ?
+       LIMIT 20`,
+      [clientId],
+    );
+    const ofgSet = new Set<number>();
+    for (const r of rows) {
+      add(r.assigned_admin_id);
+      if (r.ofg_number_id != null) ofgSet.add(Number(r.ofg_number_id));
+    }
+    if (ofgSet.size) {
+      const ofgList = [...ofgSet];
+      const [owners] = await pool.query<RowDataPacket[]>(
+        `SELECT DISTINCT assigned_admin_id FROM admin_phone_numbers
+         WHERE id IN (${ofgList.map(() => "?").join(",")}) AND is_active = 1`,
+        ofgList,
+      );
+      for (const o of owners) add(o.assigned_admin_id);
+    }
+  } else if (unknownId > 0) {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT ofg_number_id FROM conversation_unknown_contacts WHERE id = ? LIMIT 1`,
+      [unknownId],
+    );
+    if (rows[0]?.ofg_number_id != null) {
+      const [owners] = await pool.query<RowDataPacket[]>(
+        `SELECT assigned_admin_id FROM admin_phone_numbers
+         WHERE id = ? AND is_active = 1 LIMIT 1`,
+        [Number(rows[0].ofg_number_id)],
+      );
+      add(owners[0]?.assigned_admin_id);
+    }
+    const [conv] = await pool.query<RowDataPacket[]>(
+      `SELECT DISTINCT assigned_admin_id FROM conversations
+       WHERE unknown_contact_id = ? LIMIT 10`,
+      [unknownId],
+    );
+    for (const r of conv) add(r.assigned_admin_id);
+  }
+
+  return [...ids];
+}
+
 function mapPhoneNumberRow(r: RowDataPacket) {
   let capabilities: { sms?: boolean; mms?: boolean; voice?: boolean } | null =
     null;
@@ -17619,12 +18657,8 @@ async function publishConversationRealtime(event: {
     const targets =
       event.adminIds && event.adminIds.length > 0
         ? event.adminIds
-        : (
-            await pool.query<RowDataPacket[]>(
-              `SELECT DISTINCT assigned_admin_id AS id FROM admin_phone_numbers
-               WHERE assigned_admin_id IS NOT NULL AND is_active = 1`,
-            )
-          )[0].map((r) => Number(r.id));
+        : await resolveConversationRealtimeAdminIds(event.payload);
+    if (!targets.length) return;
     await Promise.all(
       targets.filter(Boolean).map(async (adminId) => {
         const channel = rest.channels.get(`admin:${adminId}:conversations`);
@@ -17730,7 +18764,7 @@ async function unknownContactSnapshot(
   };
 }
 
-/** True when any contact thread is closed/archived (compose + outbound voice blocked). */
+/** True when any contact thread is closed/archived. */
 async function contactComposeBlockedByClosed(opts: {
   clientId?: number;
   unknownContactId?: number;
@@ -17754,6 +18788,27 @@ async function contactComposeBlockedByClosed(opts: {
     rows = r;
   }
   return rows.length > 0;
+}
+
+/**
+ * Staff outbound (SMS / note / call) keeps closed threads usable: auto-reopen
+ * with a system timeline event instead of hard-blocking compose.
+ */
+async function ensureContactOpenForStaffOutbound(opts: {
+  clientId?: number;
+  unknownContactId?: number;
+  adminId: number;
+}): Promise<{ reopened: boolean; system_message: RowDataPacket | null }> {
+  if (!(await contactComposeBlockedByClosed(opts))) {
+    return { reopened: false, system_message: null };
+  }
+  const result = await setContactConversationStatus({
+    clientId: opts.clientId,
+    unknownContactId: opts.unknownContactId,
+    status: "open",
+    adminId: opts.adminId,
+  });
+  return { reopened: true, system_message: result.system_message };
 }
 
 async function insertConversationSystemEvent(opts: {
@@ -17833,14 +18888,31 @@ async function setContactConversationStatus(opts: {
       primaryId = Number(primary[0].id);
     } else if (status === "closed") {
       // Close with no threads yet — create a primary SMS row so Closed list + banner stick.
+      let ofgNumberId: number | null = null;
+      if (hasClient) {
+        const ofgIds = await adminAssignedPhoneNumberIds(opts.adminId);
+        ofgNumberId = ofgIds[0] ?? null;
+      } else if (opts.unknownContactId) {
+        const [u] = await pool.query<RowDataPacket[]>(
+          `SELECT ofg_number_id FROM conversation_unknown_contacts WHERE id = ? LIMIT 1`,
+          [opts.unknownContactId],
+        );
+        ofgNumberId =
+          u[0]?.ofg_number_id != null ? Number(u[0].ofg_number_id) : null;
+      }
       const [ins] = await pool.query<ResultSetHeader>(
         hasClient
-          ? `INSERT INTO conversations (client_id, channel, status, assigned_admin_id)
-             VALUES (?, 'sms', 'closed', ?)`
+          ? `INSERT INTO conversations
+               (client_id, channel, status, assigned_admin_id, ofg_number_id)
+             VALUES (?, 'sms', 'closed', ?, ?)`
           : `INSERT INTO conversations
-               (unknown_contact_id, channel, status, assigned_admin_id)
-             VALUES (?, 'sms', 'closed', ?)`,
-        [hasClient ? opts.clientId : opts.unknownContactId, opts.adminId],
+               (unknown_contact_id, channel, status, assigned_admin_id, ofg_number_id)
+             VALUES (?, 'sms', 'closed', ?, ?)`,
+        [
+          hasClient ? opts.clientId : opts.unknownContactId,
+          opts.adminId,
+          ofgNumberId,
+        ],
       );
       primaryId = Number(ins.insertId);
     }
@@ -18117,16 +19189,13 @@ async function deliverHubConversationMessage(opts: {
   if (opts.mediaUrl && ch !== "sms") {
     throw new Error("Media attachments are SMS only");
   }
-  if (
-    await contactComposeBlockedByClosed({
-      clientId: hasClient ? opts.clientId : undefined,
-      unknownContactId: hasUnknown ? opts.unknownContactId : undefined,
-    })
-  ) {
-    const err = new Error("conversation_closed");
-    (err as Error & { code?: string }).code = "conversation_closed";
-    throw err;
-  }
+  // Closed threads stay usable for staff: auto-reopen on outbound compose.
+  const reopen = await ensureContactOpenForStaffOutbound({
+    clientId: hasClient ? opts.clientId : undefined,
+    unknownContactId: hasUnknown ? opts.unknownContactId : undefined,
+    adminId: opts.adminId,
+  });
+  void reopen;
 
   const assigned = await listAssignedPhoneNumbers(opts.adminId);
   let ofgNumberId =
@@ -18997,6 +20066,53 @@ async function syncAdminUploadToMatchingTask(opts: {
  * Docs Verified auto-advance: only when EVERY active required task for the
  * case is approved (uploads + service_agreement, etc.). Never advances early.
  */
+async function countRequiredTasksApproved(caseId: number): Promise<{
+  requiredTotal: number;
+  approvedCount: number;
+}> {
+  const [[reqRow]] = await pool.query<RowDataPacket[]>(
+    `SELECT COUNT(*) AS required_total FROM onboarding_task_templates
+     WHERE is_active = 1 AND is_required = 1`,
+  );
+  const [[approvedRow]] = await pool.query<RowDataPacket[]>(
+    `SELECT COUNT(*) AS approved_count
+     FROM client_task_completions ctc
+     JOIN onboarding_task_templates ott ON ott.id = ctc.task_template_id
+     WHERE ctc.case_id = ? AND ctc.admin_review_status = 'approved'
+       AND ott.is_required = 1 AND ott.is_active = 1`,
+    [caseId],
+  );
+  return {
+    requiredTotal: Number(reqRow.required_total || 0),
+    approvedCount: Number(approvedRow.approved_count || 0),
+  };
+}
+
+/**
+ * Gate Docs Verified: required templates must exist AND all must be approved
+ * on this case. Prevents empty-task / migrated cases from sitting on docs_ready.
+ */
+async function assertDocsReadyTaskGate(
+  caseId: number,
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { requiredTotal, approvedCount } =
+    await countRequiredTasksApproved(caseId);
+  if (requiredTotal <= 0) {
+    return {
+      ok: false,
+      message:
+        "Cannot advance to Docs Verified — no required onboarding tasks are configured.",
+    };
+  }
+  if (approvedCount < requiredTotal) {
+    return {
+      ok: false,
+      message: `Cannot advance to Docs Verified — ${requiredTotal - approvedCount} required task(s) still need approval.`,
+    };
+  }
+  return { ok: true };
+}
+
 async function maybeAutoAdvanceDocsReadyFromTasks(opts: {
   clientId: number;
   caseId: number;
@@ -19008,21 +20124,8 @@ async function maybeAutoAdvanceDocsReadyFromTasks(opts: {
   );
   if (caseRows[0]?.pipeline_stage !== "new_client") return false;
 
-  const [[reqRow]] = await pool.query<RowDataPacket[]>(
-    `SELECT COUNT(*) AS required_total FROM onboarding_task_templates
-     WHERE is_active = 1 AND is_required = 1`,
-  );
-  const [[approvedRow]] = await pool.query<RowDataPacket[]>(
-    `SELECT COUNT(*) AS approved_count
-     FROM client_task_completions ctc
-     JOIN onboarding_task_templates ott ON ott.id = ctc.task_template_id
-     WHERE ctc.case_id = ? AND ctc.admin_review_status = 'approved'
-       AND ott.is_required = 1 AND ott.is_active = 1`,
-    [opts.caseId],
-  );
-  const requiredTotal = Number(reqRow.required_total);
-  const approvedCount = Number(approvedRow.approved_count);
-  if (requiredTotal <= 0 || approvedCount < requiredTotal) return false;
+  const gate = await assertDocsReadyTaskGate(opts.caseId);
+  if (gate.ok === false) return false;
 
   await advanceCasePipeline(pool, {
     clientId: opts.clientId,
@@ -19101,6 +20204,10 @@ function adminAiDecodeFileBase64(raw: string): Buffer | null {
   }
 }
 
+function sha256BufferHex(buf: Buffer): string {
+  return crypto.createHash("sha256").update(buf).digest("hex");
+}
+
 /** Encrypt, CDN upload, DB row, and onboarding-task sync for one admin case doc. */
 async function persistAdminCaseDocumentUpload(opts: {
   clientId: number;
@@ -19122,17 +20229,31 @@ async function persistAdminCaseDocumentUpload(opts: {
   task_synced: boolean;
 }> {
   const { encrypted, iv, tag } = encryptFile(opts.buffer);
-  const cdnUrl = await uploadToCDN(
-    encrypted,
-    opts.fileName + ".enc",
-    "application/octet-stream",
-    opts.clientId,
-  );
+  let storageProvider: "cdn" | "local" = "cdn";
+  let storageKey: string;
+  try {
+    storageKey = await uploadToCDN(
+      encrypted,
+      opts.fileName + ".enc",
+      "application/octet-stream",
+      opts.clientId,
+    );
+    // uploadToCDN stubs under VITEST — mark local so file-serve never hits HostGator.
+    if (storageKey.startsWith("vitest://")) storageProvider = "local";
+  } catch (e: any) {
+    if (process.env.VITEST !== "true") throw e;
+    console.warn(
+      "[admin:case-doc] CDN unavailable in VITEST — storing local key:",
+      e?.message ?? e,
+    );
+    storageProvider = "local";
+    storageKey = `vitest/case-docs/${opts.caseId}/${opts.docType}-${Date.now()}.enc`;
+  }
   const [r] = await pool.query<ResultSetHeader>(
     `INSERT INTO client_documents
        (client_id, case_id, doc_type, pipeline_round, file_name, file_size, mime_type,
         storage_provider, storage_key, encrypted, enc_iv, enc_tag, review_status, uploaded_by_admin_id)
-     VALUES (?,?,?,?,?,?,?, 'cdn', ?, 1, ?, ?, 'approved', ?)`,
+     VALUES (?,?,?,?,?,?,?, ?, ?, 1, ?, ?, 'approved', ?)`,
     [
       opts.clientId,
       opts.caseId,
@@ -19141,13 +20262,14 @@ async function persistAdminCaseDocumentUpload(opts: {
       opts.fileName,
       opts.buffer.length,
       opts.mimeType,
-      cdnUrl,
+      storageProvider,
+      storageKey,
       iv,
       tag,
       opts.adminId,
     ],
   );
-  const fileStorageKey = `${cdnUrl}|${iv}|${tag}`;
+  const fileStorageKey = `${storageKey}|${iv}|${tag}`;
   const taskSynced = await syncAdminUploadToMatchingTask({
     clientId: opts.clientId,
     caseId: opts.caseId,
@@ -20628,6 +21750,8 @@ const ADMIN_AI_MCP_WRITE_TOOLS = new Set([
   "create_funding_application",
   "convert_funding_application",
   "upload_funding_document",
+  "update_referrer",
+  "attach_referrer",
 ]);
 
 /** MCP tool annotations — always readOnlyHint so Claude does not gate dry-runs.
@@ -21554,8 +22678,35 @@ function mountOptimumMcpRoutes(opts: MountOptimumMcpOpts): void {
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 15 * 1024 * 1024 },
+  limits: { fileSize: VERCEL_SAFE_UPLOAD_MAX_BYTES },
 });
+
+function multipartFilesTotalBytes(
+  files: Array<{ buffer?: Buffer; size?: number }>,
+): number {
+  return files.reduce((sum, f) => {
+    const n = f.buffer?.length ?? (Number(f.size) || 0);
+    return sum + n;
+  }, 0);
+}
+
+function assertMultipartUnderVercelLimit(
+  files: Array<{ buffer?: Buffer; size?: number }>,
+): string | null {
+  for (const f of files) {
+    const n = f.buffer?.length ?? (Number(f.size) || 0);
+    if (n > VERCEL_SAFE_UPLOAD_MAX_BYTES) {
+      const mb = Math.round(VERCEL_SAFE_UPLOAD_MAX_BYTES / (1024 * 1024));
+      return `Each file must be ${mb} MB or smaller (platform upload limit)`;
+    }
+  }
+  const total = multipartFilesTotalBytes(files);
+  if (total > VERCEL_SAFE_UPLOAD_MAX_BYTES) {
+    const mb = Math.round(VERCEL_SAFE_UPLOAD_MAX_BYTES / (1024 * 1024));
+    return `Total upload exceeds ${mb} MB (platform limit). Upload one smaller file at a time or compress the PDF.`;
+  }
+  return null;
+}
 
 /**
  * Build the browser CORS allowlist.
@@ -28588,26 +29739,9 @@ function buildApp() {
 
       // Enforce docs_ready rule: all required tasks must be approved
       if (stage === "docs_ready") {
-        const [[requiredRow]] = await pool.query<RowDataPacket[]>(
-          `SELECT COUNT(*) AS required_total FROM onboarding_task_templates
-           WHERE is_active = 1 AND is_required = 1`,
-        );
-        const requiredTotal = Number(requiredRow.required_total);
-
-        const [[approvedRow]] = await pool.query<RowDataPacket[]>(
-          `SELECT COUNT(*) AS approved_count
-           FROM client_task_completions ctc
-           JOIN onboarding_task_templates ott ON ott.id = ctc.task_template_id
-           WHERE ctc.case_id = ? AND ctc.admin_review_status = 'approved'
-             AND ott.is_required = 1 AND ott.is_active = 1`,
-          [caseId],
-        );
-        const approvedCount = Number(approvedRow.approved_count);
-
-        if (approvedCount < requiredTotal) {
-          return res.status(422).json({
-            error: `Cannot advance to Docs Verified — ${requiredTotal - approvedCount} required task(s) still need approval.`,
-          });
+        const gate = await assertDocsReadyTaskGate(caseId);
+        if (gate.ok === false) {
+          return res.status(422).json({ error: gate.message });
         }
       }
 
@@ -29103,6 +30237,22 @@ function buildApp() {
           args.push(package_id ? Number(package_id) : null);
         }
         if (status != null && allowedStatus.includes(status)) {
+          // Paid/enrolled statuses require an enrolled case — same rule as MCP
+          // update_client_status. Prevents "active + prospect stage, no case".
+          if (
+            status === "pending_payment" ||
+            status === "onboarding" ||
+            status === "active"
+          ) {
+            const enrolled = await clientHasEnrolledCase(id);
+            if (!enrolled) {
+              return res.status(422).json({
+                error:
+                  "Cannot set status to pending_payment/onboarding/active until the client has an enrolled case. Convert the prospect first (Pipeline: Prospect → New Client).",
+                code: "use_convert_prospect",
+              });
+            }
+          }
           updates.push("status = ?");
           args.push(status);
         }
@@ -29745,62 +30895,82 @@ function buildApp() {
     denyAffiliateAccess,
     upload.array("files", 5),
     async (req: AuthedRequest, res) => {
-      const caseId = Number(req.params.id);
-      if (!caseId || isNaN(caseId)) {
-        return res.status(400).json({ error: "Invalid case id" });
-      }
-      const docType = String(req.body?.doc_type || "");
-      if (
-        !CASE_DOC_TYPES.includes(docType as (typeof CASE_DOC_TYPES)[number])
-      ) {
-        return res.status(400).json({ error: "Invalid doc_type" });
-      }
-      const [caseRows] = await pool.query<RowDataPacket[]>(
-        `SELECT id, client_id, pipeline_stage FROM credit_repair_cases WHERE id = ? LIMIT 1`,
-        [caseId],
-      );
-      if (!caseRows[0])
-        return res.status(404).json({ error: "Case not found" });
-      const clientId = Number(caseRows[0].client_id);
-      const pipelineRound = (caseRows[0].pipeline_stage as string) || null;
-      const files = (req.files as Express.Multer.File[]) || [];
-      if (files.length === 0) {
-        return res.status(400).json({ error: "No files" });
-      }
-      const inserted: any[] = [];
-      let syncedTasks = 0;
-      for (const f of files) {
-        const row = await persistAdminCaseDocumentUpload({
+      try {
+        const caseId = Number(req.params.id);
+        if (!caseId || isNaN(caseId)) {
+          return res.status(400).json({ error: "Invalid case id" });
+        }
+        const docType = String(req.body?.doc_type || "");
+        if (
+          !CASE_DOC_TYPES.includes(docType as (typeof CASE_DOC_TYPES)[number])
+        ) {
+          return res.status(400).json({ error: "Invalid doc_type" });
+        }
+        const [caseRows] = await pool.query<RowDataPacket[]>(
+          `SELECT id, client_id, pipeline_stage FROM credit_repair_cases WHERE id = ? LIMIT 1`,
+          [caseId],
+        );
+        if (!caseRows[0])
+          return res.status(404).json({ error: "Case not found" });
+        const clientId = Number(caseRows[0].client_id);
+        const pipelineRound = (caseRows[0].pipeline_stage as string) || null;
+        const files = (req.files as Express.Multer.File[]) || [];
+        if (files.length === 0) {
+          return res.status(400).json({ error: "No files" });
+        }
+        const sizeErr = assertMultipartUnderVercelLimit(files);
+        if (sizeErr) {
+          return res.status(413).json({ error: sizeErr });
+        }
+        const inserted: any[] = [];
+        let syncedTasks = 0;
+        for (const f of files) {
+          const row = await persistAdminCaseDocumentUpload({
+            clientId,
+            caseId,
+            docType,
+            buffer: f.buffer,
+            fileName: f.originalname,
+            mimeType: f.mimetype,
+            adminId: req.auth!.id,
+            pipelineRound,
+          });
+          if (row.task_synced) syncedTasks += 1;
+          inserted.push({
+            id: row.id,
+            doc_type: row.doc_type,
+            file_name: row.file_name,
+            file_size: row.file_size,
+            review_status: row.review_status,
+            uploaded_by_admin_id: row.uploaded_by_admin_id,
+            task_synced: row.task_synced,
+          });
+        }
+        const autoAdvanced = await maybeAutoAdvanceDocsReadyFromTasks({
           clientId,
           caseId,
-          docType,
-          buffer: f.buffer,
-          fileName: f.originalname,
-          mimeType: f.mimetype,
           adminId: req.auth!.id,
-          pipelineRound,
         });
-        if (row.task_synced) syncedTasks += 1;
-        inserted.push({
-          id: row.id,
-          doc_type: row.doc_type,
-          file_name: row.file_name,
-          review_status: row.review_status,
-          uploaded_by_admin_id: row.uploaded_by_admin_id,
-          task_synced: row.task_synced,
+        res.status(201).json({
+          ok: true,
+          documents: inserted,
+          tasks_synced: syncedTasks,
+          auto_advanced_docs_ready: autoAdvanced,
+        });
+      } catch (err: any) {
+        console.error("[admin:case-documents]", err?.message ?? err);
+        const raw = String(err?.message ?? err ?? "");
+        if (/cdn|fetch failed|timeout|ECONN|ENOTFOUND|TLS|SSL/i.test(raw)) {
+          return res.status(502).json({
+            error:
+              "Document storage is temporarily unavailable. Retry in a moment, or compress the file under 4 MB and try again.",
+          });
+        }
+        res.status(500).json({
+          error:
+            "Could not upload document. Check file size (max 4 MB) and try again.",
         });
       }
-      const autoAdvanced = await maybeAutoAdvanceDocsReadyFromTasks({
-        clientId,
-        caseId,
-        adminId: req.auth!.id,
-      });
-      res.status(201).json({
-        ok: true,
-        documents: inserted,
-        tasks_synced: syncedTasks,
-        auto_advanced_docs_ready: autoAdvanced,
-      });
     },
   );
 
@@ -30327,30 +31497,18 @@ function buildApp() {
         });
       }
 
-      // Enforce docs_ready rule: all 4 required docs must be approved
+      // Enforce docs_ready rule: same task gate as case stage POST (not legacy doc_type count)
       if (stage === "docs_ready") {
-        const REQUIRED = [
-          "id_front",
-          "id_back",
-          "ssn_card",
-          "proof_of_address",
-        ];
-        const [docRows] = await pool.query<RowDataPacket[]>(
-          `SELECT doc_type, review_status FROM client_documents
-           WHERE client_id = ? AND doc_type IN (?) ORDER BY uploaded_at DESC`,
-          [id, REQUIRED],
-        );
-        // Keep only the latest doc per type
-        const latestByType: Record<string, string> = {};
-        for (const d of docRows) {
-          if (!latestByType[d.doc_type as string])
-            latestByType[d.doc_type as string] = d.review_status as string;
-        }
-        const approved = REQUIRED.filter((t) => latestByType[t] === "approved");
-        if (approved.length < 4) {
+        const caseIdForGate = await resolvePrimaryActiveCaseId(pool, id);
+        if (!caseIdForGate) {
           return res.status(422).json({
-            error: `Cannot advance to Docs Verified — ${4 - approved.length} required document(s) still need approval.`,
+            error:
+              "Cannot advance to Docs Verified — client has no enrolled case. Convert the prospect first.",
           });
+        }
+        const gate = await assertDocsReadyTaskGate(caseIdForGate);
+        if (gate.ok === false) {
+          return res.status(422).json({ error: gate.message });
         }
       }
       const { unchanged } = await advanceCasePipeline(pool, {
@@ -31485,10 +32643,12 @@ function buildApp() {
         Math.max(1, parseInt((req.query.limit as string) || "50", 10)),
       );
       const adminId = req.auth!.id;
+      const ofgIds = await adminAssignedPhoneNumberIds(adminId);
+      const clientScope = adminClientConversationScopeSql("cv", adminId, ofgIds);
 
-      // Contact-centric: aggregate client threads
-      const where: string[] = ["cv.client_id IS NOT NULL"];
-      const args: any[] = [];
+      // Contact-centric: aggregate client threads visible on my OFG lines or assigned to me
+      const where: string[] = ["cv.client_id IS NOT NULL", clientScope.sql];
+      const args: any[] = [...clientScope.params];
       if (view === "mine") {
         where.push("cv.assigned_admin_id = ?");
         where.push("cv.status NOT IN ('closed','archived')");
@@ -31502,6 +32662,9 @@ function buildApp() {
         where.push("cv.status IN ('closed','archived')");
       } else if (view === "unread") {
         where.push("cv.unread_count > 0");
+        where.push("cv.status NOT IN ('closed','archived')");
+      } else if (view === "all") {
+        // Active inbox: hide closed/archived (use Closed filter to find them)
         where.push("cv.status NOT IN ('closed','archived')");
       }
       if (q) {
@@ -31641,17 +32804,26 @@ function buildApp() {
                    SELECT 1 FROM conversations cvu
                    WHERE cvu.unknown_contact_id = u.id
                      AND cvu.assigned_admin_id = ?
-                     AND cvu.status = 'open'
+                     AND cvu.status NOT IN ('closed','archived')
                  )`,
               );
               unkArgs.push(adminId);
             }
-          } else if (
-            view === "unknown" ||
-            view === "all" ||
-            view === "unread"
-          ) {
-            // Default inbox: hide closed/archived unknown threads
+          } else if (view === "unknown" || view === "all") {
+            // Active inbox: hide closed/archived unknown threads
+            unkWhere.push(
+              `(
+                 NOT EXISTS (
+                   SELECT 1 FROM conversations cvu WHERE cvu.unknown_contact_id = u.id
+                 )
+                 OR EXISTS (
+                   SELECT 1 FROM conversations cvu
+                   WHERE cvu.unknown_contact_id = u.id
+                     AND cvu.status NOT IN ('closed','archived')
+                 )
+               )`,
+            );
+          } else if (view === "unread") {
             unkWhere.push(
               `(
                  NOT EXISTS (
@@ -31663,9 +32835,7 @@ function buildApp() {
                  )
                )`,
             );
-            if (view === "unread") {
-              unkWhere.push(`u.unread_count > 0`);
-            }
+            unkWhere.push(`u.unread_count > 0`);
           }
           if (q) {
             const like = likeContains(q);
@@ -31807,17 +32977,25 @@ function buildApp() {
         });
       }
 
-      // client
+      // client — only threads on my OFG line(s) or assigned to me
+      if (!(await adminCanAccessClientConversations(req.auth!.id, id))) {
+        return res.status(404).json({ error: "Not found" });
+      }
       const [crows] = await pool.query<RowDataPacket[]>(
         `SELECT id, first_name, last_name, email, phone, status, pipeline_stage, preferred_language
          FROM clients WHERE id = ? LIMIT 1`,
         [id],
       );
       if (!crows[0]) return res.status(404).json({ error: "Client not found" });
+      const ofgIds = await adminAssignedPhoneNumberIds(req.auth!.id);
+      const scope = adminClientConversationScopeSql("cv", req.auth!.id, ofgIds);
       const [threads] = await pool.query<RowDataPacket[]>(
-        `SELECT id, channel, status, assigned_admin_id, ofg_number_id, unread_count, last_message_at
-         FROM conversations WHERE client_id = ? ORDER BY last_message_at DESC`,
-        [id],
+        `SELECT cv.id, cv.channel, cv.status, cv.assigned_admin_id, cv.ofg_number_id,
+                cv.unread_count, cv.last_message_at
+         FROM conversations cv
+         WHERE cv.client_id = ? AND ${scope.sql}
+         ORDER BY cv.last_message_at DESC`,
+        [id, ...scope.params],
       );
       const convIds = threads.map((t) => Number(t.id));
       let messages: RowDataPacket[] = [];
@@ -31832,8 +33010,9 @@ function buildApp() {
         );
         messages = m;
         await pool.query(
-          `UPDATE conversations SET unread_count = 0 WHERE client_id = ?`,
-          [id],
+          `UPDATE conversations SET unread_count = 0
+           WHERE client_id = ? AND id IN (?)`,
+          [id, convIds],
         );
       }
       res.json({
@@ -32304,17 +33483,40 @@ function buildApp() {
     async (req: AuthedRequest, res) => {
       if (!(await requireConversationsAccess(req, res))) return;
       const clientId = Number(req.params.id);
+      if (!(await adminCanMutateClientConversations(req.auth!.id, clientId))) {
+        return res.status(404).json({ error: "Not found" });
+      }
       const assignee =
         req.body?.assigned_admin_id === null
           ? null
           : Number(req.body?.assigned_admin_id ?? req.auth!.id);
-      await pool.query(
-        `UPDATE conversations SET assigned_admin_id = ? WHERE client_id = ? AND status = 'open'`,
-        [assignee, clientId],
+      const ofgIds = await adminAssignedPhoneNumberIds(req.auth!.id);
+      const scope = adminClientConversationScopeSql(
+        "conversations",
+        req.auth!.id,
+        ofgIds,
       );
+      // Bootstrap: if no in-scope rows yet, still allow assign when client has zero threads
+      const [existing] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM conversations WHERE client_id = ? AND status = 'open' LIMIT 1`,
+        [clientId],
+      );
+      if (!existing[0]) {
+        // no open threads — nothing to assign; ok
+      } else {
+        await pool.query(
+          `UPDATE conversations SET assigned_admin_id = ?
+           WHERE client_id = ? AND status = 'open' AND ${scope.sql}`,
+          [assignee, clientId, ...scope.params],
+        );
+      }
       await publishConversationRealtime({
         type: "assign",
         payload: { client_id: clientId, assigned_admin_id: assignee },
+        adminIds: await resolveConversationRealtimeAdminIds({
+          client_id: clientId,
+          assigned_admin_id: assignee,
+        }),
       });
       res.json({ ok: true });
     },
@@ -32328,6 +33530,9 @@ function buildApp() {
       if (!(await requireConversationsAccess(req, res))) return;
       const clientId = Number(req.params.id);
       if (!clientId) return res.status(400).json({ error: "Invalid id" });
+      if (!(await adminCanMutateClientConversations(req.auth!.id, clientId))) {
+        return res.status(404).json({ error: "Not found" });
+      }
       const status = String(req.body?.status || "").trim();
       if (!["open", "snoozed", "closed", "archived"].includes(status)) {
         return res.status(400).json({ error: "Invalid status" });
@@ -39569,6 +40774,14 @@ function buildApp() {
             "before_pdf is required unless reuse_before_session_id is provided",
         });
       }
+      const sizeCheckFiles = [
+        ...(beforeFile ? [beforeFile] : []),
+        afterFile,
+      ];
+      const sizeErr = assertMultipartUnderVercelLimit(sizeCheckFiles);
+      if (sizeErr) {
+        return res.status(413).json({ error: sizeErr });
+      }
       if (afterFile.mimetype !== "application/pdf") {
         return res.status(400).json({ error: "Only PDF files are accepted" });
       }
@@ -40680,6 +41893,8 @@ export {
   toPdfSafeText,
   createSession,
   executeAdminAiTool,
+  adminAiCrmRequired,
+  adminAiBuildCrmHref,
   resolveLanguageOwnerAdminId,
   isDuplicateKeyError,
   mapFriendlyError,
@@ -41954,7 +43169,7 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
       let unknownContactId: number | null = null;
 
       if (dir === "outbound") {
-        // Resolve unknown id for closed-gate when dialing an unknown number
+        // Resolve unknown id for reopen gate when dialing an unknown number
         if (!resolvedClientId && ofgNumberId) {
           const phoneVariants = phoneMatchVariants(normalizedPhone);
           if (phoneVariants.length) {
@@ -41975,17 +43190,11 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
             if (uFound[0]) unknownContactId = Number(uFound[0].id);
           }
         }
-        if (
-          await contactComposeBlockedByClosed({
-            clientId: resolvedClientId ?? undefined,
-            unknownContactId: unknownContactId ?? undefined,
-          })
-        ) {
-          return res.status(409).json({
-            success: false,
-            error: "conversation_closed",
-          });
-        }
+        await ensureContactOpenForStaffOutbound({
+          clientId: resolvedClientId ?? undefined,
+          unknownContactId: unknownContactId ?? undefined,
+          adminId,
+        });
       }
 
       let conversationId: number;
@@ -41995,14 +43204,14 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
           channel: "call",
           ofgNumberId,
           assignedAdminId: adminId,
-          reopenIfClosed: dir === "inbound",
+          reopenIfClosed: true,
         });
       } else if (ofgNumberId) {
         const created = await getOrCreateCallConversation(deps, {
           callerPhone: normalizedPhone,
           ofgNumberId,
           assignedAdminId: adminId,
-          reopenIfClosed: dir === "inbound",
+          reopenIfClosed: true,
         });
         conversationId = created.conversationId;
         unknownContactId = created.unknownContactId;
@@ -42713,12 +43922,16 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
   // ── POST /api/voice/call-screen (+ accept) ──────────────────────────────
   app.post("/api/voice/call-screen", guard, (req, res) => {
     res.set("Content-Type", "text/xml");
+    const callerHint = String(
+      req.query?.caller || req.body?.caller || "",
+    ).trim();
     console.log(
       "[voice:call-screen]",
       JSON.stringify({
         CallSid: req.body?.CallSid,
         Called: req.body?.Called,
         From: req.body?.From,
+        callerHint: callerHint || null,
       }),
     );
     const VoiceResponse = twilio.twiml.VoiceResponse;
@@ -42729,10 +43942,10 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
       action: `${getVoiceBaseUrl(deps)}/api/voice/call-screen-accept`,
       method: "POST",
     });
-    gather.say(
-      { voice: "Polly.Joanna" },
-      "Incoming call. Press any key to answer.",
-    );
+    const sayText = callerHint
+      ? `Incoming Optimum Credit call from ${callerHint.replace(/\D/g, " ").trim()}. Press any key to answer.`
+      : "Incoming Optimum Credit call. Press any key to answer.";
+    gather.say({ voice: "Polly.Joanna" }, sayText);
     twiml.hangup();
     return res.send(twiml.toString());
   });
@@ -42900,7 +44113,7 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
       }
 
       const [fwdRows] = await pool.query<RowDataPacket[]>(
-        `SELECT call_forwarding_enabled, call_forwarding_phone
+        `SELECT call_forwarding_enabled, call_forwarding_phone, voice_available
          FROM admins WHERE id = ? LIMIT 1`,
         [assignedAdminId],
       );
@@ -42908,11 +44121,23 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
         fwdRows[0]?.call_forwarding_enabled && fwdRows[0]?.call_forwarding_phone
           ? String(fwdRows[0].call_forwarding_phone)
           : null;
+      const softphoneOnline = !!fwdRows[0]?.voice_available;
+      const callerDigits = normalizePhoneDigits(callerNumber);
+      const fwdDigits = fwdPhone ? normalizePhoneDigits(fwdPhone) : "";
+      // Cannot ring the same handset that is placing the call (self-test from cell).
+      const ringCell =
+        !!fwdPhone && !!fwdDigits && fwdDigits !== callerDigits;
+      // Softphone when Available, or when there is no useful cell leg to ring.
+      const ringSoftphone = softphoneOnline || !ringCell;
 
       const statusCallbackUrl = `${getVoiceBaseUrl(deps)}/api/voice/dial-status`;
       // Give softphone + optional cell call-screen (Gather ~8s) room to answer
-      const dialTimeout = fwdPhone ? 28 : 22;
-      const dial = twiml.dial({
+      const dialTimeout = ringCell ? 28 : 22;
+      const ofgE164 = ofg?.e164 ? String(ofg.e164) : String(calledNumber || "");
+      // CRITICAL: present the OFG number as CallerID on the cell leg. Using the
+      // original client CallerID causes many US carriers to return busy/no-ring
+      // (spam / Silence Unknown Callers) — staff get missed-call SMS with no ring.
+      const dialAttrs: Record<string, unknown> = {
         timeout: dialTimeout,
         action: statusCallbackUrl,
         method: "POST",
@@ -42920,14 +44145,27 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
         recordingStatusCallback: `${getVoiceBaseUrl(deps)}/api/voice/recording-status`,
         recordingStatusCallbackMethod: "POST",
         trim: "trim-silence",
-      } as any);
+      };
+      if (ringCell && ofgE164.startsWith("+")) {
+        dialAttrs.callerId = ofgE164;
+      }
+      const dial = twiml.dial(dialAttrs as any);
 
-      // Ring ONLY the assigned admin's softphone
-      dial.client(`admin_${assignedAdminId}`);
-      if (fwdPhone) {
+      // Ring ONLY the assigned admin (softphone and/or forwarded cell).
+      if (ringSoftphone) {
+        dial.client(`admin_${assignedAdminId}`);
+      }
+      if (ringCell && fwdPhone) {
+        const screenQs = new URLSearchParams();
+        if (callerNumber && callerNumber !== "Unknown") {
+          screenQs.set("caller", callerNumber);
+        }
+        const screenUrl = `${getVoiceBaseUrl(deps)}/api/voice/call-screen${
+          screenQs.toString() ? `?${screenQs.toString()}` : ""
+        }`;
         dial.number(
           {
-            url: `${getVoiceBaseUrl(deps)}/api/voice/call-screen`,
+            url: screenUrl,
             method: "POST",
           } as any,
           fwdPhone,

@@ -35,22 +35,32 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-// On 401: clear the stale token and redirect to the appropriate login page
+// On 401: clear the stale token and redirect to the appropriate login page.
+// Only logout when the request actually sent a Bearer token — bare 401s
+// (race / missing header) would otherwise wipe a valid session and make the
+// next Conversations poll fail in ~1ms with Unauthorized.
 api.interceptors.response.use(
   (res) => res,
   (err) => {
     if (err?.response?.status === 401) {
       const url: string = err?.config?.url || "";
-      const isAdmin = isAdminApiPath(url);
-      if (isAdmin) {
-        setAdminToken(null);
-        if (!window.location.pathname.startsWith("/admin/login")) {
-          window.location.href = "/admin/login";
-        }
-      } else {
-        setClientToken(null);
-        if (!window.location.pathname.startsWith("/portal/login")) {
-          window.location.href = "/portal/login";
+      const sentAuth = Boolean(
+        err?.config?.headers?.Authorization ||
+          (err?.config?.headers as { authorization?: string } | undefined)
+            ?.authorization,
+      );
+      if (sentAuth) {
+        const isAdmin = isAdminApiPath(url);
+        if (isAdmin) {
+          setAdminToken(null);
+          if (!window.location.pathname.startsWith("/admin/login")) {
+            window.location.href = "/admin/login";
+          }
+        } else {
+          setClientToken(null);
+          if (!window.location.pathname.startsWith("/portal/login")) {
+            window.location.href = "/portal/login";
+          }
         }
       }
     }

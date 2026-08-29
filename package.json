@@ -8,6 +8,7 @@
     "test": "vitest --run",
     "format.fix": "prettier --write .",
     "typecheck": "tsc",
+    "check:api-inline": "npx tsx scripts/check-api-inline.ts",
     "deploy:prod": "npx tsx scripts/deploy-prod.ts",
     "db:migrate": "bash scripts/apply-migrations.sh",
     "db:cleanup": "bash scripts/apply-migrations.sh --cleanup",

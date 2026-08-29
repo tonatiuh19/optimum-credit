@@ -259,6 +259,53 @@ describe("conversations voice", () => {
     expect(xml).toContain(`admin_${agentId}`);
   });
 
+  it("inbound with forwarding rings cell only when softphone offline", async () => {
+    const cell = "+17651234999";
+    await pool.query(
+      `UPDATE admins
+       SET voice_available = 0, call_forwarding_enabled = 1, call_forwarding_phone = ?
+       WHERE id = ?`,
+      [cell, agentId],
+    );
+    const [numRows] = await pool.query<RowDataPacket[]>(
+      `SELECT e164 FROM admin_phone_numbers WHERE id = ?`,
+      [phoneNumberId],
+    );
+    const to = String(numRows[0].e164);
+    const res = await request(app)
+      .post("/api/voice/incoming")
+      .type("form")
+      .send({
+        From: "+17651112233",
+        To: to,
+        Called: to,
+        CallSid: `CAfwd${Date.now()}`,
+        Direction: "inbound",
+      });
+    expect(res.status).toBe(200);
+    const xml = String(res.text || "");
+    expect(xml).toContain(cell);
+    expect(xml).toContain("call-screen");
+    expect(xml).toContain(`callerId="${to}"`);
+    expect(xml).not.toContain(`admin_${agentId}`);
+
+    // Self-test from the forward-to cell → cannot ring that handset; fall back to softphone
+    const self = await request(app)
+      .post("/api/voice/incoming")
+      .type("form")
+      .send({
+        From: cell,
+        To: to,
+        Called: to,
+        CallSid: `CAself${Date.now()}`,
+        Direction: "inbound",
+      });
+    expect(self.status).toBe(200);
+    const selfXml = String(self.text || "");
+    expect(selfXml).toContain(`admin_${agentId}`);
+    expect(selfXml).not.toContain(`>${cell}<`);
+  });
+
   it("dial-status no-answer creates missed_call in-app notification", async () => {
     const [numRows] = await pool.query<RowDataPacket[]>(
       `SELECT e164 FROM admin_phone_numbers WHERE id = ?`,

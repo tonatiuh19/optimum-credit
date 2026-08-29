@@ -2464,7 +2464,9 @@ paths:
         auto-logs to the client file; `list_ofg_phone_numbers` lists active OFG numbers).
         Audits every turn to `admin_ai_audit_logs`. `admin` role is rate-limited (~30/hour);
         `super_admin` is not. Tool loop is capped (4 rounds / ~50s wall) to
-        fit the API `maxDuration` (60s).
+        fit the API `maxDuration` (60s). When a write cannot be completed via MCP
+        (e.g. file too large), tools return `crm_required` with `user_message` +
+        `crm_href` — the assistant must tell staff to finish in CRM and not retry MCP.
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -2575,6 +2577,8 @@ paths:
             enum:
               - search_clients
               - search_referrers
+              - update_referrer
+              - attach_referrer
               - get_case
               - pipeline_summary
               - list_funding_applications
@@ -2710,9 +2714,11 @@ paths:
       summary: Get my notification preferences
       description: |
         Per-admin mute toggles for operational alerts (email / in-app / SMS),
-        including `inbound_sms` for the profile bell when clients text your OFG line.
-        Null stored prefs mean all ON. SMS channel is unavailable until Twilio
-        env keys are configured. OTP / welcome emails are never included.
+        including `inbound_sms` when clients text your OFG line (in-app bell,
+        email, and optional SMS alert to `admins.phone` from the assigned OFG
+        From number — not a full SMS relay). Null stored prefs mean all ON.
+        SMS channel requires Twilio env keys + an assigned OFG number + profile
+        phone. OTP / welcome emails are never included.
       security: [{ bearerAuth: [] }]
       responses:
         "200":
@@ -2960,7 +2966,7 @@ paths:
         "403":
           description: conversations_number_required
         "409":
-          description: conversation_closed — reopen before sending
+          description: Reserved (closed threads auto-reopen on staff send)
 
   /admin/conversations/start:
     post:
@@ -2984,7 +2990,7 @@ paths:
         "200":
           description: "{ kind client|unknown, client_id?, unknown_contact_id?, ... }"
         "409":
-          description: conversation_closed — reopen before sending
+          description: Reserved (closed threads auto-reopen on staff send)
 
   /admin/conversations/suggest-replies:
     post:
@@ -4805,6 +4811,10 @@ paths:
     post:
       tags: [Admin]
       summary: Admin upload documents to a case (AES-256-GCM)
+      description: |
+        Multipart upload. Each file and the total request body must stay under
+        ~4MB (Vercel serverless limit). Prefer one file per request for large PDFs.
+        Files are AES-256-GCM encrypted then stored on CDN. Returns 413 when oversize.
       security:
         - BearerAuth: []
       parameters:
@@ -4831,6 +4841,10 @@ paths:
       responses:
         "201":
           description: Documents uploaded and encrypted
+        "413":
+          description: File or total upload exceeds platform 4MB limit
+        "502":
+          description: Document storage (CDN) temporarily unavailable
 
   /admin/cases/{caseId}/tasks/{templateId}/remind:
     post:

@@ -81,13 +81,20 @@ describe("validatePdfUploadPair — edge cases", () => {
     );
   });
 
-  it("accepts files exactly at the 15 MB limit", () => {
-    const limit = 15 * 1024 * 1024;
-    const a = Buffer.alloc(limit);
-    const b = Buffer.alloc(limit);
+  it("accepts files that fit under the 4 MB combined limit", () => {
+    const a = Buffer.alloc(1024 * 1024);
+    const b = Buffer.alloc(1024 * 1024);
     a.write("%PDF", 0);
     b.write("%PDF", 0);
     expect(validatePdfUploadPair(a, b)).toBeNull();
+  });
+
+  it("rejects two files that each fit but exceed combined 4 MB", () => {
+    const a = Buffer.alloc(3 * 1024 * 1024);
+    const b = Buffer.alloc(2 * 1024 * 1024);
+    a.write("%PDF", 0);
+    b.write("%PDF", 0);
+    expect(validatePdfUploadPair(a, b)).toMatch(/Combined PDF/i);
   });
 
   it("rejects one valid + one invalid magic", () => {

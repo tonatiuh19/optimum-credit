@@ -477,6 +477,58 @@ describe("admin AI tools", () => {
     expect(Number((uploaded.data as any).document_id)).toBeGreaterThan(0);
     expect((uploaded.data as any).file_name).toBe(`atlas-id-${RUN_ID}.png`);
     expect((uploaded.data as any).doc_type).toBe("id_front");
+    expect((uploaded.data as any).integrity_ok).toBe(true);
+    expect(Number((uploaded.data as any).source_byte_length)).toBeGreaterThan(0);
+    expect(Number((uploaded.data as any).stored_byte_length)).toBe(
+      Number((uploaded.data as any).source_byte_length),
+    );
+    expect(String((uploaded.data as any).source_sha256 || "")).toMatch(
+      /^[a-f0-9]{64}$/,
+    );
+
+    const badLen = await executeAdminAiTool(
+      "upload_case_document",
+      {
+        client_id: clientId,
+        doc_type: "other",
+        file_name: `atlas-bad-${RUN_ID}.png`,
+        file_base64: tinyPngB64,
+        expected_byte_length: 999999,
+        confirm: false,
+      },
+      { adminId },
+    );
+    expect(badLen.ok).toBe(true);
+    if (badLen.ok) {
+      expect((badLen.data as any).ready).toBe(false);
+      expect((badLen.data as any).crm_required?.crm_required).toBe(true);
+      expect((badLen.data as any).crm_required?.reason).toBe("integrity_failed");
+      expect(String((badLen.data as any).guidance || "")).toMatch(/CRM|truncated|Re-send/i);
+    }
+
+    const oversizeB64 = Buffer.alloc(3 * 1024 * 1024 + 64, 0x41).toString(
+      "base64",
+    );
+    const tooBig = await executeAdminAiTool(
+      "upload_case_document",
+      {
+        client_id: clientId,
+        doc_type: "other",
+        file_name: `atlas-big-${RUN_ID}.bin`,
+        file_base64: oversizeB64,
+        mime_type: "application/pdf",
+        confirm: false,
+      },
+      { adminId },
+    );
+    expect(tooBig.ok).toBe(true);
+    if (tooBig.ok) {
+      expect((tooBig.data as any).ready).toBe(false);
+      expect((tooBig.data as any).crm_required?.reason).toBe("file_too_large");
+      expect(String((tooBig.data as any).crm_required?.user_message || "")).toMatch(
+        /CRM|Pipeline/i,
+      );
+    }
 
     const docId = Number((uploaded.data as any).document_id);
     const [docRows] = await pool.query<RowDataPacket[]>(
@@ -1917,4 +1969,150 @@ describe("admin AI tools", () => {
       }
     }
   }, 120_000);
+
+  it("update_referrer + attach_referrer + phone-only funding", async () => {
+    const phoneOnly = `1555${String(Date.now()).slice(-7)}`;
+    let phoneFundingAppId = 0;
+    let phoneClientId = 0;
+    let attachReferrerId = 0;
+    try {
+      const dryPhone = await executeAdminAiTool(
+        "create_funding_application",
+        {
+          funding_type: "credit_card_stacking",
+          first_name: "Phone",
+          last_name: `Only${RUN_ID}`,
+          phone: phoneOnly,
+        },
+        { adminId },
+      );
+      expect(dryPhone.ok).toBe(true);
+      if (dryPhone.ok) expect((dryPhone.data as any).dry_run).toBe(true);
+
+      const createdPhone = await executeAdminAiTool(
+        "create_funding_application",
+        {
+          funding_type: "credit_card_stacking",
+          first_name: "Phone",
+          last_name: `Only${RUN_ID}`,
+          phone: phoneOnly,
+          confirm: true,
+          confirm_phrase: "CONFIRM",
+        },
+        { adminId },
+      );
+      expect(createdPhone.ok).toBe(true);
+      if (!createdPhone.ok) return;
+      phoneFundingAppId = Number((createdPhone.data as any).application?.id);
+      phoneClientId = Number((createdPhone.data as any).client_id);
+      expect(phoneFundingAppId).toBeGreaterThan(0);
+      expect(
+        (createdPhone.data as any).application?.email == null ||
+          (createdPhone.data as any).application?.email === "",
+      ).toBe(true);
+
+      const [refIns] = await pool.query<ResultSetHeader>(
+        `INSERT INTO referrers (category, first_name, last_name, email, phone, status)
+         VALUES ('realtor_broker', 'Iris', ?, NULL, ?, 'active')`,
+        [`Attach${RUN_ID}`, phoneOnly],
+      );
+      attachReferrerId = Number(refIns.insertId);
+
+      const dryUpdate = await executeAdminAiTool(
+        "update_referrer",
+        {
+          referrer_id: attachReferrerId,
+          email: `iris.attach.${RUN_ID}@example.com`,
+        },
+        { adminId },
+      );
+      expect(dryUpdate.ok).toBe(true);
+      if (dryUpdate.ok) expect((dryUpdate.data as any).dry_run).toBe(true);
+
+      const updated = await executeAdminAiTool(
+        "update_referrer",
+        {
+          referrer_id: attachReferrerId,
+          email: `iris.attach.${RUN_ID}@example.com`,
+          confirm: true,
+          confirm_phrase: "CONFIRM",
+        },
+        { adminId },
+      );
+      expect(updated.ok).toBe(true);
+      if (updated.ok) {
+        expect((updated.data as any).referrer?.email).toBe(
+          `iris.attach.${RUN_ID}@example.com`,
+        );
+      }
+
+      const dryAttach = await executeAdminAiTool(
+        "attach_referrer",
+        {
+          client_id: clientId,
+          referrer_id: attachReferrerId,
+          role: "secondary",
+        },
+        { adminId },
+      );
+      expect(dryAttach.ok).toBe(true);
+      if (dryAttach.ok) expect((dryAttach.data as any).dry_run).toBe(true);
+
+      const attached = await executeAdminAiTool(
+        "attach_referrer",
+        {
+          client_id: clientId,
+          referrer_id: attachReferrerId,
+          role: "secondary",
+          confirm: true,
+          confirm_phrase: "CONFIRM",
+        },
+        { adminId },
+      );
+      expect(attached.ok).toBe(true);
+      if (attached.ok) {
+        const refs = (attached.data as any).referrers as Array<{
+          referrer_id: number;
+        }>;
+        expect(refs.some((r) => r.referrer_id === attachReferrerId)).toBe(true);
+      }
+
+      const installments = await executeAdminAiTool(
+        "list_installments",
+        { client_id: clientId },
+        { adminId },
+      );
+      expect(installments.ok).toBe(true);
+      if (installments.ok) {
+        const rows = (installments.data as any).installments as Array<{
+          payment_link?: string | null;
+        }>;
+        expect(Array.isArray(rows)).toBe(true);
+        expect(rows[0]).toHaveProperty("payment_link");
+      }
+    } finally {
+      if (attachReferrerId) {
+        await pool
+          .query(`DELETE FROM client_referrers WHERE referrer_id = ?`, [
+            attachReferrerId,
+          ])
+          .catch(() => {});
+        await pool
+          .query(`DELETE FROM referrers WHERE id = ?`, [attachReferrerId])
+          .catch(() => {});
+      }
+      if (phoneFundingAppId) {
+        await pool
+          .query(`DELETE FROM funding_applications WHERE id = ?`, [
+            phoneFundingAppId,
+          ])
+          .catch(() => {});
+      }
+      if (phoneClientId) {
+        await pool
+          .query(`DELETE FROM clients WHERE id = ?`, [phoneClientId])
+          .catch(() => {});
+      }
+    }
+  }, 90_000);
 });

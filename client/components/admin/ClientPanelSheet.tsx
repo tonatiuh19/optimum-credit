@@ -108,6 +108,7 @@ import {
   buildReopenToastParts,
   isProspectLead,
 } from "@/lib/pipelineFilters";
+import { isReportRoundActive } from "@/lib/pipelineStage";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -135,12 +136,6 @@ const ROUND_STAGES = [
   "round_5",
   "completed",
 ];
-
-function isRoundActive(roundNumber: number, pipelineStage: string): boolean {
-  const stageIndex = ROUND_STAGES.indexOf(pipelineStage);
-  if (stageIndex === -1) return false;
-  return stageIndex >= roundNumber - 1;
-}
 
 // ─── TaskCompletionCard ───────────────────────────────────────────────────────
 
@@ -576,7 +571,7 @@ function ReportsTab({
         </p>
         <div className="flex gap-1.5 overflow-x-auto pb-0.5">
           {[1, 2, 3, 4, 5].map((round) => {
-            const active = isRoundActive(round, pipelineStage);
+            const active = isReportRoundActive(round, pipelineStage);
             const report = getReport(round);
             const pdfs = getPdfs(round);
             const dates = parseReportDatesFromSummary(report?.summary_md);
@@ -635,7 +630,7 @@ function ReportsTab({
       )}
 
       {[1, 2, 3, 4, 5].map((round) => {
-        const active = isRoundActive(round, pipelineStage);
+        const active = isReportRoundActive(round, pipelineStage);
         const report = getReport(round);
         const pdfs = getPdfs(round);
 

@@ -187,9 +187,9 @@ describe("conversationsSlice realtime reducers", () => {
     expect(state.activeHubStatus).toBe("open");
     expect(state.activeId).toBe(1);
     expect(state.timeline?.messages).toHaveLength(1);
-    expect(state.contacts.find((c) => c.contact_id === 2)?.status).toBe(
-      "closed",
-    );
+    // Closed rows leave All/Mine/etc.; panel for the still-open contact is unchanged
+    expect(state.contacts.map((c) => c.contact_id)).toEqual([1]);
+    expect(state.contacts.find((c) => c.contact_id === 2)).toBeUndefined();
   });
 });
 

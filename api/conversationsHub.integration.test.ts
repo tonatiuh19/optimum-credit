@@ -650,6 +650,89 @@ describe("conversations contact hub", () => {
       .catch(() => {});
   });
 
+  it("scopes client All/timeline to OFG line owner (not peer staff)", async () => {
+    // Agent owns a client SMS on their OFG line; peer with a different OFG must not see it
+    const [cIns] = await pool.query<ResultSetHeader>(
+      `INSERT INTO clients
+         (first_name, last_name, email, phone, status, pipeline_stage, preferred_language)
+       VALUES ('Scope', ?, ?, '+15550118877', 'prospect', 'prospect', 'en')`,
+      [`Client${RUN_ID}`, `scope-client-${RUN_ID}@example.test`],
+    );
+    const scopedClientId = Number(cIns.insertId);
+    seededClientIds.push(scopedClientId);
+
+    const [convIns] = await pool.query<ResultSetHeader>(
+      `INSERT INTO conversations
+         (client_id, channel, status, ofg_number_id, assigned_admin_id,
+          last_message_at, last_message_preview, unread_count)
+       VALUES (?, 'sms', 'open', ?, ?, NOW(), 'hello from agent line', 1)`,
+      [scopedClientId, phoneNumberId, agentId],
+    );
+    const convId = Number(convIns.insertId);
+    await pool.query(
+      `INSERT INTO conversation_messages
+         (conversation_id, direction, channel, body, sent_by_admin_id)
+       VALUES (?, 'outbound', 'sms', 'hello from agent line', ?)`,
+      [convId, agentId],
+    );
+
+    const agentAll = await request(app)
+      .get("/api/admin/conversations")
+      .query({ view: "all" })
+      .set("Authorization", `Bearer ${agentToken}`);
+    expect(agentAll.status).toBe(200);
+    expect(
+      (agentAll.body.contacts || []).some(
+        (c: any) =>
+          c.kind === "client" && Number(c.contact_id) === scopedClientId,
+      ),
+    ).toBe(true);
+
+    const [pIns] = await pool.query<ResultSetHeader>(
+      `INSERT INTO admin_phone_numbers
+         (e164, friendly_name, assigned_admin_id, is_active, capabilities_json)
+       VALUES (?, 'Vitest Peer OFG scope', ?, 1, JSON_OBJECT('sms', TRUE))`,
+      [`+1555${String(Date.now() + 3).slice(-7)}`, otherId],
+    );
+    const peerPhoneId = Number(pIns.insertId);
+
+    try {
+      const peerAll = await request(app)
+        .get("/api/admin/conversations")
+        .query({ view: "all" })
+        .set("Authorization", `Bearer ${otherToken}`);
+      expect(peerAll.status).toBe(200);
+      const leaked = (peerAll.body.contacts || []).find(
+        (c: any) =>
+          c.kind === "client" && Number(c.contact_id) === scopedClientId,
+      );
+      expect(leaked).toBeFalsy();
+
+      const peerTimeline = await request(app)
+        .get(
+          `/api/admin/conversations/contact/client/${scopedClientId}/timeline`,
+        )
+        .set("Authorization", `Bearer ${otherToken}`);
+      expect(peerTimeline.status).toBe(404);
+
+      const agentTimeline = await request(app)
+        .get(
+          `/api/admin/conversations/contact/client/${scopedClientId}/timeline`,
+        )
+        .set("Authorization", `Bearer ${agentToken}`);
+      expect(agentTimeline.status).toBe(200);
+      expect(
+        (agentTimeline.body.messages || []).some((m: any) =>
+          String(m.body || "").includes("hello from agent line"),
+        ),
+      ).toBe(true);
+    } finally {
+      await pool
+        .query(`DELETE FROM admin_phone_numbers WHERE id = ?`, [peerPhoneId])
+        .catch(() => {});
+    }
+  });
+
   it("creates inbound_sms bell row and dedupes by provider_message_id", async () => {
     const sid = `SMbell${Date.now()}`;
     const [numRows] = await pool.query<RowDataPacket[]>(
@@ -705,6 +788,45 @@ describe("conversations contact hub", () => {
       [agentId, sid],
     );
     expect(rows2.length).toBe(1);
+  });
+
+  it("sends inbound_sms alert SMS dry-run when sms pref + profile phone set", async () => {
+    // Agent already has phone + OFG From; null prefs ⇒ sms.inbound_sms ON.
+    // VITEST stubs Twilio → dry-run; assert webhook still succeeds with SMS path.
+    const sid = `SMsmsalert${Date.now()}`;
+    const [numRows] = await pool.query<RowDataPacket[]>(
+      `SELECT e164 FROM admin_phone_numbers WHERE id = ?`,
+      [phoneNumberId],
+    );
+    const to = String(numRows[0].e164);
+    const logs: string[] = [];
+    const origLog = console.log;
+    console.log = (...args: unknown[]) => {
+      logs.push(args.map(String).join(" "));
+      origLog.apply(console, args as Parameters<typeof console.log>);
+    };
+    try {
+      const wh = await request(app)
+        .post("/api/webhooks/twilio/sms")
+        .type("form")
+        .send({
+          From: "+15559876002",
+          To: to,
+          Body: "Alert SMS path check",
+          MessageSid: sid,
+        });
+      expect(wh.status).toBe(200);
+      expect(
+        logs.some(
+          (l) =>
+            l.includes("[sms:dry-run]") &&
+            l.includes("+15551234001") &&
+            l.includes("OFG SMS from"),
+        ),
+      ).toBe(true);
+    } finally {
+      console.log = origLog;
+    }
   });
 
   it("starts cold outbound to a new unknown number", async () => {
@@ -908,7 +1030,7 @@ describe("conversations contact hub", () => {
     expect(bad.status).toBe(400);
   });
 
-  it("close/reopen inserts system events and blocks send while closed", async () => {
+  it("close/reopen inserts system events; staff send auto-reopens closed thread", async () => {
     await pool.query(
       `INSERT INTO conversations (client_id, channel, status, ofg_number_id, assigned_admin_id)
        VALUES (?, 'sms', 'open', ?, ?)`,
@@ -930,17 +1052,23 @@ describe("conversations contact hub", () => {
     );
     expect(st[0]?.status).toBe("closed");
 
-    const blocked = await request(app)
+    const sent = await request(app)
       .post("/api/admin/conversations/send")
       .set("Authorization", `Bearer ${agentToken}`)
       .send({
         client_id: clientId,
         channel: "sms",
-        body: `should fail ${RUN_ID}`,
+        body: `auto reopen ${RUN_ID}`,
         ofg_number_id: phoneNumberId,
       });
-    expect(blocked.status).toBe(409);
-    expect(blocked.body.error).toBe("conversation_closed");
+    expect(sent.status).toBe(200);
+    expect(sent.body.message_id).toBeTruthy();
+
+    const [st2] = await pool.query<RowDataPacket[]>(
+      `SELECT status FROM conversations WHERE client_id = ? LIMIT 1`,
+      [clientId],
+    );
+    expect(st2[0]?.status).toBe("open");
 
     const inboxOpen = await request(app)
       .get("/api/admin/conversations")
@@ -951,7 +1079,13 @@ describe("conversations contact hub", () => {
       (inboxOpen.body.contacts as any[]).some(
         (c) => c.kind === "client" && Number(c.contact_id) === clientId,
       ),
-    ).toBe(false);
+    ).toBe(true);
+
+    // Close again and confirm Closed filter lists it; All/Mine hide it
+    await request(app)
+      .post(`/api/admin/conversations/contact/client/${clientId}/status`)
+      .set("Authorization", `Bearer ${agentToken}`)
+      .send({ status: "closed" });
 
     const inboxClosed = await request(app)
       .get("/api/admin/conversations")
@@ -964,13 +1098,34 @@ describe("conversations contact hub", () => {
       ),
     ).toBe(true);
 
+    const inboxMine = await request(app)
+      .get("/api/admin/conversations")
+      .set("Authorization", `Bearer ${agentToken}`)
+      .query({ view: "mine" });
+    expect(inboxMine.status).toBe(200);
+    expect(
+      (inboxMine.body.contacts as any[]).some(
+        (c) => c.kind === "client" && Number(c.contact_id) === clientId,
+      ),
+    ).toBe(false);
+
+    const inboxAll = await request(app)
+      .get("/api/admin/conversations")
+      .set("Authorization", `Bearer ${agentToken}`)
+      .query({ view: "all" });
+    expect(inboxAll.status).toBe(200);
+    expect(
+      (inboxAll.body.contacts as any[]).some(
+        (c) => c.kind === "client" && Number(c.contact_id) === clientId,
+      ),
+    ).toBe(false);
+
     const reopened = await request(app)
       .post(`/api/admin/conversations/contact/client/${clientId}/status`)
       .set("Authorization", `Bearer ${agentToken}`)
       .send({ status: "open" });
     expect(reopened.status).toBe(200);
     expect(reopened.body.status).toBe("open");
-    expect(reopened.body.system_message?.body).toBe("reopened");
 
     const timeline = await request(app)
       .get(`/api/admin/conversations/contact/client/${clientId}/timeline`)
@@ -1010,18 +1165,29 @@ describe("conversations contact hub", () => {
     );
     expect(u[0]?.status).toBe("open");
 
-    const blocked = await request(app)
+    const sent = await request(app)
       .post("/api/admin/conversations/send")
       .set("Authorization", `Bearer ${agentToken}`)
       .send({
         unknown_contact_id: unknownId,
         channel: "sms",
-        body: `unknown closed ${RUN_ID}`,
+        body: `unknown auto reopen ${RUN_ID}`,
         ofg_number_id: phoneNumberId,
       });
-    expect(blocked.status).toBe(409);
+    expect(sent.status).toBe(200);
 
-    const startBlocked = await request(app)
+    const [cv] = await pool.query<RowDataPacket[]>(
+      `SELECT status FROM conversations WHERE unknown_contact_id = ? LIMIT 1`,
+      [unknownId],
+    );
+    expect(cv[0]?.status).toBe("open");
+
+    await request(app)
+      .post(`/api/admin/conversations/unknown/${unknownId}/status`)
+      .set("Authorization", `Bearer ${agentToken}`)
+      .send({ status: "closed" });
+
+    const startOk = await request(app)
       .post("/api/admin/conversations/start")
       .set("Authorization", `Bearer ${agentToken}`)
       .send({
@@ -1029,8 +1195,7 @@ describe("conversations contact hub", () => {
         body: `start while closed ${RUN_ID}`,
         ofg_number_id: phoneNumberId,
       });
-    expect(startBlocked.status).toBe(409);
-    expect(startBlocked.body.error).toBe("conversation_closed");
+    expect(startOk.status).toBe(200);
 
     const reopened = await request(app)
       .post(`/api/admin/conversations/unknown/${unknownId}/status`)
@@ -1040,7 +1205,7 @@ describe("conversations contact hub", () => {
     expect(reopened.body.status).toBe("open");
   });
 
-  it("close with no threads creates a closed primary + blocks send", async () => {
+  it("close with no threads creates a closed primary; staff send auto-reopens", async () => {
     const [ins] = await pool.query<ResultSetHeader>(
       `INSERT INTO clients
          (first_name, last_name, email, phone, status, pipeline_stage, preferred_language)
@@ -1064,15 +1229,21 @@ describe("conversations contact hub", () => {
     expect(rows.length).toBeGreaterThan(0);
     expect(rows.every((r) => r.status === "closed")).toBe(true);
 
-    const blocked = await request(app)
+    const sent = await request(app)
       .post("/api/admin/conversations/send")
       .set("Authorization", `Bearer ${agentToken}`)
       .send({
         client_id: cid,
         channel: "sms",
-        body: `no thread closed ${RUN_ID}`,
+        body: `no thread auto reopen ${RUN_ID}`,
         ofg_number_id: phoneNumberId,
       });
-    expect(blocked.status).toBe(409);
+    expect(sent.status).toBe(200);
+
+    const [rows2] = await pool.query<RowDataPacket[]>(
+      `SELECT status FROM conversations WHERE client_id = ?`,
+      [cid],
+    );
+    expect(rows2.some((r) => r.status === "open")).toBe(true);
   });
 });

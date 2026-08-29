@@ -145,6 +145,13 @@ export const createReportWizardSession = createAsyncThunk<
   },
   { rejectValue: string }
 >("reportWizard/createSession", async (args, { rejectWithValue }) => {
+  const { assertFilesUnderUploadLimit } = await import("@/lib/uploadLimits");
+  const sizeCheck = assertFilesUnderUploadLimit(
+    [args.beforePdf, args.afterPdf].filter(Boolean) as File[],
+  );
+  if (sizeCheck.ok === false) {
+    return rejectWithValue(sizeCheck.message);
+  }
   const fd = new FormData();
   if (args.beforePdf) fd.append("before_pdf", args.beforePdf);
   fd.append("after_pdf", args.afterPdf);

@@ -43,6 +43,8 @@ const WRITE_TOOLS = new Set([
   "create_funding_application",
   "convert_funding_application",
   "upload_funding_document",
+  "update_referrer",
+  "attach_referrer",
   "send_text",
 ]);
 
