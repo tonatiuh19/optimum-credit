@@ -34,6 +34,7 @@ import {
   CalendarClock,
   CheckCheck,
   XCircle,
+  MessageSquare,
 } from "lucide-react";
 import AdminPageHeader from "@/components/AdminPageHeader";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
@@ -175,6 +176,13 @@ const TRIGGER_EVENT_META: Record<
     color: "text-violet-400 bg-violet-500/10 border-violet-500/25",
     icon: Activity,
   },
+  round_extended_complete: {
+    label: "Extended Round Complete",
+    description:
+      "Fires when admin publishes a Round 6+ (special / extended) progress report.",
+    color: "text-violet-400 bg-violet-500/10 border-violet-500/25",
+    icon: Activity,
+  },
   completed: {
     label: "Credit Repair Completed",
     description: "Fires when admin moves the client to the Completed stage.",
@@ -232,6 +240,7 @@ function StepEditorDialog({
   onSaved,
   onDelete,
 }: StepEditorProps) {
+  const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const { toast } = useToast();
   const [saving, setSaving] = useState(false);
@@ -243,6 +252,10 @@ function StepEditorDialog({
     template_slug: step?.template_slug ?? "",
     subject: step?.subject ?? "",
     body: step?.body ?? "",
+    also_sms:
+      step?.also_sms === undefined || step?.also_sms === null
+        ? true
+        : Number(step.also_sms) !== 0,
   });
 
   useEffect(() => {
@@ -253,6 +266,10 @@ function StepEditorDialog({
       template_slug: step?.template_slug ?? "",
       subject: step?.subject ?? "",
       body: step?.body ?? "",
+      also_sms:
+        step?.also_sms === undefined || step?.also_sms === null
+          ? true
+          : Number(step.also_sms) !== 0,
     });
   }, [step, open]);
 
@@ -272,6 +289,7 @@ function StepEditorDialog({
             template_slug: form.template_slug || undefined,
             subject: form.subject || undefined,
             body: form.body || undefined,
+            also_sms: form.step_type === "send_email" ? form.also_sms : false,
           }),
         ).unwrap();
         toast({ title: "Step updated" });
@@ -285,6 +303,7 @@ function StepEditorDialog({
             template_slug: form.template_slug || undefined,
             subject: form.subject || undefined,
             body: form.body || undefined,
+            also_sms: form.step_type === "send_email" ? form.also_sms : false,
           }),
         ).unwrap();
         toast({ title: "Step added" });
@@ -451,6 +470,23 @@ function StepEditorDialog({
                   </div>
                 </>
               )}
+
+              <div className="flex items-start justify-between gap-3 rounded-lg border border-border bg-muted/30 px-3 py-2.5">
+                <div className="min-w-0 space-y-0.5">
+                  <Label className="text-xs font-medium flex items-center gap-1.5">
+                    <MessageSquare className="h-3.5 w-3.5 text-primary" />
+                    {t("adminReminderFlows.alsoSmsLabel")}
+                  </Label>
+                  <p className="text-[11px] text-muted-foreground leading-snug">
+                    {t("adminReminderFlows.alsoSmsHint")}
+                  </p>
+                </div>
+                <Switch
+                  checked={form.also_sms}
+                  onCheckedChange={(v) => set("also_sms", v)}
+                  aria-label={t("adminReminderFlows.alsoSmsLabel")}
+                />
+              </div>
             </>
           )}
 
@@ -890,6 +926,13 @@ function StepNode({ data }: NodeProps) {
                 ? "Immediately"
                 : `Day ${d.step.delay_days}`}
             </span>
+            {d.step.step_type === "send_email" &&
+              Number(d.step.also_sms) !== 0 && (
+                <span className="text-[10px] bg-accent/10 text-accent border border-accent/20 px-1.5 py-0.5 rounded-full font-medium inline-flex items-center gap-0.5">
+                  <MessageSquare className="h-2.5 w-2.5" />
+                  SMS
+                </span>
+              )}
           </div>
           <p className="text-sm font-medium text-foreground mt-0.5 truncate">
             {d.step.label || "(no label)"}

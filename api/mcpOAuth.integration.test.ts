@@ -193,8 +193,15 @@ describe("MCP OAuth + remote endpoint", () => {
 
     const createWorkTask = tools.find((t) => t.name === "create_work_task");
     expect(createWorkTask?.inputSchema?.properties?.preferred_language).toBeTruthy();
+    expect(createWorkTask?.inputSchema?.properties?.assignee_name).toBeTruthy();
     expect(createWorkTask?.inputSchema?.properties?.push_hubspot).toBeTruthy();
     expect(createWorkTask?.description || "").toMatch(/OFG|push_hubspot/i);
+    expect(names).toContain("search_admins");
+    expect(names).toContain("update_work_task");
+    const updateWorkTask = tools.find((t) => t.name === "update_work_task");
+    expect(updateWorkTask?.inputSchema?.properties?.task_id).toBeTruthy();
+    expect(updateWorkTask?.inputSchema?.properties?.assignee_name).toBeTruthy();
+    expect(createProspect?.inputSchema?.properties?.assigned_admin_name).toBeTruthy();
 
     const convertProspect = tools.find((t) => t.name === "convert_prospect");
     expect(convertProspect).toBeTruthy();

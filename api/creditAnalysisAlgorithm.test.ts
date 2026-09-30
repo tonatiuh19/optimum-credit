@@ -75,8 +75,9 @@ describe("resolveTextLanguage", () => {
     expect(resolveTextLanguage("es", "Smith")).toBe("Spanish");
   });
 
-  it("biases Spanish for Hispanic surnames when form is en", () => {
-    expect(resolveTextLanguage("en", "Garcia")).toBe("Spanish");
+  it("respects explicit English even for Hispanic surnames", () => {
+    expect(resolveTextLanguage("en", "Garcia")).toBe("English");
+    expect(resolveTextLanguage("en", "Flores")).toBe("English");
     expect(resolveTextLanguage("en", "Smith")).toBe("English");
   });
 });
@@ -130,17 +131,18 @@ describe("runCreditAnalysisAlgorithm", () => {
       ...base,
       clientGoal: "FHA Loan",
     });
-    expect(a.text_language).toBe("Spanish"); // Rivera surname
+    expect(a.text_language).toBe("English"); // explicit en wins over surname
     expect(a.score_tu_label).toBe("FAIR");
     expect(a.middle_score).toBe(640);
     expect(a.mortgage_tu).not.toBeNull();
     expect(a.mortgage_tu!).toBeLessThan(a.score_transunion!);
-    expect(a.fha_status.toLowerCase()).toMatch(/fha|elegible/);
-    expect(a.fs_label_1).toMatch(/Revolving|Revolving|Abiertas/i);
+    expect(a.fha_status.toLowerCase()).toMatch(/fha|eligible/);
+    expect(a.fs_label_1).toMatch(/Open Revolving|Revolving/i);
     expect(a.fs_label_3).toMatch(/Mortgage|Hipotecario/i);
-    expect(a.neg_1_account).toBeTruthy();
-    expect(a.neg_1_priority).toMatch(/HIGH|CRITICAL|MEDIUM/);
-    expect(a.neg_5_account).toBe("");
+    expect(a.neg_1_account).toMatch(/^IH-\d+$/);
+    expect(a.util_1_account).toMatch(/^RU-\d+$/);
+    expect(a.neg_1_priority).toMatch(/HIGH|CRITICAL|MEDIUM|LOWER/);
+    expect(a.neg_1_round).toMatch(/^[1-4]$/);
     expect(a.action_1_time).toBeTruthy();
     expect(a.action_6_action).toBeTruthy();
     expect(a.negative_items_html).toContain("<tr>");
@@ -181,6 +183,61 @@ describe("runCreditAnalysisAlgorithm", () => {
       weakExtraction: true,
     });
     expect(a.utilization_critical_note).toMatch(/Limited PDF|text-based/i);
+  });
+
+  it("uses Round 1–4 labels (no week/month timing)", () => {
+    const a = runCreditAnalysisAlgorithm({
+      ...base,
+      lastName: "Smith",
+      clientGoal: "General Improvement",
+    });
+    expect(a.action_1_time).toMatch(/Round 1|Ronda 1/i);
+    expect(a.action_6_time).toMatch(/Round 4|Ronda 4/i);
+    expect(a.target_timeframe).toMatch(/Round/i);
+    expect(a.action_1_time).not.toMatch(/WEEK|MONTH|SEMANA|MES/i);
+  });
+
+  it("assigns dispute rounds and program tier", () => {
+    const a = runCreditAnalysisAlgorithm({
+      ...base,
+      lastName: "Smith",
+      clientGoal: "General Improvement",
+      negatives: [
+        {
+          type: "Hard Inquiry",
+          creditor: "AUTO FINANCE",
+          detail: "Inquiry 01/02/2024",
+          bureaus: ["TU", "EX"],
+        },
+        {
+          type: "Collection",
+          creditor: "MIDLAND FUNDING",
+          detail: "Collection $800 03/15/2019",
+          bureaus: ["EQ"],
+        },
+        {
+          type: "Charge-Off",
+          creditor: "CAPITAL ONE",
+          detail: "Charged off",
+          bureaus: ["TU", "EX", "EQ"],
+        },
+      ],
+    });
+    expect(a.program_tier).toBe("standard");
+    expect(a.program_tier_label).toMatch(/Standard/i);
+    expect(a.neg_1_round).toBe("1");
+    expect(a.neg_2_round).toBe("2");
+    expect(a.neg_3_round).toBe("4");
+    expect(a.score_30_days).toBeGreaterThan(a.score_today as number);
+  });
+
+  it("flags Complex Repair for bankruptcy files", () => {
+    const a = runCreditAnalysisAlgorithm({
+      ...base,
+      lastName: "Smith",
+      negatives: [{ type: "Bankruptcy", creditor: "Chapter 7", detail: "BK" }],
+    });
+    expect(a.program_tier).toBe("complex");
   });
 });
 

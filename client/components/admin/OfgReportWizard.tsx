@@ -42,6 +42,13 @@ import {
 } from "@/store/slices/reportWizardSlice";
 import type { OfGReportData } from "@shared/api";
 import FieldHint from "@/components/admin/FieldHint";
+import { fetchClientReferrers } from "@/store/slices/adminSlice";
+import {
+  clampMaxRounds,
+  DEFAULT_MAX_ROUNDS,
+  roundOptionsForMax,
+  suggestReportRoundExtended,
+} from "@/lib/extendedRounds";
 
 type BureauCode = "TU" | "EX" | "EQ";
 const ALL_BUREAUS: BureauCode[] = ["TU", "EX", "EQ"];
@@ -51,7 +58,13 @@ interface Props {
   onOpenChange: (open: boolean) => void;
   caseId: number;
   clientFirstName: string;
+  /** Auto Spanish report locale from client preferred_language (César: ES auto). */
+  clientPreferredLanguage?: "en" | "es" | null;
   suggestedRound: number;
+  /** Case max_rounds (5–12). Controls round dropdown. */
+  maxRounds?: number;
+  /** baseline (default) = vs enrollment; chain = vs prior After. */
+  compareMode?: "baseline" | "chain";
   onPublished: () => void;
 }
 
@@ -66,23 +79,33 @@ const ROUND_STAGES = [
 function suggestRound(
   pipelineStage: string,
   reports: { round_number: number; pdfs?: unknown[] }[],
+  maxRounds: number = DEFAULT_MAX_ROUNDS,
 ): number {
-  for (let r = 1; r <= 5; r++) {
+  const max = clampMaxRounds(maxRounds);
+  for (let r = 1; r <= max; r++) {
     const rep = reports.find((x) => x.round_number === r);
     const hasPdf = (rep?.pdfs?.length ?? 0) > 0;
     if (!hasPdf) return r;
   }
-  return 5;
+  return max;
 }
 
 export function suggestReportRound(
   pipelineStage: string,
   reports: { round_number: number; pdfs?: unknown[] }[],
+  maxRounds: number = DEFAULT_MAX_ROUNDS,
 ): number {
-  if (!ROUND_STAGES.includes(pipelineStage) && pipelineStage !== "docs_ready") {
+  if (
+    !ROUND_STAGES.includes(pipelineStage) &&
+    pipelineStage !== "docs_ready" &&
+    pipelineStage !== "completed"
+  ) {
     return 1;
   }
-  return suggestRound(pipelineStage, reports);
+  if (clampMaxRounds(maxRounds) > DEFAULT_MAX_ROUNDS) {
+    return suggestReportRoundExtended(pipelineStage, reports, maxRounds);
+  }
+  return suggestRound(pipelineStage, reports, maxRounds);
 }
 
 function fmtDraftDate(iso: string) {
@@ -99,11 +122,16 @@ export default function OfGReportWizard({
   onOpenChange,
   caseId,
   clientFirstName,
+  maxRounds: maxRoundsProp,
+  clientPreferredLanguage,
   suggestedRound,
+  compareMode = "baseline",
   onPublished,
 }: Props) {
   const { t } = useTranslation();
   const dispatch = useAppDispatch();
+  const maxRounds = clampMaxRounds(maxRoundsProp ?? DEFAULT_MAX_ROUNDS);
+  const roundChoices = roundOptionsForMax(maxRounds);
   const {
     session,
     drafts,
@@ -125,6 +153,11 @@ export default function OfGReportWizard({
   const [publishAlerts, setPublishAlerts] = useState<
     Array<{ type: string; severity: string; title: string; detail: string }>
   >([]);
+  const [publishPartnersEmailed, setPublishPartnersEmailed] = useState<
+    number | null
+  >(null);
+  const [publishPartnersPdfFailed, setPublishPartnersPdfFailed] =
+    useState(false);
   const [roundNumber, setRoundNumber] = useState(suggestedRound);
   const [beforePdf, setBeforePdf] = useState<File | null>(null);
   const [afterPdf, setAfterPdf] = useState<File | null>(null);
@@ -137,6 +170,21 @@ export default function OfGReportWizard({
   const [enhanceWithClaude, setEnhanceWithClaude] = useState(true);
   const [complianceOk, setComplianceOk] = useState(false);
   const [scoreAnomalyOk, setScoreAnomalyOk] = useState(false);
+  const [notifyPartners, setNotifyPartners] = useState(true);
+
+  const clientReferrers = useAppSelector((s) => s.admin.clientReferrers);
+  const clientReferrersLoading = useAppSelector(
+    (s) => s.admin.clientReferrersLoading,
+  );
+  const partnersWithEmail = useMemo(
+    () =>
+      clientReferrers.filter((r) => {
+        const email = String(r.referrer?.email || "").trim();
+        return email.includes("@");
+      }).length,
+    [clientReferrers],
+  );
+  const partnersLinked = clientReferrers.length;
 
   const confidenceBadge = (score?: number) => {
     if (!score || score < 0.5) {
@@ -175,6 +223,10 @@ export default function OfGReportWizard({
     setStep(1);
     setComplianceOk(false);
     setScoreAnomalyOk(false);
+    setNotifyPartners(true);
+    setPublishPartnersEmailed(null);
+    setPublishPartnersPdfFailed(false);
+    setPublishAlerts([]);
     setBeforePdf(null);
     setAfterPdf(null);
     setReusePriorBefore(true);
@@ -182,9 +234,9 @@ export default function OfGReportWizard({
     setHighlightWin("");
     setTradelineRec(false);
     setFundingNote(false);
-    setSpanish(false);
+    setSpanish(clientPreferredLanguage === "es");
     dispatch(fetchReportWizardDrafts(caseId));
-  }, [open, suggestedRound, caseId, dispatch]);
+  }, [open, suggestedRound, caseId, dispatch, clientPreferredLanguage]);
 
   useEffect(() => {
     if (!open) return;
@@ -193,6 +245,12 @@ export default function OfGReportWizard({
     setOverrideBeforeUpload(false);
     setBeforePdf(null);
   }, [open, caseId, roundNumber, dispatch]);
+
+  useEffect(() => {
+    if (!open || step !== 4) return;
+    const cid = Number(session?.client_id || 0);
+    if (cid > 0) dispatch(fetchClientReferrers({ clientId: cid }));
+  }, [open, step, session?.client_id, dispatch]);
 
   const canReusePrior =
     !loadingBeforeContext &&
@@ -219,6 +277,10 @@ export default function OfGReportWizard({
     setStep(1);
     setComplianceOk(false);
     setScoreAnomalyOk(false);
+    setNotifyPartners(true);
+    setPublishPartnersEmailed(null);
+    setPublishPartnersPdfFailed(false);
+    setPublishAlerts([]);
     setBeforePdf(null);
     setAfterPdf(null);
     setReusePriorBefore(true);
@@ -350,11 +412,20 @@ export default function OfGReportWizard({
         sessionId: session.id,
         acknowledgeScoreAnomalies:
           scoreAnomalyWarnings.length > 0 && scoreAnomalyOk,
+        notifyPartners,
       }),
     );
     if (finalizeReportWizard.fulfilled.match(result)) {
       const alerts = result.payload.alerts || [];
       setPublishAlerts(alerts);
+      setPublishPartnersEmailed(
+        typeof result.payload.partners_emailed === "number"
+          ? result.payload.partners_emailed
+          : notifyPartners
+            ? 0
+            : null,
+      );
+      setPublishPartnersPdfFailed(!!result.payload.partners_pdf_load_failed);
       setStep(5);
       onPublished();
     }
@@ -399,19 +470,24 @@ export default function OfGReportWizard({
     const byLabel = new Map(
       reviewData.wins.map((w) => [w.itemRemoved.toLowerCase(), w]),
     );
+    const wins = lines.map((itemRemoved) => {
+      const prev = byLabel.get(itemRemoved.toLowerCase());
+      return {
+        itemRemoved,
+        bureaus: prev?.bureaus?.length ? prev.bureaus : [],
+        impact: prev?.impact ?? "",
+        status: prev?.status ?? "Removed",
+        highlighted: prev?.highlighted,
+      };
+    });
+    const mode = reviewData.compareMode === "chain" ? "chain" : "baseline";
     dispatch(
       setReviewedData({
         ...reviewData,
-        wins: lines.map((itemRemoved) => {
-          const prev = byLabel.get(itemRemoved.toLowerCase());
-          return {
-            itemRemoved,
-            bureaus: prev?.bureaus?.length ? prev.bureaus : [],
-            impact: prev?.impact ?? "",
-            status: prev?.status ?? "Removed",
-            highlighted: prev?.highlighted,
-          };
-        }),
+        wins,
+        ...(mode === "chain"
+          ? { winsThisRound: wins }
+          : { winsSinceEnrollment: wins }),
       }),
     );
   };
@@ -422,18 +498,23 @@ export default function OfGReportWizard({
     const byLabel = new Map(
       reviewData.targets.map((t) => [t.item.toLowerCase(), t]),
     );
+    const targets = lines.map((item) => {
+      const prev = byLabel.get(item.toLowerCase());
+      return {
+        item,
+        bureaus: prev?.bureaus?.length ? prev.bureaus : [],
+        detail: prev?.detail ?? "",
+        priority: prev?.priority ?? ("medium" as const),
+      };
+    });
+    const mode = reviewData.compareMode === "chain" ? "chain" : "baseline";
     dispatch(
       setReviewedData({
         ...reviewData,
-        targets: lines.map((item) => {
-          const prev = byLabel.get(item.toLowerCase());
-          return {
-            item,
-            bureaus: prev?.bureaus?.length ? prev.bureaus : [],
-            detail: prev?.detail ?? "",
-            priority: prev?.priority ?? ("medium" as const),
-          };
-        }),
+        targets,
+        ...(mode === "chain"
+          ? { targetsThisRound: targets }
+          : { targetsSinceEnrollment: targets }),
       }),
     );
   };
@@ -448,7 +529,16 @@ export default function OfGReportWizard({
         : [...(w.bureaus || []), bureau];
       return { ...w, bureaus: next as BureauCode[] };
     });
-    dispatch(setReviewedData({ ...reviewData, wins }));
+    const mode = reviewData.compareMode === "chain" ? "chain" : "baseline";
+    dispatch(
+      setReviewedData({
+        ...reviewData,
+        wins,
+        ...(mode === "chain"
+          ? { winsThisRound: wins }
+          : { winsSinceEnrollment: wins }),
+      }),
+    );
   };
 
   const toggleTargetBureau = (index: number, bureau: BureauCode) => {
@@ -461,7 +551,16 @@ export default function OfGReportWizard({
         : [...(tgt.bureaus || []), bureau];
       return { ...tgt, bureaus: next as BureauCode[] };
     });
-    dispatch(setReviewedData({ ...reviewData, targets }));
+    const mode = reviewData.compareMode === "chain" ? "chain" : "baseline";
+    dispatch(
+      setReviewedData({
+        ...reviewData,
+        targets,
+        ...(mode === "chain"
+          ? { targetsThisRound: targets }
+          : { targetsSinceEnrollment: targets }),
+      }),
+    );
   };
 
   const updateReportDate = (field: "before" | "after", value: string) => {
@@ -552,6 +651,13 @@ export default function OfGReportWizard({
             <p className="text-sm text-muted-foreground">
               {t("reportWizard.uploadIntro")}
             </p>
+            <FieldHint>
+              {compareMode === "chain"
+                ? t("reportWizard.compareModeChain")
+                : t("reportWizard.compareModeBaseline")}
+              {" — "}
+              {t("reportWizard.compareModeHint")}
+            </FieldHint>
             <div>
               <Label>{t("reportWizard.round")}</Label>
               <select
@@ -559,7 +665,7 @@ export default function OfGReportWizard({
                 value={roundNumber}
                 onChange={(e) => setRoundNumber(Number(e.target.value))}
               >
-                {[1, 2, 3, 4, 5].map((r) => (
+                {roundChoices.map((r) => (
                   <option key={r} value={r}>
                     {t("reportWizard.roundN", { n: r })}
                   </option>
@@ -625,6 +731,54 @@ export default function OfGReportWizard({
                   />
                 )}
               </div>
+            ) : beforeContext?.source === "enrollment" &&
+              beforeContext.can_reuse ? (
+              <div className="rounded-xl border border-accent/25 bg-accent/[0.06] p-3 space-y-3">
+                <div className="flex items-start gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-accent shrink-0 mt-0.5" />
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-foreground">
+                      {t("reportWizard.beforeReportEnrollment")}
+                    </p>
+                    <p className="text-[11px] text-muted-foreground mt-0.5 leading-snug">
+                      {t("reportWizard.reuseEnrollmentHint", {
+                        file:
+                          beforeContext.file_name ||
+                          t("reportWizard.beforeReportEnrollment"),
+                        date: beforeContext.report_date_after || "—",
+                        score:
+                          beforeContext.score_after ??
+                          beforeContext.middle_score_after ??
+                          "—",
+                      })}
+                    </p>
+                  </div>
+                </div>
+                <label className="flex items-start gap-2.5 text-sm cursor-pointer">
+                  <Checkbox
+                    className="mt-0.5"
+                    checked={reusePriorBefore && !overrideBeforeUpload}
+                    onCheckedChange={(v) => {
+                      const on = !!v;
+                      setReusePriorBefore(on);
+                      setOverrideBeforeUpload(!on);
+                      if (on) setBeforePdf(null);
+                    }}
+                  />
+                  <span className="text-foreground">
+                    {t("reportWizard.reuseEnrollmentCheckbox")}
+                  </span>
+                </label>
+                {(overrideBeforeUpload || !reusePriorBefore) && (
+                  <PdfDrop
+                    label={t("reportWizard.beforeReportOverride")}
+                    hint={t("reportWizard.beforeReportEnrollmentHint")}
+                    chooseLabel={t("reportWizard.choosePdf")}
+                    file={beforePdf}
+                    onFile={setBeforePdf}
+                  />
+                )}
+              </div>
             ) : beforeContext?.source === "none" ? (
               <FieldHint tone="warning">
                 {t("reportWizard.noPriorRound", {
@@ -638,18 +792,17 @@ export default function OfGReportWizard({
             <div className="grid sm:grid-cols-2 gap-4">
               {!(
                 beforeContext?.can_reuse &&
-                reusePriorBefore &&
-                !overrideBeforeUpload
-              ) &&
-                beforeContext?.source !== "prior_round" && (
+                (beforeContext.source === "prior_round" ||
+                  beforeContext.source === "enrollment")
+              ) && (
                   <PdfDrop
                     label={
-                      roundNumber === 1
+                      roundNumber === 1 || compareMode === "baseline"
                         ? t("reportWizard.beforeReportEnrollment")
                         : t("reportWizard.beforeReport")
                     }
                     hint={
-                      roundNumber === 1
+                      roundNumber === 1 || compareMode === "baseline"
                         ? t("reportWizard.beforeReportEnrollmentHint")
                         : t("reportWizard.beforeReportHint")
                     }
@@ -812,15 +965,20 @@ export default function OfGReportWizard({
               <>
                 <FileText className="w-10 h-10 mx-auto text-primary" />
                 <p className="text-sm">
-                  {canReusePrior
-                    ? t("reportWizard.readyExtractReuse", {
-                        prior: beforeContext?.prior_round,
+                  {canReusePrior && beforeContext?.source === "enrollment"
+                    ? t("reportWizard.readyExtract", {
+                        before: t("reportWizard.beforeReportEnrollment"),
                         after: afterPdf?.name,
                       })
-                    : t("reportWizard.readyExtract", {
-                        before: beforePdf?.name,
-                        after: afterPdf?.name,
-                      })}
+                    : canReusePrior
+                      ? t("reportWizard.readyExtractReuse", {
+                          prior: beforeContext?.prior_round,
+                          after: afterPdf?.name,
+                        })
+                      : t("reportWizard.readyExtract", {
+                          before: beforePdf?.name,
+                          after: afterPdf?.name,
+                        })}
                 </p>
                 <div className="flex justify-center gap-2">
                   <Button variant="outline" onClick={() => setStep(1)}>
@@ -938,6 +1096,32 @@ export default function OfGReportWizard({
                 </p>
               </div>
             )}
+            {(() => {
+              const warns = Array.isArray(
+                (session?.extraction_meta as Record<string, unknown> | undefined)
+                  ?.extraction_warnings,
+              )
+                ? ((session!.extraction_meta as Record<string, unknown>)
+                    .extraction_warnings as string[])
+                : [];
+              if (!warns.length) return null;
+              const parts: string[] = [];
+              if (warns.some((w) => w.includes("date_not_found"))) {
+                parts.push(t("reportWizard.extractWarnDates"));
+              }
+              if (warns.some((w) => w.includes("tu_ex_identical"))) {
+                parts.push(t("reportWizard.extractWarnScores"));
+              }
+              if (warns.some((w) => w.startsWith("mixed_providers"))) {
+                parts.push(t("reportWizard.extractWarnMixedProviders"));
+              }
+              if (!parts.length) return null;
+              return (
+                <FieldHint tone="warning">
+                  {parts.join(" ")}
+                </FieldHint>
+              );
+            })()}
             <p className="text-sm text-muted-foreground">
               {t("reportWizard.reviewIntro")}
             </p>
@@ -1208,6 +1392,37 @@ export default function OfGReportWizard({
               </label>
             )}
             <FieldHint>{t("adminHelpers.publishReportHint")}</FieldHint>
+            <label className="flex items-start gap-2 text-sm rounded-xl border border-border/70 bg-muted/30 p-3">
+              <Checkbox
+                checked={notifyPartners}
+                onCheckedChange={(v) => setNotifyPartners(!!v)}
+                className="mt-0.5"
+                data-testid="notify-partners-checkbox"
+              />
+              <span>
+                <span className="font-medium text-foreground block">
+                  {t("reportWizard.notifyPartnersLabel")}
+                </span>
+                <span className="text-[11px] text-muted-foreground leading-snug">
+                  {t("reportWizard.notifyPartnersHint")}
+                </span>
+              </span>
+            </label>
+            {notifyPartners &&
+              !clientReferrersLoading &&
+              partnersWithEmail === 0 && (
+              <div
+                className="flex items-start gap-2 rounded-xl border border-border/70 bg-muted/40 px-3 py-2.5"
+                data-testid="notify-partners-warning"
+              >
+                <Info className="w-4 h-4 text-muted-foreground shrink-0 mt-0.5" />
+                <p className="text-[11px] text-muted-foreground leading-snug">
+                  {partnersLinked > 0
+                    ? t("reportWizard.notifyPartnersNoEmail")
+                    : t("reportWizard.notifyPartnersNoneLinked")}
+                </p>
+              </div>
+            )}
             <div className="flex justify-between">
               <Button variant="outline" onClick={() => setStep(3)}>
                 <ChevronLeft className="w-4 h-4 mr-1" />
@@ -1219,7 +1434,8 @@ export default function OfGReportWizard({
                   publishing ||
                   (scoreAnomalyWarnings.length > 0 && !scoreAnomalyOk)
                 }
-              >                {publishing ? (
+              >
+                {publishing ? (
                   <Loader2 className="w-4 h-4 animate-spin mr-2" />
                 ) : null}
                 {t("reportWizard.publishToPortal")}
@@ -1235,6 +1451,27 @@ export default function OfGReportWizard({
             <p className="text-sm text-muted-foreground">
               {t("reportWizard.publishedBody", { round: roundNumber })}
             </p>
+            {publishPartnersEmailed != null && (
+              <p
+                className="text-[11px] text-muted-foreground"
+                data-testid="publish-partners-emailed"
+              >
+                {t("reportWizard.publishedPartnersBody", {
+                  count: publishPartnersEmailed,
+                })}
+              </p>
+            )}
+            {publishPartnersPdfFailed && (
+              <div
+                className="mx-auto max-w-md flex items-start gap-2 rounded-xl border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-left"
+                data-testid="publish-partners-pdf-failed"
+              >
+                <Info className="w-4 h-4 text-destructive shrink-0 mt-0.5" />
+                <p className="text-[11px] text-foreground/90 leading-snug">
+                  {t("reportWizard.publishedPartnersPdfFailed")}
+                </p>
+              </div>
+            )}
             {publishAlerts.length > 0 && (
               <div
                 className="text-left mx-auto max-w-md rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 space-y-1.5"

@@ -82,7 +82,11 @@ async function runPreDeployChecks() {
   await runCommand("npm", ["run", "typecheck"]);
   console.log("\n✅ Typecheck passed.\n");
   await runCommand("npm", ["test"]);
-  console.log("\n✅ Tests passed. Continuing to deploy...\n");
+  console.log("\n✅ Tests passed.\n");
+  // Leave shared TiDB without vitest staff/clients so Settings/People stay clean.
+  console.log("🧹 Purging leftover integration-test fixtures...\n");
+  await runCommand("npm", ["run", "test:cleanup-fixtures"]);
+  console.log("\n✅ Fixture cleanup done. Continuing to deploy...\n");
 }
 
 async function promptForVersion(

@@ -29,6 +29,7 @@ let app: ReturnType<typeof createServer>;
 let adminId = 0;
 let adminEmail = "";
 let adminToken = "";
+let adminPrefsSnapshot: string | null = null;
 let clientId = 0;
 let caseId = 0;
 let referrerId = 0;
@@ -63,15 +64,30 @@ describe("round calendar — HTTP integration", () => {
     app = createServer();
 
     const [admins] = await pool.query<RowDataPacket[]>(
-      `SELECT id, email FROM admins
+      `SELECT id, email, notification_prefs_json FROM admins
        WHERE status = 'active' AND role IN ('super_admin','admin','agent')
        ORDER BY id ASC LIMIT 1`,
     );
     if (!admins[0]) throw new Error("No admin for tests");
     adminId = Number(admins[0].id);
     adminEmail = String(admins[0].email).toLowerCase();
+    adminPrefsSnapshot =
+      admins[0].notification_prefs_json == null
+        ? null
+        : typeof admins[0].notification_prefs_json === "string"
+          ? admins[0].notification_prefs_json
+          : JSON.stringify(admins[0].notification_prefs_json);
+    // ICS email respects admin notify prefs — force email.round_calendar on for this run
+    // so the suite does not flake when the first active admin has muted the event.
     await pool.query(
-      `UPDATE admins SET preferred_language = 'en', status = 'active' WHERE id = ?`,
+      `UPDATE admins
+          SET preferred_language = 'en',
+              status = 'active',
+              notification_prefs_json = JSON_SET(
+                COALESCE(notification_prefs_json, JSON_OBJECT()),
+                '$.email.round_calendar', true
+              )
+        WHERE id = ?`,
       [adminId],
     );
     adminToken = await createSession(
@@ -107,6 +123,12 @@ describe("round calendar — HTTP integration", () => {
     );
     clientId = cliIns.insertId;
 
+    await pool.query(
+      `INSERT INTO client_referrers (client_id, referrer_id, role, sort_order, notify_on_round)
+       VALUES (?, ?, 'primary', 0, 1)`,
+      [clientId, referrerId],
+    );
+
     const [caseIns] = await pool.query<ResultSetHeader>(
       `INSERT INTO credit_repair_cases
          (client_id, case_number, pipeline_stage, status)
@@ -132,11 +154,18 @@ describe("round calendar — HTTP integration", () => {
       await pool.query(`DELETE FROM credit_repair_cases WHERE id = ?`, [id]);
     }
     for (const id of [clientId, createdClientId].filter(Boolean)) {
+      await pool.query(`DELETE FROM client_referrers WHERE client_id = ?`, [id]);
       await pool.query(`DELETE FROM client_labels WHERE client_id = ?`, [id]);
       await pool.query(`DELETE FROM clients WHERE id = ?`, [id]);
     }
     for (const id of [referrerId, inactiveReferrerId].filter(Boolean)) {
       await pool.query(`DELETE FROM referrers WHERE id = ?`, [id]);
+    }
+    if (adminId) {
+      await pool.query(
+        `UPDATE admins SET notification_prefs_json = ? WHERE id = ?`,
+        [adminPrefsSnapshot, adminId],
+      );
     }
     await cleanupIntegrationTestClients(pool, {
       runId: RUN_ID,
@@ -220,7 +249,10 @@ describe("round calendar — HTTP integration", () => {
     );
     expect(Number(rows1[0].calendar_send_count)).toBe(1);
 
-    // Inactive referrer must be skipped
+    // Inactive / unlinked partners must be skipped (3A: junction only)
+    await pool.query(`DELETE FROM client_referrers WHERE client_id = ?`, [
+      clientId,
+    ]);
     await pool.query(`UPDATE clients SET referrer_id = ? WHERE id = ?`, [
       inactiveReferrerId,
       clientId,
@@ -233,6 +265,7 @@ describe("round calendar — HTTP integration", () => {
     expect(send2.status).toBe(200);
     const sent2: string[] = send2.body.sent_to ?? [];
     expect(sent2).not.toContain(INACTIVE_REF_EMAIL.toLowerCase());
+    expect(sent2).not.toContain(REFERRER_EMAIL.toLowerCase());
     expect(sent2).toEqual(
       expect.arrayContaining([CLIENT_EMAIL.toLowerCase(), adminEmail]),
     );
@@ -253,6 +286,11 @@ describe("round calendar — HTTP integration", () => {
       referrerId,
       clientId,
     ]);
+    await pool.query(
+      `INSERT INTO client_referrers (client_id, referrer_id, role, sort_order, notify_on_round)
+       VALUES (?, ?, 'primary', 0, 1)`,
+      [clientId, referrerId],
+    );
   }, 60_000);
 
   it("exposes round_events on calendar and upcoming_rounds on dashboard", async () => {

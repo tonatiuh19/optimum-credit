@@ -152,4 +152,12 @@ describe("extractReportDate / parseLooseDateToIso", () => {
   it("returns null when no date present", () => {
     expect(extractReportDate("No date here, just scores TU 600")).toBeNull();
   });
+
+  it("parses SmartCredit triplicated Credit Report Date row", () => {
+    expect(
+      extractReportDate(
+        `Credit Report Date\nConsumer Statement\n05/22/2026 \t05/22/2026 \t05/22/2026\n`,
+      ),
+    ).toBe("2026-05-22");
+  });
 });

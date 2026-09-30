@@ -1,5 +1,6 @@
 import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
 import api, { formatAxiosError } from "@/lib/api";
+import { applyAdminNotifyPrefsPatch } from "@/lib/adminNotifyPrefs";
 import type {
   AdminInAppNotification,
   AdminNotificationPrefs,
@@ -10,6 +11,7 @@ import type {
 
 interface AdminNotificationsState {
   prefs: AdminNotificationPrefs | null;
+  prefsSnapshot: AdminNotificationPrefs | null;
   channels: AdminNotificationPrefsResponse["channels"] | null;
   events: AdminNotifyEventKey[];
   prefsLoading: boolean;
@@ -23,6 +25,7 @@ interface AdminNotificationsState {
 
 const initialState: AdminNotificationsState = {
   prefs: null,
+  prefsSnapshot: null,
   channels: null,
   events: [],
   prefsLoading: false,
@@ -121,6 +124,12 @@ const slice = createSlice({
     });
     b.addCase(fetchNotificationPrefs.fulfilled, (s, a) => {
       s.prefsLoading = false;
+      // Do not clobber an in-flight optimistic save (would snap toggles back On).
+      if (s.prefsSaving) {
+        s.channels = a.payload.channels;
+        s.events = a.payload.events;
+        return;
+      }
       s.prefs = a.payload.prefs;
       s.channels = a.payload.channels;
       s.events = a.payload.events;
@@ -130,12 +139,21 @@ const slice = createSlice({
       s.prefsError = a.payload || "Failed";
     });
 
-    b.addCase(saveNotificationPrefs.pending, (s) => {
+    b.addCase(saveNotificationPrefs.pending, (s, a) => {
       s.prefsSaving = true;
       s.prefsError = null;
+      if (s.prefs) {
+        s.prefsSnapshot = {
+          email: { ...s.prefs.email },
+          in_app: { ...s.prefs.in_app },
+          sms: { ...s.prefs.sms },
+        };
+        s.prefs = applyAdminNotifyPrefsPatch(s.prefs, a.meta.arg);
+      }
     });
     b.addCase(saveNotificationPrefs.fulfilled, (s, a) => {
       s.prefsSaving = false;
+      s.prefsSnapshot = null;
       s.prefs = a.payload.prefs;
       s.channels = a.payload.channels;
       s.events = a.payload.events;
@@ -143,6 +161,10 @@ const slice = createSlice({
     b.addCase(saveNotificationPrefs.rejected, (s, a) => {
       s.prefsSaving = false;
       s.prefsError = a.payload || "Failed";
+      if (s.prefsSnapshot) {
+        s.prefs = s.prefsSnapshot;
+        s.prefsSnapshot = null;
+      }
     });
 
     b.addCase(fetchAdminInbox.pending, (s) => {

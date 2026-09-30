@@ -1,5 +1,6 @@
 import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
 import api, { formatAxiosError } from "@/lib/api";
+import { decodeLiteralUnicodeEscapes } from "@/lib/decodeLiteralUnicodeEscapes";
 import type {
   AdminPhoneNumber,
   AdminConversationsListResponse,
@@ -17,6 +18,24 @@ export type ConversationsView =
   | "unread"
   | "unknown";
 
+const CONTACTS_PAGE_SIZE = 25;
+
+function contactKey(c: { kind: string; contact_id: number }) {
+  return `${c.kind}:${c.contact_id}`;
+}
+
+/** Normalize list rows (unicode escapes in previews, etc.). */
+export function mapConversationContact(
+  c: ConversationContactHubItem,
+): ConversationContactHubItem {
+  return {
+    ...c,
+    last_message_preview: c.last_message_preview
+      ? decodeLiteralUnicodeEscapes(String(c.last_message_preview))
+      : c.last_message_preview,
+  };
+}
+
 export interface ConversationTimelineThread {
   id: number;
   channel: string;
@@ -28,7 +47,7 @@ export interface ConversationTimelineThread {
 }
 
 export interface ConversationTimeline {
-  kind: "client" | "unknown";
+  kind: "client" | "unknown" | "contact" | "contact";
   contact: Record<string, unknown>;
   threads?: ConversationTimelineThread[];
   messages: ConversationMessage[];
@@ -47,7 +66,7 @@ interface ConversationsState {
   contactsError: string | null;
   view: ConversationsView;
   search: string;
-  activeKind: "client" | "unknown" | null;
+  activeKind: "client" | "unknown" | "contact" | null;
   activeId: number | null;
   /** Conversation hub status for the open panel (survives list filter removes). */
   activeHubStatus: ConversationContactHubItem["status"] | null;
@@ -67,6 +86,7 @@ interface ConversationsState {
   navBadgeLoading: boolean;
   aiSuggestionsLoading: boolean;
   aiSuggestions: Array<{ id: string; label: string; body: string }>;
+  retryCallInsightsId: number | null;
 }
 
 const initialState: ConversationsState = {
@@ -99,6 +119,7 @@ const initialState: ConversationsState = {
   navBadgeLoading: false,
   aiSuggestionsLoading: false,
   aiSuggestions: [],
+  retryCallInsightsId: null,
 };
 
 /** Maps API timeline rows into hub messages (includes call recording fields). */
@@ -129,7 +150,7 @@ export function mapConversationHubMessage(m: any): ConversationMessage {
     conversation_id: m.conversation_id != null ? Number(m.conversation_id) : undefined,
     direction,
     channel,
-    body: String(m.body || ""),
+    body: decodeLiteralUnicodeEscapes(String(m.body || "")),
     media_url: m.media_url ? String(m.media_url) : null,
     media_content_type: m.media_content_type
       ? String(m.media_content_type)
@@ -147,12 +168,45 @@ export function mapConversationHubMessage(m: any): ConversationMessage {
       m.call_duration_sec != null ? Number(m.call_duration_sec) : null,
     recording_url: m.recording_url ? String(m.recording_url) : null,
     metadata_json: meta,
+    call_insights_status: m.call_insights_status
+      ? (String(m.call_insights_status) as ConversationMessage["call_insights_status"])
+      : null,
+    call_insights_error: m.call_insights_error
+      ? String(m.call_insights_error)
+      : null,
+    call_transcript: m.call_transcript
+      ? decodeLiteralUnicodeEscapes(String(m.call_transcript))
+      : null,
+    call_insights_json: (() => {
+      if (!m.call_insights_json) return null;
+      try {
+        const raw =
+          typeof m.call_insights_json === "string"
+            ? JSON.parse(m.call_insights_json)
+            : m.call_insights_json;
+        return raw && typeof raw === "object" ? raw : null;
+      } catch {
+        return null;
+      }
+    })(),
     created_at: String(m.created_at),
   };
 }
 
 function mapMessage(m: any): ConversationMessage {
   return mapConversationHubMessage(m);
+}
+
+export function mapConversationTemplate(
+  t: ConversationTemplate,
+): ConversationTemplate {
+  return {
+    ...t,
+    subject: t.subject
+      ? decodeLiteralUnicodeEscapes(String(t.subject))
+      : t.subject,
+    body: decodeLiteralUnicodeEscapes(String(t.body || "")),
+  };
 }
 
 export const fetchConversationsAccess = createAsyncThunk(
@@ -184,7 +238,16 @@ export const fetchConversationsNavBadge = createAsyncThunk(
 export const fetchConversationContacts = createAsyncThunk(
   "conversations/contacts",
   async (
-    args: { view?: ConversationsView; q?: string; page?: number; limit?: number } | undefined,
+    args:
+      | {
+          view?: ConversationsView;
+          q?: string;
+          page?: number;
+          limit?: number;
+          /** Append page to existing list (Load more). */
+          append?: boolean;
+        }
+      | undefined,
     { rejectWithValue },
   ) => {
     try {
@@ -193,10 +256,14 @@ export const fetchConversationContacts = createAsyncThunk(
           view: args?.view || "all",
           q: args?.q || undefined,
           page: args?.page || 1,
-          limit: args?.limit || 50,
+          limit: args?.limit || CONTACTS_PAGE_SIZE,
         },
       });
-      return data as AdminConversationsListResponse;
+      return {
+        ...(data as AdminConversationsListResponse),
+        contacts: (data.contacts || []).map(mapConversationContact),
+        append: !!args?.append,
+      };
     } catch (e: any) {
       return rejectWithValue(formatAxiosError(e, "Failed to load inbox"));
     }
@@ -206,7 +273,7 @@ export const fetchConversationContacts = createAsyncThunk(
 export const fetchConversationTimeline = createAsyncThunk(
   "conversations/timeline",
   async (
-    args: { kind: "client" | "unknown"; id: number },
+    args: { kind: "client" | "unknown" | "contact" | "contact"; id: number },
     { rejectWithValue },
   ) => {
     try {
@@ -214,7 +281,7 @@ export const fetchConversationTimeline = createAsyncThunk(
         `/admin/conversations/contact/${args.kind}/${args.id}/timeline`,
       );
       return {
-        kind: data.kind as "client" | "unknown",
+        kind: data.kind as "client" | "unknown" | "contact",
         contact: data.contact || {},
         threads: data.threads || [],
         messages: (data.messages || []).map(mapMessage),
@@ -231,6 +298,7 @@ export const sendHubMessage = createAsyncThunk(
     args: {
       client_id?: number;
       unknown_contact_id?: number;
+      contact_id?: number;
       channel: "sms" | "internal";
       body: string;
       subject?: string;
@@ -254,6 +322,7 @@ export const sendHubMessage = createAsyncThunk(
         error?: string | null;
         client_id?: number;
         unknown_contact_id?: number;
+        contact_id?: number;
       };
     } catch (e: any) {
       if (e?.response?.data?.error === "conversation_closed") {
@@ -285,9 +354,10 @@ export const startConversationOutbound = createAsyncThunk(
       }
       return data as {
         ok: boolean;
-        kind: "client" | "unknown";
+        kind: "client" | "unknown" | "contact";
         client_id?: number;
         unknown_contact_id?: number;
+        contact_id?: number;
         unknown_created?: boolean;
         phone?: string;
         conversation_id: number;
@@ -308,7 +378,7 @@ export const fetchConversationAiSuggestions = createAsyncThunk(
   "conversations/aiSuggestions",
   async (
     args: {
-      kind: "client" | "unknown";
+      kind: "client" | "unknown" | "contact";
       contact_id: number;
       recent_messages: Array<{ direction: string; body: string | null }>;
     },
@@ -319,7 +389,13 @@ export const fetchConversationAiSuggestions = createAsyncThunk(
         ...args,
         include_ai: true,
       });
-      return (data.ai_suggestions || []) as Array<{
+      return (data.ai_suggestions || []).map(
+        (s: { id: string; label: string; body: string }) => ({
+          ...s,
+          label: decodeLiteralUnicodeEscapes(String(s.label || "")),
+          body: decodeLiteralUnicodeEscapes(String(s.body || "")),
+        }),
+      ) as Array<{
         id: string;
         label: string;
         body: string;
@@ -353,6 +429,27 @@ export const uploadConversationMedia = createAsyncThunk(
   },
 );
 
+export const retryCallInsights = createAsyncThunk(
+  "conversations/retryCallInsights",
+  async (args: { messageId: number }, { rejectWithValue }) => {
+    try {
+      const { data } = await api.post(
+        `/admin/conversations/messages/${args.messageId}/retry-call-insights`,
+      );
+      return {
+        messageId: args.messageId,
+        message: data?.message
+          ? mapConversationHubMessage(data.message)
+          : null,
+      };
+    } catch (e: any) {
+      return rejectWithValue(
+        formatAxiosError(e, "Failed to retry call insights"),
+      );
+    }
+  },
+);
+
 export const assignConversationContact = createAsyncThunk(
   "conversations/assign",
   async (
@@ -375,7 +472,7 @@ export const setConversationContactStatus = createAsyncThunk(
   "conversations/status",
   async (
     args: {
-      kind: "client" | "unknown";
+      kind: "client" | "unknown" | "contact" | "contact";
       contactId: number;
       status: "open" | "snoozed" | "closed" | "archived";
     },
@@ -385,7 +482,9 @@ export const setConversationContactStatus = createAsyncThunk(
       const path =
         args.kind === "unknown"
           ? `/admin/conversations/unknown/${args.contactId}/status`
-          : `/admin/conversations/contact/client/${args.contactId}/status`;
+          : args.kind === "contact"
+            ? `/admin/conversations/contact/${args.contactId}/status`
+            : `/admin/conversations/contact/client/${args.contactId}/status`;
       const { data } = await api.post(path, { status: args.status });
       const view = (getState() as { conversations: ConversationsState })
         .conversations.view;
@@ -553,7 +652,7 @@ export const fetchConversationTemplates = createAsyncThunk(
           all: opts.all ? "1" : undefined,
         },
       });
-      return (data.templates || []) as ConversationTemplate[];
+      return (data.templates || []).map(mapConversationTemplate) as ConversationTemplate[];
     } catch (e: any) {
       return rejectWithValue(formatAxiosError(e, "Failed to load templates"));
     }
@@ -575,7 +674,7 @@ export const createConversationTemplate = createAsyncThunk(
   ) => {
     try {
       const { data } = await api.post("/admin/conversation-templates", args);
-      return data.template as ConversationTemplate;
+      return mapConversationTemplate(data.template as ConversationTemplate);
     } catch (e: any) {
       return rejectWithValue(formatAxiosError(e, "Failed to create template"));
     }
@@ -603,7 +702,7 @@ export const updateConversationTemplate = createAsyncThunk(
         `/admin/conversation-templates/${id}`,
         rest,
       );
-      return data.template as ConversationTemplate;
+      return mapConversationTemplate(data.template as ConversationTemplate);
     } catch (e: any) {
       return rejectWithValue(formatAxiosError(e, "Failed to update template"));
     }
@@ -643,7 +742,7 @@ const slice = createSlice({
       state,
       action: {
         payload: {
-          kind: "client" | "unknown";
+          kind: "client" | "unknown" | "contact";
           id: number;
           status?: ConversationContactHubItem["status"];
         };
@@ -671,14 +770,24 @@ const slice = createSlice({
       state,
       action: {
         payload: {
-          kind: "client" | "unknown";
+          kind: "client" | "unknown" | "contact";
           contact_id: number;
           patch: Partial<ConversationContactHubItem>;
         };
       },
     ) {
       const { kind, contact_id, patch } = action.payload;
-      const status = patch.status as
+      const normalizedPatch = {
+        ...patch,
+        ...(patch.last_message_preview != null
+          ? {
+              last_message_preview: decodeLiteralUnicodeEscapes(
+                String(patch.last_message_preview),
+              ),
+            }
+          : {}),
+      };
+      const status = normalizedPatch.status as
         | ConversationContactHubItem["status"]
         | undefined;
       const isClosed = status === "closed" || status === "archived";
@@ -695,8 +804,8 @@ const slice = createSlice({
         (c) => c.kind === kind && c.contact_id === contact_id,
       );
       if (idx >= 0) {
-        const updated = { ...state.contacts[idx], ...patch };
-        if (patch.last_message_at) {
+        const updated = { ...state.contacts[idx], ...normalizedPatch };
+        if (normalizedPatch.last_message_at) {
           state.contacts.splice(idx, 1);
           state.contacts.unshift(updated);
         } else {
@@ -737,22 +846,31 @@ const slice = createSlice({
       const inserted: ConversationContactHubItem = {
         kind,
         contact_id,
-        display_name: String(patch.display_name || "").trim() || "Contact",
-        phone: patch.phone ?? null,
-        email: patch.email ?? null,
-        last_message_at: patch.last_message_at ?? null,
-        last_message_preview: patch.last_message_preview ?? null,
-        unread_count: Number(patch.unread_count ?? 1),
-        status: (patch.status as ConversationContactHubItem["status"]) || "open",
-        assigned_admin_id: patch.assigned_admin_id ?? null,
-        assigned_admin_name: patch.assigned_admin_name ?? null,
-        channels: patch.channels ?? ["sms"],
-        primary_conversation_id: patch.primary_conversation_id ?? null,
-        client_id: kind === "client" ? contact_id : patch.client_id ?? null,
+        display_name:
+          String(normalizedPatch.display_name || "").trim() || "Contact",
+        phone: normalizedPatch.phone ?? null,
+        email: normalizedPatch.email ?? null,
+        last_message_at: normalizedPatch.last_message_at ?? null,
+        last_message_preview: normalizedPatch.last_message_preview ?? null,
+        unread_count: Number(normalizedPatch.unread_count ?? 1),
+        status:
+          (normalizedPatch.status as ConversationContactHubItem["status"]) ||
+          "open",
+        assigned_admin_id: normalizedPatch.assigned_admin_id ?? null,
+        assigned_admin_name: normalizedPatch.assigned_admin_name ?? null,
+        channels: normalizedPatch.channels ?? ["sms"],
+        primary_conversation_id:
+          normalizedPatch.primary_conversation_id ?? null,
+        client_id:
+          kind === "client"
+            ? contact_id
+            : normalizedPatch.client_id ?? null,
         unknown_contact_id:
-          kind === "unknown" ? contact_id : patch.unknown_contact_id ?? null,
-        pipeline_stage: patch.pipeline_stage ?? null,
-        client_status: patch.client_status ?? null,
+          kind === "unknown"
+            ? contact_id
+            : normalizedPatch.unknown_contact_id ?? null,
+        pipeline_stage: normalizedPatch.pipeline_stage ?? null,
+        client_status: normalizedPatch.client_status ?? null,
       };
       state.contacts.unshift(inserted);
       if (
@@ -777,6 +895,77 @@ const slice = createSlice({
         messages: state.timeline.messages.map((m) =>
           m.id === action.payload.message_id
             ? { ...m, provider_status: action.payload.provider_status }
+            : m,
+        ),
+      };
+    },
+    /** Patch call insights onto an open timeline message (Ably). */
+    callInsightsRealtime(
+      state,
+      action: {
+        payload: {
+          message_id: number;
+          call_insights_status?: ConversationMessage["call_insights_status"];
+          call_insights_json?: ConversationMessage["call_insights_json"];
+          call_transcript?: string | null;
+          call_insights_error?: string | null;
+        };
+      },
+    ) {
+      if (!state.timeline?.messages) return;
+      const p = action.payload;
+      state.timeline = {
+        ...state.timeline,
+        messages: state.timeline.messages.map((m) =>
+          m.id === p.message_id
+            ? {
+                ...m,
+                call_insights_status:
+                  p.call_insights_status ?? m.call_insights_status,
+                call_insights_json:
+                  p.call_insights_json !== undefined
+                    ? p.call_insights_json
+                    : m.call_insights_json,
+                call_transcript:
+                  p.call_transcript != null
+                    ? decodeLiteralUnicodeEscapes(String(p.call_transcript))
+                    : m.call_transcript,
+                call_insights_error:
+                  p.call_insights_error !== undefined
+                    ? p.call_insights_error
+                    : m.call_insights_error,
+              }
+            : m,
+        ),
+      };
+    },
+    /** Attach Twilio Dial recording URL onto an open timeline call row (Ably). */
+    callRecordingRealtime(
+      state,
+      action: {
+        payload: {
+          message_id: number;
+          recording_url?: string | null;
+          call_duration_sec?: number | null;
+        };
+      },
+    ) {
+      if (!state.timeline?.messages) return;
+      const p = action.payload;
+      state.timeline = {
+        ...state.timeline,
+        messages: state.timeline.messages.map((m) =>
+          m.id === p.message_id
+            ? {
+                ...m,
+                recording_url: p.recording_url
+                  ? String(p.recording_url)
+                  : m.recording_url,
+                call_duration_sec:
+                  p.call_duration_sec != null
+                    ? Number(p.call_duration_sec)
+                    : m.call_duration_sec,
+              }
             : m,
         ),
       };
@@ -807,11 +996,14 @@ const slice = createSlice({
       s.navBadgeLoading = false;
     });
 
-    b.addCase(fetchConversationContacts.pending, (s) => {
-      if (!s.contactsLoadedOnce) {
-        s.contactsLoading = true;
-      } else {
-        s.contactsRefreshing = true;
+    b.addCase(fetchConversationContacts.pending, (s, a) => {
+      // Append ("Show more") keeps the list visible — no soft refresh opacity.
+      if (!a.meta.arg?.append) {
+        if (!s.contactsLoadedOnce) {
+          s.contactsLoading = true;
+        } else {
+          s.contactsRefreshing = true;
+        }
       }
       s.contactsError = null;
     });
@@ -819,7 +1011,24 @@ const slice = createSlice({
       s.contactsLoading = false;
       s.contactsRefreshing = false;
       s.contactsLoadedOnce = true;
-      s.contacts = a.payload.contacts;
+      const next = a.payload.contacts || [];
+      if (a.payload.append && next.length) {
+        const seen = new Set(s.contacts.map(contactKey));
+        const merged = [...s.contacts];
+        for (const c of next) {
+          const k = contactKey(c);
+          if (seen.has(k)) {
+            const i = merged.findIndex((x) => contactKey(x) === k);
+            if (i >= 0) merged[i] = c;
+          } else {
+            seen.add(k);
+            merged.push(c);
+          }
+        }
+        s.contacts = merged;
+      } else {
+        s.contacts = next;
+      }
       s.contactsPagination = a.payload.pagination;
     });
     b.addCase(fetchConversationContacts.rejected, (s, a) => {
@@ -982,6 +1191,8 @@ const slice = createSlice({
           client_id: kind === "client" ? contactId : c.client_id ?? null,
           unknown_contact_id:
             kind === "unknown" ? contactId : c.unknown_contact_id ?? null,
+          crm_contact_id:
+            kind === "contact" ? contactId : c.crm_contact_id ?? null,
           pipeline_stage: c.pipeline_stage ?? null,
           client_status: c.client_status ?? null,
         });
@@ -1055,6 +1266,24 @@ const slice = createSlice({
       s.aiSuggestionsLoading = false;
       s.aiSuggestions = [];
     });
+
+    b.addCase(retryCallInsights.pending, (s, a) => {
+      s.retryCallInsightsId = a.meta.arg.messageId;
+    });
+    b.addCase(retryCallInsights.fulfilled, (s, a) => {
+      s.retryCallInsightsId = null;
+      if (!s.timeline?.messages || !a.payload.message) return;
+      const next = a.payload.message;
+      s.timeline = {
+        ...s.timeline,
+        messages: s.timeline.messages.map((m) =>
+          m.id === a.payload.messageId ? { ...m, ...next } : m,
+        ),
+      };
+    });
+    b.addCase(retryCallInsights.rejected, (s) => {
+      s.retryCallInsightsId = null;
+    });
   },
 });
 
@@ -1066,6 +1295,8 @@ export const {
   setConversationsSendError,
   contactActivityRealtime,
   messageStatusRealtime,
+  callInsightsRealtime,
+  callRecordingRealtime,
 } = slice.actions;
 
 export default slice.reducer;

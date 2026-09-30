@@ -9,7 +9,7 @@ export type ConversationSuggestion = {
 };
 
 type SuggestionContext = {
-  kind: "client" | "unknown";
+  kind: "client" | "unknown" | "contact";
   mergeContext: ConversationMergeContext;
   pipelineStage?: string | null;
   clientStatus?: string | null;
@@ -21,12 +21,12 @@ export function buildStaticConversationSuggestions(
   ctx: SuggestionContext,
 ): ConversationSuggestion[] {
   const es = ctx.preferredLanguage === "es";
-  const stage = ctx.pipelineStage || (ctx.kind === "unknown" ? "unknown" : "");
+  const stage = ctx.pipelineStage || (ctx.kind === "unknown" || ctx.kind === "contact" ? "unknown" : "");
   const status = ctx.clientStatus || "";
 
   const defs: Array<{ id: string; label: string; body: string }> = [];
 
-  if (ctx.kind === "unknown" || status === "unknown") {
+  if (ctx.kind === "unknown" || ctx.kind === "contact" || status === "unknown") {
     defs.push(
       es
         ? {

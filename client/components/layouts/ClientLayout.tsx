@@ -20,6 +20,7 @@ import {
   CreditCard,
   ClipboardList,
   Landmark,
+  Sparkles,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
@@ -27,6 +28,8 @@ import { clientLogout, fetchClientMe } from "@/store/slices/clientAuthSlice";
 import { fetchPortalSectionLocks } from "@/store/slices/portalSlice";
 import { fetchPortalInfoRequests } from "@/store/slices/infoRequestsSlice";
 import { fetchPortalFunding } from "@/store/slices/fundingSlice";
+import { fetchPortalCreditAnalysis } from "@/store/slices/creditAnalysisSlice";
+import { isProspectLead } from "@/lib/pipelineFilters";
 import LanguageSwitcher from "@/components/LanguageSwitcher";
 import ThemeToggle from "@/components/ThemeToggle";
 import LegalLinks from "@/components/LegalLinks";
@@ -43,6 +46,8 @@ const NAV: {
   sectionKey?: string;
   /** When true, only show if portal funding application exists */
   fundingOnly?: boolean;
+  /** When true, only show for prospect leads (pre-convert) */
+  prospectOnly?: boolean;
 }[] = [
   {
     to: "/portal",
@@ -55,6 +60,12 @@ const NAV: {
     to: "/portal/documents",
     labelKey: "sidebar.documents",
     icon: FileText,
+  },
+  {
+    to: "/portal/credit-analysis",
+    labelKey: "sidebar.creditAnalysis",
+    icon: Sparkles,
+    prospectOnly: true,
   },
   {
     to: "/portal/funding",
@@ -111,6 +122,7 @@ export default function ClientLayout({ children }: Props) {
   const { portalApplication, portalInitialized } = useAppSelector(
     (s) => s.funding,
   );
+  const { portalResult } = useAppSelector((s) => s.creditAnalysis);
   const [mobileOpen, setMobileOpen] = useState(false);
 
   useEffect(() => {
@@ -134,6 +146,10 @@ export default function ClientLayout({ children }: Props) {
   }, [token, dispatch]);
 
   useEffect(() => {
+    if (token) void dispatch(fetchPortalCreditAnalysis());
+  }, [token, dispatch]);
+
+  useEffect(() => {
     if (!mobileOpen) return;
     const prev = document.body.style.overflow;
     document.body.style.overflow = "hidden";
@@ -148,8 +164,12 @@ export default function ClientLayout({ children }: Props) {
   );
 
   const hasFundingApp = Boolean(portalApplication);
+  const isProspect = isProspectLead(user);
+  const showCreditAnalysisNav = isProspect || Boolean(portalResult);
   const visibleNav = NAV.filter(
-    (item) => !item.fundingOnly || hasFundingApp,
+    (item) =>
+      (!item.fundingOnly || hasFundingApp) &&
+      (!item.prospectOnly || showCreditAnalysisNav),
   );
 
   // Redirect direct URL access to locked sections (only after locks are loaded)
@@ -170,6 +190,16 @@ export default function ClientLayout({ children }: Props) {
     !hasFundingApp
   ) {
     return <Navigate to="/portal/documents" replace />;
+  }
+
+  // Credit analysis route: prospects always; enrolled only when a prior analysis exists
+  if (
+    user &&
+    location.pathname === "/portal/credit-analysis" &&
+    !isProspect &&
+    !portalResult
+  ) {
+    return <Navigate to="/portal" replace />;
   }
 
   const handleLogout = async () => {

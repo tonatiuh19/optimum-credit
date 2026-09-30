@@ -23,22 +23,33 @@ import {
   RotateCcw,
   UserPlus,
   Sparkles,
+  Pencil,
+  Check,
+  Trash2,
+  Send,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
   fetchPanelCase,
   fetchPanelClient,
+  fetchPipeline,
   clearPanelClient,
-  deleteRoundReportPdf,
+  previewRoundReportReset,
+  updateCaseExtendedRounds,
+  confirmRoundReportReset,
+  resendRoundReportPdf,
   fetchCaseSplits,
   createCaseSplit,
   fetchCaseDocuments,
+  deleteCaseDocument,
   fetchCaseRoundSchedule,
   saveCaseRoundSchedule,
   sendCaseRoundCalendar,
   fetchClientReferrers,
   replaceClientReferrers,
   updateAdminClient,
+  type RoundReportResetPreview,
 } from "@/store/slices/adminSlice";
 import {
   fetchCaseTaskCompletions,
@@ -56,6 +67,7 @@ import type {
 import AdminSplitActions from "@/components/admin/AdminSplitActions";
 import { AdminAskCaseButton } from "@/components/admin/AdminAskDrawer";
 import { ClientPanelConversationButton } from "@/components/admin/ClientPanelConversationButton";
+import { ContactPhoneActions } from "@/components/admin/ContactPhoneActions";
 import ClientReferrersEditor, {
   emptyReferrerSlots,
   linksToReferrerSlots,
@@ -71,7 +83,6 @@ import InstallmentDraftFields, {
 import RoundCalendarScheduleFields, {
   emptyRoundScheduleInput,
 } from "@/components/admin/RoundCalendarScheduleFields";
-import { useTranslation } from "react-i18next";
 import ReopenTaskDialog from "@/components/admin/ReopenTaskDialog";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import {
@@ -91,8 +102,16 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import api from "@/lib/api";
 import { LangBadge } from "@/components/ui/lang-badge";
 import { useToast } from "@/hooks/use-toast";
@@ -109,6 +128,16 @@ import {
   isProspectLead,
 } from "@/lib/pipelineFilters";
 import { isReportRoundActive } from "@/lib/pipelineStage";
+import {
+  ABSOLUTE_MAX_ROUNDS,
+  clampMaxRounds,
+  DEFAULT_MAX_ROUNDS,
+  extendedRoundsLegend,
+  roundOptionsForMax,
+} from "@/lib/extendedRounds";
+import ProspectCreditAnalysisSection from "@/components/credit/ProspectCreditAnalysisSection";
+import ClientPreSaleAnalysisCard from "@/components/credit/ClientPreSaleAnalysisCard";
+import { clearAdminCreditAnalysis } from "@/store/slices/creditAnalysisSlice";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -419,14 +448,15 @@ function TaskCompletionCard({
 function RoundPdfRow({
   pdf,
   onView,
-  onDelete,
-  deleting,
+  onResend,
+  resending,
 }: {
   pdf: any;
   onView: (pdf: any) => void;
-  onDelete: (pdf: any) => void;
-  deleting: boolean;
+  onResend: (pdf: any) => void;
+  resending: boolean;
 }) {
+  const { t } = useTranslation();
   return (
     <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-muted/40 border border-border/60 group hover:border-primary/20 transition-all">
       <div className="w-7 h-7 rounded-lg bg-destructive/10 border border-destructive/15 flex items-center justify-center shrink-0">
@@ -444,23 +474,28 @@ function RoundPdfRow({
           })}
         </p>
       </div>
-      <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+      <div className="flex items-center gap-1 shrink-0 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
         <button
+          type="button"
+          onClick={() => onResend(pdf)}
+          disabled={resending}
+          title={t("reportWizard.resendRoundTitle")}
+          className="inline-flex items-center gap-1 text-[10px] font-medium text-accent hover:text-accent/90 bg-accent/10 hover:bg-accent/15 border border-accent/25 px-2 py-1 rounded-md transition-colors disabled:opacity-50"
+          data-testid="resend-round-pdf"
+        >
+          {resending ? (
+            <Loader2 className="w-3 h-3 animate-spin" />
+          ) : (
+            <Send className="w-3 h-3" />
+          )}
+          {t("reportWizard.resendRound")}
+        </button>
+        <button
+          type="button"
           onClick={() => onView(pdf)}
           className="inline-flex items-center gap-1 text-[10px] text-primary hover:text-primary/80 bg-primary/8 hover:bg-primary/12 border border-primary/15 px-2 py-1 rounded-md transition-colors"
         >
-          <Eye className="w-3 h-3" /> View
-        </button>
-        <button
-          onClick={() => onDelete(pdf)}
-          disabled={deleting}
-          className="inline-flex items-center justify-center w-6 h-6 rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors disabled:opacity-50"
-        >
-          {deleting ? (
-            <Loader2 className="w-3 h-3 animate-spin" />
-          ) : (
-            <X className="w-3 h-3" />
-          )}
+          <Eye className="w-3 h-3" /> {t("reportWizard.viewPdf")}
         </button>
       </div>
     </div>
@@ -482,44 +517,207 @@ function parseReportDatesFromSummary(
 
 function ReportsTab({
   reports,
+  wizardSessions,
   pipelineStage,
   caseId,
+  clientId,
   clientFirstName,
+  preferredLanguage,
+  maxRounds: maxRoundsProp,
+  nextDisputeTargetDate,
+  reportCompareMode: reportCompareModeProp,
   onPdfUploaded,
+  onExtendedRoundsSaved,
 }: {
   reports: any[];
+  wizardSessions: Array<{
+    id: number;
+    round_number: number;
+    status: string;
+  }>;
   pipelineStage: string;
   caseId: number;
+  clientId: number;
   clientFirstName: string;
+  preferredLanguage?: "en" | "es" | null;
+  maxRounds?: number;
+  nextDisputeTargetDate?: string | null;
+  reportCompareMode?: "baseline" | "chain";
   onPdfUploaded: (roundNumber: number) => void;
+  onExtendedRoundsSaved?: () => void;
 }) {
   const { t } = useTranslation();
   const dispatch = useAppDispatch();
+  const { toast } = useToast();
+  const { user } = useAppSelector((s) => s.adminAuth);
+  const canResetRound =
+    user?.role === "admin" || user?.role === "super_admin";
+  const maxRounds = clampMaxRounds(maxRoundsProp ?? DEFAULT_MAX_ROUNDS);
+  const roundList = roundOptionsForMax(maxRounds);
+  const compareMode: "baseline" | "chain" =
+    reportCompareModeProp === "chain" ? "chain" : "baseline";
+  const [maxRoundsDraft, setMaxRoundsDraft] = useState(String(maxRounds));
+  const [compareModeDraft, setCompareModeDraft] = useState<"baseline" | "chain">(
+    compareMode,
+  );
+  const [nextDateDraft, setNextDateDraft] = useState(
+    nextDisputeTargetDate || "",
+  );
+  const [savingExtended, setSavingExtended] = useState(false);
   const [wizardOpen, setWizardOpen] = useState(false);
-  const [deleting, setDeleting] = useState<Record<number, boolean>>({});
+  const [resending, setResending] = useState<Record<number, boolean>>({});
+  const [resendConfirmPdf, setResendConfirmPdf] = useState<any | null>(null);
   const [previewPdf, setPreviewPdf] = useState<any | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [resetRound, setResetRound] = useState<number | null>(null);
+  const [resetPreview, setResetPreview] =
+    useState<RoundReportResetPreview | null>(null);
+  const [resetLoading, setResetLoading] = useState(false);
+  const [resetConfirming, setResetConfirming] = useState(false);
 
   const inRounds = ROUND_STAGES.includes(pipelineStage);
-  const suggestedRound = suggestReportRound(pipelineStage, reports);
+  const highestPublished = reports.reduce((h, r) => {
+    const n = Number(r?.round_number);
+    return Number.isFinite(n) && n > h ? n : h;
+  }, 0);
+  const suggestedRound = suggestReportRound(
+    pipelineStage,
+    reports,
+    maxRounds,
+  );
+
+  useEffect(() => {
+    setMaxRoundsDraft(String(maxRounds));
+    setCompareModeDraft(compareMode);
+    setNextDateDraft(nextDisputeTargetDate || "");
+  }, [maxRounds, compareMode, nextDisputeTargetDate, caseId]);
+
+  const saveExtendedRounds = async () => {
+    const nextMax = clampMaxRounds(Number(maxRoundsDraft));
+    setSavingExtended(true);
+    try {
+      const result = await dispatch(
+        updateCaseExtendedRounds({
+          caseId,
+          max_rounds: nextMax,
+          next_dispute_target_date: nextDateDraft.trim()
+            ? nextDateDraft.trim()
+            : null,
+          report_compare_mode: compareModeDraft,
+        }),
+      ).unwrap();
+      toast({
+        title: result.case.reopened_to_round_5
+          ? t("reportWizard.extendedRoundsReopened")
+          : t("reportWizard.extendedRoundsSaved"),
+      });
+      onExtendedRoundsSaved?.();
+      // Refresh board so Completed → Round 5 reopen moves the card immediately.
+      void dispatch(fetchPipeline(undefined));
+    } catch (err) {
+      toast({
+        variant: "destructive",
+        title: t("reportWizard.extendedRoundsSaveFailed"),
+        description: typeof err === "string" ? err : undefined,
+      });
+    } finally {
+      setSavingExtended(false);
+    }
+  };
 
   const getReport = (round: number) =>
     reports.find((r: any) => r.round_number === round);
 
   const getPdfs = (round: number): any[] => getReport(round)?.pdfs ?? [];
 
-  const handleDelete = async (pdf: any) => {
-    const round = pdf.round_number as number;
-    setDeleting((p) => ({ ...p, [pdf.id]: true }));
+  const getSessions = (round: number) =>
+    wizardSessions.filter((s) => Number(s.round_number) === round);
+
+  const hasResettableData = (round: number) =>
+    !!(getReport(round) || getPdfs(round).length > 0 || getSessions(round).length > 0);
+
+  const openResetDialog = async (round: number) => {
+    setResetRound(round);
+    setResetPreview(null);
+    setResetLoading(true);
+    try {
+      const result = await dispatch(
+        previewRoundReportReset({ clientId, roundNumber: round }),
+      ).unwrap();
+      setResetPreview(result.preview || null);
+    } catch (err) {
+      setResetRound(null);
+      toast({
+        variant: "destructive",
+        title: t("reportWizard.resetRoundErrorTitle"),
+        description:
+          typeof err === "string" ? err : t("reportWizard.resetRoundErrorBody"),
+      });
+    } finally {
+      setResetLoading(false);
+    }
+  };
+
+  const handleResetConfirm = async () => {
+    if (resetRound == null || resetConfirming) return;
+    const roundBeingReset = resetRound;
+    setResetConfirming(true);
     try {
       await dispatch(
-        deleteRoundReportPdf({ pdfId: pdf.id, roundNumber: round }),
+        confirmRoundReportReset({
+          clientId,
+          roundNumber: roundBeingReset,
+        }),
       ).unwrap();
-    } catch {
-      // silent
+      setResetRound(null);
+      setResetPreview(null);
+      toast({
+        title: t("reportWizard.resetRoundSuccessTitle"),
+        description: t("reportWizard.resetRoundSuccessBody", {
+          round: roundBeingReset,
+        }),
+      });
+      dispatch(fetchPanelClient(clientId));
+      dispatch(fetchPanelCase(caseId));
+      onPdfUploaded(roundBeingReset);
+    } catch (err) {
+      toast({
+        variant: "destructive",
+        title: t("reportWizard.resetRoundErrorTitle"),
+        description:
+          typeof err === "string" ? err : t("reportWizard.resetRoundErrorBody"),
+      });
     } finally {
-      setDeleting((p) => ({ ...p, [pdf.id]: false }));
+      setResetConfirming(false);
+    }
+  };
+
+  const handleResendConfirm = async () => {
+    const pdf = resendConfirmPdf;
+    if (!pdf || resending[pdf.id]) return;
+    setResending((p) => ({ ...p, [pdf.id]: true }));
+    try {
+      const result = await dispatch(
+        resendRoundReportPdf({ pdfId: pdf.id }),
+      ).unwrap();
+      setResendConfirmPdf(null);
+      toast({
+        title: t("reportWizard.resendRoundSuccessTitle"),
+        description: t("reportWizard.resendRoundSuccessBody", {
+          round: result.round_number,
+          partners: result.partners_emailed,
+        }),
+      });
+    } catch (err) {
+      toast({
+        variant: "destructive",
+        title: t("reportWizard.resendRoundErrorTitle"),
+        description:
+          typeof err === "string" ? err : t("reportWizard.resendRoundErrorBody"),
+      });
+    } finally {
+      setResending((p) => ({ ...p, [pdf.id]: false }));
     }
   };
 
@@ -549,7 +747,9 @@ function ReportsTab({
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-2 rounded-xl border border-primary/20 bg-primary/[0.04] p-3">
         <div>
-          <p className="text-sm font-semibold">{t("reportWizard.panelTitle")}</p>
+          <p className="text-sm font-semibold">
+            {t("reportWizard.panelTitle")}
+          </p>
           <p className="text-[11px] text-muted-foreground mt-0.5">
             {t("reportWizard.panelBlurb")}
           </p>
@@ -570,8 +770,13 @@ function ReportsTab({
           {t("reports.timelineTitle")}
         </p>
         <div className="flex gap-1.5 overflow-x-auto pb-0.5">
-          {[1, 2, 3, 4, 5].map((round) => {
-            const active = isReportRoundActive(round, pipelineStage);
+          {roundList.map((round) => {
+            const active = isReportRoundActive(
+              round,
+              pipelineStage,
+              maxRounds,
+              highestPublished,
+            );
             const report = getReport(round);
             const pdfs = getPdfs(round);
             const dates = parseReportDatesFromSummary(report?.summary_md);
@@ -613,12 +818,113 @@ function ReportsTab({
         onOpenChange={setWizardOpen}
         caseId={caseId}
         clientFirstName={clientFirstName}
+        clientPreferredLanguage={preferredLanguage === "es" ? "es" : "en"}
         suggestedRound={suggestedRound}
+        maxRounds={maxRounds}
+        compareMode={compareMode}
         onPublished={() => {
           onPdfUploaded(suggestedRound);
           setWizardOpen(false);
         }}
       />
+
+      <div className="rounded-xl border border-border bg-muted/20 p-3 space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-xs font-semibold text-foreground">
+            {t("reportWizard.extendedRoundsTitle")}
+          </p>
+          {extendedRoundsLegend({
+            maxRounds,
+            highestPublished,
+          }) ? (
+            <span className="text-[10px] font-bold bg-secondary text-secondary-foreground border border-border px-1.5 py-0.5 rounded-full">
+              {extendedRoundsLegend({
+                maxRounds,
+                highestPublished,
+              })}
+            </span>
+          ) : null}
+        </div>
+        <p className="text-[11px] text-muted-foreground leading-relaxed">
+          {t("reportWizard.extendedRoundsHint")}
+        </p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label className="text-[11px] font-medium text-muted-foreground">
+              {t("reportWizard.maxRoundsLabel")}
+            </label>
+            <Select
+              value={maxRoundsDraft}
+              onValueChange={setMaxRoundsDraft}
+            >
+              <SelectTrigger className="mt-1 h-9">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {Array.from(
+                  { length: ABSOLUTE_MAX_ROUNDS - DEFAULT_MAX_ROUNDS + 1 },
+                  (_, i) => DEFAULT_MAX_ROUNDS + i,
+                ).map((n) => (
+                  <SelectItem key={n} value={String(n)}>
+                    {n === DEFAULT_MAX_ROUNDS
+                      ? t("reportWizard.maxRoundsStandard", { n })
+                      : t("reportWizard.maxRoundsSpecial", { n })}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div>
+            <label className="text-[11px] font-medium text-muted-foreground">
+              {t("reportWizard.compareModeLabel")}
+            </label>
+            <Select
+              value={compareModeDraft}
+              onValueChange={(v) =>
+                setCompareModeDraft(v === "chain" ? "chain" : "baseline")
+              }
+            >
+              <SelectTrigger className="mt-1 h-9">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="baseline">
+                  {t("reportWizard.compareModeBaseline")}
+                </SelectItem>
+                <SelectItem value="chain">
+                  {t("reportWizard.compareModeChain")}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-[10px] text-muted-foreground mt-1 leading-snug">
+              {t("reportWizard.compareModeHint")}
+            </p>
+          </div>
+          <div className="sm:col-span-2">
+            <label className="text-[11px] font-medium text-muted-foreground">
+              {t("reportWizard.nextDisputeDateLabel")}
+            </label>
+            <Input
+              type="date"
+              className="mt-1 h-9"
+              value={nextDateDraft}
+              onChange={(e) => setNextDateDraft(e.target.value)}
+            />
+          </div>
+        </div>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={savingExtended}
+          onClick={() => void saveExtendedRounds()}
+        >
+          {savingExtended ? (
+            <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+          ) : null}
+          {t("reportWizard.extendedRoundsSave")}
+        </Button>
+      </div>
 
       {!inRounds && pipelineStage !== "docs_ready" && (
         <div className="flex items-start gap-2.5 rounded-xl bg-primary/[0.06] border border-primary/15 p-3">
@@ -629,8 +935,13 @@ function ReportsTab({
         </div>
       )}
 
-      {[1, 2, 3, 4, 5].map((round) => {
-        const active = isReportRoundActive(round, pipelineStage);
+      {roundList.map((round) => {
+        const active = isReportRoundActive(
+          round,
+          pipelineStage,
+          maxRounds,
+          highestPublished,
+        );
         const report = getReport(round);
         const pdfs = getPdfs(round);
 
@@ -659,7 +970,7 @@ function ReportsTab({
                 R{round}
               </div>
               <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-sm font-semibold">
                     {t("reportWizard.roundReportsTitle", { n: round })}
                   </span>
@@ -671,6 +982,15 @@ function ReportsTab({
                       {pdfs.length} PDF{pdfs.length !== 1 ? "s" : ""}
                     </span>
                   )}
+                  {!report &&
+                    pdfs.length === 0 &&
+                    getSessions(round).length > 0 && (
+                      <span className="text-[9px] font-bold bg-primary/10 text-primary border border-primary/25 px-1.5 py-0.5 rounded-full">
+                        {t("reportWizard.wizardSessionBadge", {
+                          status: getSessions(round)[0]?.status || "draft",
+                        })}
+                      </span>
+                    )}
                 </div>
                 {report && (
                   <div className="text-[10px] text-muted-foreground mt-0.5 flex flex-wrap items-center gap-2">
@@ -703,6 +1023,17 @@ function ReportsTab({
                   </div>
                 )}
               </div>
+              {canResetRound && hasResettableData(round) && (
+                <button
+                  type="button"
+                  onClick={() => void openResetDialog(round)}
+                  className="inline-flex items-center gap-1 shrink-0 text-[10px] font-semibold text-destructive hover:text-destructive/90 bg-destructive/10 hover:bg-destructive/15 border border-destructive/25 px-2 py-1 rounded-md transition-colors"
+                  data-testid={`reset-round-${round}`}
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  {t("reportWizard.resetRound")}
+                </button>
+              )}
             </div>
 
             {active && (
@@ -714,8 +1045,8 @@ function ReportsTab({
                         key={pdf.id}
                         pdf={pdf}
                         onView={openPdfPreview}
-                        onDelete={handleDelete}
-                        deleting={!!deleting[pdf.id]}
+                        onResend={(pdf) => setResendConfirmPdf(pdf)}
+                        resending={!!resending[pdf.id]}
                       />
                     ))}
                   </div>
@@ -737,6 +1068,142 @@ function ReportsTab({
           </div>
         );
       })}
+
+      <AlertDialog
+        open={!!resendConfirmPdf}
+        onOpenChange={(o) => {
+          if (!o && !(resendConfirmPdf && resending[resendConfirmPdf.id])) {
+            setResendConfirmPdf(null);
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {t("reportWizard.resendRoundConfirmTitle")}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("reportWizard.resendRoundConfirmBody", {
+                round: resendConfirmPdf?.round_number ?? "",
+                file: resendConfirmPdf?.file_name ?? "",
+              })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              disabled={
+                !!(resendConfirmPdf && resending[resendConfirmPdf.id])
+              }
+            >
+              {t("common.cancel")}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              disabled={
+                !!(resendConfirmPdf && resending[resendConfirmPdf.id])
+              }
+              onClick={(e) => {
+                e.preventDefault();
+                void handleResendConfirm();
+              }}
+            >
+              {resendConfirmPdf && resending[resendConfirmPdf.id] ? (
+                <Loader2 className="w-4 h-4 animate-spin mr-2" />
+              ) : null}
+              {t("reportWizard.resendRoundConfirmAction")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={resetRound != null}
+        onOpenChange={(o) => {
+          if (!o && !resetConfirming && !resetLoading) {
+            setResetRound(null);
+            setResetPreview(null);
+          }
+        }}
+      >
+        <AlertDialogContent className="max-w-md">
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {t("reportWizard.resetRoundConfirmTitle", {
+                round: resetRound ?? "",
+              })}
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2 text-sm text-muted-foreground">
+                {resetLoading && (
+                  <div className="flex items-center gap-2 py-2">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    {t("reportWizard.resetRoundLoading")}
+                  </div>
+                )}
+                {!resetLoading && resetPreview && (
+                  <>
+                    <p>{t("reportWizard.resetRoundConfirmIntro")}</p>
+                    <ul className="list-disc pl-4 space-y-1 text-foreground/90">
+                      <li>
+                        {t("reportWizard.resetRoundCheckRounds", {
+                          rounds: resetPreview.rounds_with_data.join(", "),
+                        })}
+                      </li>
+                      <li>
+                        {t("reportWizard.resetRoundCheckPipeline", {
+                          from: resetPreview.pipeline.from || "—",
+                          to: resetPreview.pipeline.to || "—",
+                        })}
+                      </li>
+                      <li>
+                        {t("reportWizard.resetRoundCheckCounts", {
+                          reports: resetPreview.report_ids.length,
+                          pdfs: resetPreview.pdf_ids.length,
+                          sessions: resetPreview.session_ids.length,
+                        })}
+                      </li>
+                      {(resetPreview.staged_pdf_ids?.length || 0) > 0 && (
+                        <li>
+                          {t("reportWizard.resetRoundCheckStaged", {
+                            count: resetPreview.staged_pdf_ids!.length,
+                          })}
+                        </li>
+                      )}
+                    </ul>
+                    {(resetPreview.warnings || []).length > 0 &&
+                      (resetPreview.warnings || []).map((w) => (
+                      <p
+                        key={w}
+                        className="text-[12px] text-destructive/90 leading-relaxed"
+                      >
+                        {t("reportWizard.resetRoundEmailWarning")}
+                      </p>
+                    ))}
+                  </>
+                )}
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={resetConfirming || resetLoading}>
+              {t("common.cancel")}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              disabled={resetConfirming || resetLoading || !resetPreview}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={(e) => {
+                e.preventDefault();
+                void handleResetConfirm();
+              }}
+              data-testid="reset-round-confirm"
+            >
+              {resetConfirming ? (
+                <Loader2 className="w-4 h-4 animate-spin mr-2" />
+              ) : null}
+              {t("reportWizard.resetRoundConfirmAction")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* PDF Preview Dialog */}
       <Dialog open={!!previewPdf} onOpenChange={(o) => !o && closePdfPreview()}>
@@ -807,13 +1274,111 @@ function OverviewTab({ client, payments }: { client: any; payments: any[] }) {
   const { clientReferrersLoading, clientReferrersSaving } = useAppSelector(
     (s) => s.admin,
   );
-  const [referralCategory, setReferralCategory] = useState<
-    ReferralCategory | ""
-  >((client?.referral_category as ReferralCategory | null) ?? "");
   const [referrerSlots, setReferrerSlots] = useState<ClientReferrerSlotDraft[]>(
     () => emptyReferrerSlots(1),
   );
+  const [referralCategory, setReferralCategory] = useState<
+    ReferralCategory | ""
+  >("");
   const [partnersLoaded, setPartnersLoaded] = useState(false);
+  const [contactEditing, setContactEditing] = useState(false);
+  const [contactSaving, setContactSaving] = useState(false);
+  const [contactDraft, setContactDraft] = useState({
+    first_name: "",
+    last_name: "",
+    email: "",
+    phone: "",
+    preferred_language: "en" as "en" | "es",
+  });
+
+  useEffect(() => {
+    setContactEditing(false);
+    setContactDraft({
+      first_name: String(client?.first_name || ""),
+      last_name: String(client?.last_name || ""),
+      email: String(client?.email || ""),
+      phone: String(client?.phone || ""),
+      preferred_language: client?.preferred_language === "es" ? "es" : "en",
+    });
+  }, [
+    client?.id,
+    client?.first_name,
+    client?.last_name,
+    client?.email,
+    client?.phone,
+    client?.preferred_language,
+  ]);
+
+  const startContactEdit = () => {
+    setContactDraft({
+      first_name: String(client?.first_name || ""),
+      last_name: String(client?.last_name || ""),
+      email: String(client?.email || ""),
+      phone: String(client?.phone || ""),
+      preferred_language: client?.preferred_language === "es" ? "es" : "en",
+    });
+    setContactEditing(true);
+  };
+
+  const handleSaveContact = async () => {
+    if (!client?.id) return;
+    const first = contactDraft.first_name.trim();
+    const last = contactDraft.last_name.trim();
+    const email = contactDraft.email.trim().toLowerCase();
+    const phone = contactDraft.phone.trim();
+    if (!first || !last) {
+      toast({
+        title: t("adminPipeline.contactSaveError"),
+        description: t("adminPipeline.contactNameRequired"),
+        variant: "destructive",
+      });
+      return;
+    }
+    if (!email && !phone) {
+      toast({
+        title: t("adminPipeline.contactSaveError"),
+        description: t("adminPipeline.contactEmailOrPhoneRequired"),
+        variant: "destructive",
+      });
+      return;
+    }
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      toast({
+        title: t("adminPipeline.contactSaveError"),
+        description: t("adminPipeline.contactEmailInvalid"),
+        variant: "destructive",
+      });
+      return;
+    }
+    setContactSaving(true);
+    try {
+      const res = await dispatch(
+        updateAdminClient({
+          id: Number(client.id),
+          first_name: first,
+          last_name: last,
+          email: email || null,
+          phone: phone || null,
+          ...(isAffiliate
+            ? {}
+            : { preferred_language: contactDraft.preferred_language }),
+        }),
+      );
+      if (!updateAdminClient.fulfilled.match(res)) {
+        toast({
+          title: t("adminPipeline.contactSaveError"),
+          description: String(res.payload || ""),
+          variant: "destructive",
+        });
+        return;
+      }
+      setContactEditing(false);
+      toast({ title: t("adminPipeline.contactSaveSuccess") });
+      await dispatch(fetchPanelClient(Number(client.id)));
+    } finally {
+      setContactSaving(false);
+    }
+  };
 
   useEffect(() => {
     if (isAffiliate) return;
@@ -896,36 +1461,174 @@ function OverviewTab({ client, payments }: { client: any; payments: any[] }) {
 
   return (
     <div className="space-y-4">
+      {client?.id && !isProspectLead(client) && (
+        <ClientPreSaleAnalysisCard clientId={Number(client.id)} />
+      )}
       <ClientLabelsEditor clientId={client.id} initialLabels={client.labels} />
       <div className="bg-muted/40 rounded-xl p-4 space-y-2.5">
-        <h3 className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-          Contact
-        </h3>
-        <div className="space-y-2 text-sm">
-          <div className="flex items-center gap-2 text-foreground/80">
-            <Mail className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-            {client.email ? (
-              client.email
-            ) : (
-              <span className="italic text-muted-foreground/70">
-                {t("adminHelpers.noEmailShort")}
-              </span>
-            )}
-          </div>
-          {client.phone && (
-            <div className="flex items-center gap-2 text-foreground/80">
-              <Phone className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-              {client.phone}
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            {t("adminPipeline.contactHeading")}
+          </h3>
+          {!contactEditing ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-8 px-2.5 text-xs gap-1.5"
+              onClick={startContactEdit}
+              data-testid="panel-edit-contact"
+            >
+              <Pencil className="w-3.5 h-3.5" />
+              {t("adminPipeline.contactEdit")}
+            </Button>
+          ) : (
+            <div className="flex items-center gap-1">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                disabled={contactSaving}
+                onClick={() => setContactEditing(false)}
+              >
+                <X className="w-3 h-3 mr-1" />
+                {t("common.cancel")}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                disabled={contactSaving}
+                onClick={() => void handleSaveContact()}
+              >
+                {contactSaving ? (
+                  <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                ) : (
+                  <Check className="w-3 h-3 mr-1" />
+                )}
+                {t("common.save")}
+              </Button>
             </div>
           )}
-          {!client.email && (
-            <NoEmailWarning hasPhone={!!client.phone} className="mt-2" />
-          )}
-          <div className="flex items-center gap-2 text-foreground/80">
-            <Calendar className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-            Joined {fmtDate(client.created_at)}
-          </div>
         </div>
+        {contactEditing ? (
+          <div className="space-y-2.5">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <Input
+                value={contactDraft.first_name}
+                onChange={(e) =>
+                  setContactDraft((d) => ({
+                    ...d,
+                    first_name: e.target.value,
+                  }))
+                }
+                placeholder={t("adminPipeline.contactFirstName")}
+                disabled={contactSaving}
+              />
+              <Input
+                value={contactDraft.last_name}
+                onChange={(e) =>
+                  setContactDraft((d) => ({
+                    ...d,
+                    last_name: e.target.value,
+                  }))
+                }
+                placeholder={t("adminPipeline.contactLastName")}
+                disabled={contactSaving}
+              />
+            </div>
+            <Input
+              type="email"
+              value={contactDraft.email}
+              onChange={(e) =>
+                setContactDraft((d) => ({ ...d, email: e.target.value }))
+              }
+              placeholder={t("adminPipeline.contactEmail")}
+              disabled={contactSaving}
+            />
+            <Input
+              value={contactDraft.phone}
+              onChange={(e) =>
+                setContactDraft((d) => ({ ...d, phone: e.target.value }))
+              }
+              placeholder={t("adminPipeline.contactPhone")}
+              disabled={contactSaving}
+            />
+            {!isAffiliate && (
+              <Select
+                value={contactDraft.preferred_language}
+                onValueChange={(v) =>
+                  setContactDraft((d) => ({
+                    ...d,
+                    preferred_language: v === "es" ? "es" : "en",
+                  }))
+                }
+                disabled={contactSaving}
+              >
+                <SelectTrigger>
+                  <SelectValue
+                    placeholder={t("adminPipeline.contactLanguage")}
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="en">
+                    {t("adminPipeline.contactLanguageEn")}
+                  </SelectItem>
+                  <SelectItem value="es">
+                    {t("adminPipeline.contactLanguageEs")}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            )}
+            {!contactDraft.email.trim() && (
+              <NoEmailWarning
+                hasPhone={!!contactDraft.phone.trim()}
+                className="mt-1"
+              />
+            )}
+          </div>
+        ) : (
+          <div className="space-y-2 text-sm">
+            <div className="flex items-center gap-2 text-foreground/80">
+              <Mail className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+              {client.email ? (
+                client.email
+              ) : (
+                <span className="italic text-muted-foreground/70">
+                  {t("adminHelpers.noEmailShort")}
+                </span>
+              )}
+            </div>
+            {client.phone && (
+              <div className="flex items-center gap-2 text-foreground/80">
+                <Phone className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                <ContactPhoneActions
+                  phone={client.phone}
+                  clientId={Number(client.id)}
+                  clientName={`${client.first_name || ""} ${client.last_name || ""}`.trim()}
+                />
+              </div>
+            )}
+            <div className="flex items-center gap-2 text-foreground/80">
+              <LangBadge lang={client.preferred_language} />
+              <span className="text-xs text-muted-foreground">
+                {client.preferred_language === "es"
+                  ? t("adminPipeline.contactLanguageEs")
+                  : t("adminPipeline.contactLanguageEn")}
+              </span>
+            </div>
+            {!client.email && (
+              <NoEmailWarning hasPhone={!!client.phone} className="mt-2" />
+            )}
+            <div className="flex items-center gap-2 text-foreground/80">
+              <Calendar className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+              {t("adminPipeline.contactJoined", {
+                date: fmtDate(client.created_at),
+              })}
+            </div>
+          </div>
+        )}
       </div>
 
       {!isAffiliate && (
@@ -1012,7 +1715,9 @@ function RoundCalendarPanel({ caseId }: { caseId: number }) {
   const dispatch = useAppDispatch();
   const { toast } = useToast();
   const { t } = useTranslation();
-  const [draft, setDraft] = useState<RoundScheduleInput>(emptyRoundScheduleInput());
+  const [draft, setDraft] = useState<RoundScheduleInput>(
+    emptyRoundScheduleInput(),
+  );
   const [lastSentAt, setLastSentAt] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -1061,9 +1766,7 @@ function RoundCalendarPanel({ caseId }: { caseId: number }) {
           ? t("adminPipeline.roundCalendarSent")
           : t("adminPipeline.roundCalendarSaved"),
         description:
-          alsoSend && res.sent_to?.length
-            ? res.sent_to.join(", ")
-            : undefined,
+          alsoSend && res.sent_to?.length ? res.sent_to.join(", ") : undefined,
       });
       if (res.schedule?.last_sent_at) setLastSentAt(res.schedule.last_sent_at);
       setDraft((d) => ({ ...d, send_calendar: false }));
@@ -1276,7 +1979,9 @@ function PaymentScheduleTab({ caseId }: { caseId: number }) {
               >
                 {eff.charAt(0).toUpperCase() + eff.slice(1)}
               </span>
-              <span className="text-sm font-bold">{fmtMoney(sp.amount_cents)}</span>
+              <span className="text-sm font-bold">
+                {fmtMoney(sp.amount_cents)}
+              </span>
               <AdminSplitActions split={sp} onDone={refresh} />
             </div>
           </div>
@@ -1386,8 +2091,12 @@ export function ClientPanelSheet({
 }: ClientPanelSheetProps) {
   const dispatch = useAppDispatch();
   const { t } = useTranslation();
-  const { panelClient: pd, panelLoading, caseDocuments, caseDocumentsLoading } =
-    useAppSelector((s) => s.admin);
+  const {
+    panelClient: pd,
+    panelLoading,
+    caseDocuments,
+    caseDocumentsLoading,
+  } = useAppSelector((s) => s.admin);
   const {
     clientCompletions,
     caseCompletions,
@@ -1397,7 +2106,13 @@ export function ClientPanelSheet({
   } = useAppSelector((s) => s.adminTasks);
 
   const [panelTab, setPanelTab] = useState<
-    "overview" | "tasks" | "requests" | "reports" | "history" | "schedule"
+    | "overview"
+    | "analysis"
+    | "tasks"
+    | "requests"
+    | "reports"
+    | "history"
+    | "schedule"
   >("tasks");
   const prospectTabInitialized = useRef(false);
   const [rejectingTaskId, setRejectingTaskId] = useState<number | null>(null);
@@ -1416,6 +2131,11 @@ export function ClientPanelSheet({
   const [reopenNotify, setReopenNotify] = useState(false);
   const [reopenReason, setReopenReason] = useState("");
   const [reopenSending, setReopenSending] = useState(false);
+  const [deleteDocTarget, setDeleteDocTarget] = useState<{
+    id: number;
+    file_name: string;
+  } | null>(null);
+  const [deleteDocSending, setDeleteDocSending] = useState(false);
   const { toast } = useToast();
 
   // Fetch panel data when opening
@@ -1458,6 +2178,7 @@ export function ClientPanelSheet({
     if (!open) {
       closePreview();
       dispatch(clearPanelClient());
+      dispatch(clearAdminCreditAnalysis());
     }
   }, [open, closePreview, dispatch]);
 
@@ -1470,6 +2191,11 @@ export function ClientPanelSheet({
   const panelPayments: any[] = pd?.payments ?? [];
   const panelHistory: any[] = pd?.pipeline_history ?? [];
   const panelReports: any[] = pd?.reports ?? [];
+  const panelWizardSessions: Array<{
+    id: number;
+    round_number: number;
+    status: string;
+  }> = pd?.wizard_sessions ?? [];
   const approvedCount = panelCompletions.filter(
     (c) => c.admin_review_status === "approved",
   ).length;
@@ -1634,40 +2360,41 @@ export function ClientPanelSheet({
     }
   }, []);
 
-  const openCaseDocPreview = useCallback(async (doc: {
-    id: number;
-    file_name: string;
-    mime_type?: string;
-  }) => {
-    setPreviewDoc({
-      file_name: doc.file_name,
-      file_mime: doc.mime_type,
-    });
-    setPreviewLoading(true);
-    setPreviewUrl(null);
-    try {
-      const resp = await api.get(`/admin/client-documents/${doc.id}/file`, {
-        responseType: "blob",
+  const openCaseDocPreview = useCallback(
+    async (doc: { id: number; file_name: string; mime_type?: string }) => {
+      setPreviewDoc({
+        file_name: doc.file_name,
+        file_mime: doc.mime_type,
       });
-      setPreviewUrl(URL.createObjectURL(resp.data as Blob));
-    } catch {
+      setPreviewLoading(true);
       setPreviewUrl(null);
-    } finally {
-      setPreviewLoading(false);
-    }
-  }, []);
+      try {
+        const resp = await api.get(`/admin/client-documents/${doc.id}/file`, {
+          responseType: "blob",
+        });
+        setPreviewUrl(URL.createObjectURL(resp.data as Blob));
+      } catch {
+        setPreviewUrl(null);
+      } finally {
+        setPreviewLoading(false);
+      }
+    },
+    [],
+  );
 
   const isPreviewImage = previewDoc?.file_mime?.startsWith("image/");
   const isPreviewPdf = previewDoc?.file_mime === "application/pdf";
   const isProspect = isProspectLead(pd?.client, {
     hasEnrolledCase: Boolean(
       pd?.case_info &&
-        pd.case_info.status === "active" &&
-        pd.case_info.pipeline_stage &&
-        pd.case_info.pipeline_stage !== "prospect",
+      pd.case_info.status === "active" &&
+      pd.case_info.pipeline_stage &&
+      pd.case_info.pipeline_stage !== "prospect",
     ),
   });
   const resolvedCaseId = caseId ?? pd?.case_info?.id ?? null;
+  const resolvedClientId =
+    clientId ?? (pd?.client?.id ? Number(pd.client.id) : null);
 
   const handleConvertClick = () => {
     if (!pd?.client || !onConvertProspect) return;
@@ -1689,7 +2416,7 @@ export function ClientPanelSheet({
       <Sheet open={open} onOpenChange={(o) => !o && onClose()}>
         <SheetContent
           side="right"
-          className="w-full sm:max-w-[520px] bg-background border-l border-border p-0 flex flex-col [&>button:first-of-type]:hidden"
+          className="w-full sm:max-w-3xl lg:max-w-4xl bg-background border-l border-border p-0 flex flex-col [&>button:first-of-type]:hidden"
         >
           <SheetTitle className="sr-only">Client Detail</SheetTitle>
           {panelLoading || (!pd && open) ? (
@@ -1794,7 +2521,9 @@ export function ClientPanelSheet({
                   <div className="flex items-start gap-2">
                     <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
                     <div>
-                      <p className="font-semibold">Duplicate active case detected</p>
+                      <p className="font-semibold">
+                        Duplicate active case detected
+                      </p>
                       <p className="mt-1 text-destructive/90 leading-relaxed">
                         This client has other active cases (
                         {pd.sibling_cases
@@ -1814,6 +2543,7 @@ export function ClientPanelSheet({
                 {(
                   [
                     "overview",
+                    ...(isProspect ? (["analysis"] as const) : []),
                     "tasks",
                     "requests",
                     "reports",
@@ -1837,7 +2567,9 @@ export function ClientPanelSheet({
                         ? "Schedule"
                         : tab === "requests"
                           ? "Requests"
-                          : tab.charAt(0).toUpperCase() + tab.slice(1)}
+                          : tab === "analysis"
+                            ? t("prospectAnalysis.tab")
+                            : tab.charAt(0).toUpperCase() + tab.slice(1)}
                   </button>
                 ))}
               </div>
@@ -1846,6 +2578,19 @@ export function ClientPanelSheet({
               <div className="flex-1 overflow-y-auto p-5">
                 {panelTab === "overview" && (
                   <OverviewTab client={pd.client} payments={panelPayments} />
+                )}
+
+                {panelTab === "analysis" && isProspect && resolvedClientId && (
+                  <ProspectCreditAnalysisSection
+                    variant="admin"
+                    clientId={resolvedClientId}
+                    prefilled={{
+                      first_name: pd.client?.first_name,
+                      last_name: pd.client?.last_name,
+                      email: pd.client?.email,
+                      preferred_language: pd.client?.preferred_language,
+                    }}
+                  />
                 )}
 
                 {panelTab === "tasks" && (
@@ -1871,172 +2616,199 @@ export function ClientPanelSheet({
                       </div>
                     ) : (
                       <>
-                    <div className="flex items-center justify-between pb-1">
-                      <span className="text-[11px] text-muted-foreground font-medium">
-                        Case onboarding tasks
-                      </span>
-                      <span className="font-mono text-[10px] font-bold text-primary/70 bg-primary/8 border border-primary/15 px-1.5 py-0.5 rounded">
-                        {pd.case_info?.case_number ?? ""}
-                      </span>
-                    </div>
-                    {(caseCompletionsLoading || clientCompletionsLoading) &&
-                    panelCompletions.length === 0 ? (
-                      <div className="flex items-center justify-center py-8">
-                        <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
-                      </div>
-                    ) : panelCompletions.length === 0 ? (
-                      <p className="text-sm text-muted-foreground py-4 text-center">
-                        No task templates configured.
-                      </p>
-                    ) : (
-                      panelCompletions.map((completion: any) => (
-                        <TaskCompletionCard
-                          key={completion.id ?? completion.task_template_id}
-                          task={completion}
-                          isRejecting={rejectingTaskId === completion.id}
-                          rejectReason={rejectReason}
-                          actionLoading={
-                            actionLoadingId === completion.id || taskSaving
-                          }
-                          remindLoading={
-                            remindSending &&
-                            (remindTarget?.template_id ??
-                              remindTarget?.task_template_id) ===
-                              (completion.template_id ??
-                                completion.task_template_id)
-                          }
-                          onApprove={() =>
-                            completion.id && handleApproveTask(completion.id)
-                          }
-                          onStartReject={() => {
-                            if (completion.id) {
-                              setRejectingTaskId(completion.id);
-                              setRejectReason("");
-                            }
-                          }}
-                          onCancelReject={() => {
-                            setRejectingTaskId(null);
-                            setRejectReason("");
-                          }}
-                          onRejectReasonChange={setRejectReason}
-                          onConfirmReject={() =>
-                            completion.id && handleRejectTask(completion.id)
-                          }
-                          onPreview={
-                            completion.task_type === "upload" &&
-                            completion.file_name
-                              ? () => openPreview(completion)
-                              : undefined
-                          }
-                          onRemind={
-                            caseId &&
-                            (completion.template_id ||
-                              completion.task_template_id)
-                              ? () => setRemindTarget(completion)
-                              : undefined
-                          }
-                          onReopen={
-                            caseId && completion.id
-                              ? () => {
-                                  setReopenTarget(completion);
-                                  setReopenNotify(false);
-                                  setReopenReason("");
-                                }
-                              : undefined
-                          }
-                          onAdminUpload={
-                            caseId &&
-                            completion.task_type === "upload" &&
-                            taskSlugToDocType(completion.slug)
-                              ? () => openAdminUploadForTask(completion)
-                              : undefined
-                          }
-                          reopenLoading={
-                            reopenSending &&
-                            reopenTarget?.id === completion.id
-                          }
-                        />
-                      ))
-                    )}
-
-                    {caseId && (
-                      <div className="mt-4 pt-4 border-t border-border space-y-2">
-                        <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center justify-between pb-1">
                           <span className="text-[11px] text-muted-foreground font-medium">
-                            {t("adminHelpers.caseDocuments")}
+                            Case onboarding tasks
                           </span>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            className="h-7 text-[11px] gap-1.5"
-                            onClick={() => {
-                              setUploadPrefillDocType(null);
-                              setUploadDialogOpen(true);
-                            }}
-                          >
-                            <Upload className="w-3 h-3" />
-                            {t("adminHelpers.uploadCaseDocs")}
-                          </Button>
+                          <span className="font-mono text-[10px] font-bold text-primary/70 bg-primary/8 border border-primary/15 px-1.5 py-0.5 rounded">
+                            {pd.case_info?.case_number ?? ""}
+                          </span>
                         </div>
-                        {caseDocumentsLoading && caseDocuments.length === 0 ? (
-                          <div className="flex items-center justify-center py-4">
-                            <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+                        {(caseCompletionsLoading || clientCompletionsLoading) &&
+                        panelCompletions.length === 0 ? (
+                          <div className="flex items-center justify-center py-8">
+                            <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
                           </div>
-                        ) : caseDocuments.length === 0 ? (
-                          <p className="text-xs text-muted-foreground py-2 text-center">
-                            {t("adminHelpers.caseDocumentsEmpty")}
+                        ) : panelCompletions.length === 0 ? (
+                          <p className="text-sm text-muted-foreground py-4 text-center">
+                            No task templates configured.
                           </p>
                         ) : (
-                          <ul className="space-y-1.5">
-                            {caseDocuments.map((doc: any) => {
-                              const uploader =
-                                doc.uploaded_by_first_name ||
-                                doc.uploaded_by_last_name
-                                  ? `${doc.uploaded_by_first_name ?? ""} ${doc.uploaded_by_last_name ?? ""}`.trim()
-                                  : t("adminHelpers.uploadedByClient");
-                              return (
-                                <li
-                                  key={doc.id}
-                                  className="flex items-start gap-2 rounded-lg border border-border bg-muted/30 px-2.5 py-2"
-                                >
-                                  <FileText className="w-3.5 h-3.5 text-muted-foreground shrink-0 mt-0.5" />
-                                  <div className="min-w-0 flex-1">
-                                    <div className="text-xs font-medium truncate">
-                                      {doc.file_name}
-                                    </div>
-                                    <div className="text-[10px] text-muted-foreground mt-0.5">
-                                      {t(`adminHelpers.docTypes.${doc.doc_type}`, {
-                                        defaultValue: doc.doc_type,
-                                      })}
-                                      {" · "}
-                                      {t("adminHelpers.uploadedBy")} {uploader}
-                                    </div>
-                                  </div>
-                                  <button
-                                    type="button"
-                                    onClick={() => openCaseDocPreview(doc)}
-                                    className="inline-flex items-center gap-1 text-[10px] text-primary hover:underline shrink-0"
-                                  >
-                                    <Eye className="w-3 h-3" />
-                                    {t("adminHelpers.viewDocument")}
-                                  </button>
-                                </li>
-                              );
-                            })}
-                          </ul>
+                          panelCompletions.map((completion: any) => (
+                            <TaskCompletionCard
+                              key={completion.id ?? completion.task_template_id}
+                              task={completion}
+                              isRejecting={rejectingTaskId === completion.id}
+                              rejectReason={rejectReason}
+                              actionLoading={
+                                actionLoadingId === completion.id || taskSaving
+                              }
+                              remindLoading={
+                                remindSending &&
+                                (remindTarget?.template_id ??
+                                  remindTarget?.task_template_id) ===
+                                  (completion.template_id ??
+                                    completion.task_template_id)
+                              }
+                              onApprove={() =>
+                                completion.id &&
+                                handleApproveTask(completion.id)
+                              }
+                              onStartReject={() => {
+                                if (completion.id) {
+                                  setRejectingTaskId(completion.id);
+                                  setRejectReason("");
+                                }
+                              }}
+                              onCancelReject={() => {
+                                setRejectingTaskId(null);
+                                setRejectReason("");
+                              }}
+                              onRejectReasonChange={setRejectReason}
+                              onConfirmReject={() =>
+                                completion.id && handleRejectTask(completion.id)
+                              }
+                              onPreview={
+                                completion.task_type === "upload" &&
+                                completion.file_name
+                                  ? () => openPreview(completion)
+                                  : undefined
+                              }
+                              onRemind={
+                                caseId &&
+                                (completion.template_id ||
+                                  completion.task_template_id)
+                                  ? () => setRemindTarget(completion)
+                                  : undefined
+                              }
+                              onReopen={
+                                caseId && completion.id
+                                  ? () => {
+                                      setReopenTarget(completion);
+                                      setReopenNotify(false);
+                                      setReopenReason("");
+                                    }
+                                  : undefined
+                              }
+                              onAdminUpload={
+                                caseId &&
+                                completion.task_type === "upload" &&
+                                taskSlugToDocType(completion.slug)
+                                  ? () => openAdminUploadForTask(completion)
+                                  : undefined
+                              }
+                              reopenLoading={
+                                reopenSending &&
+                                reopenTarget?.id === completion.id
+                              }
+                            />
+                          ))
                         )}
-                      </div>
-                    )}
 
-                    <div className="mt-2 rounded-xl bg-primary/[0.06] border border-primary/15 p-3 text-[11px] text-muted-foreground leading-relaxed">
-                      Approving all required tasks auto-advances the client to{" "}
-                      <span className="text-primary font-semibold">
-                        Docs Verified
-                      </span>
-                      . Dragging to that stage is blocked until all required
-                      tasks are approved.
-                    </div>
+                        {caseId && (
+                          <div className="mt-4 pt-4 border-t border-border space-y-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-[11px] text-muted-foreground font-medium">
+                                {t("adminHelpers.caseDocuments")}
+                              </span>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="h-7 text-[11px] gap-1.5"
+                                onClick={() => {
+                                  setUploadPrefillDocType(null);
+                                  setUploadDialogOpen(true);
+                                }}
+                              >
+                                <Upload className="w-3 h-3" />
+                                {t("adminHelpers.uploadCaseDocs")}
+                              </Button>
+                            </div>
+                            {caseDocumentsLoading &&
+                            caseDocuments.length === 0 ? (
+                              <div className="flex items-center justify-center py-4">
+                                <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+                              </div>
+                            ) : caseDocuments.length === 0 ? (
+                              <p className="text-xs text-muted-foreground py-2 text-center">
+                                {t("adminHelpers.caseDocumentsEmpty")}
+                              </p>
+                            ) : (
+                              <ul className="space-y-1.5">
+                                {caseDocuments.map((doc: any) => {
+                                  const uploader =
+                                    doc.uploaded_by_first_name ||
+                                    doc.uploaded_by_last_name
+                                      ? `${doc.uploaded_by_first_name ?? ""} ${doc.uploaded_by_last_name ?? ""}`.trim()
+                                      : t("adminHelpers.uploadedByClient");
+                                  return (
+                                    <li
+                                      key={doc.id}
+                                      className="flex items-start gap-2 rounded-lg border border-border bg-muted/30 px-2.5 py-2"
+                                    >
+                                      <FileText className="w-3.5 h-3.5 text-muted-foreground shrink-0 mt-0.5" />
+                                      <div className="min-w-0 flex-1">
+                                        <div className="text-xs font-medium truncate">
+                                          {doc.file_name}
+                                        </div>
+                                        <div className="text-[10px] text-muted-foreground mt-0.5">
+                                          {t(
+                                            `adminHelpers.docTypes.${doc.doc_type}`,
+                                            {
+                                              defaultValue: doc.doc_type,
+                                            },
+                                          )}
+                                          {" · "}
+                                          {t("adminHelpers.uploadedBy")}{" "}
+                                          {uploader}
+                                        </div>
+                                      </div>
+                                      <div className="flex items-center gap-1.5 shrink-0">
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            openCaseDocPreview(doc)
+                                          }
+                                          className="inline-flex items-center gap-1 text-[10px] text-primary hover:underline"
+                                        >
+                                          <Eye className="w-3 h-3" />
+                                          {t("adminHelpers.viewDocument")}
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            setDeleteDocTarget({
+                                              id: Number(doc.id),
+                                              file_name: String(
+                                                doc.file_name || "",
+                                              ),
+                                            })
+                                          }
+                                          className="inline-flex items-center gap-1 text-[10px] text-destructive hover:underline"
+                                          data-testid="case-doc-delete"
+                                        >
+                                          <Trash2 className="w-3 h-3" />
+                                          {t("adminHelpers.deleteDocument")}
+                                        </button>
+                                      </div>
+                                    </li>
+                                  );
+                                })}
+                              </ul>
+                            )}
+                          </div>
+                        )}
+
+                        <div className="mt-2 rounded-xl bg-primary/[0.06] border border-primary/15 p-3 text-[11px] text-muted-foreground leading-relaxed">
+                          Approving all required tasks auto-advances the client
+                          to{" "}
+                          <span className="text-primary font-semibold">
+                            Docs Verified
+                          </span>
+                          . Dragging to that stage is blocked until all required
+                          tasks are approved.
+                        </div>
                       </>
                     )}
                   </div>
@@ -2044,12 +2816,12 @@ export function ClientPanelSheet({
 
                 {panelTab === "requests" &&
                   (resolvedCaseId ? (
-                  <InfoRequestsTab
-                    caseId={resolvedCaseId}
-                    onChanged={() => {
-                      onCaseUpdated();
-                    }}
-                  />
+                    <InfoRequestsTab
+                      caseId={resolvedCaseId}
+                      onChanged={() => {
+                        onCaseUpdated();
+                      }}
+                    />
                   ) : (
                     <p
                       className="text-sm text-muted-foreground py-8 text-center"
@@ -2065,12 +2837,12 @@ export function ClientPanelSheet({
 
                 {panelTab === "schedule" &&
                   (resolvedCaseId ? (
-                  <div className="space-y-6">
-                    <RoundCalendarPanel caseId={resolvedCaseId} />
-                    {!isProspect && (
-                      <PaymentScheduleTab caseId={resolvedCaseId} />
-                    )}
-                  </div>
+                    <div className="space-y-6">
+                      <RoundCalendarPanel caseId={resolvedCaseId} />
+                      {!isProspect && (
+                        <PaymentScheduleTab caseId={resolvedCaseId} />
+                      )}
+                    </div>
                   ) : (
                     <p className="text-sm text-muted-foreground py-8 text-center">
                       {t("adminPipeline.panelProspectNeedsCase")}
@@ -2079,20 +2851,40 @@ export function ClientPanelSheet({
 
                 {panelTab === "reports" &&
                   (clientId && resolvedCaseId && !isProspect ? (
-                  <ReportsTab
-                    reports={panelReports}
-                    pipelineStage={
-                      pd?.case_info?.pipeline_stage ??
-                      pd?.client?.pipeline_stage ??
-                      ""
-                    }
-                    caseId={resolvedCaseId}
-                    clientFirstName={String(pd.client.first_name || "Client")}
-                    onPdfUploaded={() => {
-                      if (resolvedCaseId)
-                        dispatch(fetchPanelCase(resolvedCaseId));
-                    }}
-                  />
+                    <ReportsTab
+                      reports={panelReports}
+                      wizardSessions={panelWizardSessions}
+                      pipelineStage={
+                        pd?.case_info?.pipeline_stage ??
+                        pd?.client?.pipeline_stage ??
+                        ""
+                      }
+                      caseId={resolvedCaseId}
+                      clientId={clientId}
+                      clientFirstName={String(pd.client.first_name || "Client")}
+                      preferredLanguage={
+                        pd.client.preferred_language === "es" ? "es" : "en"
+                      }
+                      maxRounds={
+                        Number(pd?.case_info?.max_rounds) || DEFAULT_MAX_ROUNDS
+                      }
+                      nextDisputeTargetDate={
+                        pd?.case_info?.next_dispute_target_date ?? null
+                      }
+                      reportCompareMode={
+                        pd?.case_info?.report_compare_mode === "chain"
+                          ? "chain"
+                          : "baseline"
+                      }
+                      onPdfUploaded={() => {
+                        if (resolvedCaseId)
+                          dispatch(fetchPanelCase(resolvedCaseId));
+                      }}
+                      onExtendedRoundsSaved={() => {
+                        if (resolvedCaseId)
+                          dispatch(fetchPanelCase(resolvedCaseId));
+                      }}
+                    />
                   ) : (
                     <p className="text-sm text-muted-foreground py-8 text-center">
                       {isProspect
@@ -2199,6 +2991,65 @@ export function ClientPanelSheet({
           }}
         />
       )}
+
+      <AlertDialog
+        open={!!deleteDocTarget}
+        onOpenChange={(v) => {
+          if (!v && !deleteDocSending) setDeleteDocTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {t("adminHelpers.deleteDocumentTitle")}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("adminHelpers.deleteDocumentBody", {
+                name: deleteDocTarget?.file_name || "",
+              })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteDocSending}>
+              {t("common.cancel", { defaultValue: "Cancel" })}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              disabled={deleteDocSending}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={async (e) => {
+                e.preventDefault();
+                if (!deleteDocTarget || !caseId) return;
+                setDeleteDocSending(true);
+                try {
+                  await dispatch(
+                    deleteCaseDocument({
+                      id: deleteDocTarget.id,
+                      caseId,
+                    }),
+                  ).unwrap();
+                  dispatch(fetchCaseTaskCompletions(caseId));
+                  dispatch(fetchPanelCase(caseId));
+                  onCaseUpdated();
+                  toast({ title: t("adminHelpers.deleteDocumentSuccess") });
+                  setDeleteDocTarget(null);
+                } catch (err: any) {
+                  toast({
+                    title: t("adminHelpers.deleteDocumentFailed"),
+                    description: String(err || ""),
+                    variant: "destructive",
+                  });
+                } finally {
+                  setDeleteDocSending(false);
+                }
+              }}
+            >
+              {deleteDocSending
+                ? t("common.deleting", { defaultValue: "Deleting…" })
+                : t("adminHelpers.deleteDocument")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog
         open={!!remindTarget}

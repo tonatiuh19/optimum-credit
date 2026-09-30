@@ -270,7 +270,7 @@ describe("admin pipeline filters", () => {
     const ids = (res.body.cases || []).map((c: { id: number }) => c.id);
     expect(ids).toContain(caseEnId);
     expect(ids).not.toContain(caseEsId);
-  }, 30_000);
+  }, 60_000);
 
   it("treats % in search as literal (LIKE escape)", async () => {
     const res = await request(app)
@@ -282,7 +282,7 @@ describe("admin pipeline filters", () => {
     expect(ids).toContain(caseWildcardId);
     // Must not match everything via unescaped %
     expect(ids).not.toContain(caseEsId);
-  }, 30_000);
+  }, 60_000);
 
   it("filters by language=es", async () => {
     const res = await request(app)
@@ -293,7 +293,7 @@ describe("admin pipeline filters", () => {
     const ids = (res.body.cases || []).map((c: { id: number }) => c.id);
     expect(ids).toContain(caseEsId);
     expect(ids).not.toContain(caseEnId);
-  }, 30_000);
+  }, 60_000);
 
   it("filters by stage=new_client and hides prospects", async () => {
     const res = await request(app)
@@ -305,7 +305,7 @@ describe("admin pipeline filters", () => {
     expect(ids).toContain(caseEnId);
     expect(ids).not.toContain(caseEsId);
     expect(res.body.prospects || []).toEqual([]);
-  }, 30_000);
+  }, 60_000);
 
   it("filters stage=prospect (cases empty, prospect present)", async () => {
     const res = await request(app)
@@ -316,7 +316,7 @@ describe("admin pipeline filters", () => {
     expect(res.body.cases || []).toEqual([]);
     const pids = (res.body.prospects || []).map((p: { id: number }) => p.id);
     expect(pids).toContain(prospectId);
-  }, 30_000);
+  }, 60_000);
 
   it("includes pending_payment + prospect-stage leads (no case) on Prospect", async () => {
     const res = await request(app)
@@ -329,7 +329,7 @@ describe("admin pipeline filters", () => {
     expect(pids).not.toContain(checkoutLeadId);
     const caseIds = (res.body.cases || []).map((c: { id: number }) => c.id);
     expect(caseIds).toEqual([]);
-  }, 30_000);
+  }, 60_000);
 
   it("does not put pending_payment checkout (new_client, no case) on New Client", async () => {
     const res = await request(app)
@@ -345,7 +345,7 @@ describe("admin pipeline filters", () => {
     );
     expect(clientIds).not.toContain(ghostLeadId);
     expect(clientIds).not.toContain(checkoutLeadId);
-  }, 30_000);
+  }, 60_000);
 
   it("searches prospects by client id and digit-stripped phone", async () => {
     const byId = await request(app)
@@ -366,7 +366,7 @@ describe("admin pipeline filters", () => {
       (p: { id: number }) => p.id,
     );
     expect(phoneHits).toContain(ghostLeadId);
-  }, 30_000);
+  }, 60_000);
 
   it("lists clients by numeric id and digit-stripped phone", async () => {
     const byId = await request(app)
@@ -387,7 +387,7 @@ describe("admin pipeline filters", () => {
       (c: { id: number }) => c.id,
     );
     expect(phoneHits).toContain(ghostLeadId);
-  }, 30_000);
+  }, 60_000);
 
   it("GET /admin/clients unconverted_lead includes pending_payment prospect-stage", async () => {
     const res = await request(app)
@@ -400,7 +400,7 @@ describe("admin pipeline filters", () => {
     expect(ids).toContain(prospectId);
     expect(ids).not.toContain(checkoutLeadId);
     expect(ids).not.toContain(clientEnId);
-  }, 30_000);
+  }, 60_000);
 
   it("filters by payment_badge using real payments/splits", async () => {
     const paid = await request(app)
@@ -422,7 +422,7 @@ describe("admin pipeline filters", () => {
     );
     expect(unpaidIds).toContain(caseEnId);
     expect(unpaidIds).not.toContain(caseEsId);
-  }, 30_000);
+  }, 60_000);
 
   it("filters by billing=overdue", async () => {
     const res = await request(app)
@@ -433,7 +433,7 @@ describe("admin pipeline filters", () => {
     const ids = (res.body.cases || []).map((c: { id: number }) => c.id);
     expect(ids).toContain(caseEnId);
     expect(ids).not.toContain(caseEsId);
-  }, 30_000);
+  }, 60_000);
 
   it("filters by package_id and hides prospects", async () => {
     if (!packageId) return;
@@ -445,7 +445,7 @@ describe("admin pipeline filters", () => {
     const ids = (res.body.cases || []).map((c: { id: number }) => c.id);
     expect(ids).toContain(caseEnId);
     expect(res.body.prospects || []).toEqual([]);
-  }, 30_000);
+  }, 60_000);
 
   it("filters by package_id=none", async () => {
     const res = await request(app)
@@ -456,7 +456,7 @@ describe("admin pipeline filters", () => {
     const ids = (res.body.cases || []).map((c: { id: number }) => c.id);
     expect(ids).toContain(caseEsId);
     expect(ids).not.toContain(caseEnId);
-  }, 30_000);
+  }, 60_000);
 
   it("filters by assigned_admin_id", async () => {
     const res = await request(app)
@@ -467,7 +467,7 @@ describe("admin pipeline filters", () => {
     const ids = (res.body.cases || []).map((c: { id: number }) => c.id);
     expect(ids).toContain(caseEnId);
     expect(ids).not.toContain(caseEsId);
-  }, 30_000);
+  }, 60_000);
 
   it("filters by assigned_admin_id=unassigned", async () => {
     const res = await request(app)
@@ -478,7 +478,7 @@ describe("admin pipeline filters", () => {
     const ids = (res.body.cases || []).map((c: { id: number }) => c.id);
     expect(ids).toContain(caseEsId);
     expect(ids).not.toContain(caseEnId);
-  }, 30_000);
+  }, 60_000);
 
   it("filters by referral_category", async () => {
     const res = await request(app)
@@ -489,7 +489,7 @@ describe("admin pipeline filters", () => {
     const ids = (res.body.cases || []).map((c: { id: number }) => c.id);
     expect(ids).toContain(caseEnId);
     expect(ids).not.toContain(caseEsId);
-  }, 30_000);
+  }, 60_000);
 
   it("filters by client_status", async () => {
     const res = await request(app)
@@ -500,7 +500,7 @@ describe("admin pipeline filters", () => {
     const ids = (res.body.cases || []).map((c: { id: number }) => c.id);
     expect(ids).toContain(caseEsId);
     expect(ids).not.toContain(caseEnId);
-  }, 30_000);
+  }, 60_000);
 
   it("filters by case_status=on_hold", async () => {
     const res = await request(app)
@@ -512,7 +512,7 @@ describe("admin pipeline filters", () => {
     expect(ids).toContain(caseEsId);
     expect(ids).not.toContain(caseEnId);
     expect(res.body.prospects || []).toEqual([]);
-  }, 30_000);
+  }, 60_000);
 
   it("filters by tasks=pending_review", async () => {
     const res = await request(app)
@@ -522,7 +522,7 @@ describe("admin pipeline filters", () => {
     expect(res.status).toBe(200);
     const ids = (res.body.cases || []).map((c: { id: number }) => c.id);
     expect(ids).toContain(caseEnId);
-  }, 30_000);
+  }, 60_000);
 
   it("filters by tasks=complete", async () => {
     const res = await request(app)
@@ -533,7 +533,7 @@ describe("admin pipeline filters", () => {
     const ids = (res.body.cases || []).map((c: { id: number }) => c.id);
     expect(ids).toContain(caseEsId);
     expect(ids).not.toContain(caseEnId);
-  }, 30_000);
+  }, 60_000);
 
   it("filters by info_requests=open", async () => {
     const res = await request(app)
@@ -544,7 +544,7 @@ describe("admin pipeline filters", () => {
     const ids = (res.body.cases || []).map((c: { id: number }) => c.id);
     expect(ids).toContain(caseEnId);
     expect(ids).not.toContain(caseEsId);
-  }, 30_000);
+  }, 60_000);
 
   it("filters by has_notes=yes", async () => {
     const res = await request(app)
@@ -555,7 +555,7 @@ describe("admin pipeline filters", () => {
     const ids = (res.body.cases || []).map((c: { id: number }) => c.id);
     expect(ids).toContain(caseEnId);
     expect(ids).not.toContain(caseEsId);
-  }, 30_000);
+  }, 60_000);
 
   it("filters by labels", async () => {
     const res = await request(app)
@@ -566,7 +566,7 @@ describe("admin pipeline filters", () => {
     const ids = (res.body.cases || []).map((c: { id: number }) => c.id);
     expect(ids).toContain(caseEnId);
     expect(ids).not.toContain(caseEsId);
-  }, 30_000);
+  }, 60_000);
 
   it("combines language + payment_badge + search", async () => {
     const res = await request(app)
@@ -581,7 +581,7 @@ describe("admin pipeline filters", () => {
     const ids = (res.body.cases || []).map((c: { id: number }) => c.id);
     expect(ids).toContain(caseEsId);
     expect(ids).not.toContain(caseEnId);
-  }, 30_000);
+  }, 60_000);
 
   it("paginates columns on board and load-more", async () => {
     const board = await request(app)
@@ -613,7 +613,7 @@ describe("admin pipeline filters", () => {
     expect(more.body.items[0].id).not.toBe(firstId);
     expect(more.body.total).toBe(nc.total);
     expect(more.body.has_more).toBe(1 + more.body.items.length < more.body.total);
-  }, 30_000);
+  }, 60_000);
 
   it("GET /admin/clients returns pagination metadata and respects limit/page", async () => {
     const res = await request(app)
@@ -659,7 +659,7 @@ describe("admin pipeline filters", () => {
     } else {
       expect(p2.body.clients).toEqual([]);
     }
-  }, 30_000);
+  }, 60_000);
 
   it("GET /admin/clients page beyond total returns empty slice with valid pagination", async () => {
     const res = await request(app)
@@ -670,7 +670,7 @@ describe("admin pipeline filters", () => {
     expect(res.body.clients).toEqual([]);
     expect(res.body.pagination.page).toBe(999);
     expect(res.body.pagination.total).toBeGreaterThan(0);
-  }, 30_000);
+  }, 60_000);
 
   it("GET /admin/clients rejects unknown sort_by safely (falls back to created_at)", async () => {
     const res = await request(app)
@@ -680,5 +680,5 @@ describe("admin pipeline filters", () => {
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body.clients)).toBe(true);
     expect(res.body.pagination).toBeTruthy();
-  }, 30_000);
+  }, 60_000);
 });

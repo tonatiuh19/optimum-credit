@@ -81,7 +81,7 @@ describe("validatePdfUploadPair — edge cases", () => {
     );
   });
 
-  it("accepts files that fit under the 4 MB combined limit", () => {
+  it("accepts files that fit under the 4 MB per-file limit", () => {
     const a = Buffer.alloc(1024 * 1024);
     const b = Buffer.alloc(1024 * 1024);
     a.write("%PDF", 0);
@@ -89,12 +89,12 @@ describe("validatePdfUploadPair — edge cases", () => {
     expect(validatePdfUploadPair(a, b)).toBeNull();
   });
 
-  it("rejects two files that each fit but exceed combined 4 MB", () => {
+  it("allows two files that each fit but exceed the old combined 4 MB cap", () => {
     const a = Buffer.alloc(3 * 1024 * 1024);
     const b = Buffer.alloc(2 * 1024 * 1024);
     a.write("%PDF", 0);
     b.write("%PDF", 0);
-    expect(validatePdfUploadPair(a, b)).toMatch(/Combined PDF/i);
+    expect(validatePdfUploadPair(a, b)).toBeNull();
   });
 
   it("rejects one valid + one invalid magic", () => {
@@ -118,10 +118,32 @@ describe("validatePdfUploadPair — edge cases", () => {
 // ── Round / pipeline gating ──────────────────────────────────────────────────
 
 describe("validatePublishRound — edge cases", () => {
-  it.each([0, -1, 6, 99])("rejects invalid round %i", (roundNumber) => {
+  it.each([0, -1, 6, 99])("rejects invalid round %i on default max", (roundNumber) => {
     expect(
       validatePublishRound({ roundNumber, pipelineStage: "docs_ready" }),
     ).toMatch(/1–5|1-5/);
+  });
+
+  it("allows round 6 when max_rounds is extended", () => {
+    expect(
+      validatePublishRound({
+        roundNumber: 6,
+        pipelineStage: "round_5",
+        maxRounds: 8,
+        highestPublished: 5,
+      }),
+    ).toBeNull();
+  });
+
+  it("blocks round 7 when only unlocked through 6", () => {
+    expect(
+      validatePublishRound({
+        roundNumber: 7,
+        pipelineStage: "round_5",
+        maxRounds: 8,
+        highestPublished: 5,
+      }),
+    ).toMatch(/not available/);
   });
 
   it("allows republish when flag set", () => {
@@ -151,11 +173,31 @@ describe("validatePublishRound — edge cases", () => {
     ).toMatch(/cannot be published/);
   });
 
-  it("completed stage maps to round 5 expected", () => {
+  it("completed stage maps to round 5 expected (standard)", () => {
     expect(expectedReportRoundForStage("completed")).toBe(5);
     expect(
       validatePublishRound({ roundNumber: 5, pipelineStage: "completed" }),
     ).toBeNull();
+  });
+
+  it("completed + raised max unlocks next publish round", () => {
+    expect(expectedReportRoundForStage("completed", 8, 5)).toBe(6);
+    expect(
+      validatePublishRound({
+        roundNumber: 6,
+        pipelineStage: "completed",
+        maxRounds: 8,
+        highestPublished: 5,
+      }),
+    ).toBeNull();
+    expect(
+      validatePublishRound({
+        roundNumber: 7,
+        pipelineStage: "completed",
+        maxRounds: 8,
+        highestPublished: 5,
+      }),
+    ).toMatch(/not available/);
   });
 });
 
@@ -166,8 +208,14 @@ describe("pipelineStageAfterRoundReport — full matrix", () => {
     [3, "round_4"],
     [4, "round_5"],
     [5, "completed"],
-  ] as const)("round %i → %s", (round, stage) => {
+  ] as const)("round %i → %s (default max)", (round, stage) => {
     expect(pipelineStageAfterRoundReport(round)).toBe(stage);
+  });
+
+  it("stays on round_5 for mid extended rounds", () => {
+    expect(pipelineStageAfterRoundReport(5, 8)).toBe("round_5");
+    expect(pipelineStageAfterRoundReport(7, 8)).toBe("round_5");
+    expect(pipelineStageAfterRoundReport(8, 8)).toBe("completed");
   });
 });
 
@@ -226,6 +274,42 @@ describe("extractAllScores — edge cases", () => {
     expect(scores.equifax).toBe(551);
   });
 
+  it("parses SmartCredit stacked bureau headers + tab-separated score row", () => {
+    // Real pdf-parse layout from Ultra 4k 3B SmartCredit exports (any client).
+    const text = `
+SmartCredit Report
+Positive Accounts 20
+CAP1/KOHLS 639305****
+Open Bank High Utilization Differences $ 1
+TransUnion®\t
+Experian®\t
+Equifax®
+576 \t567 \t545
+TransUnion \tExperian \tEquifax
+BRIAN A AVELAR \tBRIAN AVELAR \tBRIAN A AVELAR
+`;
+    const scores = extractAllScores(text, "smartcredit");
+    expect(scores).toEqual({
+      transunion: 576,
+      experian: 567,
+      equifax: 545,
+    });
+  });
+
+  it("parses SmartCredit stacked headers for Round 2 score row", () => {
+    const text = `
+SmartCredit
+TransUnion®
+Experian®
+Equifax®
+583 \t548 \t517
+`;
+    const scores = extractAllScores(text, "smartcredit");
+    expect(scores.transunion).toBe(583);
+    expect(scores.experian).toBe(548);
+    expect(scores.equifax).toBe(517);
+  });
+
   it("parses abbreviated TU/EX/EQ lines", () => {
     const text = "TU: 610\nEX: 620\nEQ: 630";
     const scores = extractAllScores(text, "generic");
@@ -264,16 +348,57 @@ describe("extractAllScores — edge cases", () => {
     expect(scores.experian).toBeNull();
   });
 
-  it("auto-detects provider then extracts", () => {
+  it("prefers FICO/score context over nearby $500 balances", () => {
     const text = `
-      Smart Credit monitoring
-      TransUnion Score: 601
-      Experian Score: 602
-      Equifax Score: 603
+      TransUnion
+      High Balance $500
+      Past Due 0
+      Credit Score 515
+      Experian
+      High Balance $500
+      Score: 596
+      Equifax
+      High Balance: 500.00
+      VantageScore 602
     `;
-    expect(detectProvider(text)).toBe("smartcredit");
-    const scores = extractAllScores(text);
-    expect(middleScore(scores)).toBe(602);
+    const scores = extractAllScores(text, "generic");
+    expect(scores.transunion).toBe(515);
+    expect(scores.experian).toBe(596);
+    expect(scores.equifax).toBe(602);
+  });
+
+  it("rejects identical junk 500s across bureaus without score cues", () => {
+    const text = `
+      TransUnion Account CAPITAL ONE High Balance 500 Payment Status
+      Experian Account CAPITAL ONE High Balance 500 Payment Status
+      Equifax Account CAPITAL ONE High Balance 500 Payment Status
+    `;
+    const scores = extractAllScores(text, "generic");
+    expect(scores.transunion).toBeNull();
+    expect(scores.experian).toBeNull();
+    expect(scores.equifax).toBeNull();
+  });
+
+  it("keeps legitimate identical scores when score labels repeat", () => {
+    const text = `
+      TransUnion Credit Score 640
+      Experian Credit Score 640
+      Equifax Credit Score 640
+    `;
+    const scores = extractAllScores(text, "generic");
+    expect(scores.transunion).toBe(640);
+    expect(scores.experian).toBe(640);
+    expect(scores.equifax).toBe(640);
+  });
+});
+
+describe("buildConfidence — suspicious identical scores", () => {
+  it("lowers confidence when before/after scores are identical across bureaus", () => {
+    const conf = buildConfidence(
+      { transunion: 500, experian: 500, equifax: 500 },
+      { transunion: 500, experian: 500, equifax: 500 },
+    );
+    expect(conf.transunion).toBeLessThan(0.6);
   });
 });
 
@@ -684,6 +809,10 @@ describe("provider detection — aliases", () => {
     ["IDENTITYIQ", "identityiq"],
     ["smart credit app", "smartcredit"],
     ["My Score IQ", "myscoreiq"],
+    ["Three Bureau Credit Report powered by Equifax VantageScore", "myfreescore"],
+    ["myFICO 3-Bureau Report AS OF 8/25/2026", "myfico"],
+    ["FICO® SCORE 3B REPORT secure.myfico.com", "myfico"],
+    ["Tips to improve my FICO score", "generic"],
     ["random bureau dump", "generic"],
   ] as const)("%s → %s", (text, provider) => {
     expect(detectProvider(text)).toBe(provider);
@@ -711,5 +840,13 @@ describe("toPdfSafeText — WinAnsi safety", () => {
 
   it("strips unsupported symbols", () => {
     expect(toPdfSafeText("Score ✅ done")).toMatch(/Score \? done|Score \?done/);
+  });
+
+  it("strips tabs/newlines that crash WinAnsi (0x0009 / 542004)", () => {
+    expect(toPdfSafeText("Credit Card\tNegative Closed")).toBe(
+      "Credit Card Negative Closed",
+    );
+    expect(toPdfSafeText("Line1\nLine2\r\nLine3")).toBe("Line1 Line2 Line3");
+    expect(toPdfSafeText("a\u0009b")).toBe("a b");
   });
 });

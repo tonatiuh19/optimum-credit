@@ -13,6 +13,7 @@ import type {
 } from "@shared/api";
 import { Checkbox } from "@/components/ui/checkbox";
 import FieldHint from "@/components/admin/FieldHint";
+import { ContactPhoneActions } from "@/components/admin/ContactPhoneActions";
 import { Button } from "@/components/ui/button";
 
 const MAX_SLOTS = 3;
@@ -248,21 +249,25 @@ function PartnerSlot({
       )}
 
       {!isCreate && (slot.email || slot.phone) && (
-        <p className="text-[11px] text-muted-foreground">
-          {[slot.email, slot.phone].filter(Boolean).join(" · ")}
+        <p className="text-[11px] text-muted-foreground flex flex-wrap items-center gap-x-1 gap-y-0.5">
+          {slot.email ? <span>{slot.email}</span> : null}
+          {slot.email && slot.phone ? <span>·</span> : null}
+          {slot.phone ? (
+            <ContactPhoneActions
+              phone={slot.phone}
+              clientName={
+                [slot.first_name, slot.last_name].filter(Boolean).join(" ") ||
+                null
+              }
+              className="text-[11px] text-muted-foreground"
+            />
+          ) : null}
         </p>
       )}
 
-      <label className="flex items-center gap-2 text-xs text-foreground cursor-pointer">
-        <Checkbox
-          checked={slot.notify_on_round}
-          disabled={disabled}
-          onCheckedChange={(v) =>
-            onChange({ ...slot, notify_on_round: v === true })
-          }
-        />
-        {t("adminHelpers.partnerNotifyOnRound")}
-      </label>
+      <p className="text-[11px] text-muted-foreground">
+        {t("adminHelpers.partnerNotifyAlways")}
+      </p>
     </div>
   );
 }

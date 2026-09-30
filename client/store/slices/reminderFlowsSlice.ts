@@ -111,6 +111,7 @@ export const addFlowStep = createAsyncThunk(
     subject?: string;
     body?: string;
     template_slug?: string;
+    also_sms?: boolean;
   }) => {
     const { data } = await api.post(
       `/admin/reminder-flows/${flowId}/steps`,
@@ -135,6 +136,7 @@ export const updateFlowStep = createAsyncThunk(
     subject?: string;
     body?: string;
     template_slug?: string;
+    also_sms?: boolean;
   }) => {
     const { data } = await api.put(
       `/admin/reminder-flows/${flowId}/steps/${stepId}`,
@@ -190,6 +192,7 @@ export const saveFlowCanvas = createAsyncThunk(
         subject?: string;
         body?: string;
         template_slug?: string;
+        also_sms?: boolean | number;
       }>;
       existingStepIds: number[];
     },
@@ -233,6 +236,12 @@ export const saveFlowCanvas = createAsyncThunk(
           subject: s.subject || null,
           body: s.body || null,
           template_slug: s.template_slug || null,
+          also_sms:
+            s.step_type === "send_email"
+              ? s.also_sms === undefined || s.also_sms === null
+                ? true
+                : Number(s.also_sms) !== 0
+              : false,
           step_order: i + 1,
         };
         if (!s.step_id) {

@@ -342,6 +342,8 @@ CREATE TABLE IF NOT EXISTS `clients` (
     'prospect','new_client','docs_ready','round_1','round_2','round_3','round_4','round_5','completed','cancelled'
   ) NOT NULL DEFAULT 'new_client',
   `pipeline_stage_changed_at` DATETIME DEFAULT NULL,
+  `activation_notified_at` DATETIME DEFAULT NULL
+    COMMENT 'When signup activation SMS/email fan-out last ran (convert/payment)',
   -- Affiliate / referral routing
   `affiliate_id` INT UNSIGNED DEFAULT NULL,
   `referral_category` ENUM('realtor_broker','one_off','affiliate_partner') DEFAULT NULL
@@ -487,6 +489,12 @@ CREATE TABLE IF NOT EXISTS `credit_repair_cases` (
   `package_id`                INT UNSIGNED  DEFAULT NULL,
   `pipeline_stage`            ENUM('prospect','new_client','docs_ready','round_1','round_2','round_3','round_4','round_5','completed','cancelled')
                                             NOT NULL DEFAULT 'new_client',
+  `max_rounds`                TINYINT UNSIGNED NOT NULL DEFAULT 5
+    COMMENT 'Max OFG progress rounds (5 default; staff may raise up to 12)',
+  `next_dispute_target_date`  DATE DEFAULT NULL
+    COMMENT 'Optional next dispute target for extended rounds (calendar)',
+  `report_compare_mode` ENUM('baseline','chain') NOT NULL DEFAULT 'baseline'
+    COMMENT 'baseline=vs enrollment; chain=vs prior After',
   `pipeline_stage_changed_at` DATETIME      DEFAULT NULL,
   `status`                    ENUM('active','completed','cancelled','on_hold')
                                             NOT NULL DEFAULT 'active',
@@ -510,6 +518,8 @@ CREATE TABLE IF NOT EXISTS `case_round_schedules` (
   `round_3_date` DATE NOT NULL,
   `round_4_date` DATE NOT NULL,
   `round_5_date` DATE NOT NULL,
+  `extended_dates_json` JSON DEFAULT NULL
+    COMMENT 'Optional target dates for rounds 6+ as {"6":"YYYY-MM-DD",...}',
   `interval_days` INT UNSIGNED NOT NULL DEFAULT 35 COMMENT 'Days between rounds used when prefilling',
   `calendar_uid_ns` VARCHAR(64) NOT NULL COMMENT 'Stable ICS UID namespace for update invites',
   `last_sent_at` DATETIME DEFAULT NULL,
@@ -630,6 +640,50 @@ CREATE TABLE IF NOT EXISTS `onboarding_tokens` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================================
+-- PREPAID ONBOARD INVITES (staff-minted link for already-paid unknown clients)
+-- Applied by: 20260910_130000_prepaid_onboard_invites.sql
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `prepaid_onboard_invites` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `token_hash` CHAR(64) NOT NULL COMMENT 'SHA-256 of raw invite token',
+  `package_id` INT UNSIGNED NOT NULL,
+  `paid_amount_cents` INT UNSIGNED NOT NULL COMMENT 'Already collected offline',
+  `paid_label` VARCHAR(200) NOT NULL DEFAULT 'Enrollment (prepaid)',
+  `payment_method` ENUM('cash','zelle','venmo','card_offline','other') NOT NULL DEFAULT 'other',
+  `payment_note` VARCHAR(500) DEFAULT NULL,
+  `remaining_splits_json` JSON DEFAULT NULL
+    COMMENT 'Optional pending installments: [{label,amount_cents,due_date,send_payment_link?}]',
+  `preferred_language` ENUM('en','es') DEFAULT NULL
+    COMMENT 'NULL = client chooses on form',
+  `referral_category` ENUM('realtor_broker','one_off','affiliate_partner') DEFAULT NULL,
+  `referrer_id` INT UNSIGNED DEFAULT NULL,
+  `staff_notes` TEXT DEFAULT NULL,
+  `created_by_admin_id` INT UNSIGNED NOT NULL,
+  `expires_at` DATETIME NOT NULL,
+  `revoked_at` DATETIME DEFAULT NULL,
+  `redeemed_at` DATETIME DEFAULT NULL,
+  `redeemed_client_id` INT UNSIGNED DEFAULT NULL,
+  `redeemed_case_id` INT UNSIGNED DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_prepaid_onboard_token_hash` (`token_hash`),
+  KEY `idx_prepaid_onboard_expires` (`expires_at`),
+  KEY `idx_prepaid_onboard_creator` (`created_by_admin_id`),
+  KEY `idx_prepaid_onboard_redeemed` (`redeemed_at`),
+  CONSTRAINT `fk_prepaid_onboard_package`
+    FOREIGN KEY (`package_id`) REFERENCES `packages`(`id`) ON DELETE RESTRICT,
+  CONSTRAINT `fk_prepaid_onboard_creator`
+    FOREIGN KEY (`created_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_prepaid_onboard_referrer`
+    FOREIGN KEY (`referrer_id`) REFERENCES `referrers`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_prepaid_onboard_client`
+    FOREIGN KEY (`redeemed_client_id`) REFERENCES `clients`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_prepaid_onboard_case`
+    FOREIGN KEY (`redeemed_case_id`) REFERENCES `credit_repair_cases`(`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================================
 -- CONTRACT (signed e-signature record + uploaded PDF if any)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS `client_contracts` (
@@ -712,6 +766,27 @@ CREATE TABLE IF NOT EXISTS `round_report_pdfs` (
     REFERENCES `clients` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- Short-lived multi-use tokens for secure Round PDF download (email/SMS).
+CREATE TABLE IF NOT EXISTS `round_report_download_tokens` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `token_hash` CHAR(64) NOT NULL,
+  `pdf_id` INT UNSIGNED NOT NULL,
+  `client_id` INT UNSIGNED NOT NULL,
+  `expires_at` DATETIME NOT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `last_used_at` DATETIME DEFAULT NULL,
+  `use_count` INT UNSIGNED NOT NULL DEFAULT 0,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_rrdt_token_hash` (`token_hash`),
+  KEY `idx_rrdt_expires` (`expires_at`),
+  KEY `idx_rrdt_pdf` (`pdf_id`),
+  KEY `idx_rrdt_client` (`client_id`),
+  CONSTRAINT `fk_rrdt_pdf` FOREIGN KEY (`pdf_id`)
+    REFERENCES `round_report_pdfs` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_rrdt_client` FOREIGN KEY (`client_id`)
+    REFERENCES `clients` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- ============================================================================
 -- OFG PROGRESS REPORT WIZARD
 -- ============================================================================
@@ -762,6 +837,31 @@ CREATE TABLE IF NOT EXISTS `round_report_source_pdfs` (
   PRIMARY KEY (`id`),
   KEY `idx_rrsp_session` (`session_id`),
   CONSTRAINT `fk_rrsp_session` FOREIGN KEY (`session_id`) REFERENCES `report_wizard_sessions`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Staged Before PDFs (sequential upload — Vercel ~4.5 MB body limit)
+CREATE TABLE IF NOT EXISTS `report_wizard_staged_pdfs` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `case_id` INT UNSIGNED NOT NULL,
+  `client_id` INT UNSIGNED NOT NULL,
+  `file_name` VARCHAR(255) NOT NULL,
+  `storage_key` VARCHAR(500) NOT NULL,
+  `storage_provider` ENUM('local','cdn') NOT NULL DEFAULT 'cdn',
+  `encrypted` TINYINT(1) NOT NULL DEFAULT 1,
+  `enc_iv` CHAR(32) NOT NULL,
+  `enc_tag` CHAR(32) NOT NULL,
+  `byte_size` INT UNSIGNED NOT NULL,
+  `uploaded_by_admin_id` INT UNSIGNED NOT NULL,
+  `consumed_at` DATETIME DEFAULT NULL,
+  `expires_at` DATETIME NOT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_rwsp_case` (`case_id`),
+  KEY `idx_rwsp_admin` (`uploaded_by_admin_id`),
+  KEY `idx_rwsp_expires` (`expires_at`),
+  CONSTRAINT `fk_rwsp_case` FOREIGN KEY (`case_id`) REFERENCES `credit_repair_cases`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_rwsp_client` FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_rwsp_admin` FOREIGN KEY (`uploaded_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================================
@@ -821,6 +921,45 @@ CREATE TABLE IF NOT EXISTS `admin_phone_numbers` (
   CONSTRAINT `fk_admin_phone_admin` FOREIGN KEY (`assigned_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- CRM Contacts (address book; convert → clients prospect). Soft-delete + convert archive.
+-- Applied by: 20260915_181500_crm_contacts.sql
+CREATE TABLE IF NOT EXISTS `contacts` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `first_name` VARCHAR(100) NOT NULL,
+  `last_name` VARCHAR(100) NOT NULL,
+  `email` VARCHAR(255) DEFAULT NULL,
+  `phone` VARCHAR(20) DEFAULT NULL,
+  `address_line1` VARCHAR(255) DEFAULT NULL,
+  `address_line2` VARCHAR(255) DEFAULT NULL,
+  `city` VARCHAR(100) DEFAULT NULL,
+  `state` VARCHAR(50) DEFAULT NULL,
+  `zip` VARCHAR(20) DEFAULT NULL,
+  `preferred_language` ENUM('en','es') NOT NULL DEFAULT 'en',
+  `admin_notes` TEXT DEFAULT NULL,
+  `assigned_admin_id` INT UNSIGNED DEFAULT NULL,
+  `created_by_admin_id` INT UNSIGNED DEFAULT NULL,
+  `converted_client_id` INT UNSIGNED DEFAULT NULL
+    COMMENT 'Set when contact is added to pipeline as a prospect client',
+  `converted_at` DATETIME DEFAULT NULL,
+  `deleted_at` DATETIME DEFAULT NULL
+    COMMENT 'Soft-delete; row kept for conversation history',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_contacts_email` (`email`),
+  KEY `idx_contacts_phone` (`phone`),
+  KEY `idx_contacts_deleted` (`deleted_at`),
+  KEY `idx_contacts_converted` (`converted_client_id`),
+  KEY `idx_contacts_created` (`created_at`),
+  KEY `idx_contacts_assigned` (`assigned_admin_id`),
+  CONSTRAINT `fk_contacts_assigned_admin`
+    FOREIGN KEY (`assigned_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_contacts_created_by`
+    FOREIGN KEY (`created_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_contacts_converted_client`
+    FOREIGN KEY (`converted_client_id`) REFERENCES `clients`(`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS `conversation_unknown_contacts` (
   `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
   `phone_e164` VARCHAR(20) DEFAULT NULL,
@@ -852,6 +991,8 @@ CREATE TABLE IF NOT EXISTS `conversations` (
   `assigned_admin_id` INT UNSIGNED DEFAULT NULL,
   `ofg_number_id` INT UNSIGNED DEFAULT NULL,
   `unknown_contact_id` INT UNSIGNED DEFAULT NULL,
+  `contact_id` INT UNSIGNED DEFAULT NULL
+    COMMENT 'CRM contacts.id when thread is tied to a saved contact (not client/unknown)',
   `status` ENUM('open','snoozed','closed','archived') NOT NULL DEFAULT 'open',
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -861,10 +1002,12 @@ CREATE TABLE IF NOT EXISTS `conversations` (
   KEY `idx_conversations_status` (`status`),
   KEY `idx_conversations_ofg_number` (`ofg_number_id`),
   KEY `idx_conversations_unknown` (`unknown_contact_id`),
+  KEY `idx_conversations_contact` (`contact_id`),
   CONSTRAINT `fk_conversations_client` FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_conversations_admin` FOREIGN KEY (`assigned_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL,
   CONSTRAINT `fk_conversations_ofg_number` FOREIGN KEY (`ofg_number_id`) REFERENCES `admin_phone_numbers`(`id`) ON DELETE SET NULL,
-  CONSTRAINT `fk_conversations_unknown` FOREIGN KEY (`unknown_contact_id`) REFERENCES `conversation_unknown_contacts`(`id`) ON DELETE SET NULL
+  CONSTRAINT `fk_conversations_unknown` FOREIGN KEY (`unknown_contact_id`) REFERENCES `conversation_unknown_contacts`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_conversations_contact` FOREIGN KEY (`contact_id`) REFERENCES `contacts`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `conversation_messages` (
@@ -884,11 +1027,17 @@ CREATE TABLE IF NOT EXISTS `conversation_messages` (
   `sent_by_admin_id` INT UNSIGNED DEFAULT NULL,
   `error_message` TEXT DEFAULT NULL,
   `metadata_json` JSON DEFAULT NULL,
+  `call_insights_status` ENUM('pending','processing','ready','failed','skipped') DEFAULT NULL,
+  `call_transcript` MEDIUMTEXT DEFAULT NULL,
+  `call_insights_json` JSON DEFAULT NULL,
+  `call_insights_error` VARCHAR(500) DEFAULT NULL,
+  `call_insights_updated_at` DATETIME DEFAULT NULL,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_messages_conversation` (`conversation_id`),
   KEY `idx_messages_created` (`created_at`),
   KEY `idx_messages_provider` (`provider_message_id`),
+  KEY `idx_messages_call_insights` (`channel`, `call_insights_status`),
   CONSTRAINT `fk_messages_conversation` FOREIGN KEY (`conversation_id`) REFERENCES `conversations`(`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_messages_admin` FOREIGN KEY (`sent_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -1065,6 +1214,7 @@ INSERT INTO `communication_templates` (`slug`,`name`,`channel`,`subject`,`body`,
   ('flow_round_3_complete','[Flow] Round 3 Progress Report','email','Your Round 3 progress report is ready, {{first_name}}','',JSON_ARRAY('first_name','portal_url','items_removed','score_change')),
   ('flow_round_4_complete','[Flow] Round 4 Progress Report','email','Your Round 4 progress report is ready, {{first_name}}','',JSON_ARRAY('first_name','portal_url','items_removed','score_change')),
   ('flow_round_5_complete','[Flow] Round 5 Final Report','email','Your final progress report is ready, {{first_name}}!','',JSON_ARRAY('first_name','portal_url','items_removed','score_change')),
+  ('flow_round_extended_complete','[Flow] Round 6+ Progress Report','email','Your Round {{round_number}} progress report is ready, {{first_name}}','',JSON_ARRAY('first_name','portal_url','items_removed','score_change','round_number')),
   ('flow_completed','[Flow] Graduating Client — Credit File Clean','email','Congratulations — Your Credit File Is Clean!','',JSON_ARRAY('first_name','portal_url')),
   -- Flow templates (ES) — seeded by 20260520_000000_reminder_flow_spanish_templates.sql
   ('flow_new_client_day1_es','[Flow] Nuevo Cliente — Día 1 Bienvenida (ES)','email','¡Bienvenido a Optimum Credit, {{first_name}}! Sube tus documentos para comenzar.','',JSON_ARRAY('first_name','portal_url')),
@@ -1075,6 +1225,7 @@ INSERT INTO `communication_templates` (`slug`,`name`,`channel`,`subject`,`body`,
   ('flow_round_3_complete_es','[Flow] Informe de Progreso Ronda 3 (ES)','email','Tu informe de progreso de la Ronda 3 está listo, {{first_name}}','',JSON_ARRAY('first_name','portal_url','items_removed','score_change')),
   ('flow_round_4_complete_es','[Flow] Informe de Progreso Ronda 4 (ES)','email','Tu informe de progreso de la Ronda 4 está listo, {{first_name}}','',JSON_ARRAY('first_name','portal_url','items_removed','score_change')),
   ('flow_round_5_complete_es','[Flow] Informe Final Ronda 5 (ES)','email','¡Tu informe final de progreso está listo, {{first_name}}!','',JSON_ARRAY('first_name','portal_url','items_removed','score_change')),
+  ('flow_round_extended_complete_es','[Flow] Informe de Progreso Ronda 6+ (ES)','email','Tu informe de progreso de la Ronda {{round_number}} está listo, {{first_name}}','',JSON_ARRAY('first_name','portal_url','items_removed','score_change','round_number')),
   ('flow_completed_es','[Flow] Cliente graduado — Archivo limpio (ES)','email','¡Felicidades — Su archivo de crédito está limpio!','',JSON_ARRAY('first_name','portal_url'))
 ON DUPLICATE KEY UPDATE `name`=VALUES(`name`), `subject`=VALUES(`subject`);
 
@@ -1271,7 +1422,9 @@ INSERT INTO `system_settings` (`setting_key`,`setting_value`,`description`) VALU
   ('voice_voicemail_greeting_text','Hello, you have reached Optimum Credit. We are unable to take your call right now. Please leave a message after the tone.','Default TTS voicemail greeting'),
   ('voice_voicemail_max_seconds','120','Max voicemail recording seconds'),
   ('voice_voicemail_transcribe','1','Request Twilio transcription for voicemails'),
-  ('funding_sms_from_phone_number_id','','admin_phone_numbers.id used as From for funding client confirmation SMS')
+  ('funding_sms_from_phone_number_id','','admin_phone_numbers.id used as From for funding client confirmation SMS'),
+  ('signup_notify_sms_from_phone_number_id','','admin_phone_numbers.id used as From for client/referrer activation SMS (prefer Lecca 949-736-5644)'),
+  ('client_reminder_sms_enabled','1','Master switch: after reminder-flow emails succeed, also SMS client from signup From (Lecca) when step.also_sms=1')
 ON DUPLICATE KEY UPDATE `description`=VALUES(`description`);
 
 -- ============================================================================
@@ -1313,7 +1466,8 @@ INSERT INTO `section_locks` (`section_key`, `label`, `is_locked`, `lock_reason`)
   ('portal_profile',   'Portal — My Profile',        1, 'Coming soon — profile page is under construction.'),
   ('affiliates',       'Affiliates',                 0, NULL),
   ('affiliate-portal', 'My Affiliate',               0, NULL),
-  ('my_tasks',         'My Tasks (Work Hub)',         0, NULL)
+  ('my_tasks',         'My Tasks (Work Hub)',         0, NULL),
+  ('contacts',         'Contacts',                   0, NULL)
 ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 
 -- ============================================================================
@@ -1323,7 +1477,7 @@ CREATE TABLE IF NOT EXISTS `reminder_flows` (
   `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
   `name` VARCHAR(200) NOT NULL,
   `description` TEXT DEFAULT NULL,
-  `trigger_event` ENUM('payment_confirmed','docs_ready','round_1_complete','round_2_complete','round_3_complete','round_4_complete','round_5_complete','completed','payment_due') NOT NULL,
+  `trigger_event` ENUM('payment_confirmed','docs_ready','round_1_complete','round_2_complete','round_3_complete','round_4_complete','round_5_complete','round_extended_complete','completed','payment_due') NOT NULL,
   `is_active` TINYINT(1) NOT NULL DEFAULT 1,
   `required_label_slugs_json` JSON DEFAULT NULL COMMENT 'If set, flow only runs when client has ALL listed label slugs',
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -1343,6 +1497,7 @@ CREATE TABLE IF NOT EXISTS `reminder_flow_steps` (
   `subject` VARCHAR(500) DEFAULT NULL,
   `body` MEDIUMTEXT DEFAULT NULL,
   `template_slug` VARCHAR(100) DEFAULT NULL,
+  `also_sms` TINYINT(1) NOT NULL DEFAULT 1 COMMENT 'When 1 and global client_reminder_sms_enabled, SMS after email succeeds',
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
@@ -1675,6 +1830,8 @@ CREATE TABLE IF NOT EXISTS `credit_analyses` (
   `report_mime_type` VARCHAR(100) DEFAULT NULL,
   `report_storage_key` VARCHAR(500) DEFAULT NULL,
   `provider_detected` VARCHAR(40) DEFAULT NULL,
+  `extraction_status` ENUM('ok','empty','parse_failed','unsupported_type') DEFAULT NULL,
+  `chars_extracted` INT UNSIGNED NOT NULL DEFAULT 0,
   `scores_json` JSON DEFAULT NULL,
   `negatives_json` JSON DEFAULT NULL,
   `labels_suggested_json` JSON DEFAULT NULL,
@@ -1695,7 +1852,11 @@ CREATE TABLE IF NOT EXISTS `credit_analyses` (
 -- Seed system labels (source + analysis layers)
 INSERT INTO `labels` (`slug`, `name_en`, `name_es`, `layer`, `color`, `is_system`, `sort_order`) VALUES
   ('web_analysis', 'Web analysis', 'Análisis web', 'source', 'primary', 1, 10),
+  ('web_lead_review', 'Web lead (review)', 'Lead web (revisar)', 'source', 'secondary', 1, 15),
   ('get_started_wizard', 'Get started lead', 'Lead inicio', 'source', 'secondary', 1, 20),
+  ('get_credit_report', 'Get credit report', 'Obtener reporte de crédito', 'source', 'primary', 1, 25),
+  ('golf_tournament_prospect', 'Golf tournament prospect', 'Prospecto torneo de golf', 'source', 'accent', 1, 26),
+  ('las_vegas_event', 'Las Vegas Event', 'Evento Las Vegas', 'source', 'accent', 1, 27),
   ('agent_submission', 'Agent submission', 'Envío de agente', 'source', 'accent', 1, 30),
   ('referral', 'Referral', 'Referido', 'source', 'muted', 1, 40),
   ('realtor_broker', 'Realtor / Mortgage Broker', 'Agente inmobiliario / Broker hipotecario', 'source', 'accent', 1, 41),

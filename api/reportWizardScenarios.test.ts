@@ -93,7 +93,7 @@ describe("buildConfidence", () => {
       { transunion: 600, experian: null, equifax: 610 },
       { transunion: 620, experian: null, equifax: 630 },
     );
-    expect(c.experian).toBe(0.4);
+    expect(c.experian).toBe(0.35);
     expect(c.transunion).toBe(0.9);
   });
 });

@@ -1,19 +1,26 @@
 /**
  * Work Hub case link + calendar/dashboard surfaces.
+ * Uses an ephemeral agent so dashboard `my_work_tasks` (LIMIT 8) is not crowded
+ * out by real staff backlog on shared TiDB.
  * Requires DB_HOST + JWT_SECRET.
  */
 import "dotenv/config";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import request from "supertest";
-import mysql, {
+import {
   type Pool,
   type ResultSetHeader,
   type RowDataPacket,
 } from "mysql2/promise";
 import { createServer, createSession } from "./index";
-import { cleanupIntegrationTestClients, createIntegrationTestPool } from "./testDbCleanup";
+import {
+  cleanupIntegrationTestAdmins,
+  cleanupIntegrationTestClients,
+  createIntegrationTestPool,
+} from "./testDbCleanup";
 
 const RUN_ID = `wt-case-${Date.now()}`;
+const AGENT_EMAIL = `wt-agent-${RUN_ID}@example.test`;
 
 let pool: Pool;
 let app: ReturnType<typeof createServer>;
@@ -30,15 +37,18 @@ describe("work tasks case link — calendar + dashboard", () => {
     }
     pool = createIntegrationTestPool();
     app = createServer();
-    const [admins] = await pool.query<RowDataPacket[]>(
-      `SELECT id, email FROM admins ORDER BY id ASC LIMIT 1`,
+
+    const [ins] = await pool.query<ResultSetHeader>(
+      `INSERT INTO admins
+         (email, first_name, last_name, role, status, preferred_language)
+       VALUES (?, 'Work', 'CaseAgent', 'agent', 'active', 'en')`,
+      [AGENT_EMAIL],
     );
-    if (!admins[0]) throw new Error("No admin user in DB for integration tests");
-    adminId = Number(admins[0].id);
+    adminId = Number(ins.insertId);
     adminToken = await createSession(
       "admin",
       adminId,
-      String(admins[0].email),
+      AGENT_EMAIL,
       "127.0.0.1",
       "vitest-wt-case",
     );
@@ -57,6 +67,9 @@ describe("work tasks case link — calendar + dashboard", () => {
       clientIds,
       runId: RUN_ID,
     });
+    if (adminId) {
+      await cleanupIntegrationTestAdmins(pool, [adminId]);
+    }
     await pool.end();
   }, 60_000);
 

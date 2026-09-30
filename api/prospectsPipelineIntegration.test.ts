@@ -106,7 +106,11 @@ describe("prospects pipeline — HTTP smoke", () => {
     );
     const slugs = labels.map((r) => r.slug as string);
     expect(slugs).toEqual(
-      expect.arrayContaining(["web_analysis", "get_started_wizard"]),
+      expect.arrayContaining([
+        "web_analysis",
+        "get_started_wizard",
+        "web_lead_review",
+      ]),
     );
   });
 

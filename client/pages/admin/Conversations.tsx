@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   ArrowLeft,
   Delete,
@@ -21,13 +21,26 @@ import {
   X,
   ChevronDown,
   ChevronUp,
-  ChevronLeft,
-  ChevronRight,
   ArchiveRestore,
+  Instagram,
+  Loader2,
 } from "lucide-react";
 import { getSharedAblyClient, isAblyPermanentlyUnavailable } from "@/lib/ably-client";
 import type { RealtimeChannel } from "ably";
 import AdminPageHeader from "@/components/AdminPageHeader";
+import ConversationSocialHub from "@/components/admin/ConversationSocialHub";
+import ConversationCallInsights from "@/components/admin/ConversationCallInsights";
+import {
+  ConversationMediaLightbox,
+  ConversationMediaThumb,
+  type ConversationMediaPreviewItem,
+} from "@/components/admin/ConversationMediaLightbox";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { ClientPanelSheet } from "@/components/admin/ClientPanelSheet";
 import ConversationsHubSkeleton, {
   ConversationsContactListSkeleton,
@@ -39,9 +52,15 @@ import {
   ConversationComposeTargetPicker,
   type ConversationComposeTarget,
 } from "@/components/admin/ConversationComposeTargetPicker";
+import {
+  ConversationComposeAlsoSend,
+  type ComposeAlsoRecipient,
+} from "@/components/admin/ConversationComposeAlsoSend";
 import { ConversationMessageStatus } from "@/components/admin/ConversationMessageStatus";
 import ConversationVoiceSettingsModal from "@/components/admin/ConversationVoiceSettingsModal";
+import { ContactPhoneActions } from "@/components/admin/ContactPhoneActions";
 import { isOutboundProviderStatusPending } from "@/lib/conversationProviderStatus";
+import { normalizeContactPhone } from "@/lib/contactPhoneActions";
 import { ClientSearchPicker } from "@/components/ui/client-search-picker";
 import { Button } from "@/components/ui/button";
 import {
@@ -73,18 +92,32 @@ import {
   uploadConversationMedia,
   contactActivityRealtime,
   messageStatusRealtime,
+  callInsightsRealtime,
+  callRecordingRealtime,
   type ConversationsView,
 } from "@/store/slices/conversationsSlice";
+import { fetchClientReferrers } from "@/store/slices/adminSlice";
 import {
   applyConversationTemplateVars,
   buildConversationMergeVars,
 } from "@/lib/conversationTemplateVars";
 import { buildStaticConversationSuggestions } from "@/lib/conversationSuggestedReplies";
+import { SMS_MAX_BODY_CHARS } from "@/lib/smsSegments";
+import {
+  formatConversationAbsoluteTime,
+  formatConversationListTime,
+} from "@/lib/conversationListTime";
+import {
+  dedupeAlsoRecipients,
+  filterAlsoRecipientsForRetry,
+  type AlsoRecipient,
+} from "@/lib/conversationAlsoSend";
+import { useToast } from "@/hooks/use-toast";
 import {
   setVoiceAvailable,
   startOutboundCall,
 } from "@/store/slices/voiceSlice";
-import type { AdminClientListItem, ConversationContactHubItem } from "@shared/api";
+import type { AdminClientListItem, ClientReferrerLink, ConversationContactHubItem, ConversationMessage } from "@shared/api";
 import { logger } from "@/utils/logger";
 import { cn } from "@/lib/utils";
 
@@ -129,7 +162,15 @@ function readGuideDismissed(): boolean {
 }
 
 export default function AdminConversations() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const timeLang = i18n.language?.startsWith("es") ? "es" : "en";
+  const [listClock, setListClock] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setListClock(Date.now()), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
+  const { toast } = useToast();
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const dispatch = useAppDispatch();
   const authUser = useAppSelector((s) => s.adminAuth.user);
@@ -214,8 +255,26 @@ export default function AdminConversations() {
     "sms",
   );
   const [composeBody, setComposeBody] = useState("");
+  const [composeAlsoRecipients, setComposeAlsoRecipients] = useState<
+    ComposeAlsoRecipient[]
+  >([]);
+  const [composeReferrers, setComposeReferrers] = useState<ClientReferrerLink[]>(
+    [],
+  );
+  const [composeReferrersLoading, setComposeReferrersLoading] = useState(false);
+  const [composeSending, setComposeSending] = useState(false);
+  const [threadAlsoRecipients, setThreadAlsoRecipients] = useState<
+    AlsoRecipient[]
+  >([]);
+  const [threadReferrers, setThreadReferrers] = useState<ClientReferrerLink[]>(
+    [],
+  );
+  const [threadReferrersLoading, setThreadReferrersLoading] = useState(false);
+  const [threadSending, setThreadSending] = useState(false);
   const [attachment, setAttachment] =
     useState<ConversationMediaAttachment | null>(null);
+  const [mediaPreview, setMediaPreview] =
+    useState<ConversationMediaPreviewItem | null>(null);
   const [composeAttachment, setComposeAttachment] =
     useState<ConversationMediaAttachment | null>(null);
   const [uploadingMedia, setUploadingMedia] = useState(false);
@@ -223,10 +282,18 @@ export default function AdminConversations() {
   const [ablyLive, setAblyLive] = useState(false);
   const [isDialerOpen, setIsDialerOpen] = useState(false);
   const [dialerNumber, setDialerNumber] = useState("");
+  const [dialerClient, setDialerClient] = useState<AdminClientListItem | null>(
+    null,
+  );
   const [isDialerCallActive, setIsDialerCallActive] = useState(false);
   const [voiceSettingsOpen, setVoiceSettingsOpen] = useState(false);
   const [unknownLeadOpen, setUnknownLeadOpen] = useState(false);
+  /** SMS hub vs Social DM (FB/IG) — social locked until credentials. */
+  const [hubChannel, setHubChannel] = useState<"sms" | "social">("sms");
+  const socialDmMode = authUser?.social_dm_mode || "disabled";
+  const socialDmLive = authUser?.social_dm_enabled === true;
   const [contactsPage, setContactsPage] = useState(1);
+  const [contactsLoadingMore, setContactsLoadingMore] = useState(false);
 
   const lastContactsFetchRef = useRef(0);
   const ablyRefreshRef = useRef({
@@ -238,13 +305,14 @@ export default function AdminConversations() {
   });
 
   const fetchContacts = useCallback(
-    (targetPage: number) => {
+    (targetPage: number, opts?: { append?: boolean }) => {
       dispatch(
         fetchConversationContacts({
           view,
           q: search.trim() || undefined,
           page: targetPage,
-          limit: 50,
+          limit: 25,
+          append: !!opts?.append,
         }),
       );
     },
@@ -256,15 +324,50 @@ export default function AdminConversations() {
     if (now - lastContactsFetchRef.current < CONTACTS_THROTTLE_MS) return;
     lastContactsFetchRef.current = now;
     const cur = ablyRefreshRef.current;
+    // Soft refresh keeps the first loaded page(s) coherent — reset to page 1.
+    setContactsPage(1);
     dispatch(
       fetchConversationContacts({
         view: cur.view,
         q: cur.search.trim() || undefined,
-        page: cur.contactsPage,
-        limit: 50,
+        page: 1,
+        limit: 25,
+        append: false,
       }),
     );
   }, [dispatch]);
+
+  const loadMoreContacts = useCallback(async () => {
+    if (!contactsPagination) return;
+    if (contactsPagination.page >= contactsPagination.totalPages) return;
+    if (contactsLoading || contactsRefreshing || contactsLoadingMore) return;
+    const next = contactsPagination.page + 1;
+    setContactsLoadingMore(true);
+    try {
+      await dispatch(
+        fetchConversationContacts({
+          view,
+          q: search.trim() || undefined,
+          page: next,
+          limit: 25,
+          append: true,
+        }),
+      ).unwrap();
+      setContactsPage(next);
+    } catch {
+      // Error lands in slice; keep current page.
+    } finally {
+      setContactsLoadingMore(false);
+    }
+  }, [
+    contactsPagination,
+    contactsLoading,
+    contactsRefreshing,
+    contactsLoadingMore,
+    dispatch,
+    view,
+    search,
+  ]);
 
   const refreshOpenTimeline = useCallback(() => {
     const cur = ablyRefreshRef.current;
@@ -344,18 +447,85 @@ export default function AdminConversations() {
   }, [dispatch]);
 
   // Deep link from notification bell: /admin/conversations?client=123 or ?unknown=456
+  // Compose deep link: ?composeClient=…&composeContact=…&composePhone=…
   useEffect(() => {
     if (!accessEnabled) return;
     const clientId = Number(searchParams.get("client"));
     const unknownId = Number(searchParams.get("unknown"));
+    const contactId = Number(searchParams.get("contact"));
     if (clientId > 0) {
       dispatch(selectConversationContact({ kind: "client", id: clientId }));
       dispatch(fetchConversationTimeline({ kind: "client", id: clientId }));
     } else if (unknownId > 0) {
       dispatch(selectConversationContact({ kind: "unknown", id: unknownId }));
       dispatch(fetchConversationTimeline({ kind: "unknown", id: unknownId }));
+    } else if (contactId > 0) {
+      dispatch(selectConversationContact({ kind: "contact", id: contactId }));
+      dispatch(fetchConversationTimeline({ kind: "contact", id: contactId }));
     }
-  }, [accessEnabled, dispatch, searchParams]);
+
+    const composeClientId = Number(searchParams.get("composeClient"));
+    const composeContactId = Number(searchParams.get("composeContact"));
+    const composePhoneRaw = searchParams.get("composePhone");
+    if (!(composeClientId > 0) && !(composeContactId > 0) && !composePhoneRaw)
+      return;
+
+    const normalized = composePhoneRaw
+      ? normalizeContactPhone(composePhoneRaw)
+      : null;
+    let openedCompose = false;
+    if (composeClientId > 0) {
+      setComposeTarget({
+        kind: "client",
+        client: {
+          id: composeClientId,
+          first_name: "",
+          last_name: "",
+          phone: normalized?.phone || composePhoneRaw || "",
+          email: "",
+        } as AdminClientListItem,
+      });
+      dispatch(
+        selectConversationContact({ kind: "client", id: composeClientId }),
+      );
+      dispatch(
+        fetchConversationTimeline({ kind: "client", id: composeClientId }),
+      );
+      openedCompose = true;
+    } else if (composeContactId > 0) {
+      setComposeTarget({
+        kind: "contact",
+        contact: {
+          id: composeContactId,
+          first_name: "",
+          last_name: "",
+          phone: normalized?.phone || composePhoneRaw || "",
+          email: null,
+          preferred_language: "en",
+          created_at: "",
+        },
+      });
+      dispatch(
+        selectConversationContact({ kind: "contact", id: composeContactId }),
+      );
+      dispatch(
+        fetchConversationTimeline({ kind: "contact", id: composeContactId }),
+      );
+      openedCompose = true;
+    } else if (normalized) {
+      setComposeTarget({
+        kind: "phone",
+        phone: normalized.phone,
+        label: normalized.label,
+      });
+      openedCompose = true;
+    }
+    if (openedCompose) {
+      setComposeChannel("sms");
+      setComposeOpen(true);
+    }
+    navigate("/admin/conversations", { replace: true });
+  }, [accessEnabled, dispatch, searchParams, navigate]);
 
   useEffect(() => {
     if (!accessEnabled) return;
@@ -366,10 +536,11 @@ export default function AdminConversations() {
     return () => window.clearTimeout(handle);
   }, [accessEnabled, view, search, fetchContacts]);
 
-  useEffect(() => {
-    if (!accessEnabled || contactsPage === 1) return;
-    fetchContacts(contactsPage);
-  }, [accessEnabled, contactsPage, fetchContacts]);
+  /** After mutations, reload from page 1 (append list stays coherent). */
+  const reloadContactsFromStart = useCallback(() => {
+    setContactsPage(1);
+    fetchContacts(1);
+  }, [fetchContacts]);
 
   // Keep inbox/timeline refresh targets current without recreating the Ably client
   // (TokenRequest nonces are one-time — recreating + replaying the same request → 40105).
@@ -389,7 +560,7 @@ export default function AdminConversations() {
     let onSuspended: (() => void) | null = null;
 
     const applyContactPatch = (
-      kind: "client" | "unknown",
+      kind: "client" | "unknown" | "contact",
       contactId: number,
       patch: Partial<ConversationContactHubItem>,
     ) => {
@@ -406,12 +577,17 @@ export default function AdminConversations() {
       const data = msg.data ?? {};
       const contact = data.contact as Record<string, unknown> | undefined;
       const kind =
-        (contact?.kind as "client" | "unknown") ||
-        (data.client_id != null ? "client" : "unknown");
+        (contact?.kind as "client" | "unknown" | "contact") ||
+        (data.client_id != null
+          ? "client"
+          : data.contact_id != null
+            ? "contact"
+            : "unknown");
       const contactId =
         Number(contact?.contact_id) ||
         Number(data.client_id) ||
-        Number(data.unknown_contact_id);
+        Number(data.unknown_contact_id) ||
+        Number(data.contact_id);
       if (!contactId) {
         refreshContacts();
         return;
@@ -449,6 +625,56 @@ export default function AdminConversations() {
       } else {
         refreshContacts();
       }
+    };
+
+    const handleCallInsights = (msg: { data?: Record<string, unknown> }) => {
+      const data = msg.data ?? {};
+      const messageId = Number(data.message_id);
+      if (!messageId) {
+        refreshOpenTimeline();
+        return;
+      }
+      dispatch(
+        callInsightsRealtime({
+          message_id: messageId,
+          call_insights_status: data.call_insights_status as
+            | ConversationMessage["call_insights_status"]
+            | undefined,
+          call_insights_json: (data.call_insights_json as ConversationMessage["call_insights_json"]) || null,
+          call_transcript:
+            data.call_transcript != null
+              ? String(data.call_transcript)
+              : null,
+          call_insights_error:
+            data.call_insights_error != null
+              ? String(data.call_insights_error)
+              : data.call_insights_error === null
+                ? null
+                : undefined,
+        }),
+      );
+    };
+
+    const handleCallRecording = (msg: { data?: Record<string, unknown> }) => {
+      const data = msg.data ?? {};
+      const messageId = Number(data.message_id);
+      if (!messageId) {
+        refreshOpenTimeline();
+        return;
+      }
+      dispatch(
+        callRecordingRealtime({
+          message_id: messageId,
+          recording_url:
+            data.recording_url != null ? String(data.recording_url) : null,
+          call_duration_sec:
+            data.call_duration_sec != null
+              ? Number(data.call_duration_sec)
+              : null,
+        }),
+      );
+      // Patch is a no-op if the call bubble isn't loaded yet — refetch open thread.
+      refreshOpenTimeline();
     };
 
     const handleAssign = (msg: { data?: Record<string, unknown> }) => {
@@ -520,6 +746,8 @@ export default function AdminConversations() {
       channel.subscribe("inbound_unknown", handleInbound);
       channel.subscribe("message", handleInbound);
       channel.subscribe("message_status", handleMessageStatus);
+      channel.subscribe("call_insights", handleCallInsights);
+      channel.subscribe("call_recording", handleCallRecording);
       channel.subscribe("assign", handleAssign);
       channel.subscribe("status", handleStatus);
     })();
@@ -533,6 +761,8 @@ export default function AdminConversations() {
           channel.unsubscribe("inbound_unknown", handleInbound);
           channel.unsubscribe("message", handleInbound);
           channel.unsubscribe("message_status", handleMessageStatus);
+          channel.unsubscribe("call_insights", handleCallInsights);
+          channel.unsubscribe("call_recording", handleCallRecording);
           channel.unsubscribe("assign", handleAssign);
           channel.unsubscribe("status", handleStatus);
         }
@@ -602,11 +832,13 @@ export default function AdminConversations() {
     );
   }, [timeline?.messages]);
 
-  // Twilio statusCallback updates DB; without Ably, poll until delivered/failed.
+  // Twilio statusCallback → Ably `message_status` patches ticks in-place.
+  // Only HTTP-poll the open timeline when Ably is down and outbound is still pending.
   useEffect(() => {
     if (!accessEnabled || !activeKind || !activeId || !hasPendingOutbound) {
       return;
     }
+    if (ablyLive) return;
     let attempts = 0;
     const maxAttempts = 30;
     const interval = window.setInterval(() => {
@@ -619,7 +851,14 @@ export default function AdminConversations() {
       }
     }, 4000);
     return () => window.clearInterval(interval);
-  }, [accessEnabled, activeKind, activeId, hasPendingOutbound, dispatch]);
+  }, [
+    accessEnabled,
+    activeKind,
+    activeId,
+    hasPendingOutbound,
+    ablyLive,
+    dispatch,
+  ]);
 
   const activeContact = useMemo(() => {
     const fromList =
@@ -653,6 +892,7 @@ export default function AdminConversations() {
       channels: ["sms"] as ConversationContactHubItem["channels"],
       client_id: activeKind === "client" ? activeId : null,
       unknown_contact_id: activeKind === "unknown" ? activeId : null,
+      crm_contact_id: activeKind === "contact" ? activeId : null,
     } as ConversationContactHubItem;
   }, [contacts, activeKind, activeId, timeline, activeHubStatus]);
 
@@ -661,13 +901,23 @@ export default function AdminConversations() {
 
   useEffect(() => {
     if (!isDialerCallActive || !dialerNumber.trim()) return;
+    const normalized = normalizeContactPhone(dialerNumber);
+    const phone = normalized?.phone ?? dialerNumber.trim();
+    const name = dialerClient
+      ? `${dialerClient.first_name} ${dialerClient.last_name}`.trim()
+      : null;
     dispatch(
-      startOutboundCall({ phone: dialerNumber.trim(), clientName: null }),
+      startOutboundCall({
+        phone,
+        clientName: name || null,
+        clientId: dialerClient?.id ?? null,
+      }),
     );
     setIsDialerCallActive(false);
     setIsDialerOpen(false);
     setDialerNumber("");
-  }, [isDialerCallActive, dialerNumber, dispatch]);
+    setDialerClient(null);
+  }, [isDialerCallActive, dialerNumber, dialerClient, dispatch]);
 
   const mergeContext = useMemo(() => {
     const c = timeline?.contact || {};
@@ -699,6 +949,54 @@ export default function AdminConversations() {
       preferred_language: String((c as any).preferred_language || "en"),
     };
   }, [timeline?.contact, activeContact, activeKind]);
+
+  const threadAlsoTarget = useMemo((): ConversationComposeTarget | null => {
+    if (activeKind !== "client" || !activeId) return null;
+    return {
+      kind: "client",
+      client: {
+        id: activeId,
+        first_name: mergeContext.first_name,
+        last_name: mergeContext.last_name,
+        phone: mergeContext.phone,
+      } as AdminClientListItem,
+    };
+  }, [activeKind, activeId, mergeContext]);
+
+  useEffect(() => {
+    setThreadAlsoRecipients([]);
+  }, [activeId, activeKind]);
+
+  useEffect(() => {
+    if (channel === "internal") {
+      setThreadAlsoRecipients([]);
+    }
+  }, [channel]);
+
+  useEffect(() => {
+    if (activeKind !== "client" || !activeId) {
+      setThreadReferrers([]);
+      setThreadReferrersLoading(false);
+      return;
+    }
+    const clientId = activeId;
+    let cancelled = false;
+    setThreadReferrersLoading(true);
+    void dispatch(fetchClientReferrers({ clientId })).then((result) => {
+      if (cancelled) return;
+      setThreadReferrersLoading(false);
+      if (
+        fetchClientReferrers.fulfilled.match(result) &&
+        activeKind === "client" &&
+        activeId === clientId
+      ) {
+        setThreadReferrers(result.payload);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeKind, activeId, dispatch]);
 
   const staticSuggestions = useMemo(() => {
     if (!activeKind || !activeId) return [];
@@ -734,7 +1032,7 @@ export default function AdminConversations() {
   }, [activeKind, activeId, timeline?.messages, dispatch]);
 
   const openContact = (
-    kind: "client" | "unknown",
+    kind: "client" | "unknown" | "contact",
     id: number,
     status?: ConversationContactHubItem["status"],
   ) => {
@@ -769,11 +1067,80 @@ export default function AdminConversations() {
     });
   };
 
+  const fanOutAlsoRecipients = async (
+    recipients: AlsoRecipient[],
+    filledBody: string,
+    media?: ConversationMediaAttachment | null,
+  ) => {
+    const failures: string[] = [];
+    for (const recipient of dedupeAlsoRecipients(recipients)) {
+      const result = await dispatch(
+        startConversationOutbound({
+          phone: recipient.phone,
+          body: filledBody,
+          ofg_number_id: accessNumbers[0]?.id,
+          media_url: media?.url,
+          media_content_type: media?.content_type,
+        }),
+      );
+      if (startConversationOutbound.rejected.match(result)) {
+        failures.push(recipient.label);
+      }
+    }
+    return failures;
+  };
+
+  const notifyAlsoSendOutcome = (
+    sentCount: number,
+    failures: string[],
+    recipients: AlsoRecipient[],
+  ) => {
+    if (failures.length > 0) {
+      toast({
+        variant: "destructive",
+        title: t("conversations.composeAlsoPartialFail", {
+          names: failures.join(", "),
+        }),
+      });
+      return;
+    }
+    if (sentCount === 1) {
+      toast({
+        title: t("conversations.composeAlsoSuccessOne", {
+          name: recipients[0]?.label || "",
+        }),
+      });
+      return;
+    }
+    if (sentCount > 1) {
+      toast({
+        title: t("conversations.composeAlsoSuccess", { count: sentCount }),
+      });
+    }
+  };
+
   const send = async () => {
-    if (!activeKind || !activeId) return;
+    if (!activeKind || !activeId || threadSending) return;
     if (!body.trim() && !(channel === "sms" && attachment)) return;
     const vars = buildConversationMergeVars(mergeContext);
     const filledBody = applyConversationTemplateVars(body.trim(), vars);
+    if (
+      channel === "sms" &&
+      [...filledBody].length > SMS_MAX_BODY_CHARS
+    ) {
+      dispatch(
+        setConversationsSendError(
+          t("conversations.smsTooLong", { max: SMS_MAX_BODY_CHARS }),
+        ),
+      );
+      return;
+    }
+    const alsoList =
+      activeKind === "client" && channel === "sms"
+        ? dedupeAlsoRecipients(threadAlsoRecipients)
+        : [];
+    setThreadSending(true);
+    try {
     const payload =
       activeKind === "client"
         ? {
@@ -786,29 +1153,120 @@ export default function AdminConversations() {
             media_content_type:
               channel === "sms" ? attachment?.content_type : undefined,
           }
-        : {
-            unknown_contact_id: activeId,
-            channel: "sms" as const,
-            body: filledBody,
-            ofg_number_id: accessNumbers[0]?.id,
-            media_url: attachment?.url,
-            media_content_type: attachment?.content_type,
-          };
+        : activeKind === "contact"
+          ? {
+              contact_id: activeId,
+              channel: "sms" as const,
+              body: filledBody,
+              ofg_number_id: accessNumbers[0]?.id,
+              media_url: attachment?.url,
+              media_content_type: attachment?.content_type,
+            }
+          : {
+              unknown_contact_id: activeId,
+              channel: "sms" as const,
+              body: filledBody,
+              ofg_number_id: accessNumbers[0]?.id,
+              media_url: attachment?.url,
+              media_content_type: attachment?.content_type,
+            };
     const result = await dispatch(sendHubMessage(payload));
     if (sendHubMessage.fulfilled.match(result)) {
-      setBody("");
+      let alsoFailures: string[] = [];
+      if (alsoList.length > 0) {
+        alsoFailures = await fanOutAlsoRecipients(
+          alsoList,
+          filledBody,
+          attachment,
+        );
+      }
+    setBody("");
       clearAttachment();
       dispatch(fetchConversationTimeline({ kind: activeKind, id: activeId }));
-      fetchContacts(contactsPage);
+      reloadContactsFromStart();
+      if (alsoList.length > 0) {
+        notifyAlsoSendOutcome(
+          alsoList.length - alsoFailures.length,
+          alsoFailures,
+          alsoList,
+        );
+        if (alsoFailures.length > 0) {
+          setThreadAlsoRecipients(
+            filterAlsoRecipientsForRetry(alsoList, alsoFailures),
+          );
+        } else {
+          setThreadAlsoRecipients([]);
+        }
+      }
+    }
+    } finally {
+      setThreadSending(false);
     }
   };
 
   const handleComposeTargetChange = (target: ConversationComposeTarget | null) => {
     setComposeTarget(target);
+    setComposeAlsoRecipients([]);
+    setComposeReferrers([]);
+    setComposeReferrersLoading(false);
     if (target?.kind === "phone") {
       setComposeChannel("sms");
     }
   };
+
+  // Hydrate empty composeClient stub names once timeline contact loads
+  useEffect(() => {
+    if (!composeOpen || composeTarget?.kind !== "client") return;
+    if (composeTarget.client.first_name || composeTarget.client.last_name) return;
+    if (activeKind !== "client" || activeId !== Number(composeTarget.client.id))
+      return;
+    const c = timeline?.contact as Record<string, unknown> | undefined;
+    if (!c) return;
+    const first = String(c.first_name || "").trim();
+    const last = String(c.last_name || "").trim();
+    const phone = String(c.phone || composeTarget.client.phone || "");
+    if (!first && !last && !phone) return;
+    setComposeTarget({
+      kind: "client",
+      client: {
+        ...composeTarget.client,
+        first_name: first || composeTarget.client.first_name,
+        last_name: last || composeTarget.client.last_name,
+        phone: phone || composeTarget.client.phone,
+      } as AdminClientListItem,
+    });
+  }, [
+    composeOpen,
+    composeTarget,
+    activeKind,
+    activeId,
+    timeline?.contact,
+  ]);
+
+  useEffect(() => {
+    if (!composeOpen || composeTarget?.kind !== "client") {
+      setComposeReferrers([]);
+      setComposeReferrersLoading(false);
+      return;
+    }
+    const clientId = Number(composeTarget.client.id);
+    let cancelled = false;
+    setComposeReferrersLoading(true);
+    void dispatch(fetchClientReferrers({ clientId })).then((result) => {
+      if (cancelled) return;
+      setComposeReferrersLoading(false);
+      if (
+        fetchClientReferrers.fulfilled.match(result) &&
+        composeTarget?.kind === "client" &&
+        Number(composeTarget.client.id) === clientId
+      ) {
+        setComposeReferrers(result.payload);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [composeOpen, composeTarget, dispatch]);
 
   const handleComposeOpenChange = (open: boolean) => {
     setComposeOpen(open);
@@ -816,17 +1274,34 @@ export default function AdminConversations() {
       setComposeTarget(null);
       setComposeBody("");
       setComposeChannel("sms");
+      setComposeAlsoRecipients([]);
+      setComposeReferrers([]);
+      setComposeReferrersLoading(false);
+      setComposeSending(false);
       clearComposeAttachment();
       dispatch(setConversationsSendError(null));
     }
   };
 
   const sendCompose = async () => {
-    if (!composeTarget) return;
+    if (!composeTarget || composeSending) return;
     const composeSms =
       composeTarget.kind === "phone" || composeChannel === "sms";
     if (!composeBody.trim() && !(composeSms && composeAttachment)) return;
+    if (
+      composeSms &&
+      [...composeBody].length > SMS_MAX_BODY_CHARS
+    ) {
+      dispatch(
+        setConversationsSendError(
+          t("conversations.smsTooLong", { max: SMS_MAX_BODY_CHARS }),
+        ),
+      );
+      return;
+    }
 
+    setComposeSending(true);
+    try {
     if (composeTarget.kind === "phone") {
       const vars = buildConversationMergeVars({
         first_name: "",
@@ -835,10 +1310,19 @@ export default function AdminConversations() {
         pipeline_stage: "unknown",
         client_status: "unknown",
       });
+      const filledBody = applyConversationTemplateVars(composeBody.trim(), vars);
+      if ([...filledBody].length > SMS_MAX_BODY_CHARS) {
+        dispatch(
+          setConversationsSendError(
+            t("conversations.smsTooLong", { max: SMS_MAX_BODY_CHARS }),
+          ),
+        );
+        return;
+      }
       const result = await dispatch(
         startConversationOutbound({
           phone: composeTarget.phone,
-          body: applyConversationTemplateVars(composeBody.trim(), vars),
+          body: filledBody,
           ofg_number_id: accessNumbers[0]?.id,
           media_url: composeAttachment?.url,
           media_content_type: composeAttachment?.content_type,
@@ -852,10 +1336,66 @@ export default function AdminConversations() {
         clearComposeAttachment();
         if (data.kind === "client" && data.client_id) {
           openContact("client", data.client_id);
+        } else if (data.kind === "contact" && data.contact_id) {
+          openContact("contact", data.contact_id);
         } else if (data.unknown_contact_id) {
           openContact("unknown", data.unknown_contact_id);
         }
-        fetchContacts(contactsPage);
+        reloadContactsFromStart();
+      } else if (startConversationOutbound.rejected.match(result)) {
+        dispatch(
+          setConversationsSendError(
+            String(result.payload || "Failed to send"),
+          ),
+        );
+      }
+      return;
+    }
+
+    if (composeTarget.kind === "contact") {
+      const contact = composeTarget.contact;
+      const vars = buildConversationMergeVars({
+        first_name: contact.first_name,
+        last_name: contact.last_name,
+        phone: contact.phone,
+        pipeline_stage: "",
+        client_status: "",
+      });
+      const filledBody = applyConversationTemplateVars(
+        composeBody.trim(),
+        vars,
+      );
+      if ([...filledBody].length > SMS_MAX_BODY_CHARS) {
+        dispatch(
+          setConversationsSendError(
+            t("conversations.smsTooLong", { max: SMS_MAX_BODY_CHARS }),
+          ),
+        );
+        return;
+      }
+      const result = await dispatch(
+        sendHubMessage({
+          contact_id: contact.id,
+          channel: "sms",
+          body: filledBody,
+          ofg_number_id: accessNumbers[0]?.id,
+          media_url: composeAttachment?.url,
+          media_content_type: composeAttachment?.content_type,
+        }),
+      );
+      if (sendHubMessage.fulfilled.match(result)) {
+        setComposeOpen(false);
+        setComposeTarget(null);
+        setComposeBody("");
+        clearComposeAttachment();
+        openContact("contact", contact.id);
+        reloadContactsFromStart();
+      } else if (sendHubMessage.rejected.match(result)) {
+        dispatch(
+          setConversationsSendError(
+            String(result.payload || "Failed to send"),
+          ),
+        );
       }
       return;
     }
@@ -868,11 +1408,23 @@ export default function AdminConversations() {
       pipeline_stage: (client as any).pipeline_stage,
       client_status: (client as any).status,
     });
+    const filledBody = applyConversationTemplateVars(composeBody.trim(), vars);
+    if (
+      composeChannel === "sms" &&
+      [...filledBody].length > SMS_MAX_BODY_CHARS
+    ) {
+      dispatch(
+        setConversationsSendError(
+          t("conversations.smsTooLong", { max: SMS_MAX_BODY_CHARS }),
+        ),
+      );
+      return;
+    }
     const result = await dispatch(
       sendHubMessage({
         client_id: client.id,
         channel: composeChannel === "internal" ? "internal" : composeChannel,
-        body: applyConversationTemplateVars(composeBody.trim(), vars),
+        body: filledBody,
         is_internal_note: composeChannel === "internal",
         ofg_number_id: accessNumbers[0]?.id,
         media_url:
@@ -884,12 +1436,41 @@ export default function AdminConversations() {
       }),
     );
     if (sendHubMessage.fulfilled.match(result)) {
-      setComposeOpen(false);
-      setComposeTarget(null);
+      const alsoList =
+        composeChannel === "sms"
+          ? dedupeAlsoRecipients(composeAlsoRecipients)
+          : [];
+      let alsoFailures: string[] = [];
+      if (alsoList.length > 0) {
+        alsoFailures = await fanOutAlsoRecipients(
+          alsoList,
+          filledBody,
+          composeAttachment,
+        );
+      }
       setComposeBody("");
       clearComposeAttachment();
       openContact("client", client.id);
-      fetchContacts(contactsPage);
+      reloadContactsFromStart();
+      if (alsoList.length > 0) {
+        notifyAlsoSendOutcome(
+          alsoList.length - alsoFailures.length,
+          alsoFailures,
+          alsoList,
+        );
+      }
+      if (alsoFailures.length > 0) {
+        setComposeAlsoRecipients(
+          filterAlsoRecipientsForRetry(alsoList, alsoFailures),
+        );
+      } else {
+        setComposeOpen(false);
+        setComposeTarget(null);
+        setComposeAlsoRecipients([]);
+      }
+    }
+    } finally {
+      setComposeSending(false);
     }
   };
 
@@ -923,29 +1504,31 @@ export default function AdminConversations() {
       setCompleteProfileClientId(clientId);
       setPanelOpen(true);
       dispatch(clearActiveConversation());
-      fetchContacts(contactsPage);
+      reloadContactsFromStart();
       openContact("client", clientId);
     }
   };
 
   if (accessLoading || accessEnabled === null) {
-    return (
-      <div className="space-y-4">
+  return (
+    <div className="flex flex-col gap-3 lg:h-[calc(100dvh-7rem)] min-h-0">
+      <div className="shrink-0 [&>div]:mb-0">
         <AdminPageHeader
           icon={MessageSquare}
           title={t("conversations.title")}
           description={t("conversations.description")}
         />
-        <ConversationsHubSkeleton />
       </div>
-    );
+      <ConversationsHubSkeleton />
+    </div>
+  );
   }
 
   if (!accessEnabled) {
-    return (
-      <div className="space-y-4">
-        <AdminPageHeader
-          icon={MessageSquare}
+  return (
+    <div className="space-y-4">
+      <AdminPageHeader
+        icon={MessageSquare}
           title={t("conversations.title")}
           description={t("conversations.description")}
         />
@@ -967,14 +1550,15 @@ export default function AdminConversations() {
   const messages = timeline?.messages || [];
 
   return (
-    <div className="space-y-4">
-      <AdminPageHeader
-        icon={MessageSquare}
-        title={t("conversations.title")}
-        description={t("conversations.description")}
-        actions={
-          <div className="flex items-center gap-2 flex-wrap">
-            <button
+    <div className="flex flex-col gap-3 lg:h-[calc(100dvh-7rem)] min-h-0">
+      <div className="shrink-0 [&>div]:mb-0">
+        <AdminPageHeader
+          icon={MessageSquare}
+          title={t("conversations.title")}
+          description={t("conversations.description")}
+          actions={
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
               type="button"
               onClick={() => dispatch(setVoiceAvailable(!isAvailable))}
               className={cn(
@@ -1046,6 +1630,7 @@ export default function AdminConversations() {
                 setIsDialerOpen((v) => !v);
                 setIsDialerCallActive(false);
                 setDialerNumber("");
+                setDialerClient(null);
               }}
               title={t("conversations.voice.dialpadTitle")}
             >
@@ -1076,9 +1661,10 @@ export default function AdminConversations() {
           </div>
         }
       />
+      </div>
 
       {guideOpen && (
-        <div className="rounded-2xl border border-primary/20 bg-primary/5 p-4 sm:p-5 relative">
+        <div className="rounded-2xl border border-primary/20 bg-primary/5 p-4 sm:p-5 relative shrink-0">
           <button
             type="button"
             onClick={dismissGuide}
@@ -1127,10 +1713,10 @@ export default function AdminConversations() {
         </div>
       )}
 
-      <div className="grid lg:grid-cols-[320px_minmax(0,1fr)] gap-4 lg:h-[calc(100vh-13rem)]">
+      <div className="grid lg:grid-cols-[320px_minmax(0,1fr)] gap-4 flex-1 min-h-0 lg:min-h-[28rem]">
         {/* Inbox list */}
         <div
-          className={`bg-card rounded-2xl border border-border flex flex-col overflow-hidden ${
+          className={`bg-card rounded-2xl border border-border flex flex-col overflow-hidden min-h-[75vh] lg:min-h-0 ${
             activeId ? "hidden lg:flex" : "flex"
           }`}
         >
@@ -1147,8 +1733,58 @@ export default function AdminConversations() {
               />
             </div>
             <div className="flex flex-wrap gap-1">
+              <TooltipProvider delayDuration={200}>
+              <button
+                  type="button"
+                  onClick={() => setHubChannel("sms")}
+                  className={cn(
+                    "px-2.5 py-1 rounded-lg text-[11px] font-semibold uppercase tracking-wide transition-colors inline-flex items-center gap-1",
+                    hubChannel === "sms"
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-muted text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  <MessageSquare className="w-3 h-3" />
+                  {t("conversations.hubChannels.sms")}
+                </button>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      onClick={() => setHubChannel("social")}
+                      className={cn(
+                        "px-2.5 py-1 rounded-lg text-[11px] font-semibold uppercase tracking-wide transition-colors inline-flex items-center gap-1",
+                        hubChannel === "social"
+                          ? "bg-primary text-primary-foreground"
+                          : "bg-muted text-muted-foreground hover:text-foreground",
+                        !socialDmLive && "opacity-90",
+                      )}
+                      data-testid="conversations-hub-social"
+                      aria-label={
+                        socialDmLive
+                          ? t("conversations.hubChannels.social")
+                          : t("conversations.social.chipLockedAria")
+                      }
+                    >
+                      <Instagram className="w-3 h-3" />
+                      {t("conversations.hubChannels.social")}
+                      {!socialDmLive && (
+                        <Lock className="w-3 h-3 opacity-80" />
+                      )}
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="max-w-[220px] text-xs">
+                    {socialDmLive
+                      ? t("conversations.social.chipLiveHint")
+                      : t("conversations.social.chipSoonHint")}
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            </div>
+            {hubChannel === "sms" && (
+            <div className="flex flex-wrap gap-1">
               {VIEWS.map((v) => (
-                <button
+              <button
                   key={v}
                   type="button"
                   onClick={() => dispatch(setConversationsView(v))}
@@ -1162,8 +1798,18 @@ export default function AdminConversations() {
                 </button>
               ))}
             </div>
+            )}
           </div>
 
+          {hubChannel === "social" ? (
+            <div className="flex-1 overflow-y-auto p-4">
+              <p className="text-xs text-muted-foreground text-center leading-relaxed px-2">
+                {socialDmLive
+                  ? t("conversations.social.listLiveEmpty")
+                  : t("conversations.social.listSoonEmpty")}
+              </p>
+            </div>
+          ) : (
           <div
             className={cn(
               "flex-1 overflow-y-auto",
@@ -1202,13 +1848,16 @@ export default function AdminConversations() {
                 </Button>
               </div>
             ) : (
-              contacts.map((c) => {
+              <>
+              {contacts.map((c) => {
                 const selected =
                   c.kind === activeKind && c.contact_id === activeId;
                 const rowClosed =
                   c.status === "closed" || c.status === "archived";
                 const canCloseOrReopen =
-                  c.kind === "client" || c.kind === "unknown";
+                  c.kind === "client" ||
+                  c.kind === "unknown" ||
+                  c.kind === "contact";
                 return (
                   <div
                     key={`${c.kind}-${c.contact_id}`}
@@ -1225,22 +1874,44 @@ export default function AdminConversations() {
                       className="min-w-0 flex-1 text-left"
                     >
                       <div className="flex items-start justify-between gap-2">
-                        <div className="font-medium text-sm truncate">
+                        <div className="font-medium text-sm truncate min-w-0">
                           {c.display_name}
                         </div>
-                        {c.unread_count > 0 && (
-                          <span className="shrink-0 min-w-[1.25rem] h-5 px-1.5 rounded-full bg-accent text-accent-foreground text-[10px] font-bold flex items-center justify-center">
-                            {c.unread_count > 99 ? "99+" : c.unread_count}
-                          </span>
-                        )}
+                        <div className="flex flex-col items-end gap-1 shrink-0 pt-0.5">
+                          {c.last_message_at ? (
+                            <time
+                              dateTime={String(c.last_message_at)}
+                              title={formatConversationAbsoluteTime(
+                                c.last_message_at,
+                                timeLang,
+                              )}
+                              className="text-[10px] font-medium tabular-nums text-muted-foreground/90 leading-none tracking-tight"
+                            >
+                              {formatConversationListTime(c.last_message_at, {
+                                lang: timeLang,
+                                now: new Date(listClock),
+                              })}
+                            </time>
+                          ) : null}
+                          {c.unread_count > 0 && (
+                            <span className="min-w-[1.25rem] h-5 px-1.5 rounded-full bg-accent text-accent-foreground text-[10px] font-bold flex items-center justify-center animate-in zoom-in-50 duration-200">
+                              {c.unread_count > 99 ? "99+" : c.unread_count}
+                            </span>
+                          )}
+                        </div>
                       </div>
-                      <div className="text-xs text-muted-foreground truncate mt-0.5">
+                      <div className="text-xs text-muted-foreground truncate mt-0.5 pr-1">
                         {c.last_message_preview || "—"}
                       </div>
                       <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
                         {c.kind === "unknown" && (
                           <span className="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded bg-destructive/10 text-destructive">
                             {t("conversations.unknownBadge")}
+                          </span>
+                        )}
+                        {c.kind === "contact" && (
+                          <span className="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded bg-primary/10 text-primary">
+                            {t("conversations.contactBadge")}
                           </span>
                         )}
                         {(c.channels || []).map((ch) => (
@@ -1261,8 +1932,8 @@ export default function AdminConversations() {
                             {t("conversations.unassignedBadge")}
                           </span>
                         )}
-                      </div>
-                    </button>
+                </div>
+              </button>
                     {canCloseOrReopen && (
                       <button
                         type="button"
@@ -1304,55 +1975,57 @@ export default function AdminConversations() {
                     )}
                   </div>
                 );
-              })
+              })}
+              {contactsPagination &&
+                contactsPagination.page < contactsPagination.totalPages && (
+                  <div className="px-3 py-3">
+                    <button
+                      type="button"
+                      onClick={loadMoreContacts}
+                      disabled={
+                        contactsLoading ||
+                        contactsRefreshing ||
+                        contactsLoadingMore
+                      }
+                      className="w-full inline-flex items-center justify-center gap-1.5 h-9 rounded-xl border border-border bg-background text-xs font-medium text-foreground hover:bg-muted/80 disabled:opacity-50 transition-colors"
+                    >
+                      {contactsLoadingMore ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />
+                      ) : null}
+                      {t("conversations.loadMore", {
+                        shown: contacts.length,
+                        total: contactsPagination.total,
+                      })}
+                    </button>
+                  </div>
+                )}
+              {contactsPagination &&
+                contactsPagination.totalPages > 1 &&
+                contactsPagination.page >= contactsPagination.totalPages && (
+                  <div className="px-3 py-2.5 text-[11px] text-center text-muted-foreground">
+                    {t("conversations.showingAll", {
+                      total: contactsPagination.total,
+                    })}
+                  </div>
+                )}
+              </>
             )}
           </div>
-          {contactsPagination && contactsPagination.totalPages > 1 && (
-            <div className="flex items-center justify-between px-3 py-2 border-t border-border shrink-0 text-xs text-muted-foreground">
-              <span>
-                {(contactsPagination.page - 1) * contactsPagination.limit + 1}–
-                {Math.min(
-                  contactsPagination.page * contactsPagination.limit,
-                  contactsPagination.total,
-                )}{" "}
-                of {contactsPagination.total}
-              </span>
-              <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  onClick={() => setContactsPage((p) => Math.max(1, p - 1))}
-                  disabled={contactsPagination.page <= 1}
-                  className="inline-flex items-center justify-center w-8 h-8 rounded-md border border-border disabled:opacity-40"
-                  aria-label="Previous page"
-                >
-                  <ChevronLeft className="w-4 h-4" />
-                </button>
-                <span>
-                  {contactsPagination.page}/{contactsPagination.totalPages}
-                </span>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setContactsPage((p) =>
-                      Math.min(contactsPagination.totalPages, p + 1),
-                    )
-                  }
-                  disabled={
-                    contactsPagination.page >= contactsPagination.totalPages
-                  }
-                  className="inline-flex items-center justify-center w-8 h-8 rounded-md border border-border disabled:opacity-40"
-                  aria-label="Next page"
-                >
-                  <ChevronRight className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
           )}
         </div>
 
-        {/* Timeline + composer */}
+        {/* Timeline + composer (or Social coming-soon) */}
+        {hubChannel === "social" ? (
+          <div
+            className={`bg-card rounded-2xl border border-border flex flex-col min-h-[75vh] lg:min-h-0 lg:h-full overflow-hidden ${
+              activeId || hubChannel === "social" ? "flex" : "hidden lg:flex"
+            }`}
+          >
+            <ConversationSocialHub mode={socialDmMode} />
+          </div>
+        ) : (
         <div
-          className={`bg-card rounded-2xl border border-border flex flex-col min-h-[65vh] lg:h-full overflow-hidden min-h-0 ${
+          className={`bg-card rounded-2xl border border-border flex flex-col min-h-[75vh] lg:min-h-0 lg:h-full overflow-hidden ${
             activeId ? "flex" : "hidden lg:flex"
           }`}
         >
@@ -1406,13 +2079,55 @@ export default function AdminConversations() {
                       <div className="font-semibold text-foreground">
                         {activeContact?.display_name ||
                           t("conversations.conversation")}
-                      </div>
+                </div>
                     )}
                     <div className="text-xs text-muted-foreground mt-0.5">
-                      {activeContact?.phone || "—"}
-                    </div>
+                      {activeContact?.phone ? (
+                        <ContactPhoneActions
+                          phone={activeContact.phone}
+                          clientId={
+                            activeKind === "client" ? activeId : null
+                          }
+                          clientName={activeContact.display_name}
+                          onText={({ phone, clientId, clientName }) => {
+                            if (clientId && clientId > 0) {
+                              setComposeTarget({
+                                kind: "client",
+                                client: {
+                                  id: clientId,
+                                  first_name:
+                                    String(clientName || "")
+                                      .split(/\s+/)[0] || "",
+                                  last_name:
+                                    String(clientName || "")
+                                      .split(/\s+/)
+                                      .slice(1)
+                                      .join(" ") || "",
+                                  phone,
+                                  email: "",
+                                } as AdminClientListItem,
+                              });
+                            } else {
+                              const n = normalizeContactPhone(phone);
+                              if (!n) return;
+                              setComposeTarget({
+                                kind: "phone",
+                                phone: n.phone,
+                                label: n.label,
+                              });
+                            }
+                            setComposeChannel("sms");
+                            setComposeOpen(true);
+                          }}
+                        />
+                      ) : (
+                        "—"
+                      )}
+              </div>
                   </div>
-                  {(activeKind === "client" || activeKind === "unknown") && (
+                  {(activeKind === "client" ||
+                    activeKind === "unknown" ||
+                    activeKind === "contact") && (
                     <div className="flex flex-wrap gap-2">
                       {activeKind === "client" && (
                         <button
@@ -1423,7 +2138,7 @@ export default function AdminConversations() {
                                 clientId: activeId,
                                 assigned_admin_id: authUser?.id ?? null,
                               }),
-                            ).then(() => fetchContacts(contactsPage))
+                            ).then(() => reloadContactsFromStart())
                           }
                           className="h-8 px-3 rounded-lg text-xs font-medium border border-border hover:bg-muted"
                         >
@@ -1563,7 +2278,7 @@ export default function AdminConversations() {
                                 );
                                 if (linkUnknownContact.fulfilled.match(r)) {
                                   dispatch(clearActiveConversation());
-                                  fetchContacts(contactsPage);
+                                  reloadContactsFromStart();
                                   openContact("client", linkClient.id);
                                 }
                               }}
@@ -1577,7 +2292,7 @@ export default function AdminConversations() {
                               onClick={async () => {
                                 await dispatch(dismissUnknownContact(activeId));
                                 dispatch(clearActiveConversation());
-                                fetchContacts(contactsPage);
+                                reloadContactsFromStart();
                               }}
                               className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg text-xs font-medium text-destructive hover:bg-destructive/10"
                             >
@@ -1634,21 +2349,21 @@ export default function AdminConversations() {
                     const isOut = m.direction === "outbound";
                     const isNote = m.direction === "internal" || m.channel === "internal";
                     return (
-                      <div
-                        key={m.id}
-                        className={`flex ${
+                  <div
+                    key={m.id}
+                    className={`flex ${
                           isNote ? "justify-center" : isOut ? "justify-end" : "justify-start"
-                        }`}
-                      >
-                        <div
+                    }`}
+                  >
+                    <div
                           className={`max-w-[85%] p-3 rounded-2xl text-sm ${
                             isNote
                               ? "bg-secondary text-secondary-foreground border border-border w-full max-w-xl"
                               : isOut
-                                ? "bg-primary text-primary-foreground"
-                                : "bg-muted text-foreground"
-                          }`}
-                        >
+                          ? "bg-primary text-primary-foreground"
+                          : "bg-muted text-foreground"
+                      }`}
+                    >
                           <div className="flex items-center gap-1.5 mb-1 text-[10px] uppercase font-semibold opacity-80">
                             {m.channel === "internal" ? (
                               <StickyNote className="w-3 h-3" />
@@ -1666,68 +2381,28 @@ export default function AdminConversations() {
                               ? ` · ${m.sent_by_admin_name}`
                               : ""}
                           </div>
-                          {m.subject && (
-                            <div className="font-semibold mb-1">{m.subject}</div>
-                          )}
+                      {m.subject && (
+                        <div className="font-semibold mb-1">{m.subject}</div>
+                      )}
                           {m.media_url && (
                             <div className="mb-2">
                               {(() => {
                                 const src = resolveMediaSrc(m.media_url);
                                 const ct = String(m.media_content_type || "");
-                                if (
-                                  ct.startsWith("image/") ||
-                                  (!ct &&
-                                    /\.(jpe?g|png|gif|webp)(\?|$)/i.test(
-                                      m.media_url,
-                                    ))
-                                ) {
-                                  return (
-                                    <a
-                                      href={src}
-                                      target="_blank"
-                                      rel="noreferrer"
-                                      className="block"
-                                    >
-                                      <img
-                                        src={src}
-                                        alt=""
-                                        className="max-h-80 max-w-[260px] w-full rounded-xl object-cover border border-border/40"
-                                        loading="lazy"
-                                      />
-                                    </a>
-                                  );
-                                }
-                                if (ct.startsWith("video/")) {
-                                  return (
-                                    <video
-                                      controls
-                                      className="max-h-80 max-w-[260px] rounded-xl"
-                                      preload="metadata"
-                                    >
-                                      <source src={src} type={ct} />
-                                    </video>
-                                  );
-                                }
-                                if (ct.startsWith("audio/")) {
-                                  return (
-                                    <audio
-                                      controls
-                                      preload="metadata"
-                                      className="w-full max-w-[260px] h-8"
-                                    >
-                                      <source src={src} type={ct} />
-                                    </audio>
-                                  );
-                                }
                                 return (
-                                  <a
-                                    href={src}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="text-xs underline opacity-90"
-                                  >
-                                    {t("conversations.viewAttachment")}
-                                  </a>
+                                  <ConversationMediaThumb
+                                    src={src}
+                                    contentType={ct}
+                                    onOpen={() =>
+                                      setMediaPreview({
+                                        src,
+                                        contentType: ct,
+                                        label: t(
+                                          "conversations.mediaPreview.attachment",
+                                        ),
+                                      })
+                                    }
+                                  />
                                 );
                               })()}
                             </div>
@@ -1748,8 +2423,11 @@ export default function AdminConversations() {
                               </audio>
                             </div>
                           ) : null}
+                          {m.channel === "call" ? (
+                            <ConversationCallInsights message={m} />
+                          ) : null}
                           {m.body ? (
-                            <div className="whitespace-pre-wrap">{m.body}</div>
+                      <div className="whitespace-pre-wrap">{m.body}</div>
                           ) : null}
                           <div className="text-[10px] opacity-70 mt-1 flex flex-wrap items-center gap-x-1">
                             <span>{formatWhen(m.created_at)}</span>
@@ -1763,15 +2441,17 @@ export default function AdminConversations() {
                                 />
                               </>
                             )}
-                          </div>
-                        </div>
                       </div>
+                    </div>
+                  </div>
                     );
                   })
                 )}
               </div>
 
-              {(activeKind === "client" || activeKind === "unknown") && (
+              {(activeKind === "client" ||
+                activeKind === "unknown" ||
+                activeKind === "contact") && (
                 <div className="shrink-0 border-t border-border">
                   {isThreadClosed && (
                     <div
@@ -1806,10 +2486,32 @@ export default function AdminConversations() {
                       </Button>
                     </div>
                   )}
+                  {activeKind === "client" &&
+                    channel === "sms" &&
+                    threadAlsoTarget && (
+                      <div className="px-3 pt-3 pb-2">
+                        <ConversationComposeAlsoSend
+                          composeTarget={threadAlsoTarget}
+                          referrers={threadReferrers}
+                          referrersLoading={threadReferrersLoading}
+                          selected={threadAlsoRecipients}
+                          onChange={setThreadAlsoRecipients}
+                          disabled={sending || threadSending}
+                        />
+                      </div>
+                    )}
                   <ConversationMessageComposer
-                    channel={activeKind === "unknown" ? "sms" : channel}
+                    collapsible
+                    collapseResetKey={`${activeKind}-${activeId}`}
+                    channel={
+                      activeKind === "unknown" || activeKind === "contact"
+                        ? "sms"
+                        : channel
+                    }
                     onChannelChange={
-                      activeKind === "unknown" ? () => {} : setChannel
+                      activeKind === "unknown" || activeKind === "contact"
+                        ? () => {}
+                        : setChannel
                     }
                     body={body}
                     onBodyChange={setBody}
@@ -1824,7 +2526,7 @@ export default function AdminConversations() {
                       pickMedia(file, setAttachment, attachment)
                     }
                     uploadingMedia={uploadingMedia}
-                    sending={sending}
+                    sending={sending || threadSending}
                     sendError={
                       sendError === "conversation_closed"
                         ? t("conversations.conversationClosedError")
@@ -1834,15 +2536,18 @@ export default function AdminConversations() {
                     onSuggestAi={loadAiSuggestions}
                     aiSuggestionsLoading={aiSuggestionsLoading}
                     allowedChannels={
-                      activeKind === "unknown" ? ["sms"] : undefined
+                      activeKind === "unknown" || activeKind === "contact"
+                        ? ["sms"]
+                        : undefined
                     }
                     onSend={() => void send()}
                   />
                 </div>
               )}
             </>
-          )}
-        </div>
+                  )}
+                </div>
+        )}
       </div>
 
       <Dialog open={composeOpen} onOpenChange={handleComposeOpenChange}>
@@ -1899,7 +2604,7 @@ export default function AdminConversations() {
                         }),
                       );
                       return (
-                        <button
+                  <button
                           key={key}
                           type="button"
                           onClick={() => {
@@ -1911,21 +2616,43 @@ export default function AdminConversations() {
                         >
                           {preview.slice(0, 72)}
                           {preview.length > 72 ? "…" : ""}
-                        </button>
+                  </button>
                       );
                     })}
-                  </div>
+                </div>
+              </div>
+              )}
+              {composeTarget.kind === "client" && composeChannel === "sms" && (
+                <div className="px-4 pb-2">
+                  <ConversationComposeAlsoSend
+                    composeTarget={composeTarget}
+                    referrers={composeReferrers}
+                    referrersLoading={composeReferrersLoading}
+                    selected={composeAlsoRecipients}
+                    onChange={setComposeAlsoRecipients}
+                    disabled={sending || composeSending}
+                    defaultExpanded
+                  />
                 </div>
               )}
               <ConversationMessageComposer
                 channel={
-                  composeTarget.kind === "phone" ? "sms" : composeChannel
+                  composeTarget.kind === "phone" ||
+                  composeTarget.kind === "contact"
+                    ? "sms"
+                    : composeChannel
                 }
                 onChannelChange={
-                  composeTarget.kind === "phone" ? () => {} : setComposeChannel
+                  composeTarget.kind === "phone" ||
+                  composeTarget.kind === "contact"
+                    ? () => {}
+                    : setComposeChannel
                 }
                 allowedChannels={
-                  composeTarget.kind === "phone" ? ["sms"] : undefined
+                  composeTarget.kind === "phone" ||
+                  composeTarget.kind === "contact"
+                    ? ["sms"]
+                    : undefined
                 }
                 body={composeBody}
                 onBodyChange={setComposeBody}
@@ -1940,13 +2667,21 @@ export default function AdminConversations() {
                           .pipeline_stage,
                         client_status: (composeTarget.client as any).status,
                       }
-                    : {
-                        first_name: "",
-                        last_name: "",
-                        phone: composeTarget.phone,
-                        pipeline_stage: "unknown",
-                        client_status: "unknown",
-                      }
+                    : composeTarget.kind === "contact"
+                      ? {
+                          first_name: composeTarget.contact.first_name,
+                          last_name: composeTarget.contact.last_name,
+                          phone: composeTarget.contact.phone,
+                          pipeline_stage: "",
+                          client_status: "",
+                        }
+                      : {
+                          first_name: "",
+                          last_name: "",
+                          phone: composeTarget.phone,
+                          pipeline_stage: "unknown",
+                          client_status: "unknown",
+                        }
                 }
                 suggestedReplies={
                   composeTarget.kind === "phone"
@@ -1973,7 +2708,7 @@ export default function AdminConversations() {
                   pickMedia(file, setComposeAttachment, composeAttachment)
                 }
                 uploadingMedia={uploadingMedia}
-                sending={sending}
+                sending={sending || composeSending}
                 sendError={
                   sendError === "conversation_closed"
                     ? t("conversations.conversationClosedError")
@@ -2029,6 +2764,11 @@ export default function AdminConversations() {
         }}
       />
 
+      <ConversationMediaLightbox
+        item={mediaPreview}
+        onClose={() => setMediaPreview(null)}
+      />
+
       <ConversationVoiceSettingsModal
         open={voiceSettingsOpen}
         onOpenChange={setVoiceSettingsOpen}
@@ -2043,16 +2783,16 @@ export default function AdminConversations() {
             "sm:inset-x-auto sm:bottom-6 sm:right-6 sm:p-0 sm:w-80 sm:animate-in sm:slide-in-from-bottom-4",
           )}
         >
-          <div className="bg-card border border-border shadow-2xl rounded-2xl overflow-hidden max-h-[min(85dvh,36rem)] flex flex-col">
+          <div className="bg-card border border-border shadow-2xl rounded-2xl overflow-hidden max-h-[min(85dvh,40rem)] flex flex-col">
             <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
               <div className="flex items-center gap-2">
                 <div className="p-1.5 bg-primary/10 rounded-lg">
                   <PhoneCall className="h-4 w-4 text-primary" />
-                </div>
+        </div>
                 <p className="text-sm font-semibold text-foreground">
                   {t("conversations.voice.dialpadTitle")}
                 </p>
-              </div>
+      </div>
               <Button
                 variant="ghost"
                 size="icon"
@@ -2060,6 +2800,7 @@ export default function AdminConversations() {
                 onClick={() => {
                   setIsDialerOpen(false);
                   setDialerNumber("");
+                  setDialerClient(null);
                 }}
                 aria-label={t("conversations.cancel")}
               >
@@ -2067,32 +2808,53 @@ export default function AdminConversations() {
               </Button>
             </div>
 
-            <div className="overflow-y-auto overscroll-contain flex-1 min-h-0">
-              <div className="px-4 pt-4 pb-2">
-                <div className="flex items-center gap-2 bg-muted rounded-xl px-4 py-3">
-                  <input
-                    type="tel"
-                    inputMode="tel"
-                    autoComplete="tel"
-                    value={dialerNumber}
-                    onChange={(e) => setDialerNumber(e.target.value)}
-                    placeholder={t("conversations.voice.dialpadPlaceholder")}
-                    className="flex-1 bg-transparent text-lg font-mono tracking-wider text-foreground outline-none placeholder:text-muted-foreground/50"
-                  />
-                  {dialerNumber && (
-                    <button
-                      type="button"
-                      onClick={() => setDialerNumber((n) => n.slice(0, -1))}
-                      className="p-1 rounded hover:bg-muted-foreground/10 transition-colors"
-                      aria-label={t("conversations.voice.dialpadBackspace")}
-                    >
-                      <Delete className="h-4 w-4 text-muted-foreground" />
-                    </button>
-                  )}
-                </div>
+            <div className="px-4 pt-3 pb-2 space-y-2 shrink-0 border-b border-border/40">
+              <ClientSearchPicker
+                value={dialerClient}
+                onChange={(client) => {
+                  setDialerClient(client);
+                  if (client?.phone) {
+                    setDialerNumber(String(client.phone));
+                  } else if (client && !client.phone) {
+                    toast({
+                      title: t("conversations.voice.dialpadNoClientPhone"),
+                      variant: "destructive",
+                    });
+                  }
+                }}
+                placeholder={t("conversations.voice.dialpadSearchClient")}
+              />
+              <div className="flex items-center gap-2 bg-muted rounded-xl px-4 py-3">
+                <input
+                  type="tel"
+                  inputMode="tel"
+                  autoComplete="tel"
+                  value={dialerNumber}
+                  onChange={(e) => {
+                    setDialerNumber(e.target.value);
+                    if (dialerClient) setDialerClient(null);
+                  }}
+                  placeholder={t("conversations.voice.dialpadPlaceholder")}
+                  className="flex-1 bg-transparent text-lg font-mono tracking-wider text-foreground outline-none placeholder:text-muted-foreground/50"
+                />
+                {dialerNumber && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDialerNumber((n) => n.slice(0, -1));
+                      setDialerClient(null);
+                    }}
+                    className="p-1 rounded hover:bg-muted-foreground/10 transition-colors"
+                    aria-label={t("conversations.voice.dialpadBackspace")}
+                  >
+                    <Delete className="h-4 w-4 text-muted-foreground" />
+                  </button>
+                )}
               </div>
+            </div>
 
-              <div className="px-4 pb-2">
+            <div className="overflow-y-auto overscroll-contain flex-1 min-h-0">
+              <div className="px-4 py-2">
                 {[
                   ["1", "2", "3"],
                   ["4", "5", "6"],
@@ -2104,7 +2866,10 @@ export default function AdminConversations() {
                       <button
                         key={key}
                         type="button"
-                        onClick={() => setDialerNumber((n) => n + key)}
+                        onClick={() => {
+                          setDialerNumber((n) => n + key);
+                          setDialerClient(null);
+                        }}
                         className="flex flex-col items-center justify-center h-14 rounded-xl bg-muted hover:bg-muted/70 active:scale-95 transition-all duration-100 select-none"
                       >
                         <span className="text-lg font-semibold text-foreground leading-none">
@@ -2117,19 +2882,58 @@ export default function AdminConversations() {
               </div>
             </div>
 
-            <div className="px-4 pt-2 pb-4 border-t border-border/60 shrink-0 bg-card">
-              <Button
-                className="w-full h-12 rounded-xl bg-accent hover:bg-accent/90 text-accent-foreground gap-2 text-base font-semibold shadow-md"
-                disabled={!dialerNumber.trim()}
-                onClick={() => {
-                  if (dialerNumber.trim()) setIsDialerCallActive(true);
-                }}
-              >
-                <Phone className="h-5 w-5" />
-                {t("conversations.voice.call")}
-              </Button>
+            <div className="px-4 pt-2 pb-4 border-t border-border/60 shrink-0 bg-card space-y-2">
+              <div className="grid grid-cols-2 gap-2">
+                <Button
+                  variant="outline"
+                  className="h-12 rounded-xl gap-2 text-base font-semibold"
+                  disabled={!dialerNumber.trim()}
+                  onClick={() => {
+                    const normalized = normalizeContactPhone(dialerNumber);
+                    if (!normalized && dialerNumber.replace(/\D/g, "").length < 10) {
+                      toast({
+                        title: t("conversations.voice.validationPhone"),
+                        variant: "destructive",
+                      });
+                      return;
+                    }
+                    const phone =
+                      normalized?.phone ?? dialerNumber.trim();
+                    if (dialerClient?.id) {
+                      setComposeTarget({
+                        kind: "client",
+                        client: dialerClient,
+                      });
+                    } else {
+                      setComposeTarget({
+                        kind: "phone",
+                        phone,
+                        label: normalized?.label ?? phone,
+                      });
+                    }
+                    setComposeChannel("sms");
+                    setComposeOpen(true);
+                    setIsDialerOpen(false);
+                    setDialerNumber("");
+                    setDialerClient(null);
+                  }}
+                >
+                  <MessageSquare className="h-5 w-5" />
+                  {t("conversations.phoneActions.text")}
+                </Button>
+                <Button
+                  className="h-12 rounded-xl bg-accent hover:bg-accent/90 text-accent-foreground gap-2 text-base font-semibold shadow-md"
+                  disabled={!dialerNumber.trim()}
+                  onClick={() => {
+                    if (dialerNumber.trim()) setIsDialerCallActive(true);
+                  }}
+                >
+                  <Phone className="h-5 w-5" />
+                  {t("conversations.voice.call")}
+                </Button>
+              </div>
               {!isAvailable && (
-                <p className="text-[11px] text-muted-foreground text-center mt-2 leading-snug">
+                <p className="text-[11px] text-muted-foreground text-center leading-snug">
                   {t("conversations.voice.dialpadNeedAvailable")}
                 </p>
               )}

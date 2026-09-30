@@ -3,20 +3,32 @@ import {
   TrendingUp,
   TrendingDown,
   Minus,
-  Download,
+  Share2,
   FileText,
   Loader2,
+  ExternalLink,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { fetchDashboard } from "@/store/slices/portalSlice";
 import api from "@/lib/api";
+import { useToast } from "@/hooks/use-toast";
+import {
+  canSharePdfFile,
+  deliverPdfBlob,
+  readBlobErrorMessage,
+} from "@/lib/deliverPdfBlob";
+import { parsePortalDualList } from "@/lib/reportCompareMode";
+import { logger } from "@/utils/logger";
+import { isAxiosError } from "axios";
 
 export default function Reports() {
   const { t } = useTranslation();
+  const { toast } = useToast();
   const dispatch = useAppDispatch();
   const { reports, loading } = useAppSelector((s) => s.portal);
   const [pdfLoading, setPdfLoading] = useState<Record<number, boolean>>({});
+  const shareCapable = canSharePdfFile();
 
   const handleDownloadPdf = async (pdfId: number, fileName: string) => {
     setPdfLoading((prev) => ({ ...prev, [pdfId]: true }));
@@ -24,14 +36,41 @@ export default function Reports() {
       const resp = await api.get(`/portal/round-report-pdfs/${pdfId}`, {
         responseType: "blob",
       });
-      const url = URL.createObjectURL(resp.data as Blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = fileName || `report-${pdfId}.pdf`;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 5000);
-    } catch {
-      // silent
+      const data = resp.data as Blob;
+      // API errors with responseType:blob still return a Blob body.
+      if (data.type && data.type.includes("json")) {
+        const msg = await readBlobErrorMessage(
+          data,
+          t("reports.downloadPdfError"),
+        );
+        throw new Error(msg);
+      }
+      const result = await deliverPdfBlob({ blob: data, fileName });
+      if (result === "shared") {
+        toast({
+          title: t("reports.downloadPdfShared"),
+          description: fileName,
+        });
+      } else if (result === "opened") {
+        toast({
+          title: t("reports.downloadPdfOpened"),
+          description: t("reports.downloadPdfOpenedHint"),
+        });
+      } else {
+        toast({
+          title: t("reports.downloadPdfSaved"),
+          description: fileName,
+        });
+      }
+    } catch (e: unknown) {
+      logger.error("[portal:reports] pdf deliver", e);
+      let msg = t("reports.downloadPdfError");
+      if (isAxiosError(e) && e.response?.data) {
+        msg = await readBlobErrorMessage(e.response.data, msg);
+      } else if (e instanceof Error && e.message && e.message !== "pdf_deliver_failed") {
+        msg = e.message;
+      }
+      toast({ title: msg, variant: "destructive" });
     } finally {
       setPdfLoading((prev) => ({ ...prev, [pdfId]: false }));
     }
@@ -85,46 +124,51 @@ export default function Reports() {
         </div>
       ) : (
         <>
-          {/* Summary bar */}
+          {/* Summary bar — lifetime / since-start */}
           {reports.length > 0 && (
-            <div className="grid sm:grid-cols-3 gap-4">
-              <div className="bg-card rounded-2xl border border-border p-5 shadow-sm">
-                <div className="text-xs text-muted-foreground uppercase tracking-wide mb-1">
-                  {t("reports.totalRemoved")}
+            <div className="space-y-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                {t("reports.lifetimeProgress")}
+              </p>
+              <div className="grid sm:grid-cols-3 gap-4">
+                <div className="bg-card rounded-2xl border border-border p-5 shadow-sm">
+                  <div className="text-xs text-muted-foreground uppercase tracking-wide mb-1">
+                    {t("reports.totalRemoved")}
+                  </div>
+                  <div className="text-3xl font-bold text-accent">
+                    {totalRemoved}
+                  </div>
                 </div>
-                <div className="text-3xl font-bold text-accent">
-                  {totalRemoved}
+                <div className="bg-card rounded-2xl border border-border p-5 shadow-sm">
+                  <div className="text-xs text-muted-foreground uppercase tracking-wide mb-1">
+                    {t("reports.roundsCompleted")}
+                  </div>
+                  <div className="text-3xl font-bold">{reports.length}</div>
                 </div>
-              </div>
-              <div className="bg-card rounded-2xl border border-border p-5 shadow-sm">
-                <div className="text-xs text-muted-foreground uppercase tracking-wide mb-1">
-                  {t("reports.roundsCompleted")}
-                </div>
-                <div className="text-3xl font-bold">{reports.length}</div>
-              </div>
-              <div className="bg-card rounded-2xl border border-border p-5 shadow-sm">
-                <div className="text-xs text-muted-foreground uppercase tracking-wide mb-1">
-                  {t("reports.scoreChange")}
-                </div>
-                <div className="text-3xl font-bold flex items-center gap-1.5">
-                  {scoreDelta === null ? (
-                    <span className="text-muted-foreground">—</span>
-                  ) : scoreDelta > 0 ? (
-                    <>
-                      <TrendingUp className="w-6 h-6 text-accent" />
-                      <span className="text-accent">+{scoreDelta}</span>
-                    </>
-                  ) : scoreDelta < 0 ? (
-                    <>
-                      <TrendingDown className="w-6 h-6 text-destructive" />
-                      <span className="text-destructive">{scoreDelta}</span>
-                    </>
-                  ) : (
-                    <>
-                      <Minus className="w-6 h-6 text-muted-foreground" />
-                      <span>0</span>
-                    </>
-                  )}
+                <div className="bg-card rounded-2xl border border-border p-5 shadow-sm">
+                  <div className="text-xs text-muted-foreground uppercase tracking-wide mb-1">
+                    {t("reports.scoreChange")}
+                  </div>
+                  <div className="text-3xl font-bold flex items-center gap-1.5">
+                    {scoreDelta === null ? (
+                      <span className="text-muted-foreground">—</span>
+                    ) : scoreDelta > 0 ? (
+                      <>
+                        <TrendingUp className="w-6 h-6 text-accent" />
+                        <span className="text-accent">+{scoreDelta}</span>
+                      </>
+                    ) : scoreDelta < 0 ? (
+                      <>
+                        <TrendingDown className="w-6 h-6 text-destructive" />
+                        <span className="text-destructive">{scoreDelta}</span>
+                      </>
+                    ) : (
+                      <>
+                        <Minus className="w-6 h-6 text-muted-foreground" />
+                        <span>0</span>
+                      </>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
@@ -202,7 +246,25 @@ export default function Reports() {
           <div className="space-y-4">
             {[...reports]
               .sort((a: any, b: any) => b.round_number - a.round_number)
-              .map((r: any) => (
+              .map((r: any) => {
+                const dualWins = parsePortalDualList(r.wins_json);
+                const dualTargets = parsePortalDualList(r.targets_json);
+                const sinceWins = dualWins.sinceEnrollment;
+                const thisWins = dualWins.thisRound;
+                const sinceTargets = dualTargets.sinceEnrollment;
+                const thisTargets = dualTargets.thisRound;
+                const winsDual =
+                  dualWins.compareMode != null &&
+                  thisWins.length !== sinceWins.length;
+                const targetsDual =
+                  dualTargets.compareMode != null &&
+                  thisTargets.length !== sinceTargets.length;
+                const primaryWins =
+                  sinceWins.length > 0 ? sinceWins : thisWins;
+                const primaryTargets =
+                  sinceTargets.length > 0 ? sinceTargets : thisTargets;
+
+                return (
                 <div
                   key={r.id}
                   className="bg-card rounded-2xl border border-border p-6 shadow-sm"
@@ -293,61 +355,104 @@ export default function Reports() {
                     </p>
                   )}
 
-                  {parseJsonList(r.wins_json)?.length ? (
+                  {primaryWins.length > 0 ? (
                     <div className="mb-4">
                       <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
-                        {t("reports.wins")}
+                        {dualWins.compareMode != null
+                          ? t("reports.sinceEnrollmentWins")
+                          : t("reports.wins")}
                       </p>
                       <ul className="text-sm space-y-1.5">
-                        {parseJsonList(r.wins_json)!.map(
-                          (
-                            w: {
-                              itemRemoved?: string;
-                              bureaus?: string[];
-                            },
-                            i: number,
-                          ) => (
-                            <li
-                              key={i}
-                              className="flex flex-wrap items-center gap-2 text-accent"
-                            >
-                              <span>
-                                ✓{" "}
-                                {w.itemRemoved ||
-                                  t("reports.itemRemovedFallback")}
+                        {primaryWins.map((w, i) => (
+                          <li
+                            key={i}
+                            className="flex flex-wrap items-center gap-2 text-accent"
+                          >
+                            <span>
+                              ✓{" "}
+                              {w.itemRemoved ||
+                                w.item ||
+                                t("reports.itemRemovedFallback")}
+                            </span>
+                            {Array.isArray(w.bureaus) && w.bureaus.length > 0 && (
+                              <span className="inline-flex gap-0.5">
+                                {w.bureaus.map((b) => (
+                                  <span
+                                    key={b}
+                                    className="text-[9px] font-bold px-1 py-0.5 rounded bg-accent/15 text-accent"
+                                  >
+                                    {b}
+                                  </span>
+                                ))}
                               </span>
-                              {Array.isArray(w.bureaus) && w.bureaus.length > 0 && (
-                                <span className="inline-flex gap-0.5">
-                                  {w.bureaus.map((b) => (
-                                    <span
-                                      key={b}
-                                      className="text-[9px] font-bold px-1 py-0.5 rounded bg-accent/15 text-accent"
-                                    >
-                                      {b}
-                                    </span>
-                                  ))}
-                                </span>
-                              )}
-                            </li>
-                          ),
-                        )}
+                            )}
+                          </li>
+                        ))}
                       </ul>
                     </div>
                   ) : null}
 
-                  {parseJsonList(r.targets_json)?.length ? (
+                  {winsDual && thisWins.length > 0 ? (
+                    <div className="mb-4">
+                      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                        {t("reports.thisRoundWins")}
+                      </p>
+                      <ul className="text-sm space-y-1.5">
+                        {thisWins.map((w, i) => (
+                          <li
+                            key={i}
+                            className="flex flex-wrap items-center gap-2 text-foreground"
+                          >
+                            <span>
+                              ✓{" "}
+                              {w.itemRemoved ||
+                                w.item ||
+                                t("reports.itemRemovedFallback")}
+                            </span>
+                            {Array.isArray(w.bureaus) && w.bureaus.length > 0 && (
+                              <span className="inline-flex gap-0.5">
+                                {w.bureaus.map((b) => (
+                                  <span
+                                    key={b}
+                                    className="text-[9px] font-bold px-1 py-0.5 rounded bg-muted text-muted-foreground"
+                                  >
+                                    {b}
+                                  </span>
+                                ))}
+                              </span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+
+                  {primaryTargets.length > 0 ? (
                     <div className="mb-4">
                       <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
                         {t("reports.stillWorking")}
                       </p>
                       <ul className="text-sm space-y-1 text-muted-foreground">
-                        {parseJsonList(r.targets_json)!.map(
-                          (tgt: { item?: string }, i: number) => (
-                            <li key={i}>
-                              • {tgt.item || t("reports.targetFallback")}
-                            </li>
-                          ),
-                        )}
+                        {primaryTargets.map((tgt, i) => (
+                          <li key={i}>
+                            • {tgt.item || t("reports.targetFallback")}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+
+                  {targetsDual && thisTargets.length > 0 ? (
+                    <div className="mb-4">
+                      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                        {t("reports.thisRoundTargets")}
+                      </p>
+                      <ul className="text-sm space-y-1 text-muted-foreground">
+                        {thisTargets.map((tgt, i) => (
+                          <li key={i}>
+                            • {tgt.item || t("reports.targetFallback")}
+                          </li>
+                        ))}
                       </ul>
                     </div>
                   ) : null}
@@ -355,13 +460,24 @@ export default function Reports() {
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-4">
                     <RoundStat
                       label={t("reports.itemsRemoved")}
-                      value={r.items_removed || 0}
+                      value={
+                        dualWins.compareMode != null
+                          ? sinceWins.length || r.items_removed || 0
+                          : r.items_removed || 0
+                      }
                       accent
                     />
-                    <RoundStat
-                      label={t("reports.itemsDisputed")}
-                      value={r.items_disputed || 0}
-                    />
+                    {winsDual ? (
+                      <RoundStat
+                        label={t("reports.thisRoundDelta")}
+                        value={thisWins.length}
+                      />
+                    ) : (
+                      <RoundStat
+                        label={t("reports.itemsDisputed")}
+                        value={r.items_disputed || 0}
+                      />
+                    )}
                     <RoundStat
                       label={t("reports.scoreBefore")}
                       value={r.score_before || "—"}
@@ -382,17 +498,25 @@ export default function Reports() {
                   {/* PDF attachments list */}
                   {Array.isArray(r.pdfs) && r.pdfs.length > 0 && (
                     <div className="border-t border-border pt-4 space-y-2">
-                      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
-                        {t("reports.downloadPdf")}
-                      </p>
+                      <div className="flex items-baseline justify-between gap-2 mb-2">
+                        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                          {t("reports.downloadPdf")}
+                        </p>
+                        <p className="text-[11px] text-muted-foreground">
+                          {shareCapable
+                            ? t("reports.downloadPdfShareHint")
+                            : t("reports.downloadPdfOpenHint")}
+                        </p>
+                      </div>
                       {r.pdfs.map((pdf: any) => (
                         <button
                           key={pdf.id}
+                          type="button"
                           onClick={() =>
                             handleDownloadPdf(pdf.id, pdf.file_name)
                           }
                           disabled={pdfLoading[pdf.id]}
-                          className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl border border-border bg-muted/30 hover:bg-primary/[0.05] hover:border-primary/25 transition-all group text-left"
+                          className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl border border-border bg-muted/30 hover:bg-primary/[0.05] hover:border-primary/25 active:scale-[0.99] transition-all group text-left disabled:opacity-60"
                         >
                           <div className="w-8 h-8 rounded-lg bg-destructive/10 border border-destructive/15 flex items-center justify-center shrink-0">
                             {pdfLoading[pdf.id] ? (
@@ -414,15 +538,24 @@ export default function Reports() {
                                   year: "numeric",
                                 },
                               )}
+                              {" · "}
+                              {shareCapable
+                                ? t("reports.downloadPdfShareAction")
+                                : t("reports.downloadPdfOpenAction")}
                             </p>
                           </div>
-                          <Download className="w-4 h-4 text-muted-foreground group-hover:text-primary transition-colors shrink-0" />
+                          {shareCapable ? (
+                            <Share2 className="w-4 h-4 text-muted-foreground group-hover:text-primary transition-colors shrink-0" />
+                          ) : (
+                            <ExternalLink className="w-4 h-4 text-muted-foreground group-hover:text-primary transition-colors shrink-0" />
+                          )}
                         </button>
                       ))}
                     </div>
                   )}
                 </div>
-              ))}
+                );
+              })}
           </div>
         </>
       )}
@@ -440,16 +573,6 @@ function parseBureauScores(raw: unknown) {
       experian: { before: number; after: number };
       equifax: { before: number; after: number };
     };
-  } catch {
-    return null;
-  }
-}
-
-function parseJsonList(raw: unknown): unknown[] | null {
-  if (!raw) return null;
-  try {
-    const data = typeof raw === "string" ? JSON.parse(raw) : raw;
-    return Array.isArray(data) && data.length > 0 ? data : null;
   } catch {
     return null;
   }

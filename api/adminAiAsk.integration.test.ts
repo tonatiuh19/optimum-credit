@@ -170,9 +170,11 @@ describe("admin AI Ask", () => {
     expect(names).toContain("list_round_schedule");
     expect(names).toContain("create_prospect");
     expect(names).toContain("create_work_task");
+    expect(names).toContain("search_admins");
     expect(names).toContain("add_case_note");
     expect(names).toContain("upload_case_document");
     expect(names).toContain("send_email");
+    expect(names).toContain("send_round_report");
     expect(names).toContain("send_sms");
     expect(names).toContain("list_sms");
     expect(names).toContain("update_pipeline_stage");
@@ -181,6 +183,9 @@ describe("admin AI Ask", () => {
     expect(names).toContain("upsert_progress_report");
     expect(names).toContain("upsert_payment_splits");
     expect(names).toContain("update_payment_split");
+    expect(names).toContain("set_case_payment_plan");
+    expect(names).toContain("list_coupons");
+    expect(names).toContain("create_coupon");
     expect(names).toContain("list_funding_applications");
     expect(names).toContain("get_funding_application");
     expect(names).toContain("funding_pipeline_summary");

@@ -18,10 +18,13 @@ import NotFound from "./pages/NotFound";
 import Register from "./pages/Register";
 import PaySplit from "./pages/PaySplit";
 import CreditAnalysis from "./pages/CreditAnalysis";
+import GetCreditReport from "./pages/GetCreditReport";
 import Funding from "./pages/Funding";
 import Pricing from "./pages/Pricing";
 import AffiliateRedirect from "./pages/public/AffiliateRedirect";
+import FreeScoreRedirect from "./pages/public/FreeScoreRedirect";
 import AffiliateJoin from "./pages/public/AffiliateJoin";
+import PrepaidOnboardJoin from "./pages/public/PrepaidOnboardJoin";
 
 import ClientLogin from "./pages/auth/ClientLogin";
 import AdminLogin from "./pages/auth/AdminLogin";
@@ -38,9 +41,11 @@ import ClientPayments from "./pages/client/Payments";
 import Videos from "./pages/client/Videos";
 import InfoRequests from "./pages/client/InfoRequests";
 import PortalFunding from "./pages/client/PortalFunding";
+import PortalCreditAnalysis from "./pages/client/PortalCreditAnalysis";
 
 import AdminDashboard from "./pages/admin/Dashboard";
 import AdminClients from "./pages/admin/Clients";
+import AdminContacts from "./pages/admin/Contacts";
 import AdminClientDetail from "@/components/admin/ClientDetail";
 import AdminPipeline from "./pages/admin/Pipeline";
 import AdminFunding from "./pages/admin/Funding";
@@ -96,11 +101,21 @@ function AppShell() {
         <Route path="/register" element={<Register />} />
         {/* Public payment page — no auth */}
         <Route path="/pay/:token" element={<PaySplit />} />
+        {/* Prepaid already-paid client self-onboard (staff-minted invite) */}
+        <Route
+          path="/join/:token"
+          element={wrap(Layout, PrepaidOnboardJoin)}
+        />
 
         {/* Free credit analysis — public, no auth */}
         <Route
           path="/credit-analysis"
           element={wrap(Layout, CreditAnalysis)}
+        />
+        {/* Unlisted credit pull chooser — public, not linked from home/nav */}
+        <Route
+          path="/get-credit-report"
+          element={wrap(Layout, GetCreditReport)}
         />
         {/* Legacy typo redirect */}
         <Route
@@ -116,6 +131,7 @@ function AppShell() {
 
         {/* Affiliate short referral link — /r/:slug — public, no layout */}
         <Route path="/r/:slug" element={<AffiliateRedirect />} />
+        <Route path="/go/free-score" element={<FreeScoreRedirect />} />
         <Route path="/affiliate/join/:token" element={<AffiliateJoin />} />
 
         {/* Legal (DB-backed markdown) */}
@@ -190,6 +206,14 @@ function AppShell() {
           }
         />
         <Route
+          path="/portal/credit-analysis"
+          element={
+            <RequireClient>
+              {wrap(ClientLayout, PortalCreditAnalysis)}
+            </RequireClient>
+          }
+        />
+        <Route
           path="/portal/funding"
           element={
             <RequireClient>{wrap(ClientLayout, PortalFunding)}</RequireClient>
@@ -201,6 +225,12 @@ function AppShell() {
           path="/admin"
           element={
             <RequireAdmin>{wrap(AdminLayout, AdminDashboard)}</RequireAdmin>
+          }
+        />
+        <Route
+          path="/admin/contacts"
+          element={
+            <RequireAdmin>{wrap(AdminLayout, AdminContacts)}</RequireAdmin>
           }
         />
         <Route

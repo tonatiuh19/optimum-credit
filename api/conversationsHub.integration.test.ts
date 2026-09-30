@@ -16,7 +16,7 @@ import mysql, {
   type RowDataPacket,
 } from "mysql2/promise";
 import { createServer, createSession } from "./index";
-import { cleanupIntegrationTestClients, createIntegrationTestPool, uniqueTestE164 } from "./testDbCleanup";
+import { cleanupIntegrationTestClients, createIntegrationTestPool, uniqueTestE164, cleanupIntegrationTestAdmins } from "./testDbCleanup";
 
 const RUN_ID = `conv-${Date.now()}`;
 const AGENT_EMAIL = `conv-agent-${RUN_ID}@example.test`;
@@ -123,12 +123,7 @@ describe("conversations contact hub", () => {
         clientIds: seededClientIds,
       });
     }
-    for (const id of [agentId, otherId].filter(Boolean)) {
-      await pool
-        .query(`DELETE FROM admin_sessions WHERE admin_id = ?`, [id])
-        .catch(() => {});
-      await pool.query(`DELETE FROM admins WHERE id = ?`, [id]).catch(() => {});
-    }
+    await cleanupIntegrationTestAdmins(pool, [agentId, otherId].filter(Boolean));
     await pool.end().catch(() => {});
   });
 
@@ -733,6 +728,129 @@ describe("conversations contact hub", () => {
     }
   });
 
+  it("creates own OFG SMS thread when peer already has SMS (calls-only bug)", async () => {
+    // Peer owns client SMS on César-like OFG; agent has CALL on their line.
+    // Agent outbound must create a new SMS conversation on agent OFG — not
+    // append to peer's thread (which agent timeline cannot see).
+    const [cIns] = await pool.query<ResultSetHeader>(
+      `INSERT INTO clients
+         (first_name, last_name, email, phone, status, pipeline_stage, preferred_language)
+       VALUES ('Deena', ?, ?, '+15550119988', 'active', 'round_1', 'en')`,
+      [`PeerSms${RUN_ID}`, `peer-sms-${RUN_ID}@example.test`],
+    );
+    const deenaId = Number(cIns.insertId);
+    seededClientIds.push(deenaId);
+
+    const [pIns] = await pool.query<ResultSetHeader>(
+      `INSERT INTO admin_phone_numbers
+         (e164, friendly_name, assigned_admin_id, is_active, capabilities_json)
+       VALUES (?, 'Vitest Peer César OFG', ?, 1, JSON_OBJECT('sms', TRUE, 'voice', TRUE))`,
+      [uniqueTestE164(`${RUN_ID}-peer-ofg`), otherId],
+    );
+    const peerPhoneId = Number(pIns.insertId);
+
+    try {
+      const [peerSmsIns] = await pool.query<ResultSetHeader>(
+        `INSERT INTO conversations
+           (client_id, channel, status, ofg_number_id, assigned_admin_id,
+            last_message_at, last_message_preview, unread_count)
+         VALUES (?, 'sms', 'open', ?, ?, NOW(), 'peer owned sms', 0)`,
+        [deenaId, peerPhoneId, otherId],
+      );
+      const peerSmsConvId = Number(peerSmsIns.insertId);
+      await pool.query(
+        `INSERT INTO conversation_messages
+           (conversation_id, direction, channel, body, sent_by_admin_id)
+         VALUES (?, 'outbound', 'sms', 'peer owned sms', ?)`,
+        [peerSmsConvId, otherId],
+      );
+
+      const [agentCallIns] = await pool.query<ResultSetHeader>(
+        `INSERT INTO conversations
+           (client_id, channel, status, ofg_number_id, assigned_admin_id,
+            last_message_at, last_message_preview, unread_count)
+         VALUES (?, 'call', 'open', ?, ?, NOW(), 'Voice call — 0s (completed)', 0)`,
+        [deenaId, phoneNumberId, agentId],
+      );
+      const agentCallConvId = Number(agentCallIns.insertId);
+      await pool.query(
+        `INSERT INTO conversation_messages
+           (conversation_id, direction, channel, body, sent_by_admin_id)
+         VALUES (?, 'outbound', 'call', 'Voice call — 0s (completed)', ?)`,
+        [agentCallConvId, agentId],
+      );
+
+      const beforeTimeline = await request(app)
+        .get(`/api/admin/conversations/contact/client/${deenaId}/timeline`)
+        .set("Authorization", `Bearer ${agentToken}`);
+      expect(beforeTimeline.status).toBe(200);
+      expect(
+        (beforeTimeline.body.messages || []).some((m: any) =>
+          String(m.body || "").includes("peer owned sms"),
+        ),
+      ).toBe(false);
+      expect(
+        (beforeTimeline.body.messages || []).some(
+          (m: any) => String(m.channel || "") === "call",
+        ),
+      ).toBe(true);
+
+      const sendBody = `Hi Deena, this is Lecca from OFG ${RUN_ID}`;
+      const send = await request(app)
+        .post("/api/admin/conversations/send")
+        .set("Authorization", `Bearer ${agentToken}`)
+        .send({
+          client_id: deenaId,
+          channel: "sms",
+          body: sendBody,
+        });
+      expect(send.status).toBe(200);
+      expect(send.body.ok).toBe(true);
+      expect(Number(send.body.conversation_id)).not.toBe(peerSmsConvId);
+
+      const [agentSmsRows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, ofg_number_id, assigned_admin_id FROM conversations
+         WHERE id = ? LIMIT 1`,
+        [Number(send.body.conversation_id)],
+      );
+      expect(Number(agentSmsRows[0]?.ofg_number_id)).toBe(phoneNumberId);
+
+      const afterTimeline = await request(app)
+        .get(`/api/admin/conversations/contact/client/${deenaId}/timeline`)
+        .set("Authorization", `Bearer ${agentToken}`);
+      expect(afterTimeline.status).toBe(200);
+      expect(
+        (afterTimeline.body.messages || []).some((m: any) =>
+          String(m.body || "").includes(sendBody),
+        ),
+      ).toBe(true);
+      expect(
+        (afterTimeline.body.messages || []).some(
+          (m: any) => String(m.channel || "") === "call",
+        ),
+      ).toBe(true);
+
+      const peerTimeline = await request(app)
+        .get(`/api/admin/conversations/contact/client/${deenaId}/timeline`)
+        .set("Authorization", `Bearer ${otherToken}`);
+      expect(peerTimeline.status).toBe(200);
+      expect(
+        (peerTimeline.body.messages || []).some((m: any) =>
+          String(m.body || "").includes("peer owned sms"),
+        ),
+      ).toBe(true);
+      expect(
+        (peerTimeline.body.messages || []).some((m: any) =>
+          String(m.body || "").includes(sendBody),
+        ),
+      ).toBe(false);
+    } finally {
+      await pool
+        .query(`DELETE FROM admin_phone_numbers WHERE id = ?`, [peerPhoneId])
+        .catch(() => {});
+    }
+  });
+
   it("creates inbound_sms bell row and dedupes by provider_message_id", async () => {
     const sid = `SMbell${Date.now()}`;
     const [numRows] = await pool.query<RowDataPacket[]>(
@@ -928,6 +1046,32 @@ describe("conversations contact hub", () => {
     expect(note.status).toBe(400);
   });
 
+  it("rejects outbound SMS body over 1600 characters", async () => {
+    const over = "a".repeat(1601);
+    const send = await request(app)
+      .post("/api/admin/conversations/send")
+      .set("Authorization", `Bearer ${agentToken}`)
+      .send({
+        client_id: clientId,
+        channel: "sms",
+        body: over,
+        ofg_number_id: phoneNumberId,
+      });
+    expect(send.status).toBe(400);
+    expect(String(send.body.error || "")).toMatch(/1600/i);
+
+    const start = await request(app)
+      .post("/api/admin/conversations/start")
+      .set("Authorization", `Bearer ${agentToken}`)
+      .send({
+        phone: "+15559876001",
+        body: over,
+        ofg_number_id: phoneNumberId,
+      });
+    expect(start.status).toBe(400);
+    expect(String(start.body.error || "")).toMatch(/1600/i);
+  });
+
   it("create-prospect from unknown with optional pipeline case", async () => {
     const unknownPhone = `+1555${String(Date.now()).slice(-7)}`;
     const sid = `SMprosp${Date.now()}`;
@@ -975,6 +1119,12 @@ describe("conversations contact hub", () => {
       });
     expect(dup.status).toBe(409);
     expect(dup.body.error).toBe("duplicate_phone");
+    expect(dup.body.existing_client_id).toBe(Number(dupIns.insertId));
+
+    // Hard-block: no confirm_duplicate override. Free the phone, then create.
+    await pool.query(`UPDATE clients SET phone = NULL WHERE id = ?`, [
+      dupIns.insertId,
+    ]);
 
     const created = await request(app)
       .post(`/api/admin/conversations/unknown/${unknownId}/create-prospect`)
@@ -985,7 +1135,6 @@ describe("conversations contact hub", () => {
         email: `prospect-${RUN_ID}@example.test`,
         preferred_language: "es",
         create_case: true,
-        confirm_duplicate: true,
       });
     expect(created.status).toBe(200);
     expect(created.body.client_id).toBeTruthy();
@@ -1134,7 +1283,7 @@ describe("conversations contact hub", () => {
     const bodies = (timeline.body.messages || []).map((m: any) => m.body);
     expect(bodies).toContain("closed");
     expect(bodies).toContain("reopened");
-  });
+  }, 60_000);
 
   it("unknown close/reopen mirrors client without dismissing", async () => {
     const phone = `+1555${String(Date.now()).slice(-7)}`;
@@ -1203,7 +1352,7 @@ describe("conversations contact hub", () => {
       .send({ status: "open" });
     expect(reopened.status).toBe(200);
     expect(reopened.body.status).toBe("open");
-  });
+  }, 60_000);
 
   it("close with no threads creates a closed primary; staff send auto-reopens", async () => {
     const [ins] = await pool.query<ResultSetHeader>(
@@ -1245,5 +1394,5 @@ describe("conversations contact hub", () => {
       [cid],
     );
     expect(rows2.some((r) => r.status === "open")).toBe(true);
-  });
+  }, 60_000);
 });

@@ -11,6 +11,8 @@ import { fetchMorePipelineColumn, fetchPipeline } from "./adminSlice";
 
 interface ProspectsState {
   prospects: Prospect[];
+  /** Public web leads tagged web_lead_review (Pipeline Web leads column). */
+  webReviewProspects: Prospect[];
   labels: Label[];
   loading: boolean;
   labelsLoading: boolean;
@@ -20,6 +22,7 @@ interface ProspectsState {
 
 const initialState: ProspectsState = {
   prospects: [],
+  webReviewProspects: [],
   labels: [],
   loading: false,
   labelsLoading: false,
@@ -90,13 +93,21 @@ const slice = createSlice({
       s.prospects = a.payload;
     });
 
-    // The combined pipeline endpoint returns { cases, prospects } — keep
-    // the prospect list in sync whenever the Pipeline board is refreshed,
-    // without a second network round-trip.
+    // The combined pipeline endpoint returns { cases, prospects, web_review_prospects }
+    // — keep lists in sync whenever the Pipeline board is refreshed.
     b.addCase(fetchPipeline.fulfilled, (s, a) => {
       s.prospects = a.payload.prospects ?? [];
+      s.webReviewProspects = a.payload.web_review_prospects ?? [];
     });
     b.addCase(fetchMorePipelineColumn.fulfilled, (s, a) => {
+      if (a.payload.column === "web_review") {
+        const seen = new Set(s.webReviewProspects.map((p) => p.id));
+        s.webReviewProspects = [
+          ...s.webReviewProspects,
+          ...(a.payload.items as Prospect[]).filter((p) => !seen.has(p.id)),
+        ];
+        return;
+      }
       if (a.payload.column !== "prospect") return;
       const seen = new Set(s.prospects.map((p) => p.id));
       s.prospects = [
@@ -114,6 +125,9 @@ const slice = createSlice({
     b.addCase(convertProspect.fulfilled, (s, a) => {
       s.converting = false;
       s.prospects = s.prospects.filter((p) => p.id !== a.meta.arg.id);
+      s.webReviewProspects = s.webReviewProspects.filter(
+        (p) => p.id !== a.meta.arg.id,
+      );
     });
 
     b.addCase(fetchLabels.pending, (s) => {
@@ -137,6 +151,30 @@ const slice = createSlice({
       s.savingLabels = false;
       const idx = s.prospects.findIndex((p) => p.id === a.payload.clientId);
       if (idx !== -1) s.prospects[idx].labels = a.payload.labels;
+
+      const removed = a.meta.arg.remove ?? [];
+      if (!removed.includes("web_lead_review")) return;
+      // Promoted from Web leads → main Prospect (full reload usually follows).
+      const promoted = s.webReviewProspects.find(
+        (p) => p.id === a.payload.clientId,
+      );
+      if (!promoted) return;
+      s.webReviewProspects = s.webReviewProspects.filter(
+        (p) => p.id !== a.payload.clientId,
+      );
+      const next: Prospect = {
+        ...promoted,
+        labels: a.payload.labels,
+        source_label:
+          a.payload.labels.find((l) => l.layer === "source")?.slug ??
+          promoted.source_label,
+      };
+      if (!s.prospects.some((p) => p.id === next.id)) {
+        s.prospects = [next, ...s.prospects];
+      } else {
+        const pIdx = s.prospects.findIndex((p) => p.id === next.id);
+        if (pIdx !== -1) s.prospects[pIdx].labels = a.payload.labels;
+      }
     });
   },
 });

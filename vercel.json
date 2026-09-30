@@ -28,6 +28,10 @@
       "dest": "/api/index.ts"
     },
     {
+      "src": "/go/free-score",
+      "dest": "/api/index.ts"
+    },
+    {
       "src": "/(.*\\.(js|css|json|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot))",
       "dest": "/$1"
     },

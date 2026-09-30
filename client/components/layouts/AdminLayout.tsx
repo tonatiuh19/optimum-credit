@@ -9,6 +9,7 @@ import {
 import {
   LayoutDashboard,
   Users,
+  BookUser,
   Workflow,
   FileCheck2,
   MessageSquare,
@@ -80,6 +81,12 @@ const NAV_GROUPS = [
         sectionKey: "dashboard",
       },
       {
+        to: "/admin/contacts",
+        labelKey: "adminNav.contacts",
+        icon: BookUser,
+        sectionKey: "contacts",
+      },
+      {
         to: "/admin/clients",
         labelKey: "adminNav.clients",
         icon: Users,
@@ -90,6 +97,12 @@ const NAV_GROUPS = [
         labelKey: "adminNav.pipeline",
         icon: Workflow,
         sectionKey: "pipeline",
+      },
+      {
+        to: "/admin/conversations",
+        labelKey: "adminNav.conversations",
+        icon: MessageSquare,
+        sectionKey: "conversations",
       },
       {
         to: "/admin/funding",
@@ -151,12 +164,6 @@ const NAV_GROUPS = [
         labelKey: "adminNav.clientTasks",
         icon: ClipboardList,
         sectionKey: "tasks",
-      },
-      {
-        to: "/admin/conversations",
-        labelKey: "adminNav.conversations",
-        icon: MessageSquare,
-        sectionKey: "conversations",
       },
       {
         to: "/admin/tickets",

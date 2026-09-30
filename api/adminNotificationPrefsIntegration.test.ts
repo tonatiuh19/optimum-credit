@@ -224,4 +224,62 @@ describe("admin notification preferences", () => {
       .send({ all: true })
       .expect(200);
   }, 45_000);
+
+  it("super_admin channel_masters email=false persists (not NULL defaults)", async () => {
+    const saEmail = `prefs-sa-${RUN_ID}@example.test`;
+    const [saIns] = await pool.query<ResultSetHeader>(
+      `INSERT INTO admins
+         (email, first_name, last_name, role, status, preferred_language)
+       VALUES (?, 'Prefs', 'Super', 'super_admin', 'active', 'en')`,
+      [saEmail],
+    );
+    const saId = Number(saIns.insertId);
+    const saToken = await createSession(
+      "admin",
+      saId,
+      saEmail,
+      "127.0.0.1",
+      "vitest-prefs-sa",
+    );
+    try {
+      await pool.query(
+        `UPDATE admins SET notification_prefs_json = NULL WHERE id = ?`,
+        [adminId],
+      );
+
+      const put = await request(app)
+        .put(`/api/admin/admins/${adminId}/notification-prefs`)
+        .set("Authorization", `Bearer ${saToken}`)
+        .send({ channel_masters: { email: false } })
+        .expect(200);
+      expect(put.body.staff.prefs.email.purchase_enrollment).toBe(false);
+      expect(put.body.staff.prefs.email.morning_digest).toBe(false);
+
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT notification_prefs_json FROM admins WHERE id = ? LIMIT 1`,
+        [adminId],
+      );
+      expect(rows[0].notification_prefs_json).not.toBeNull();
+      const stored =
+        typeof rows[0].notification_prefs_json === "string"
+          ? JSON.parse(String(rows[0].notification_prefs_json))
+          : rows[0].notification_prefs_json;
+      expect(stored.email.purchase_enrollment).toBe(false);
+      expect(stored.email.morning_digest).toBe(false);
+
+      const list = await request(app)
+        .get("/api/admin/notify-recipients")
+        .set("Authorization", `Bearer ${saToken}`)
+        .expect(200);
+      const staff = (list.body.staff as any[]).find(
+        (s) => Number(s.id) === adminId,
+      );
+      expect(staff).toBeTruthy();
+      expect(staff.prefs.email.purchase_enrollment).toBe(false);
+      expect(staff.prefs.email.morning_digest).toBe(false);
+    } finally {
+      await pool.query(`DELETE FROM admin_sessions WHERE admin_id = ?`, [saId]);
+      await pool.query(`DELETE FROM admins WHERE id = ?`, [saId]);
+    }
+  }, 45_000);
 });

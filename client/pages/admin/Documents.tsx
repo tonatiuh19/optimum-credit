@@ -18,25 +18,40 @@ import {
   ChevronDown,
   Hash,
   Upload,
+  Trash2,
 } from "lucide-react";
 import AdminPageHeader from "@/components/AdminPageHeader";
 import AdminCaseDocUploadDialog from "@/components/admin/AdminCaseDocUploadDialog";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { DataGridColumn } from "@/components/ui/data-grid";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
-import { fetchAllDocuments } from "@/store/slices/adminSlice";
+import {
+  deleteArchiveDocument,
+  fetchAllDocuments,
+} from "@/store/slices/adminSlice";
 import {
   Dialog,
   DialogContent,
   DialogClose,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import api from "@/lib/api";
 import { useDebounce } from "@/hooks/use-debounce";
 import { LangBadge } from "@/components/ui/lang-badge";
+import { useToast } from "@/hooks/use-toast";
 
 const DOC_TYPE_LABELS: Record<string, string> = {
   id_front: "Gov ID — Front",
@@ -112,6 +127,7 @@ export default function AdminDocuments() {
   const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
+  const { toast } = useToast();
   const { allDocuments, documentsPagination, documentsStatusCounts, documentsLoading } =
     useAppSelector((s) => s.admin);
 
@@ -129,6 +145,8 @@ export default function AdminDocuments() {
   const [selected, setSelected] = useState<DocRecord | null>(null);
   const [fileUrl, setFileUrl] = useState<string | null>(null);
   const [fileLoading, setFileLoading] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<DocRecord | null>(null);
+  const [deleteSending, setDeleteSending] = useState(false);
 
   const loadDocuments = useCallback(
     (targetPage: number) => {
@@ -318,7 +336,18 @@ export default function AdminDocuments() {
             }}
             className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline"
           >
-            <Eye className="w-3.5 h-3.5" /> View
+            <Eye className="w-3.5 h-3.5" /> {t("adminHelpers.viewDocument")}
+          </button>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setDeleteTarget(d);
+            }}
+            className="inline-flex items-center gap-1 text-xs text-destructive hover:underline"
+            title={t("adminHelpers.deleteDocument")}
+            data-testid="archive-doc-delete"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
           </button>
           <button
             onClick={(e) => {
@@ -543,6 +572,61 @@ export default function AdminDocuments() {
           loadDocuments(page);
         }}
       />
+
+      <AlertDialog
+        open={!!deleteTarget}
+        onOpenChange={(v) => {
+          if (!v && !deleteSending) setDeleteTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {t("adminHelpers.deleteDocumentTitle")}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("adminHelpers.deleteArchiveDocumentBody", {
+                name: deleteTarget?.file_name || "",
+              })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteSending}>
+              {t("common.cancel", { defaultValue: "Cancel" })}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              disabled={deleteSending}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={async (e) => {
+                e.preventDefault();
+                if (!deleteTarget) return;
+                setDeleteSending(true);
+                try {
+                  await dispatch(
+                    deleteArchiveDocument(deleteTarget.id),
+                  ).unwrap();
+                  if (selected?.id === deleteTarget.id) closeDoc();
+                  toast({ title: t("adminHelpers.deleteDocumentSuccess") });
+                  setDeleteTarget(null);
+                  loadDocuments(page);
+                } catch (err: any) {
+                  toast({
+                    title: t("adminHelpers.deleteDocumentFailed"),
+                    description: String(err || ""),
+                    variant: "destructive",
+                  });
+                } finally {
+                  setDeleteSending(false);
+                }
+              }}
+            >
+              {deleteSending
+                ? t("common.deleting", { defaultValue: "Deleting…" })
+                : t("adminHelpers.deleteDocument")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

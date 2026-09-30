@@ -67,6 +67,21 @@ describe("round calendar ICS", () => {
     });
     expect(ics).toContain("Doe\\, Jane\\; Esq");
   });
+
+  it("includes extended rounds when maxRounds > 5", () => {
+    const ics = buildRoundScheduleIcs({
+      caseNumber: "CR-00042",
+      clientName: "Jane Doe",
+      uidNs: "case42-abc",
+      dates: DATES,
+      maxRounds: 8,
+      intervalDays: 35,
+    });
+    expect(ics.match(/BEGIN:VEVENT/g)?.length).toBe(8);
+    expect(ics).toContain("UID:oc-case42-abc-r6@optimumcredit.com");
+    expect(ics).toContain("UID:oc-case42-abc-r8@optimumcredit.com");
+    expect(ics).toContain("Round 6 target");
+  });
 });
 
 describe("validateRoundScheduleDates", () => {

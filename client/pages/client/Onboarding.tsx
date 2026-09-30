@@ -13,6 +13,20 @@ export default function Onboarding() {
   const navigate = useNavigate();
   const { loading, error, user } = useAppSelector((s) => s.clientAuth);
   const taskSlug = (searchParams.get("task") || "").trim();
+  const nextRaw = (searchParams.get("next") || "").trim();
+  const nextPath = (() => {
+    if (!nextRaw.startsWith("/portal/")) return null;
+    if (nextRaw.includes("://") || nextRaw.includes("//") || nextRaw.includes(".."))
+      return null;
+    const pathOnly = nextRaw.split("?")[0].split("#")[0];
+    const allowed = [
+      "/portal/reports",
+      "/portal/documents",
+      "/portal/dashboard",
+      "/portal/home",
+    ];
+    return allowed.includes(pathOnly) ? pathOnly : null;
+  })();
 
   useEffect(() => {
     if (!token) {
@@ -25,13 +39,15 @@ export default function Onboarding() {
   useEffect(() => {
     if (user && !loading && !error) {
       // Small delay so the success state is visible
-      const dest = taskSlug
-        ? `/portal/documents?task=${encodeURIComponent(taskSlug)}`
-        : "/portal/documents";
+      const dest = nextPath
+        ? nextPath
+        : taskSlug
+          ? `/portal/documents?task=${encodeURIComponent(taskSlug)}`
+          : "/portal/documents";
       const timer = setTimeout(() => navigate(dest, { replace: true }), 1200);
       return () => clearTimeout(timer);
     }
-  }, [user, loading, error, navigate, taskSlug]);
+  }, [user, loading, error, navigate, taskSlug, nextPath]);
 
   return (
     <div className="min-h-screen bg-background flex items-center justify-center p-4">

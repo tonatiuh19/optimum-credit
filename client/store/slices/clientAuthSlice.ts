@@ -99,6 +99,14 @@ const slice = createSlice({
     setUserLocal(state, action: PayloadAction<ClientUser | null>) {
       state.user = action.payload;
     },
+    applyClientSession(
+      state,
+      action: PayloadAction<{ token: string; user: ClientUser }>,
+    ) {
+      state.token = action.payload.token;
+      state.user = action.payload.user;
+      state.error = null;
+    },
   },
   extraReducers: (b) => {
     b.addCase(requestClientOtp.pending, (s) => {
@@ -163,5 +171,5 @@ const slice = createSlice({
   },
 });
 
-export const { clearError, setUserLocal } = slice.actions;
+export const { clearError, setUserLocal, applyClientSession } = slice.actions;
 export default slice.reducer;

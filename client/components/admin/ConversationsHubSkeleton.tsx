@@ -95,7 +95,7 @@ export default function ConversationsHubSkeleton() {
 
   return (
     <div
-      className="grid lg:grid-cols-[320px_minmax(0,1fr)] gap-4 lg:h-[calc(100vh-13rem)]"
+      className="grid lg:grid-cols-[320px_minmax(0,1fr)] gap-4 flex-1 min-h-0 lg:min-h-[28rem]"
       aria-busy="true"
       aria-label={t("conversations.loadingHub")}
       data-testid="conversations-hub-skeleton"

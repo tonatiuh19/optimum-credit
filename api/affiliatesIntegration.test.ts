@@ -325,10 +325,13 @@ describe("affiliates — HTTP integration", () => {
       const [labels] = await pool.query<RowDataPacket[]>(
         `SELECT l.slug FROM client_labels cl
          JOIN labels l ON l.id = cl.label_id
-         WHERE cl.client_id = ? AND l.slug = 'affiliate_referral'`,
+         WHERE cl.client_id = ?`,
         [attributedClientId],
       );
-      expect(labels.length).toBeGreaterThanOrEqual(1);
+      const slugs = labels.map((r) => String(r.slug));
+      expect(slugs).toContain("affiliate_referral");
+      // Affiliate refs must not land in the Web leads review bucket.
+      expect(slugs).not.toContain("web_lead_review");
     },
     CASE_TIMEOUT,
   );

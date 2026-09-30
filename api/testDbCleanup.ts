@@ -27,8 +27,27 @@
  * string. `resolveCleanupRunId` accepts strings for compat but wrong/missing
  * args throw instead of silently leaving fixtures.
  */
-import mysql, { type Pool, type ResultSetHeader } from "mysql2/promise";
+import mysql, { type Pool, type ResultSetHeader, type RowDataPacket } from "mysql2/promise";
 import crypto from "crypto";
+
+/** Safe mailbox domains used only by vitest / manual debug seeds. */
+export const INTEGRATION_TEST_EMAIL_SUFFIXES = [
+  "@example.test",
+  "@affiliate.test",
+] as const;
+
+/** Broader purge domains (includes report-wizard @example.com seeds). */
+export const INTEGRATION_TEST_PURGE_EMAIL_SUFFIXES = [
+  ...INTEGRATION_TEST_EMAIL_SUFFIXES,
+  "@example.com",
+] as const;
+
+export function isIntegrationTestEmail(email: string | null | undefined): boolean {
+  const e = String(email || "")
+    .trim()
+    .toLowerCase();
+  return INTEGRATION_TEST_EMAIL_SUFFIXES.some((suffix) => e.endsWith(suffix));
+}
 
 /** Unique +1555… E.164 for parallel integration tests (avoids uk_admin_phone_e164 collisions). */
 export function uniqueTestE164(seed?: string): string {
@@ -50,7 +69,8 @@ export function createIntegrationTestPool(): Pool {
     database: process.env.DB_NAME,
     ssl: { rejectUnauthorized: true },
     waitForConnections: true,
-    connectionLimit: 2,
+    // Parallel vitest files share TiDB; 2 was too low under cron+hub load.
+    connectionLimit: 5,
     queueLimit: 0,
     timezone: "+00:00",
     enableKeepAlive: true,
@@ -58,6 +78,14 @@ export function createIntegrationTestPool(): Pool {
     connectTimeout: 60_000,
   });
 }
+
+/**
+ * Shared CRON_SECRET for integration suites that call /api/cron/*.
+ * Parallel vitest workers mutate process.env — unique per-file secrets race
+ * and cause flaky 401s. All cron suites must use this exact value.
+ */
+export const VITEST_CRON_SECRET = "vitest-cron-shared";
+
 
 function isRetriableDbError(err: unknown): boolean {
   const code = String((err as NodeJS.ErrnoException)?.code || "");
@@ -89,11 +117,7 @@ export async function withDbRetry<T>(
   throw lastErr;
 }
 
-const TEST_EMAIL_SUFFIXES = [
-  "@example.test",
-  "@affiliate.test",
-  "@example.com",
-] as const;
+const TEST_EMAIL_SUFFIXES = INTEGRATION_TEST_PURGE_EMAIL_SUFFIXES;
 
 export type CleanupRunOpts = {
   runId: string;
@@ -235,6 +259,54 @@ export async function cleanupIntegrationTestFixtures(
   await cleanupIntegrationTestReferrers(pool, { runId });
   await cleanupIntegrationTestLabels(pool, { runId });
   await cleanupIntegrationTestTickets(pool, { runId });
+}
+
+/**
+ * Delete ephemeral vitest admin rows (and sessions/notifications).
+ * Safe for @example.test / @affiliate.test only — never pass real staff ids.
+ */
+export async function cleanupIntegrationTestAdmins(
+  pool: Pool,
+  adminIds: number[],
+): Promise<number> {
+  const ids = [
+    ...new Set(adminIds.map(Number).filter((id) => id > 0)),
+  ];
+  if (!ids.length) return 0;
+  const ph = ids.map(() => "?").join(",");
+  // Only delete if email is a known test domain (defense against bad ids).
+  const [allowed] = await pool.query<RowDataPacket[]>(
+    `SELECT id FROM admins
+     WHERE id IN (${ph})
+       AND (
+         LOWER(TRIM(COALESCE(email, ''))) LIKE '%@example.test'
+         OR LOWER(TRIM(COALESCE(email, ''))) LIKE '%@affiliate.test'
+       )`,
+    ids,
+  );
+  const safeIds = allowed.map((r) => Number(r.id)).filter((id) => id > 0);
+  if (!safeIds.length) return 0;
+  const sph = safeIds.map(() => "?").join(",");
+  await pool
+    .query(`DELETE FROM admin_sessions WHERE admin_id IN (${sph})`, safeIds)
+    .catch(() => {});
+  await pool
+    .query(
+      `DELETE FROM admin_notifications WHERE admin_id IN (${sph})`,
+      safeIds,
+    )
+    .catch(() => {});
+  await pool
+    .query(
+      `DELETE FROM admin_phone_numbers WHERE assigned_admin_id IN (${sph})`,
+      safeIds,
+    )
+    .catch(() => {});
+  const [r] = await pool.query<ResultSetHeader>(
+    `DELETE FROM admins WHERE id IN (${sph})`,
+    safeIds,
+  );
+  return Number(r.affectedRows ?? 0);
 }
 
 export async function cleanupIntegrationTestAffiliates(

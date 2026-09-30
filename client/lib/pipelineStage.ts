@@ -46,12 +46,28 @@ const REPORT_ROUND_STAGES = [
 export function isReportRoundActive(
   roundNumber: number,
   pipelineStage: string,
+  maxRounds: number = 5,
+  highestPublished: number = 0,
 ): boolean {
+  const max = Math.min(12, Math.max(5, Math.floor(Number(maxRounds) || 5)));
+  const published = Math.max(0, Math.floor(Number(highestPublished) || 0));
+  if (roundNumber < 1 || roundNumber > max) return false;
   if (pipelineStage === "docs_ready") return roundNumber === 1;
+  if (pipelineStage === "completed") {
+    if (max > published && published >= 5) {
+      return roundNumber <= Math.min(max, published + 1);
+    }
+    return roundNumber <= Math.min(max, Math.max(5, published || 5));
+  }
   const stageIndex = REPORT_ROUND_STAGES.indexOf(
     pipelineStage as (typeof REPORT_ROUND_STAGES)[number],
   );
   if (stageIndex === -1) return false;
+  // On round_5 with extended max_rounds, unlock through next unpublished
+  if (pipelineStage === "round_5" && max > 5) {
+    const unlocked = Math.max(5, published + 1);
+    return roundNumber <= Math.min(max, unlocked);
+  }
   return stageIndex >= roundNumber - 1;
 }
 

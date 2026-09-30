@@ -207,13 +207,15 @@ function MemberDialog({
           </div>
           <div>
             <label className="text-xs font-medium text-muted-foreground mb-1 block">
-              Phone (optional)
+              {t("adminHelpers.teamPersonalPhoneLabel")}
             </label>
             <input
               className={inputClass}
               type="tel"
+              placeholder={t("adminHelpers.teamPersonalPhonePlaceholder")}
               {...form.getFieldProps("phone")}
             />
+            <FieldHint>{t("adminHelpers.teamPersonalPhoneHint")}</FieldHint>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -522,6 +524,20 @@ export default function AdminPeople() {
       },
     },
     {
+      key: "phone",
+      label: t("adminHelpers.teamPersonalPhoneCol"),
+      sortable: true,
+      shrink: true,
+      render: (m) =>
+        m.phone ? (
+          <span className="text-sm text-foreground tabular-nums">{m.phone}</span>
+        ) : (
+          <span className="text-xs text-muted-foreground">
+            {t("adminHelpers.teamPersonalPhoneMissing")}
+          </span>
+        ),
+    },
+    {
       key: "preferred_language",
       label: "UI",
       sortable: true,
@@ -724,6 +740,9 @@ export default function AdminPeople() {
               </h2>
               <p className="text-sm text-muted-foreground">
                 {t("conversations.phoneNumbersHint")}
+              </p>
+              <p className="text-xs text-muted-foreground mt-1">
+                {t("adminHelpers.teamOfgLineVsPersonalHint")}
               </p>
             </div>
           </div>

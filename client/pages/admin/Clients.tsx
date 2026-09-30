@@ -965,7 +965,8 @@ export default function AdminClients() {
                 setShowForm(true);
               }}
             >
-              <Pencil className="w-3.5 h-3.5 mr-2" /> Edit
+              <Pencil className="w-3.5 h-3.5 mr-2" />{" "}
+              {t("adminPipeline.contactEdit")}
             </DropdownMenuItem>
             {!isAffiliate && (
               <>

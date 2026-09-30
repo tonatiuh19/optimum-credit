@@ -164,8 +164,10 @@ describe("info requests — HTTP integration", () => {
   });
 
   it("pipeline includes info_requests_open count for the case", async () => {
+    // Pipeline paginates per column (default 20) — target this case via search.
     const res = await request(app)
       .get("/api/admin/pipeline")
+      .query({ search: CLIENT_EMAIL, stage: "round_1" })
       .set("Authorization", `Bearer ${adminToken}`);
     expect(res.status).toBe(200);
     const kase = (res.body.cases || []).find((c: any) => c.id === caseId);

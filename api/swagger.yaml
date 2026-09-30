@@ -151,7 +151,9 @@ paths:
       summary: List staff + extra notification recipients (super admin)
       description: >
         Active team staff (with Email / In-app / SMS prefs) plus extra email-only
-        recipients that need not be admin accounts.
+        recipients that need not be admin accounts. Production hides Vitest fixture
+        staff (`*@example.test` / `*@affiliate.test`); Vitest keeps them visible
+        for integration coverage.
       security:
         - bearerAuth: []
       responses:
@@ -457,6 +459,119 @@ paths:
         "400":
           description: Missing/invalid fields or file
 
+  /admin/clients/{id}/credit-analysis:
+    get:
+      tags: [Admin, Credit Analysis]
+      summary: Latest credit analysis for a client (staff)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Latest analysis or null
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  analysis:
+                    nullable: true
+                    allOf:
+                      - $ref: "#/components/schemas/CreditAnalysisResult"
+    post:
+      tags: [Admin, Credit Analysis]
+      summary: Run free credit analysis for a prospect (staff, multipart)
+      description: >-
+        Agent-mode analysis for an existing prospect (`status=prospect` or
+        `pipeline_stage=prospect`). Returns 403 prospect_only for enrolled clients.
+        Does not require an enrolled case. Optional email_opt_in emails the client.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [report_file]
+              properties:
+                text_language: { type: string, enum: [en, es] }
+                client_goal: { type: string }
+                notes: { type: string }
+                email_opt_in: { type: boolean }
+                report_file: { type: string, format: binary }
+      responses:
+        "200":
+          description: Analysis generated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreditAnalysisResult"
+
+  /portal/credit-analysis:
+    get:
+      tags: [Portal, Credit Analysis]
+      summary: Latest credit analysis for logged-in prospect
+      description: >-
+        Prospects always allowed. Enrolled clients may GET their latest stored
+        pre-sale analysis (read-only); returns 403 prospect_only when none exists.
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Latest analysis or null
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  analysis:
+                    nullable: true
+                    allOf:
+                      - $ref: "#/components/schemas/CreditAnalysisResult"
+        "403":
+          description: Not a prospect (prospect_only)
+        "400":
+          description: Missing report_file or invalid client
+    post:
+      tags: [Portal, Credit Analysis]
+      summary: Run free credit analysis (prospect portal, multipart)
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [report_file]
+              properties:
+                text_language: { type: string, enum: [en, es] }
+                client_goal: { type: string }
+                notes: { type: string }
+                email_opt_in: { type: boolean }
+                report_file: { type: string, format: binary }
+      responses:
+        "200":
+          description: Analysis generated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreditAnalysisResult"
+        "403":
+          description: Not a prospect (prospect_only)
+        "400":
+          description: Missing report_file or invalid client
+
   /public/prospect-lead:
     post:
       tags: [Credit Analysis]
@@ -504,6 +619,70 @@ paths:
                   client_id: { type: integer }
         "400":
           description: Missing/invalid fields
+
+  /public/get-credit-report-lead:
+    post:
+      tags: [Credit Analysis]
+      summary: Free-report prospect capture → pipeline + email/SMS (public)
+      description: |
+        Used by `/get-credit-report`. Creates or updates a prospect (match email
+        or phone), attaches `get_credit_report` plus event labels only on
+        2026-09-14 (`golf_tournament_prospect`) / 2026-09-15 (`las_vegas_event`)
+        America/Los_Angeles. Sends branded email with direct MFSN CTA and SMS
+        with short `https://www.ofgllc.com/go/free-score`. Also fans out team
+        alert `get_credit_report_lead` via Settings → Team notifications
+        (email / in-app / SMS per admin prefs; SMS From = each admin’s assigned
+        OFG staff number). Unassigned (`assigned_admin_id` null). Prospect SMS
+        From = César OFG (`+19496740714`) or `GET_CREDIT_REPORT_SMS_FROM_E164`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [first_name, last_name, email, phone]
+              properties:
+                first_name: { type: string }
+                last_name: { type: string }
+                email: { type: string, format: email }
+                phone: { type: string }
+                preferred_language: { type: string, enum: [en, es] }
+                hear_about: { type: string }
+                notes: { type: string }
+      responses:
+        "200":
+          description: Prospect captured; notify attempted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  client_id: { type: integer }
+                  mfsn_url: { type: string }
+                  short_url: { type: string }
+                  event_kind:
+                    type: string
+                    nullable: true
+                    enum: [golf, vegas, null]
+                  labels:
+                    type: array
+                    items: { type: string }
+                  email_sent: { type: boolean }
+                  sms_sent: { type: boolean }
+        "400":
+          description: Missing/invalid fields
+        "429":
+          description: Rate limited
+
+  /go/free-score:
+    get:
+      tags: [Credit Analysis]
+      summary: Masked redirect to free MyFreeScoreNow snapshot
+      description: SMS-friendly OFG short link; 302 to the free credit-snapshot URL.
+      responses:
+        "302":
+          description: Redirect to MFSN free snapshot
 
   /public/funding:
     post:
@@ -1896,7 +2075,19 @@ paths:
       description: |
         Same as POST. Vercel Cron invokes GET with `Authorization: Bearer CRON_SECRET`
         every 5 minutes (`vercel.json`). Cancels stale pending (>14d), reclaims stuck
-        claim tags (>15m), claim-tag sends via Resend, and deletes expired `mms_media`.
+        claim tags (>15m), claim-tag sends via Resend, emails overdue My Tasks
+        (stamps `due_notified_at` after delivery or when all channels are muted),
+        deletes expired `mms_media`,
+        and processes pending **call insights** (Whisper STT → optional Claude resume).
+        Always on unless `CALL_INSIGHTS_ENABLED=0`. Recording webhooks also process
+        immediately; this cron is the backup. After reminder emails send, optional client
+        reminder SMS (`payload_json.also_sms`) from Lecca when Settings
+        `client_reminder_sms_enabled` is on — logged to Conversations.
+        **Upload-nudge guard:** only rows with explicit
+        `payload_json.trigger_event=payment_confirmed` are cancelled
+        (no SMS twin) when all required Get Started tasks are already submitted
+        (pending admin review) or the case has left New Client / Prospect.
+        Bare queue emails (no `trigger_event`) are never soft-skipped.
       parameters:
         - in: header
           name: Authorization
@@ -1919,10 +2110,19 @@ paths:
                   processed: { type: integer }
                   sent: { type: integer }
                   failed: { type: integer }
+                  suppressed: { type: integer }
                   stale_cancelled: { type: integer }
                   stuck_reclaimed: { type: integer }
                   work_due_notified: { type: integer }
                   mms_expired_deleted: { type: integer }
+                  call_insights:
+                    type: object
+                    properties:
+                      processed: { type: integer }
+                      ready: { type: integer }
+                      failed: { type: integer }
+                      skipped: { type: integer }
+                      reclaimed: { type: integer }
         "401":
           description: Unauthorized
         "500":
@@ -1938,7 +2138,11 @@ paths:
         14 days ago, reclaims stuck `processing` claims older than 15 minutes,
         then claims a batch with a unique tag (overlap-safe) and sends emails
         via Resend. SMS / in_app / push channels are marked `failed` until
-        those deliverers are wired (never fake-marked `sent`). Also deletes
+        those deliverers are wired (never fake-marked `sent`). Also sends
+        overdue My Tasks emails (up to 8×200 rows per run; stamps
+        `due_notified_at` after a successful send or when every channel is
+        muted, so undeliverable rows cannot starve the batch).
+        Also deletes
         expired `mms_media` rows (up to 200 per run).
       parameters:
         - in: header
@@ -1961,6 +2165,7 @@ paths:
                   processed: { type: integer }
                   sent: { type: integer }
                   failed: { type: integer }
+                  suppressed: { type: integer }
                   stale_cancelled: { type: integer }
                   stuck_reclaimed: { type: integer }
                   work_due_notified: { type: integer }
@@ -1981,6 +2186,8 @@ paths:
         open conversations), asks Claude for an energizing brief + quote (falls back to
         deterministic copy), and delivers via email/in-app prefs (`morning_digest`).
         Idempotent per admin per Denver calendar day via `audit_logs`.
+        Claude enhance uses `ANTHROPIC_API_KEY`; on auth/API failure the digest still
+        emails with deterministic fallback (`claude_fallback` in the response).
       parameters:
         - in: header
           name: Authorization
@@ -2038,8 +2245,9 @@ paths:
         "200":
           description: |
             Dashboard aggregates (clients, revenue, tickets, payments) plus
-            `upcoming_rounds` and `my_work_tasks` (open tasks assigned to the
-            current admin, max 8).
+            `upcoming_rounds` (R1–5 schedules plus Special `kind: extended`
+            `next_dispute_target_date` targets) and `my_work_tasks` (open tasks
+            assigned to the current admin, max 8).
         "401":
           description: Unauthorized
 
@@ -2447,19 +2655,33 @@ paths:
       description: |
         Requires `ADMIN_AI_ENABLED=1` and role `super_admin` or `admin`.
         Uses Anthropic Messages with curated tools (read + guided writes):
-        `search_clients`, `search_referrers`, `get_case`, `pipeline_summary`, `list_progress_reports`,
+        `search_clients`, `search_referrers`, `search_admins`, `get_case`, `pipeline_summary`, `list_progress_reports`,
         `get_progress_report`, `search_work_tasks`, `get_client`,
         `list_case_documents`, `list_payments`, `list_installments`,
         `list_clients_owing`, `list_round_schedule`, plus write tools
-        `create_prospect`, `create_work_task`, `add_case_note`, `upload_case_document`, `send_email`,
-        `send_sms`, `send_text`, `list_sms`, `get_texts`, `get_conversation`, `list_ofg_phone_numbers`,
+        `create_prospect`, `create_work_task`, `update_work_task`, `add_case_note`, `upload_case_document`, `send_email`,
+        `send_round_report` (resend published Round PDF with secure download token + branded email + optional SMS),
+        `send_sms`, `send_text`, `send_contact_sms`, `send_contact_email`, `list_sms`, `get_texts`, `get_conversation`, `list_ofg_phone_numbers`,
         `update_pipeline_stage`, `preview_convert_prospect`, `convert_prospect`
         (unconverted leads without an enrolled case), `update_client_status`
         (MCP blocks pending_payment/onboarding/active until enrolled),
-        `upsert_progress_report`, `upsert_payment_splits`, `update_payment_split`
-        (dry-run then confirm=true; `create_work_task` is OFG-only unless
-        `push_hubspot=true`; `send_email` emails a client or a referrer
-        (realtor/LO) + logs a note; `send_sms`/`send_text` texts via Twilio OFG number into
+        `upsert_progress_report` (staff notes only; requires score_before/score_after;
+        published PDF overwrite returns crm_required unless replace_published),
+        `set_case_payment_plan` (discounted Zelle/cash OFG balance; not coupon codes),
+        `upsert_payment_splits`, `update_payment_split`,
+        `list_coupons`, `create_coupon` (checkout promo codes for /register)
+        (dry-run then confirm=true; `create_work_task` / `update_work_task` assign named staff via
+        `assignee_admin_id` / `assignee_name` from `search_admins`, else language owner on create;
+        `create_prospect` / `create_contact` / `convert_contact` / `update_client` use
+        `assigned_admin_*` the same way; `create_prospect` returns `existing:true`
+        (never inserts) on phone/email match and rejects placeholder phones;
+        `convert_contact` links to an existing client on match instead of creating a twin;
+        OFG-only unless
+        `push_hubspot=true`; `send_email` emails a client, referrer, or staff (`to_admin_*`)
+        + logs a note; `send_contact_sms`/`send_contact_email` message CRM Contacts by contact_id + log contacts.admin_notes;
+        `send_round_report` mints `/api/public/round-report-pdf/:token`
+        and sends the Round-complete template + optional twin SMS; `send_sms`/`send_text` texts via Twilio
+        (`from_admin_*` / `from_phone_number_id` override the MCP-connected From line) into
         Conversations + case note and returns message/SID/status for HubSpot; inbound SMS
         auto-logs to the client file; `list_ofg_phone_numbers` lists active OFG numbers).
         Audits every turn to `admin_ai_audit_logs`. `admin` role is rate-limited (~30/hour);
@@ -2591,6 +2813,7 @@ paths:
               - list_progress_reports
               - get_progress_report
               - search_work_tasks
+              - search_admins
               - get_client
               - list_case_documents
               - list_payments
@@ -2598,12 +2821,21 @@ paths:
               - list_clients_owing
               - list_round_schedule
               - create_prospect
+              - create_contact
+              - update_contact
+              - convert_contact
+              - search_contacts
+              - get_contact
               - create_work_task
+              - update_work_task
               - add_case_note
               - upload_case_document
               - send_email
+              - send_round_report
               - send_sms
               - send_text
+              - send_contact_sms
+              - send_contact_email
               - list_sms
               - get_texts
               - get_conversation
@@ -2613,8 +2845,11 @@ paths:
               - convert_prospect
               - update_client_status
               - upsert_progress_report
+              - set_case_payment_plan
               - upsert_payment_splits
               - update_payment_split
+              - list_coupons
+              - create_coupon
       requestBody:
         required: false
         content:
@@ -2893,7 +3128,8 @@ paths:
           schema: { type: integer, minimum: 1 }
         - in: query
           name: limit
-          schema: { type: integer, minimum: 1, maximum: 100 }
+          schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+          description: Page size (admin UI uses 25 with Show more append)
       responses:
         "200":
           description: Paginated contact hub inbox
@@ -2953,7 +3189,7 @@ paths:
                   type: integer
                   description: Open unknown contact (SMS only; one of client_id or unknown_contact_id)
                 channel: { type: string, enum: [sms, internal] }
-                body: { type: string, description: Text body; optional when media_url is set for SMS/MMS }
+                body: { type: string, maxLength: 1600, description: Text body (SMS max 1600 chars); optional when media_url is set for SMS/MMS }
                 is_internal_note: { type: boolean }
                 ofg_number_id: { type: integer }
                 media_url:
@@ -2982,7 +3218,7 @@ paths:
               required: [phone, body]
               properties:
                 phone: { type: string }
-                body: { type: string }
+                body: { type: string, maxLength: 1600 }
                 ofg_number_id: { type: integer }
                 media_url: { type: string }
                 media_content_type: { type: string }
@@ -3173,6 +3409,10 @@ paths:
     post:
       tags: [Admin]
       summary: Create prospect from unknown contact and link threads
+      description: >-
+        Hard-blocks placeholder phones and phone/email matches on existing clients
+        (`409` with `existing_client_id`). There is no `confirm_duplicate` override —
+        link the unknown contact to the existing client instead.
       security: [{ bearerAuth: [] }]
       parameters:
         - in: path
@@ -3190,13 +3430,13 @@ paths:
                 email: { type: string }
                 preferred_language: { type: string, enum: [en, es] }
                 create_case: { type: boolean }
-                confirm_duplicate: { type: boolean }
       responses:
         "200":
           description: "{ ok, client_id, case_id?, preferred_language }"
+        "400":
+          description: placeholder_phone or validation error
         "409":
-          description: duplicate_phone when confirm_duplicate not set
-          description: ok + client_id
+          description: duplicate_phone / duplicate_email with existing_client_id
 
   /admin/conversations/unknown/{id}/dismiss:
     post:
@@ -3211,6 +3451,39 @@ paths:
       responses:
         "200":
           description: ok
+
+  /admin/conversations/messages/{messageId}/retry-call-insights:
+    post:
+      tags: [Admin]
+      summary: Retry call insights (STT + optional Claude resume)
+      description: |
+        Re-queues and immediately processes call insights for a call/voicemail
+        message. Requires Conversations access and ACL on the thread.
+        Transcript-first: ready with transcript even when Claude is unavailable.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: messageId
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Updated message with call insights fields
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  message: { type: object }
+        "403":
+          description: Forbidden
+        "404":
+          description: Not found
+        "409":
+          description: Recording not available yet
+        "500":
+          description: Retry failed
 
   /admin/conversations/{id}/messages:
     get:
@@ -3949,6 +4222,29 @@ paths:
                       approved: { type: integer }
                       rejected: { type: integer }
 
+  /admin/documents/{id}:
+    delete:
+      tags: [Admin]
+      summary: Remove an archived upload and reopen the Get Started task
+      description: >
+        Clears the file on the matching `client_task_completions` upload row and
+        sets status/review back to pending so the client can upload again.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+          description: client_task_completions id
+      responses:
+        "200":
+          description: Upload cleared
+        "400":
+          description: Not an upload task
+        "404":
+          description: Not found
+
   /admin/documents/{id}/file:
     get:
       tags: [Admin]
@@ -4109,8 +4405,10 @@ paths:
 
         Without `column`: returns the first page of each column in `columns`
         (default `limit=20`, max 50), plus flat `cases`/`prospects` for the
-        loaded pages. With `column` + `offset`: returns a single-column page
-        for load-more (`column` is `prospect` or a case stage). Do not confuse
+        loaded pages and `web_review_prospects` for the web-lead review bucket
+        (`web_lead_review` label). Main `prospects` excludes that bucket.
+        With `column` + `offset`: returns a single-column page for load-more
+        (`column` is `prospect`, `web_review`, or a case stage). Do not confuse
         filter `stage` with load-more `column`.
       security:
         - BearerAuth: []
@@ -4179,6 +4477,7 @@ paths:
             enum:
               [
                 prospect,
+                web_review,
                 new_client,
                 docs_ready,
                 round_1,
@@ -4222,6 +4521,11 @@ paths:
                           $ref: "#/components/schemas/CreditRepairCase"
                       prospects:
                         type: array
+                        items:
+                          $ref: "#/components/schemas/Prospect"
+                      web_review_prospects:
+                        type: array
+                        description: First page of web_lead_review bucket (separate from prospects)
                         items:
                           $ref: "#/components/schemas/Prospect"
                   - type: object
@@ -4340,10 +4644,17 @@ paths:
         New Case), that case is promoted to `new_client`; otherwise a new
         `credit_repair_cases` row is created. Runs `autoAssignTasksForCase`,
         sends the dedicated prospect-welcome email (portal onboarding link),
-        optionally persists/sends round calendar `.ics`, and schedules the
-        `payment_confirmed` reminder flow with Day-0 steps skipped (Day 2/3
-        upload nudges + team alert still run — avoids duplicate/wrong
-        "payment confirmed" Day-1 copy).
+        fires idempotent signup activation SMS/email to the client + linked
+        partners (`clients.activation_notified_at`; SMS From =
+        `signup_notify_sms_from_phone_number_id`; client SMS uses the same
+        `/portal/onboarding/:token` magic link as the welcome email when
+        convert mints a shared token), optionally persists/sends
+        round calendar `.ics`, and schedules the `payment_confirmed` reminder
+        flow with Day-0 steps skipped (Day 2/3 upload nudges + team alert
+        still run — avoids duplicate/wrong "payment confirmed" Day-1 copy).
+        First paid enrollment also calls the same activation fan-out when
+        convert did not already claim the stamp (SMS mints its own magic link
+        if none was shared).
       security:
         - BearerAuth: []
       parameters:
@@ -4550,6 +4861,106 @@ paths:
         "404":
           description: Flow not found
 
+  /admin/reminder-flows/{id}/steps:
+    post:
+      tags: [Admin]
+      summary: Add a step to a reminder flow
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [step_type]
+              properties:
+                step_type:
+                  type: string
+                  enum: [send_email, internal_alert]
+                delay_days: { type: integer }
+                label: { type: string }
+                subject: { type: string }
+                body: { type: string }
+                template_slug: { type: string }
+                also_sms:
+                  type: boolean
+                  description: Default true for send_email — SMS after email succeeds
+      responses:
+        "201":
+          description: Step created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  step:
+                    $ref: "#/components/schemas/ReminderFlowStep"
+
+  /admin/reminder-flows/{id}/steps/{stepId}:
+    put:
+      tags: [Admin]
+      summary: Update a reminder flow step
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+        - in: path
+          name: stepId
+          required: true
+          schema: { type: integer }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                step_type:
+                  type: string
+                  enum: [send_email, internal_alert]
+                delay_days: { type: integer }
+                label: { type: string, nullable: true }
+                subject: { type: string, nullable: true }
+                body: { type: string, nullable: true }
+                template_slug: { type: string, nullable: true }
+                also_sms: { type: boolean }
+                step_order: { type: integer }
+      responses:
+        "200":
+          description: Step updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  step:
+                    $ref: "#/components/schemas/ReminderFlowStep"
+    delete:
+      tags: [Admin]
+      summary: Delete a reminder flow step
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+        - in: path
+          name: stepId
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Deleted
+
   /admin/admins:
     get:
       tags: [Admin]
@@ -4730,7 +5141,11 @@ paths:
                       email: { type: string }
                       phone: { type: string }
                       category: { type: string }
-                      notify_on_round: { type: boolean }
+                      notify_on_round:
+                        type: boolean
+                        description: >
+                          Accepted for backward compatibility; server always
+                          stores true (partners always notified on signup/rounds).
                       role:
                         type: string
                         enum: [primary, secondary, tertiary]
@@ -4956,6 +5371,37 @@ paths:
         "404":
           description: Not found
 
+  /admin/client-documents/{id}:
+    delete:
+      tags: [Admin]
+      summary: Delete a case document (client_documents)
+      description: >
+        Removes the encrypted case document row. If it was the last file for an
+        onboarding upload type on the case, the matching Get Started task is
+        reset to pending.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  id: { type: integer }
+                  case_id: { type: integer, nullable: true }
+                  doc_type: { type: string }
+                  task_reset: { type: boolean }
+        "404":
+          description: Not found
+
   /admin/admins/{id}/resend-welcome:
     post:
       tags: [Admin]
@@ -5149,6 +5595,26 @@ paths:
                       created_at:
                         type: string
                         format: date-time
+                      max_rounds:
+                        type: integer
+                        minimum: 5
+                        maximum: 12
+                        description: Max OFG progress rounds (5 default; up to 12 for special clients)
+                      next_dispute_target_date:
+                        type: string
+                        format: date
+                        nullable: true
+                      highest_published_round:
+                        type: integer
+                      extended_rounds_legend:
+                        type: string
+                        nullable: true
+                        example: Special · R6/8
+                      available_rounds:
+                        type: array
+                        items:
+                          type: integer
+                        description: Round numbers 1..max_rounds for UI selectors
                   client:
                     $ref: "#/components/schemas/AdminClientDetail"
                   documents:
@@ -5173,6 +5639,95 @@ paths:
           description: Unauthorized
         "404":
           description: Case not found
+
+  /admin/cases/{id}/extended-rounds:
+    patch:
+      tags: [Admin]
+      summary: Update extended OFG rounds settings for a case
+      description: |
+        Any staff admin may raise `max_rounds` (5–12) for special clients, set
+        an optional `next_dispute_target_date` (calendar), and/or choose
+        `report_compare_mode` (`baseline` = vs enrollment Before — default;
+        `chain` = vs prior After). Pipeline stage ENUM stays on `round_5` while
+        publishing rounds 6..(max−1); final max round → `completed`.
+        Cannot set `max_rounds` below the highest already-published `round_number`.
+        If the case is already `completed` and `max_rounds` is raised above the highest
+        published round, the case/client are reopened to `round_5` so staff can publish
+        the next report (no graduating/reminder side effects).
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+          description: Credit repair case ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                max_rounds:
+                  type: integer
+                  minimum: 5
+                  maximum: 12
+                next_dispute_target_date:
+                  type: string
+                  format: date
+                  nullable: true
+                  description: YYYY-MM-DD or null to clear
+                report_compare_mode:
+                  type: string
+                  enum: [baseline, chain]
+                  description: |
+                    baseline (default) — Round N Before = enrollment / Round 1 Before;
+                    chain — Round N Before = prior round After (legacy).
+      responses:
+        "200":
+          description: Updated extended-rounds fields
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  case:
+                    type: object
+                    properties:
+                      id: { type: integer }
+                      client_id: { type: integer }
+                      max_rounds: { type: integer }
+                      next_dispute_target_date:
+                        type: string
+                        format: date
+                        nullable: true
+                      report_compare_mode:
+                        type: string
+                        enum: [baseline, chain]
+                      highest_published_round: { type: integer }
+                      pipeline_stage: { type: string }
+                      reopened_to_round_5:
+                        type: boolean
+                        description: True when completed was reopened to round_5 after raising max
+                      extended_rounds_legend:
+                        type: string
+                        nullable: true
+                      available_rounds:
+                        type: array
+                        items: { type: integer }
+                      is_extended: { type: boolean }
+        "400":
+          description: Invalid body
+        "401":
+          description: Unauthorized
+        "404":
+          description: Case not found
+        "422":
+          description: max_rounds below highest published round
 
   /admin/cases/{id}/stage:
     post:
@@ -5237,6 +5792,268 @@ paths:
           description: Case not found
         "422":
           description: Stage transition blocked (e.g. docs_ready requires all docs approved)
+
+  /admin/contacts:
+    get:
+      tags: [Admin]
+      summary: List CRM contacts (address book)
+      description: >-
+        Active contacts only by default (`deleted_at` null, `converted_client_id`
+        null). Admin/super_admin only — affiliates receive 403.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: search
+          schema:
+            type: string
+          description: Name, email, or phone
+        - in: query
+          name: language
+          schema:
+            type: string
+            enum: [en, es]
+        - in: query
+          name: has_notes
+          schema:
+            type: string
+            enum: [yes, no]
+        - in: query
+          name: include_deleted
+          schema:
+            type: string
+            enum: ["1", "true"]
+        - in: query
+          name: include_converted
+          schema:
+            type: string
+            enum: ["1", "true"]
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+        - in: query
+          name: sort_by
+          schema:
+            type: string
+            enum:
+              [created_at, first_name, last_name, email, phone, preferred_language]
+        - in: query
+          name: sort_dir
+          schema:
+            type: string
+            enum: [ASC, DESC]
+      responses:
+        "200":
+          description: Paginated contacts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  contacts:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AdminCrmContact"
+                  pagination:
+                    type: object
+                    properties:
+                      page: { type: integer }
+                      limit: { type: integer }
+                      total: { type: integer }
+                      totalPages: { type: integer }
+        "403":
+          description: Affiliate access denied
+    post:
+      tags: [Admin]
+      summary: Create CRM contact
+      description: >-
+        Address-book entry (not a pipeline client). Requires first_name, last_name,
+        and email or phone. Email must be a valid address; phone must have ≥10 digits
+        and is stored as E.164 (US 10-digit → +1…). Soft-warns on phone/email duplicates
+        unless `confirm_duplicate=true`.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [first_name, last_name]
+              properties:
+                first_name: { type: string }
+                last_name: { type: string }
+                email: { type: string, nullable: true }
+                phone: { type: string, nullable: true }
+                preferred_language: { type: string, enum: [en, es] }
+                admin_notes: { type: string, nullable: true }
+                address_line1: { type: string, nullable: true }
+                address_line2: { type: string, nullable: true }
+                city: { type: string, nullable: true }
+                state: { type: string, nullable: true }
+                zip: { type: string, nullable: true }
+                confirm_duplicate: { type: boolean }
+      responses:
+        "201":
+          description: Contact created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  contact:
+                    $ref: "#/components/schemas/AdminCrmContact"
+        "400":
+          description: Validation error
+        "403":
+          description: Affiliate access denied
+        "409":
+          description: Duplicate phone/email (pass confirm_duplicate)
+
+  /admin/contacts/{id}:
+    get:
+      tags: [Admin]
+      summary: Get CRM contact
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Contact detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  contact:
+                    $ref: "#/components/schemas/AdminCrmContact"
+        "404":
+          description: Not found
+        "403":
+          description: Affiliate access denied
+    put:
+      tags: [Admin]
+      summary: Update CRM contact
+      description: >-
+        Active unconverted contacts only. Soft-warns duplicates unless
+        `confirm_duplicate=true`.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                first_name: { type: string }
+                last_name: { type: string }
+                email: { type: string, nullable: true }
+                phone: { type: string, nullable: true }
+                preferred_language: { type: string, enum: [en, es] }
+                admin_notes: { type: string, nullable: true }
+                address_line1: { type: string, nullable: true }
+                address_line2: { type: string, nullable: true }
+                city: { type: string, nullable: true }
+                state: { type: string, nullable: true }
+                zip: { type: string, nullable: true }
+                confirm_duplicate: { type: boolean }
+      responses:
+        "200":
+          description: Updated contact
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  contact:
+                    $ref: "#/components/schemas/AdminCrmContact"
+        "404":
+          description: Not found or already converted
+        "409":
+          description: Duplicate phone/email
+    delete:
+      tags: [Admin]
+      summary: Soft-delete CRM contact
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Soft-deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+        "404":
+          description: Not found
+
+  /admin/contacts/{id}/convert:
+    post:
+      tags: [Admin]
+      summary: Convert contact to Pipeline prospect
+      description: >-
+        Creates a `clients` row with status/pipeline_stage=prospect, sets
+        `converted_client_id` on the contact, and re-links Conversations
+        `contact_id` → `client_id`. If phone/email already matches a client,
+        links the contact to that existing client (`existing:true`) instead of
+        creating a twin — there is no `confirm_duplicate` override.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Converted (or linked to existing client)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  contact_id: { type: integer }
+                  client_id: { type: integer }
+                  preferred_language: { type: string, enum: [en, es] }
+                  existing: { type: boolean }
+                  linked_existing: { type: boolean }
+        "404":
+          description: Not found or already converted
 
   /admin/clients:
     get:
@@ -5371,6 +6188,9 @@ paths:
         (403 `affiliate_subscription_required` otherwise).
         `email` is optional when `phone` is provided (and vice versa). Empty
         email stores NULL; outbound client emails are skipped safely.
+        Hard-blocks placeholder phones and phone/email matches on any existing
+        client (`409` `duplicate_phone` / `duplicate_email` with
+        `existing_client_id`) — no confirm override.
       security:
         - BearerAuth: []
       requestBody:
@@ -5393,7 +6213,7 @@ paths:
                 phone:
                   type: string
                   nullable: true
-                  description: Optional when email is set; required if email is empty
+                  description: Optional when email is set; required if email is empty; placeholder phones rejected
                 package_id:
                   type: integer
                 status:
@@ -5416,7 +6236,10 @@ paths:
                     type: object
                     properties:
                       referrer_id: { type: integer }
-                      notify_on_round: { type: boolean }
+                      notify_on_round:
+                        type: boolean
+                        description: >
+                          Accepted for compatibility; server always stores true.
                       first_name: { type: string }
                       last_name: { type: string }
                       email: { type: string }
@@ -5467,10 +6290,14 @@ paths:
                   round_calendar:
                     type: object
                     nullable: true
+        "400":
+          description: Validation error (including `placeholder_phone`)
         "403":
           description: Affiliate subscription required (code `affiliate_subscription_required`)
         "409":
-          description: Email already exists
+          description: >-
+            `duplicate_phone` or `duplicate_email` with `existing_client_id`
+            (and `duplicates` for phone). No confirm override.
         "500":
           description: CMS vault save failed after insert (code `cms_credentials_failed`; client rolled back)
 
@@ -5481,8 +6308,11 @@ paths:
       description: >-
         Affiliates may only update `first_name`, `last_name`, `email`, and
         `phone` on clients within their own referral scope — `package_id`,
-        `status`, and `admin_notes` are silently ignored for affiliate
-        callers, and out-of-scope client ids return 404.
+        `status`, `preferred_language`, and `admin_notes` are silently ignored
+        for affiliate callers, and out-of-scope client ids return 404.
+        Staff may set `preferred_language` (en|es); that also reassigns
+        `assigned_admin_id` to the language owner unless `assigned_admin_id`
+        is sent explicitly.
       security:
         - BearerAuth: []
       parameters:
@@ -5505,8 +6335,16 @@ paths:
                 email:
                   type: string
                   format: email
+                  nullable: true
                 phone:
                   type: string
+                  nullable: true
+                preferred_language:
+                  type: string
+                  enum: [en, es]
+                  description: >-
+                    Staff only. Client preferred language; also reassigns
+                    language-owner admin when assigned_admin_id is omitted.
                 package_id:
                   type: integer
                 status:
@@ -5525,7 +6363,10 @@ paths:
                     type: object
                     properties:
                       referrer_id: { type: integer }
-                      notify_on_round: { type: boolean }
+                      notify_on_round:
+                        type: boolean
+                        description: >
+                          Accepted for compatibility; server always stores true.
                 cms_credentials:
                   type: object
                   description: SmartCredit + MyFreeScoreNow vault (staff only; hard-fails update if save fails)
@@ -5803,6 +6644,79 @@ paths:
                     type: string
                     enum: [disabled, dry_run, live]
 
+  /admin/connect-cloud/status:
+    get:
+      tags: [CRC]
+      summary: Connect Cloud pull scaffold status (P2)
+      description: |
+        Returns feature-flag / credential readiness for tri-merge PDF pull.
+        Live pull requires CONNECT_CLOUD_* env and vendor API wiring.
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Scaffold status
+
+  /admin/connect-cloud/pull-report:
+    post:
+      tags: [CRC]
+      summary: Pull latest tri-merge PDF from Connect Cloud (scaffold)
+      security:
+        - BearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [client_id]
+              properties:
+                client_id: { type: integer }
+      responses:
+        "400":
+          description: Missing client_id
+        "501":
+          description: Disabled, needs credentials, or vendor API not wired
+
+  /admin/mfsn/status:
+    get:
+      tags: [Admin]
+      summary: MyFreeScoreNow affiliate API gate status
+      description: |
+        Read-only. Default `MFSN_ENABLED` omitted/0 returns mode `disabled` and
+        never calls MyFreeScoreNow. Does not return secrets or bearer tokens.
+        Affiliates are forbidden.
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Feature-flag and credential presence (not a live login)
+        "401":
+          description: Missing admin session
+        "403":
+          description: Affiliates cannot access
+
+  /admin/mfsn/probe-login:
+    post:
+      tags: [Admin]
+      summary: Opt-in UAT affiliate login probe
+      description: |
+        Calls `POST {MFSN_API_BASE_URL}/api/auth/login` only when `MFSN_ENABLED=1`
+        and affiliate API email/password are set. Returns success/failure only —
+        the access token is never included in the response. 501 when gated off.
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: UAT login succeeded (token discarded)
+        "401":
+          description: Missing admin session
+        "403":
+          description: Affiliates cannot access
+        "501":
+          description: Flag off or credentials missing
+        "502":
+          description: MFSN login failed or unreachable
+
   /admin/crc/preview/{id}:
     get:
       tags: [CRC]
@@ -5989,8 +6903,12 @@ paths:
           description: PDF not found
     delete:
       tags: [Admin]
-      summary: Delete a specific round report PDF
-      description: Requires `super_admin` role.
+      summary: Delete a specific round report PDF (deprecated)
+      description: |
+        **Deprecated.** Returns 410. Use
+        `POST /admin/clients/{id}/round-reports/{roundNumber}/reset` instead
+        (clears report + PDFs + wizard sessions + pipeline). Requires
+        `admin` or `super_admin` (`requireStaffManager`).
       security:
         - BearerAuth: []
       parameters:
@@ -6000,17 +6918,87 @@ paths:
           schema:
             type: integer
       responses:
-        "200":
-          description: Deleted successfully
+        "404":
+          description: PDF not found
+        "410":
+          description: Deprecated — use Reset Round instead
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  ok:
-                    type: boolean
+                  error: { type: string }
+                  client_id: { type: integer }
+                  round_number: { type: integer }
+                  reset_path: { type: string }
+
+  /admin/clients/{id}/round-reports/{roundNumber}/reset:
+    post:
+      tags: [Admin]
+      summary: Reset OFG Progress Report round (cascade later rounds)
+      description: |
+        Clears published Round `roundNumber` and **all later rounds** (reports,
+        PDFs, wizard sessions), rolls pipeline back using the publish history
+        `from_stage` when available, best-effort CDN delete, and audit log.
+        Dry-run with `confirm=false` (default) returns a checklist preview.
+        Execute with `confirm=true`. Requires `admin` or `super_admin`
+        (`requireStaffManager`). Affiliates denied. Does not unsend emails/SMS.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+          description: Client id
+        - in: path
+          name: roundNumber
+          required: true
+          schema: { type: integer, minimum: 1, maximum: 5 }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                confirm:
+                  type: boolean
+                  description: false = dry-run preview; true = execute reset
+      responses:
+        "200":
+          description: Preview or successful reset
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  dry_run: { type: boolean }
+                  preview:
+                    type: object
+                    properties:
+                      rounds_with_data:
+                        type: array
+                        items: { type: integer }
+                      staged_pdf_ids:
+                        type: array
+                        items: { type: integer }
+                      warnings:
+                        type: array
+                        items: { type: string }
+                      pipeline:
+                        type: object
+                        properties:
+                          from: { type: string }
+                          to: { type: string }
+                  reset: { type: object }
+                  guidance: { type: string }
+        "400":
+          description: Invalid round
+        "403":
+          description: Forbidden
         "404":
-          description: PDF not found
+          description: Nothing to reset / client not found
 
   /portal/round-report-pdfs/{pdfId}:
     get:
@@ -6058,7 +7046,8 @@ paths:
           schema:
             type: integer
             minimum: 1
-            maximum: 5
+            maximum: 12
+          description: Round 1..case.max_rounds (default program 1–5; extended up to 12)
       responses:
         "200":
           description: Before-context for the requested round
@@ -6102,7 +7091,11 @@ paths:
           description: Invalid case id
     post:
       tags: [Admin]
-      summary: Create OFG report wizard session (upload after PDF + before upload or prior reuse)
+      summary: Create OFG report wizard session (upload after PDF + before upload, staged before, or prior reuse)
+      description: |
+        Vercel body limit is ~4.5 MB. When uploading both Before and After Ultra PDFs,
+        stage Before via `POST .../report-wizard/stage-pdf` first, then pass `staged_before_id`
+        with `after_pdf` only. Each file must still be ≤ 4 MB.
       security:
         - BearerAuth: []
       parameters:
@@ -6122,10 +7115,13 @@ paths:
                 before_pdf:
                   type: string
                   format: binary
-                  description: Required unless reuse_before_session_id is set
+                  description: Required unless staged_before_id or reuse_before_session_id is set (avoid with after_pdf when both are large)
                 after_pdf:
                   type: string
                   format: binary
+                staged_before_id:
+                  type: integer
+                  description: Id from POST .../stage-pdf (sequential Before upload)
                 reuse_before_session_id:
                   type: integer
                   description: Published prior-round session whose after PDF becomes Before
@@ -6151,8 +7147,60 @@ paths:
           description: Invalid input
         "404":
           description: Case not found
+        "413":
+          description: Upload exceeds platform body limit
         "422":
           description: Round validation or reuse constraints failed
+
+  /admin/cases/{caseId}/report-wizard/stage-pdf:
+    post:
+      tags: [Admin]
+      summary: Stage a Before PDF for sequential report-wizard upload
+      description: |
+        Uploads a single Before PDF (≤ 4 MB) and returns `staged_id` for
+        `POST .../report-wizard/sessions` with `staged_before_id`. Expires in 2 hours.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: caseId
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [pdf]
+              properties:
+                pdf:
+                  type: string
+                  format: binary
+      responses:
+        "201":
+          description: Staged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  staged_id:
+                    type: integer
+                  file_name:
+                    type: string
+                  byte_size:
+                    type: integer
+                  expires_at:
+                    type: string
+                    format: date-time
+        "400":
+          description: Invalid input
+        "404":
+          description: Case not found
+        "413":
+          description: File too large
 
   /admin/report-wizard/sessions/{id}:
     get:
@@ -6308,6 +7356,23 @@ paths:
     post:
       tags: [Admin]
       summary: Publish OFG report (generate PDF, advance pipeline, notify client)
+      description: |
+        Generates the progress-report PDF, advances the case round stage when
+        appropriate, and notifies the client via the `round_N_complete` reminder
+        flow only (no duplicate immediate email/SMS). The flow email attaches the
+        Round PDF when stored, includes a portal magic link landing on
+        `/portal/reports`, and a short-lived secure PDF download URL
+        (`GET /api/public/round-report-pdf/{token}`, 72h). SMS (when enabled)
+        uses the publishing admin's OFG number, matches preferred language, and
+        links the secure PDF URL.         When `notify_partners` is true (default),
+        linked referral partners of any category receive the PDF via
+        `client_referrers` only (no legacy `clients.referrer_id` fallback).
+        Soft stats `partners_linked` / `partners_with_email` /
+        `partners_emailed` / `partners_pdf_load_failed` are returned for UI
+        warnings. There is no bare stage-text partner fallback after publish
+        (PDF path only). Published reports appear in the client portal via
+        `round_report_pdfs` (dashboard no longer requires legacy
+        `pdf_storage_key`).
       security:
         - BearerAuth: []
       parameters:
@@ -6326,11 +7391,82 @@ paths:
               properties:
                 compliance_acknowledged:
                   type: boolean
+                acknowledge_score_anomalies:
+                  type: boolean
+                notify_partners:
+                  type: boolean
+                  description: >
+                    Default true. When true, email linked referral partners with
+                    the Round PDF. Set false to notify the client only.
       responses:
         "200":
           description: Published
         "422":
           description: Compliance validation failed
+
+  /admin/round-report-pdfs/{pdfId}/resend:
+    post:
+      tags: [Admin]
+      summary: Resend a published Round PDF to client and referral partners
+      description: |
+        Same secure delivery as wizard publish / MCP `send_round_report`: mints a
+        short-lived `/api/public/round-report-pdf/{token}`, emails the client
+        (`tplRoundComplete` + optional PDF attach), optional twin SMS, and by
+        default emails every linked referral partner with the PDF.
+        Defaults: `also_email`, `also_sms`, `attach_pdf`, `notify_partners` all true.
+        Affiliates are denied. Appends a CRM admin note on success.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: pdfId
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                also_email:
+                  type: boolean
+                  default: true
+                also_sms:
+                  type: boolean
+                  default: true
+                attach_pdf:
+                  type: boolean
+                  default: true
+                notify_partners:
+                  type: boolean
+                  default: true
+      responses:
+        "200":
+          description: Sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  email_sent:
+                    type: boolean
+                  sms_sent:
+                    type: boolean
+                  partners_emailed:
+                    type: integer
+                  partners_linked:
+                    type: integer
+                  partners_with_email:
+                    type: integer
+                  secure_pdf_url:
+                    type: string
+        "422":
+          description: Client missing email or phone when required
+        "404":
+          description: PDF or client not found
 
   /admin/report-wizard/sessions/{id}/source/{role}:
     get:
@@ -6740,10 +7876,15 @@ paths:
         is allowed only when the client has `status=prospect` — this attaches a
         Prospect-stage case without converting. Convert-time fields (`notes`,
         `package_id`, `splits`, `round_schedule`, `send_case_email`) are ignored
-        for prospect stage (no welcome email / tasks / payment_confirmed). Other
-        stages for a prospect must use `/admin/prospects/{id}/convert`.
-        Prospect-stage cases do not appear in Kanban case columns; they stay in
-        the Prospect column until convert.
+        for prospect stage (no welcome email / tasks / payment_confirmed).
+        `pipeline_stage=new_client` (default) always sends the convert-welcome
+        email with a Get Started / document-upload magic link (`/portal/onboarding/:token`)
+        when the client has an email, schedules `payment_confirmed` Day 2/3 nudges
+        (Day-0 skipped), assigns onboarding tasks, and may fire first-time
+        activation SMS. Optional `send_case_email` still sends the legacy
+        case-started payments email in addition. Other stages for a prospect must
+        use `/admin/prospects/{id}/convert`. Prospect-stage cases do not appear in
+        Kanban case columns; they stay in the Prospect column until convert.
       security:
         - BearerAuth: []
       requestBody:
@@ -6794,6 +7935,193 @@ paths:
           description: Missing client_id
         "401":
           description: Unauthorized
+
+  /admin/prepaid-onboard-invites:
+    get:
+      tags: [Admin - Pipeline]
+      summary: List recent prepaid onboard invites
+      description: Staff-minted single-use links for already-paid unknown clients.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 30
+            maximum: 100
+      responses:
+        "200":
+          description: Invite list
+    post:
+      tags: [Admin - Pipeline]
+      summary: Mint a prepaid onboard invite
+      description: |
+        Creates a single-use `/join/:token` link (default 7 days). Staff sets package,
+        amount already paid offline, payment method, optional remaining installments.
+        Redeeming the link creates/promotes the client to New Client with a paid split
+        (no card charge on the public page).
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [package_id, paid_amount_cents, payment_method]
+              properties:
+                package_id:
+                  type: integer
+                paid_amount_cents:
+                  type: integer
+                paid_label:
+                  type: string
+                payment_method:
+                  type: string
+                  enum: [cash, zelle, venmo, card_offline, other]
+                payment_note:
+                  type: string
+                  nullable: true
+                remaining_splits:
+                  type: array
+                  items:
+                    type: object
+                    required: [label, amount_cents, due_date]
+                    properties:
+                      label:
+                        type: string
+                      amount_cents:
+                        type: integer
+                      due_date:
+                        type: string
+                        format: date
+                      send_payment_link:
+                        type: boolean
+                preferred_language:
+                  type: string
+                  enum: [en, es]
+                  nullable: true
+                referral_category:
+                  type: string
+                  nullable: true
+                referrer_id:
+                  type: integer
+                  nullable: true
+                staff_notes:
+                  type: string
+                  nullable: true
+                expires_in_hours:
+                  type: integer
+                  default: 168
+      responses:
+        "201":
+          description: Invite created (includes url + token once)
+        "400":
+          description: Validation error
+
+  /admin/prepaid-onboard-invites/{id}/revoke:
+    post:
+      tags: [Admin - Pipeline]
+      summary: Revoke an open prepaid onboard invite
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Invite revoked
+        "404":
+          description: Not found or already closed
+
+  /public/round-report-pdf/{token}:
+    get:
+      tags: [Public]
+      summary: Download a Round progress report PDF via short-lived secure token
+      description: |
+        Multi-use until expiry (default 72h). Minted on wizard publish for email/SMS.
+        No portal session required. Returns application/pdf.
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 32
+      responses:
+        "200":
+          description: PDF binary
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        "401":
+          description: Expired or invalid token
+        "404":
+          description: File not available
+
+  /public/prepaid-onboard/{token}:
+    get:
+      tags: [Public]
+      summary: Preview a prepaid onboard invite
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Public invite summary
+        "410":
+          description: Expired, revoked, or redeemed
+    post:
+      tags: [Public]
+      summary: Redeem prepaid onboard invite
+      description: |
+        Creates or promotes client to New Client, records paid installment + optional
+        remaining splits, sends welcome email, returns portal session JWT.
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [first_name, last_name]
+              properties:
+                first_name:
+                  type: string
+                last_name:
+                  type: string
+                email:
+                  type: string
+                  description: Required for portal session / OTP return path
+                phone:
+                  type: string
+                  nullable: true
+                preferred_language:
+                  type: string
+                  enum: [en, es]
+      responses:
+        "201":
+          description: Enrolled; portal session JWT when available
+        "400":
+          description: Validation error (e.g. missing email)
+        "409":
+          description: Already an enrolled client
+        "410":
+          description: Invite closed
 
   /admin/cases/{id}/splits:
     get:
@@ -7013,6 +8341,13 @@ paths:
                         client_last_name: { type: string }
                         round_number: { type: integer }
                         target_date: { type: string, format: date }
+                        kind:
+                          type: string
+                          enum: [schedule, extended]
+                          description: schedule = R1–5 from case_round_schedules; extended = next_dispute_target_date
+                        label:
+                          type: string
+                          description: Optional display label (e.g. Round N target for extended)
                   work_tasks:
                     type: array
                     items:
@@ -7214,6 +8549,24 @@ components:
           type: string
           format: date-time
           nullable: true
+        max_rounds:
+          type: integer
+          minimum: 5
+          maximum: 12
+          description: Max OFG progress rounds (5 default; up to 12 for special clients)
+        next_dispute_target_date:
+          type: string
+          format: date
+          nullable: true
+          description: Optional next dispute target (calendar) for extended cases
+        highest_published_round:
+          type: integer
+          nullable: true
+          description: Highest published client_round_reports.round_number for this client
+        extended_rounds_legend:
+          type: string
+          nullable: true
+          description: Pipeline badge when max_rounds > 5, e.g. Special · R6/8
         status:
           type: string
           enum: [active, completed, cancelled, on_hold]
@@ -7237,6 +8590,67 @@ components:
           description: Source + analysis labels attached to the case's client
           items:
             $ref: "#/components/schemas/Label"
+
+    AdminCrmContact:
+      type: object
+      description: CRM Contacts address-book row (independent of pipeline clients)
+      properties:
+        id:
+          type: integer
+        first_name:
+          type: string
+        last_name:
+          type: string
+        email:
+          type: string
+          nullable: true
+        phone:
+          type: string
+          nullable: true
+        address_line1:
+          type: string
+          nullable: true
+        address_line2:
+          type: string
+          nullable: true
+        city:
+          type: string
+          nullable: true
+        state:
+          type: string
+          nullable: true
+        zip:
+          type: string
+          nullable: true
+        preferred_language:
+          type: string
+          enum: [en, es]
+        admin_notes:
+          type: string
+          nullable: true
+        assigned_admin_id:
+          type: integer
+          nullable: true
+        created_by_admin_id:
+          type: integer
+          nullable: true
+        converted_client_id:
+          type: integer
+          nullable: true
+        converted_at:
+          type: string
+          format: date-time
+          nullable: true
+        deleted_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
 
     AdminClientListItem:
       type: object
@@ -7382,6 +8796,29 @@ components:
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
 
+    ReminderFlowStep:
+      type: object
+      properties:
+        id: { type: integer }
+        flow_id: { type: integer }
+        step_order: { type: integer }
+        step_type:
+          type: string
+          enum: [send_email, internal_alert]
+        delay_days: { type: integer }
+        label: { type: string, nullable: true }
+        subject: { type: string, nullable: true }
+        body: { type: string, nullable: true }
+        template_slug: { type: string, nullable: true }
+        also_sms:
+          type: boolean
+          description: |
+            When true (default) and Settings `client_reminder_sms_enabled` is on,
+            send a short Lecca OFG SMS after this step's email succeeds, and log
+            it on the client's Conversations SMS thread. Ignored for internal_alert.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
     Prospect:
       type: object
       description: |
@@ -7443,6 +8880,19 @@ components:
         analysis_text: { type: string, nullable: true }
         email_sent: { type: boolean }
         generated_at: { type: string, format: date-time }
+        text_language:
+          type: string
+          enum: [en, es]
+          description: Language used for narrative, action plan, and PDF HTML
+        claude_enhanced:
+          type: boolean
+          description: |
+            True when Anthropic Claude successfully enriched Round 1–4 narrative,
+            dispute basis copy, and SMS on top of the rules-engine extraction.
+            Scores, utilization numbers, and account identities stay locked to extraction.
+        email_skipped_no_address:
+          type: boolean
+          description: email_opt_in was true but no valid email on file
         extraction_status:
           type: string
           enum: [ok, empty, parse_failed, unsupported_type]
@@ -7662,6 +9112,14 @@ components:
         middle_score_after:
           type: number
           nullable: true
+        compare_mode:
+          type: string
+          enum: [baseline, chain]
+          description: baseline = reuse Round 1 Before; chain = reuse prior After
+        reuse_pdf_role:
+          type: string
+          enum: [before, after]
+          description: Which PDF on prior_session_id to load when can_reuse is true
 
     # ─── Payment Splits ───────────────────────────────────────────────────────────
 

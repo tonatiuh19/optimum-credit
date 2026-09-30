@@ -228,6 +228,82 @@ describe("admin case document upload — edges + docs_ready rules", () => {
     expect(res.body.tasks_synced).toBe(0);
   }, 60_000);
 
+  it("DELETE /admin/client-documents/:id removes row and resets matching upload task", async () => {
+    // Prior tests may leave other id_front rows; isolate so this delete is last-of-type.
+    await pool.query(
+      `DELETE FROM client_documents WHERE case_id = ? AND doc_type = 'id_front'`,
+      [caseId],
+    );
+
+    const up = await request(app)
+      .post(`/api/admin/cases/${caseId}/documents`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .field("doc_type", "id_front")
+      .attach("files", tinyPng(), "id-front-del.png");
+    expect(up.status).toBe(201);
+    const docId = Number(up.body.documents?.[0]?.id);
+    expect(docId).toBeTruthy();
+
+    const del = await request(app)
+      .delete(`/api/admin/client-documents/${docId}`)
+      .set("Authorization", `Bearer ${adminToken}`);
+    expect(del.status).toBe(200);
+    expect(del.body.ok).toBe(true);
+    expect(del.body.task_reset).toBe(true);
+
+    const [gone] = await pool.query<RowDataPacket[]>(
+      `SELECT id FROM client_documents WHERE id = ?`,
+      [docId],
+    );
+    expect(gone.length).toBe(0);
+
+    const [tasks] = await pool.query<RowDataPacket[]>(
+      `SELECT ctc.status, ctc.admin_review_status, ctc.file_storage_key
+       FROM client_task_completions ctc
+       JOIN onboarding_task_templates ott ON ott.id = ctc.task_template_id
+       WHERE ctc.case_id = ? AND ott.slug = 'id_front'`,
+      [caseId],
+    );
+    expect(tasks[0].status).toBe("pending");
+    expect(tasks[0].admin_review_status).toBe("pending");
+    expect(tasks[0].file_storage_key).toBeNull();
+  }, 60_000);
+
+  it("DELETE /admin/documents/:id clears archive upload and reopens task", async () => {
+    // Re-upload id_front so archive has a completed row again
+    const up = await request(app)
+      .post(`/api/admin/cases/${caseId}/documents`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .field("doc_type", "id_front")
+      .attach("files", tinyPng(), "id-front-again.png");
+    expect(up.status).toBe(201);
+
+    const [tasks] = await pool.query<RowDataPacket[]>(
+      `SELECT ctc.id FROM client_task_completions ctc
+       JOIN onboarding_task_templates ott ON ott.id = ctc.task_template_id
+       WHERE ctc.case_id = ? AND ott.slug = 'id_front' AND ctc.file_name IS NOT NULL
+       LIMIT 1`,
+      [caseId],
+    );
+    expect(tasks[0]?.id).toBeTruthy();
+
+    const del = await request(app)
+      .delete(`/api/admin/documents/${tasks[0].id}`)
+      .set("Authorization", `Bearer ${adminToken}`);
+    expect(del.status).toBe(200);
+    expect(del.body.ok).toBe(true);
+
+    const [after] = await pool.query<RowDataPacket[]>(
+      `SELECT status, admin_review_status, file_name, file_storage_key
+       FROM client_task_completions WHERE id = ?`,
+      [tasks[0].id],
+    );
+    expect(after[0].status).toBe("pending");
+    expect(after[0].admin_review_status).toBe("pending");
+    expect(after[0].file_name).toBeNull();
+    expect(after[0].file_storage_key).toBeNull();
+  }, 60_000);
+
   it("does NOT advance to docs_ready after only upload tasks (service_agreement still open)", async () => {
     for (const docType of ["id_back", "ssn_card", "proof_of_address"] as const) {
       const res = await request(app)

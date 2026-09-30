@@ -26,6 +26,7 @@ import {
 import type { PipelineStage } from "@shared/api";
 import { LangBadge } from "@/components/ui/lang-badge";
 import FieldHint from "@/components/admin/FieldHint";
+import { ContactPhoneActions } from "@/components/admin/ContactPhoneActions";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -132,7 +133,12 @@ export default function AdminClientDetail() {
               </span>
               {c.phone && (
                 <span className="inline-flex items-center gap-1">
-                  <Phone className="w-4 h-4" /> {c.phone}
+                  <Phone className="w-4 h-4" />
+                  <ContactPhoneActions
+                    phone={c.phone}
+                    clientId={Number(c.id)}
+                    clientName={`${c.first_name || ""} ${c.last_name || ""}`.trim()}
+                  />
                 </span>
               )}
               {c.city && (

@@ -121,7 +121,7 @@ export default function AdminDashboard() {
 
       {/* ── My open work tasks ── */}
       <div className="bg-card rounded-2xl border border-border overflow-hidden">
-        <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-border bg-gradient-to-r from-secondary/60 via-transparent to-primary/5">
+        <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-border bg-muted/30">
           <div className="flex items-center gap-2.5 min-w-0">
             <div className="h-9 w-9 rounded-xl bg-secondary border border-border flex items-center justify-center shrink-0">
               <CheckSquare className="w-4 h-4 text-foreground" />
@@ -158,10 +158,12 @@ export default function AdminDashboard() {
                     : task.days_until === 1
                       ? t("adminDashboard.tomorrow")
                       : task.days_until < 0
-                        ? t("adminDashboard.overdueDays", {
-                            n: Math.abs(task.days_until),
-                          })
+                        ? null
                         : t("adminDashboard.inDays", { n: task.days_until });
+              const overdueDays =
+                task.days_until != null && task.days_until < 0
+                  ? Math.abs(task.days_until)
+                  : null;
               const href = task.client_id
                 ? `/admin/pipeline?client=${task.client_id}`
                 : "/admin/my-tasks";
@@ -172,21 +174,32 @@ export default function AdminDashboard() {
                   className="flex items-center gap-3 px-5 py-3 hover:bg-muted/40 transition-colors"
                 >
                   <div
-                    className={`h-10 w-10 rounded-full border flex flex-col items-center justify-center shrink-0 leading-none ${
+                    className={`h-10 w-10 rounded-full border flex flex-col items-center justify-center shrink-0 text-center ${
                       task.overdue
                         ? "bg-destructive/10 border-destructive/30"
                         : "bg-secondary border-border"
                     }`}
                   >
-                    <span
-                      className={`text-[10px] font-bold tabular-nums ${
-                        task.overdue
-                          ? "text-destructive"
-                          : "text-foreground"
-                      }`}
-                    >
-                      {dueLabel}
-                    </span>
+                    {overdueDays != null ? (
+                      <>
+                        <span className="text-[10px] font-bold tabular-nums leading-none text-destructive">
+                          {t("adminDashboard.inDays", { n: overdueDays })}
+                        </span>
+                        <span className="text-[8px] font-bold uppercase leading-none text-destructive/90 mt-0.5">
+                          {t("adminDashboard.late")}
+                        </span>
+                      </>
+                    ) : (
+                      <span
+                        className={`text-[10px] font-bold tabular-nums leading-tight px-0.5 ${
+                          task.overdue
+                            ? "text-destructive"
+                            : "text-foreground"
+                        }`}
+                      >
+                        {dueLabel}
+                      </span>
+                    )}
                   </div>
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-semibold text-foreground truncate">
@@ -210,7 +223,7 @@ export default function AdminDashboard() {
 
       {/* ── Upcoming round targets ── */}
       <div className="bg-card rounded-2xl border border-border overflow-hidden">
-        <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-border bg-gradient-to-r from-primary/10 via-transparent to-accent/5">
+        <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-border bg-muted/30">
           <div className="flex items-center gap-2.5 min-w-0">
             <div className="h-9 w-9 rounded-xl bg-primary/15 border border-primary/20 flex items-center justify-center shrink-0">
               <Target className="w-4 h-4 text-primary" />
@@ -239,40 +252,72 @@ export default function AdminDashboard() {
           </div>
         ) : (
           <div className="divide-y divide-border">
-            {upcoming.map((r) => (
-              <Link
-                key={r.id}
-                to={`/admin/pipeline?client=${r.client_id}`}
-                className="flex items-center gap-3 px-5 py-3 hover:bg-muted/40 transition-colors"
-              >
-                <div className="h-10 w-10 rounded-full bg-primary/10 border border-primary/20 flex flex-col items-center justify-center shrink-0 leading-none">
-                  <span className="text-[9px] font-bold uppercase text-primary/70">
-                    R{r.round_number}
-                  </span>
-                  <span className="text-[10px] font-bold text-primary tabular-nums">
-                    {r.days_until === 0
-                      ? t("adminDashboard.today")
-                      : r.days_until === 1
-                        ? t("adminDashboard.tomorrow")
-                        : t("adminDashboard.inDays", { n: r.days_until })}
-                  </span>
-                </div>
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-semibold text-foreground truncate">
-                    {r.first_name} {r.last_name}
-                  </p>
-                  <p className="text-xs text-muted-foreground truncate">
-                    {r.case_number ?? "—"} ·{" "}
-                    {t("adminCalendar.roundN", { n: r.round_number })} ·{" "}
-                    {new Date(r.target_date + "T12:00:00").toLocaleDateString(
-                      undefined,
-                      { month: "short", day: "numeric" },
-                    )}
-                  </p>
-                </div>
-                <ArrowRight className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-              </Link>
-            ))}
+            {upcoming.map((r) => {
+              const extended = r.kind === "extended";
+              return (
+                <Link
+                  key={r.id}
+                  to={`/admin/pipeline?client=${r.client_id}`}
+                  className="flex items-center gap-3 px-5 py-3 hover:bg-muted/40 transition-colors"
+                >
+                  <div
+                    className={
+                      extended
+                        ? "h-10 w-10 rounded-full bg-accent/10 border border-accent/25 flex flex-col items-center justify-center shrink-0 text-center"
+                        : "h-10 w-10 rounded-full bg-primary/10 border border-primary/20 flex flex-col items-center justify-center shrink-0 text-center"
+                    }
+                  >
+                    <span
+                      className={
+                        extended
+                          ? "text-[9px] font-bold uppercase text-accent/80 leading-none"
+                          : "text-[9px] font-bold uppercase text-primary/70 leading-none"
+                      }
+                    >
+                      R{r.round_number}
+                      {extended ? "★" : ""}
+                    </span>
+                    <span
+                      className={
+                        extended
+                          ? "text-[10px] font-bold text-accent tabular-nums leading-none mt-0.5"
+                          : "text-[10px] font-bold text-primary tabular-nums leading-none mt-0.5"
+                      }
+                    >
+                      {r.days_until === 0
+                        ? t("adminDashboard.today")
+                        : r.days_until === 1
+                          ? t("adminDashboard.tomorrow")
+                          : t("adminDashboard.inDays", { n: r.days_until })}
+                    </span>
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-semibold text-foreground truncate">
+                      {r.first_name} {r.last_name}
+                      {extended ? (
+                        <span className="ml-1.5 text-[10px] font-bold uppercase tracking-wide text-accent">
+                          {t("adminCalendar.specialBadge")}
+                        </span>
+                      ) : null}
+                    </p>
+                    <p className="text-xs text-muted-foreground truncate">
+                      {r.case_number ?? "—"} ·{" "}
+                      {extended
+                        ? t("adminCalendar.extendedRoundN", {
+                            n: r.round_number,
+                          })
+                        : t("adminCalendar.roundN", { n: r.round_number })}{" "}
+                      ·{" "}
+                      {new Date(r.target_date + "T12:00:00").toLocaleDateString(
+                        undefined,
+                        { month: "short", day: "numeric" },
+                      )}
+                    </p>
+                  </div>
+                  <ArrowRight className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                </Link>
+              );
+            })}
           </div>
         )}
       </div>

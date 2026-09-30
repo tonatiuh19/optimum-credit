@@ -24,7 +24,14 @@ describe("pipelineStageAfterRoundReport", () => {
   it("handles edge round numbers", () => {
     expect(pipelineStageAfterRoundReport(0)).toBe("docs_ready");
     expect(pipelineStageAfterRoundReport(-1)).toBe("docs_ready");
+    // Default max_rounds=5: publishing beyond max → completed
     expect(pipelineStageAfterRoundReport(6)).toBe("completed");
+  });
+
+  it("extended max stays on round_5 until final", () => {
+    expect(pipelineStageAfterRoundReport(5, 8)).toBe("round_5");
+    expect(pipelineStageAfterRoundReport(6, 8)).toBe("round_5");
+    expect(pipelineStageAfterRoundReport(8, 8)).toBe("completed");
   });
 });
 
@@ -55,12 +62,21 @@ describe("validatePdfUploadPair", () => {
     );
   });
 
-  it("rejects combined size over the platform total limit", () => {
+  it("allows two files that each fit under 4 MB (sequential upload path)", () => {
     const a = Buffer.alloc(3 * 1024 * 1024);
     const b = Buffer.alloc(2 * 1024 * 1024);
     a.write("%PDF", 0);
     b.write("%PDF", 0);
-    expect(validatePdfUploadPair(a, b)).toMatch(/Combined PDF/i);
+    expect(validatePdfUploadPair(a, b)).toBeNull();
+  });
+
+  it("rejects combined size over 8 MB (2× per-file cap)", () => {
+    const a = Buffer.alloc(4 * 1024 * 1024);
+    const b = Buffer.alloc(4 * 1024 * 1024 + 1);
+    a.write("%PDF", 0);
+    b.write("%PDF", 0);
+    // b alone exceeds per-file first
+    expect(validatePdfUploadPair(a, b)).toMatch(/MB or smaller/i);
   });
 });
 
@@ -111,6 +127,17 @@ describe("validatePublishRound", () => {
       validatePublishRound({ roundNumber: 1, pipelineStage: "new_client" }),
     ).toMatch(/cannot be published/);
   });
+
+  it("allows extended round on round_5 with highestPublished", () => {
+    expect(
+      validatePublishRound({
+        roundNumber: 6,
+        pipelineStage: "round_5",
+        maxRounds: 8,
+        highestPublished: 5,
+      }),
+    ).toBeNull();
+  });
 });
 
 describe("expectedReportRoundForStage", () => {
@@ -119,6 +146,15 @@ describe("expectedReportRoundForStage", () => {
     expect(expectedReportRoundForStage("round_3")).toBe(3);
     expect(expectedReportRoundForStage("completed")).toBe(5);
     expect(expectedReportRoundForStage("new_client")).toBeNull();
+  });
+
+  it("unlocks next after R5 when extended", () => {
+    expect(expectedReportRoundForStage("round_5", 8, 5)).toBe(6);
+    expect(expectedReportRoundForStage("round_5", 8, 7)).toBe(8);
+  });
+
+  it("unlocks next after completed when max raised", () => {
+    expect(expectedReportRoundForStage("completed", 8, 5)).toBe(6);
   });
 });
 

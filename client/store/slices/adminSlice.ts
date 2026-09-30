@@ -1,6 +1,7 @@
 import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
 import api, { formatAxiosError } from "@/lib/api";
 import { normalizeAdminCalendarResponse } from "@/lib/adminCalendarPayload";
+import { applyAdminNotifyPrefsPatch } from "@/lib/adminNotifyPrefs";
 import type { RootState } from "@/store";
 import type {
   AdminClientListItem,
@@ -86,10 +87,24 @@ interface AdminState {
       case_number: string;
       status: string;
       pipeline_stage: string;
+      created_at?: string;
+      max_rounds?: number;
+      next_dispute_target_date?: string | null;
+      report_compare_mode?: "baseline" | "chain";
+      highest_published_round?: number;
+      extended_rounds_legend?: string | null;
+      available_rounds?: number[];
     };
     client: any;
     documents: any[];
     reports: any[];
+    wizard_sessions?: Array<{
+      id: number;
+      round_number: number;
+      status: string;
+      created_at?: string;
+      published_at?: string | null;
+    }>;
     payments: any[];
     pipeline_history: any[];
     sibling_cases?: Array<{
@@ -117,6 +132,8 @@ interface AdminState {
   videos: EducationalVideo[];
   settings: SystemSetting[];
   notifyStaff: AdminNotifyStaffRecipient[];
+  /** Snapshot to roll back optimistic staff prefs on save failure. */
+  notifyStaffPrefsSnapshot: AdminNotifyStaffRecipient[] | null;
   notifyExtraEmails: AdminNotifyExtraEmail[];
   notifyExtraEmailsLoading: boolean;
   notifyExtraEmailsSaving: boolean;
@@ -215,6 +232,7 @@ const initialState: AdminState = {
   videos: [],
   settings: [],
   notifyStaff: [],
+  notifyStaffPrefsSnapshot: null,
   notifyExtraEmails: [],
   notifyExtraEmailsLoading: false,
   notifyExtraEmailsSaving: false,
@@ -398,6 +416,59 @@ export const updateCaseStage = createAsyncThunk<
   await api.post(`/admin/cases/${caseId}/stage`, { stage, notes });
 });
 
+export const updateCaseExtendedRounds = createAsyncThunk(
+  "admin/updateCaseExtendedRounds",
+  async (
+    {
+      caseId,
+      max_rounds,
+      next_dispute_target_date,
+      report_compare_mode,
+    }: {
+      caseId: number;
+      max_rounds?: number;
+      next_dispute_target_date?: string | null;
+      report_compare_mode?: "baseline" | "chain";
+    },
+    { rejectWithValue },
+  ) => {
+    try {
+      const body: Record<string, unknown> = {};
+      if (max_rounds !== undefined) body.max_rounds = max_rounds;
+      if (next_dispute_target_date !== undefined) {
+        body.next_dispute_target_date = next_dispute_target_date;
+      }
+      if (report_compare_mode !== undefined) {
+        body.report_compare_mode = report_compare_mode;
+      }
+      const { data } = await api.patch(
+        `/admin/cases/${caseId}/extended-rounds`,
+        body,
+      );
+      return data as {
+        ok: boolean;
+        case: {
+          id: number;
+          client_id: number;
+          max_rounds: number;
+          next_dispute_target_date: string | null;
+          report_compare_mode: "baseline" | "chain";
+          highest_published_round: number;
+          pipeline_stage: string;
+          reopened_to_round_5: boolean;
+          extended_rounds_legend: string | null;
+          available_rounds: number[];
+          is_extended: boolean;
+        };
+      };
+    } catch (err) {
+      return rejectWithValue(
+        formatAxiosError(err, "Could not save round settings"),
+      );
+    }
+  },
+);
+
 export const fetchPanelCase = createAsyncThunk(
   "admin/panelCase",
   async (id: number) => {
@@ -498,12 +569,142 @@ export const uploadCaseDocuments = createAsyncThunk<
   }
 });
 
-export const deleteRoundReportPdf = createAsyncThunk<
-  { pdfId: number; roundNumber: number },
-  { pdfId: number; roundNumber: number }
->("admin/deleteRoundReportPdf", async ({ pdfId, roundNumber }) => {
-  await api.delete(`/admin/round-report-pdfs/${pdfId}`);
-  return { pdfId, roundNumber };
+export const deleteCaseDocument = createAsyncThunk<
+  { id: number; caseId: number | null },
+  { id: number; caseId?: number | null },
+  { rejectValue: string }
+>("admin/deleteCaseDocument", async ({ id, caseId }, { rejectWithValue }) => {
+  try {
+    const { data } = await api.delete(`/admin/client-documents/${id}`);
+    return {
+      id,
+      caseId:
+        caseId != null
+          ? Number(caseId)
+          : data?.case_id != null
+            ? Number(data.case_id)
+            : null,
+    };
+  } catch (err) {
+    return rejectWithValue(
+      formatAxiosError(err, "Could not delete document"),
+    );
+  }
+});
+
+export const deleteArchiveDocument = createAsyncThunk<
+  { id: number },
+  number,
+  { rejectValue: string }
+>("admin/deleteArchiveDocument", async (id, { rejectWithValue }) => {
+  try {
+    await api.delete(`/admin/documents/${id}`);
+    return { id };
+  } catch (err) {
+    return rejectWithValue(
+      formatAxiosError(err, "Could not delete document"),
+    );
+  }
+});
+
+export type RoundReportResetPreview = {
+  client_id: number;
+  client_name: string;
+  case_id: number | null;
+  reset_from_round: number;
+  rounds_to_clear: number[];
+  rounds_with_data: number[];
+  report_ids: number[];
+  pdf_ids: number[];
+  session_ids: number[];
+  staged_pdf_ids?: number[];
+  pipeline: { from: string; to: string };
+  warnings: string[];
+};
+
+export type RoundReportResetResult = {
+  ok: boolean;
+  dry_run: boolean;
+  preview?: RoundReportResetPreview;
+  reset?: RoundReportResetPreview;
+  guidance?: string;
+};
+
+export const previewRoundReportReset = createAsyncThunk<
+  RoundReportResetResult,
+  { clientId: number; roundNumber: number },
+  { rejectValue: string }
+>("admin/previewRoundReportReset", async (args, { rejectWithValue }) => {
+  try {
+    const { data } = await api.post<RoundReportResetResult>(
+      `/admin/clients/${args.clientId}/round-reports/${args.roundNumber}/reset`,
+      { confirm: false },
+    );
+    return data;
+  } catch (e: any) {
+    return rejectWithValue(
+      formatAxiosError(e, "Failed to preview round reset"),
+    );
+  }
+});
+
+export const confirmRoundReportReset = createAsyncThunk<
+  RoundReportResetResult,
+  { clientId: number; roundNumber: number },
+  { rejectValue: string }
+>("admin/confirmRoundReportReset", async (args, { rejectWithValue }) => {
+  try {
+    const { data } = await api.post<RoundReportResetResult>(
+      `/admin/clients/${args.clientId}/round-reports/${args.roundNumber}/reset`,
+      { confirm: true },
+    );
+    return data;
+  } catch (e: any) {
+    return rejectWithValue(formatAxiosError(e, "Failed to reset round"));
+  }
+});
+
+export type ResendRoundReportPdfResult = {
+  ok: boolean;
+  pdf_id: number;
+  client_id: number;
+  round_number: number;
+  email_sent: boolean;
+  sms_sent: boolean;
+  partners_emailed: number;
+  partners_linked: number;
+  partners_with_email: number;
+  notify_partners: boolean;
+  secure_pdf_url?: string | null;
+};
+
+export const resendRoundReportPdf = createAsyncThunk<
+  ResendRoundReportPdfResult,
+  {
+    pdfId: number;
+    alsoEmail?: boolean;
+    alsoSms?: boolean;
+    attachPdf?: boolean;
+    notifyPartners?: boolean;
+  },
+  { rejectValue: string }
+>("admin/resendRoundReportPdf", async (args, { rejectWithValue }) => {
+  try {
+    const { data } = await api.post<ResendRoundReportPdfResult>(
+      `/admin/round-report-pdfs/${args.pdfId}/resend`,
+      {
+        also_email: args.alsoEmail !== false,
+        also_sms: args.alsoSms !== false,
+        attach_pdf: args.attachPdf !== false,
+        notify_partners: args.notifyPartners !== false,
+      },
+    );
+    return data;
+  } catch (err) {
+    return rejectWithValue(
+      formatAxiosError(err, "Could not resend round report"),
+    );
+  }
 });
 
 export const fetchConversations = createAsyncThunk("admin/convs", async () => {
@@ -1494,6 +1695,7 @@ const slice = createSlice({
     });
     b.addCase(fetchClientReferrers.pending, (s) => {
       s.clientReferrersLoading = true;
+      s.clientReferrers = [];
     });
     b.addCase(fetchClientReferrers.rejected, (s) => {
       s.clientReferrersLoading = false;
@@ -1570,6 +1772,18 @@ const slice = createSlice({
       ];
       s.caseDocuments = merged;
     });
+    b.addCase(deleteCaseDocument.fulfilled, (s, a) => {
+      s.caseDocuments = s.caseDocuments.filter((d) => d.id !== a.payload.id);
+    });
+    b.addCase(deleteArchiveDocument.fulfilled, (s, a) => {
+      s.allDocuments = s.allDocuments.filter((d: any) => d.id !== a.payload.id);
+      if (s.documentsPagination) {
+        s.documentsPagination = {
+          ...s.documentsPagination,
+          total: Math.max(0, Number(s.documentsPagination.total || 0) - 1),
+        };
+      }
+    });
     b.addCase(fetchConversations.fulfilled, (s, a) => {
       s.conversations = a.payload;
     });
@@ -1619,19 +1833,39 @@ const slice = createSlice({
     });
     b.addCase(fetchNotifyExtraEmails.fulfilled, (s, a) => {
       s.notifyExtraEmailsLoading = false;
-      s.notifyStaff = a.payload.staff || [];
+      // Skip staff overwrite while an optimistic prefs PUT is in flight.
+      if (!s.notifyExtraEmailsSaving) {
+        s.notifyStaff = a.payload.staff || [];
+      }
       s.notifyExtraEmails = a.payload.extras || [];
     });
     b.addCase(fetchNotifyExtraEmails.rejected, (s, a) => {
       s.notifyExtraEmailsLoading = false;
       s.notifyExtraEmailsError = a.payload || "Failed";
     });
-    b.addCase(updateStaffNotifyPrefs.pending, (s) => {
+    b.addCase(updateStaffNotifyPrefs.pending, (s, a) => {
       s.notifyExtraEmailsSaving = true;
       s.notifyExtraEmailsError = null;
+      // Optimistic: controlled Switches stay Off while PUT is in flight.
+      // Without this, checked={old} + disabled snaps the toggle back On.
+      s.notifyStaffPrefsSnapshot = s.notifyStaff.map((row) => ({
+        ...row,
+        prefs: {
+          email: { ...row.prefs.email },
+          in_app: { ...row.prefs.in_app },
+          sms: { ...row.prefs.sms },
+        },
+      }));
+      const { id, ...patch } = a.meta.arg;
+      s.notifyStaff = s.notifyStaff.map((row) =>
+        row.id === id
+          ? { ...row, prefs: applyAdminNotifyPrefsPatch(row.prefs, patch) }
+          : row,
+      );
     });
     b.addCase(updateStaffNotifyPrefs.fulfilled, (s, a) => {
       s.notifyExtraEmailsSaving = false;
+      s.notifyStaffPrefsSnapshot = null;
       s.notifyStaff = s.notifyStaff.map((row) =>
         row.id === a.payload.id ? { ...row, ...a.payload } : row,
       );
@@ -1639,6 +1873,10 @@ const slice = createSlice({
     b.addCase(updateStaffNotifyPrefs.rejected, (s, a) => {
       s.notifyExtraEmailsSaving = false;
       s.notifyExtraEmailsError = a.payload || "Failed";
+      if (s.notifyStaffPrefsSnapshot) {
+        s.notifyStaff = s.notifyStaffPrefsSnapshot;
+        s.notifyStaffPrefsSnapshot = null;
+      }
     });
     b.addCase(addNotifyExtraEmail.pending, (s) => {
       s.notifyExtraEmailsSaving = true;
@@ -1795,16 +2033,6 @@ const slice = createSlice({
       );
       if (idx !== -1) s.sectionLocks[idx] = a.payload;
       else s.sectionLocks.push(a.payload);
-    });
-    b.addCase(deleteRoundReportPdf.fulfilled, (s, a) => {
-      if (!s.panelClient) return;
-      const { pdfId, roundNumber } = a.payload;
-      const report = s.panelClient.reports.find(
-        (r: any) => r.round_number === roundNumber,
-      );
-      if (report && report.pdfs) {
-        report.pdfs = report.pdfs.filter((p: any) => p.id !== pdfId);
-      }
     });
     // Payment splits
     b.addCase(fetchCaseSplits.pending, (s) => {

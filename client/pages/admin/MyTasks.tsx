@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
   CheckSquare,
@@ -142,6 +142,7 @@ export default function AdminMyTasks() {
     labels: "",
   });
   const [linkedCase, setLinkedCase] = useState<WorkTaskCaseOption | null>(null);
+  const deepLinkTaskHandled = useRef<number | null>(null);
 
   useEffect(() => {
     dispatch(fetchWorkAssignees());
@@ -253,6 +254,70 @@ export default function AdminMyTasks() {
     );
     setCreateOpen(true);
   };
+
+  // Calendar / notifications: /admin/my-tasks?task=ID opens the editor.
+  useEffect(() => {
+    const raw = searchParams.get("task");
+    if (!raw) return;
+    const taskId = Number(raw);
+    if (!Number.isFinite(taskId) || taskId <= 0) {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.delete("task");
+          return next;
+        },
+        { replace: true },
+      );
+      return;
+    }
+    if (loading) return;
+
+    const found =
+      tasks.find((t) => t.id === taskId) ||
+      (["backlog", "doing", "done"] as WorkTaskStatus[])
+        .flatMap((st) => columns[st]?.tasks ?? [])
+        .find((t) => t.id === taskId);
+
+    if (found) {
+      if (deepLinkTaskHandled.current !== taskId) {
+        deepLinkTaskHandled.current = taskId;
+        openEdit(found);
+      }
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.delete("task");
+          return next;
+        },
+        { replace: true },
+      );
+      return;
+    }
+
+    if (deepLinkTaskHandled.current === taskId) return;
+    deepLinkTaskHandled.current = taskId;
+    toast({
+      title: t("myTasks.deepLinkNotFound"),
+      variant: "destructive",
+    });
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("task");
+        return next;
+      },
+      { replace: true },
+    );
+  }, [
+    searchParams,
+    setSearchParams,
+    loading,
+    tasks,
+    columns,
+    toast,
+    t,
+  ]);
 
   const saveTask = async () => {
     if (!form.title.trim()) return;

@@ -1,0 +1,429 @@
+Platform Requirements Discovery
+A short intake quiz — fill in and return
+
+Company / contact: ________________________________
+Industry: ________________________________________
+Prepared for: ____________________________________
+Date: ______________     Target go-live: ______________
+
+HOW TO USE THIS QUIZ
+Answer every section you can. Check boxes that apply. Write short answers
+in the blanks. Attach screenshots or exports where noted. Incomplete is OK —
+we will clarify on a follow-up call. Your answers shape Phase 1 scope,
+timeline, and cost.
+
+When you return this, we will send a scoped proposal.
+
+QUICK GLOSSARY (read this first)
+HINT: Pipeline = the steps a job/deal/case moves through (like columns on a board: Lead -> In progress -> Done).
+HINT: CRM = your shared list of people + history (who they are, notes, messages, status) — not a personal phone or spreadsheet.
+HINT: Prospect / lead = someone interested but not a paying customer yet.
+HINT: Contact (address book) = someone you text/call who is NOT in the sales pipeline (realtor, vendor, event meet).
+HINT: Portal = a private web login for clients or partners to upload docs, see status, or pay — without emailing files around.
+HINT: Phase 1 = the first release we build (must-haves). Phase 2 = later upgrades.
+HINT: Soft-warn vs hard-block = soft-warn says "this phone already exists" but lets you save; hard-block refuses duplicates.
+HINT: Magic link = login link sent by email/SMS (no password to remember).
+
+
+==============================================================================
+01  BUSINESS OUTCOME
+==============================================================================
+HINT: Pick the pain that costs you the most time or money today. We use this to order Phase 1.
+
+What problem hurts most today? (pick 1 primary, up to 2 secondary)
+
+[ ] Leads / pipeline is messy or duplicated across tools
+[ ] Team cannot text/call from a shared business line with history
+[ ] Clients / partners have no portal (or a weak one)
+[ ] Payments / installments / collections are manual
+[ ] Documents and approvals are scattered (email / Drive / WhatsApp)
+[ ] Field crews / mobile staff cannot update status easily
+[ ] Scheduling / reminders are missed
+[ ] Reporting is spreadsheet-only
+[ ] Other: ________________________________________________
+
+In one sentence, what does "success in 90 days" look like?
+
+
+________________________________________________________________________
+
+Who is the day-to-day owner on your side after launch?
+HINT: This is the person who answers questions and tests the system — not always the owner who signs the contract.
+Name / role: __________________________________________________________
+
+==============================================================================
+02  WHO USES THE SYSTEM
+==============================================================================
+HINT: "Logins" = how many people need their own username to sign in. Partners = outside people (affiliates, realtors), not your employees.
+
+Approximate headcount at launch
+Staff logins: ______     Client / customer logins: ______
+Partner / vendor / affiliate logins: ______
+
+Roles (check all that apply; add missing ones)
+
+[ ] Owner / executive
+[ ] Operations / coordinator
+[ ] Sales / intake
+[ ] Field / crew / technician
+[ ] Finance / collections
+[ ] Partner / affiliate / referral source
+[ ] End customer / client portal user
+[ ] Other: ________________________________________________
+
+For each role you checked, what must they see vs. be blocked from?
+HINT: Example: "Coordinator sees all jobs; field tech only sees jobs assigned to them."
+
+
+________________________________________________________________________
+________________________________________________________________________
+
+Mobile needs
+[ ] Office desktop only for now
+[ ] Mobile browser is enough
+HINT: Mobile browser = works on phone Chrome/Safari, no App Store install.
+[ ] Native app later (Phase 2+)
+[ ] Field staff must update status from phone (photo / text / form)
+
+Languages required
+[ ] English only
+[ ] Spanish only
+[ ] English + Spanish (staff and/or clients)
+[ ] Other: ________________________________________________
+
+==============================================================================
+03  PIPELINE / LIFECYCLE STAGES
+==============================================================================
+HINT: Write the real steps you use today (even if informal). Example for construction: Award -> Design -> City plan -> Install -> Inspection -> Closeout. Example for sales: New lead -> Quoted -> Won -> Onboarding -> Active.
+
+List the exact stages a job / deal / case moves through, in order
+
+
+1. ____________________  2. ____________________  3. ____________________
+4. ____________________  5. ____________________  6. ____________________
+7. ____________________  8. ____________________  9. ____________________
+
+Do all records use every stage?
+[ ] Yes, always
+[ ] No — some stages are optional. Which? ______________________________
+
+What should happen automatically when a stage changes?
+HINT: "Automatically" means the system does it without someone remembering — e.g. move to Install and the client gets a reminder SMS.
+[ ] Notify internal owner
+[ ] Notify client / partner
+[ ] Create tasks / checklist
+[ ] Start a reminder sequence
+[ ] Nothing automatic — status only
+[ ] Other: ________________________________________________
+
+==============================================================================
+04  PEOPLE & RECORDS (CRM)
+==============================================================================
+HINT: Keep sales "pipeline" people separate from a simple phone book when possible — otherwise partners and random contacts clutter your sales board.
+
+What kinds of people do you track? (check all)
+
+[ ] Prospects / leads (not customers yet)
+[ ] Paying clients / customers
+[ ] Address-book contacts (text/call only — not in sales pipeline)
+[ ] Referral partners (realtors, brokers, affiliates)
+[ ] Vendors / suppliers
+[ ] Crews / subcontractors
+[ ] Other: ________________________________________________
+
+Must pipeline stay separate from a simple contacts address book?
+[ ] Yes — do not mix partners / random contacts into the sales pipeline
+[ ] No — one list is fine
+[ ] Not sure
+
+Duplicate rules
+HINT: Soft-warn = "This phone already exists — save anyway?" Hard-block = cannot create a second record with the same phone/email.
+[ ] Soft-warn on matching phone/email, allow save anyway
+[ ] Hard-block duplicates
+[ ] Merge workflow needed
+
+Source of truth today
+HINT: "Source of truth" = the place you trust when two lists disagree (spreadsheet vs phone vs website).
+[ ] Spreadsheets
+[ ] Existing website / portal (share login or export)
+[ ] HubSpot / Salesforce / other CRM: ______________________________
+[ ] Paper / memory
+[ ] Mix — describe: ________________________________________________
+
+Should the new platform replace that source of truth?
+[ ] Yes, fully
+[ ] No — sync / coexist
+[ ] Phase 1 replace core only
+
+==============================================================================
+05  MESSAGING & COMMUNICATIONS
+==============================================================================
+HINT: Business SMS/voice means texts and calls go out from a company number and stay logged on the person — not from each employee's personal phone.
+
+Channels needed at launch
+
+[ ] SMS / MMS from a business number (logged in CRM)
+[ ] Voice calls (browser softphone and/or forward to cell)
+HINT: Softphone = call from the laptop/browser. Forward to cell = rings your personal phone but still logs in the CRM.
+[ ] Branded email from the platform
+[ ] Internal notes only (no client messaging yet)
+[ ] WhatsApp / social DMs (usually Phase 2+)
+[ ] Other: ________________________________________________
+
+Who can staff message?
+
+[ ] Clients / customers
+[ ] Prospects
+[ ] Address-book contacts (non-pipeline)
+[ ] Referral partners
+[ ] Unknown numbers (cold outbound)
+
+Must every outbound message be logged to the person record?
+HINT: Logging = a note like "SMS sent Tue 2pm" appears on their profile so the team has history.
+[ ] Yes — SMS and email notes auto-saved
+[ ] SMS only
+[ ] Email only
+[ ] Not required for Phase 1
+
+Business phone numbers
+How many staff need their own business line? ______
+Shared company line OK? [ ] Yes  [ ] No
+
+Templates
+HINT: Templates = saved message drafts with blanks like {{first_name}} that fill in automatically.
+[ ] Need saved SMS / email templates with merge fields (name, links, ...)
+[ ] Not needed yet
+
+==============================================================================
+06  CLIENT / PARTNER PORTALS
+==============================================================================
+HINT: A portal is a private website for outsiders. Clients upload docs or pay; partners see referrals. Without a portal, everything stays in email/WhatsApp.
+
+[ ] No portal in Phase 1
+[ ] Client portal (tasks, docs, status, reports)
+[ ] Partner / affiliate portal
+[ ] Magic-link login (no password) preferred
+[ ] Password / OTP login preferred
+HINT: OTP = one-time code sent by SMS/email to sign in.
+
+Portal must support
+[ ] Document upload (ID, contracts, proof of address, photos, ...)
+[ ] Task checklist / onboarding steps with approval
+[ ] View progress reports / PDFs
+[ ] Pay an invoice / installment
+[ ] Book / confirm appointments
+[ ] Other: ________________________________________________
+
+==============================================================================
+07  PAYMENTS & BILLING
+==============================================================================
+HINT: Installments = split a total into scheduled payments. Subscription = charges repeat monthly. Payment link = client pays from a secure URL (no card shared by text).
+
+[ ] Not needed in Phase 1
+[ ] One-time checkout
+[ ] Payment plans / installments
+[ ] Recurring subscriptions
+[ ] Collect card on file
+[ ] Send payment links by SMS / email
+[ ] Partner / affiliate commissions
+[ ] Invoicing / statements export
+
+Processor preference (if any)
+HINT: Processor = the company that charges cards (Stripe, Authorize.net). You do not need to decide today.
+[ ] Stripe  [ ] Authorize.net  [ ] Other: ______________  [ ] Undecided
+
+Collections workflow needed?
+[ ] Yes — overdue alerts to staff and/or client
+[ ] Soft reminders only
+[ ] No
+
+==============================================================================
+08  DOCUMENTS, FORMS & APPROVALS
+==============================================================================
+HINT: List the files you always collect (driver license, contract, photos, city plans). "Approval" means a staff member must click OK before work continues.
+
+Document types to store (list the important ones)
+
+
+________________________________________________________________________
+________________________________________________________________________
+
+Upload size / type constraints we should know about
+________________________________________________________________________
+
+Approvals
+[ ] Staff must approve client uploads before next stage
+[ ] Client signs / acknowledges documents
+[ ] No formal approval flow
+
+Existing storage to migrate?
+[ ] Google Drive / Dropbox  [ ] Email attachments  [ ] Other: __________
+[ ] None — start clean
+
+==============================================================================
+09  SCHEDULING, REMINDERS & CALENDAR
+==============================================================================
+HINT: Reminders = automatic "your install is in 3 days" messages. Tell us who should get them (client, your team, or both).
+
+[ ] Not needed in Phase 1
+[ ] Job / install start dates
+[ ] Round / recurring milestones (e.g. every 45 days)
+[ ] Appointment booking
+[ ] Automated reminders before a date
+
+If reminders: who gets them?
+[ ] Client only
+[ ] Internal team only
+[ ] Both
+
+Preferred timing (e.g. 3 days before, then 1 day before)
+________________________________________________________________________
+
+What does "client ready" mean before work starts?
+HINT: Example: site cleared, deposit paid, permit approved, keys available.
+________________________________________________________________________
+
+==============================================================================
+10  FIELD / OPERATIONS (if applicable)
+==============================================================================
+HINT: Skip this section if your team works only from an office or remotely. "Field" = people on-site who need to update status or upload photos from a phone.
+
+[ ] Not applicable (office / remote business)
+[ ] City / county plan or permit tracking
+[ ] Materials / vendor order -> ship -> deliver tracking
+[ ] Photo proof of work from the field
+[ ] Inspection / punch-list closeout
+
+Cities / portals / vendors to integrate or track (list top ones)
+________________________________________________________________________
+________________________________________________________________________
+
+Do those systems have logins, tracking IDs, or APIs?
+HINT: API = a technical connection so systems talk automatically. If you only check a website by hand, say "portal login" or "manual."
+[ ] Portal login + tracking number
+[ ] Email status only
+[ ] Phone / manual check
+[ ] API available (share docs if yes)
+[ ] Unknown
+
+==============================================================================
+11  INTEGRATIONS
+==============================================================================
+HINT: Integrations = connecting tools you already use (phone, email, accounting) so you do not re-type data. "Standalone first" is fine for Phase 1.
+
+Check anything you already use or want connected
+
+[ ] Twilio (SMS / voice)
+[ ] Email provider (Resend / SendGrid / Google Workspace)
+[ ] HubSpot or other CRM sync
+[ ] Credit / bureau / vendor APIs (name): ______________________________
+[ ] Accounting (QuickBooks, etc.)
+[ ] Calendar (Google / Outlook)
+[ ] Maps / routing
+[ ] Other: ________________________________________________
+[ ] None — build standalone first
+
+Must-keep tools that cannot be replaced in Phase 1
+________________________________________________________________________
+
+==============================================================================
+12  REPORTING, DASHBOARDS & AI
+==============================================================================
+HINT: Dashboard = one screen with the numbers you check every morning (open jobs, overdue payments, unread messages). AI is optional — staff still approve before anything sends.
+
+Top 3-5 things for a daily dashboard glance
+1. ____________________________________________________________________
+2. ____________________________________________________________________
+3. ____________________________________________________________________
+4. ____________________________________________________________________
+5. ____________________________________________________________________
+
+Reports you currently build by hand that should be automated
+________________________________________________________________________
+
+AI / assistant interest (optional)
+[ ] Staff AI that can search CRM and draft SMS/email (with approval)
+[ ] Call / voicemail summaries
+[ ] Document / report generation
+[ ] Not interested yet
+
+==============================================================================
+13  BRANDING, MULTI-LOCATION, WHITE-LABEL
+==============================================================================
+HINT: White-label = later you could resell a version of this software under your own brand to other companies. Not required for launch.
+
+[ ] Single brand / single company
+[ ] Multiple locations / teams under one company
+[ ] Want white-label / resale to other companies later (Phase 2+)
+
+If white-label later: first industry you would resell to?
+________________________________________________________________________
+
+Public website needed with the platform?
+[ ] Yes — marketing site + app
+[ ] App / portal only (we already have a site)
+[ ] Redesign existing site as part of project
+
+==============================================================================
+14  SECURITY, COMPLIANCE & ACCESS
+==============================================================================
+HINT: Tell us if you store sensitive data (SSN, credit reports, medical). That changes how we lock files and who can see what.
+
+[ ] Standard business data
+[ ] Sensitive personal / financial data (SSN, credit, banking)
+[ ] HIPAA or other regulated data (describe): __________________________
+
+Audit / logging needs
+HINT: Audit log = a history of who did what (sent SMS, downloaded a file, logged in).
+[ ] Who sent what message / when
+[ ] Who viewed or downloaded files
+[ ] Login history
+
+Staff access model
+[ ] Everyone sees everything
+[ ] Role-based permissions
+[ ] Assigned-only (see own book of business)
+
+==============================================================================
+15  PRIORITY & PHASE 1 CUT LINE
+==============================================================================
+HINT: Phase 1 should be the 1-2 outcomes that would make the biggest difference if finished first. Everything else can wait for Phase 2.
+
+Rank the top 2 outcomes that must ship first
+
+
+#1 ____________________________________________________________________
+#2 ____________________________________________________________________
+
+What can wait for Phase 2?
+________________________________________________________________________
+
+Hard constraints
+Budget ballpark (optional): ___________________________________________
+Hard deadline (if any): _______________________________________________
+Decision maker who signs off: _________________________________________
+
+==============================================================================
+16  ATTACHMENTS TO SEND BACK
+==============================================================================
+HINT: Rough is fine — screenshots, photos of a whiteboard, or a sample anonymized customer record help more than a perfect document.
+
+Please attach whatever you already have — even rough:
+
+[ ] Org chart or list of roles + names
+[ ] Current pipeline stages (screenshot or list)
+[ ] Sample client / job record (anonymized OK)
+[ ] Sample documents you collect
+[ ] Example reminder or SMS you send today
+[ ] Export or screenshots of current CRM / portal
+[ ] Vendor / city portal list with example tracking IDs
+[ ] Logo files + brand colors (if known)
+[ ] Domain name(s) you want to use
+
+==============================================================================
+NEXT STEP
+==============================================================================
+HINT: Incomplete answers are OK. Return what you can — we will fill gaps on the call.
+
+Return this completed quiz. We will reply with a scoped Phase 1 proposal —
+modules, timeline, and cost — then schedule a follow-up call to confirm.

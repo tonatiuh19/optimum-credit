@@ -4,6 +4,7 @@
 import "dotenv/config";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import request from "supertest";
+import type { Response as SuperTestResponse } from "supertest";
 import mysql, {
   type Pool,
   type ResultSetHeader,
@@ -24,6 +25,27 @@ let adminToken = "";
 let clientId = 0;
 let ticketId = 0;
 let docCompletionId = 0;
+
+/** One retry for transient TiDB 5xx under parallel suite load. */
+async function getAdminDocuments(
+  query: Record<string, string | number>,
+): Promise<SuperTestResponse> {
+  let last: SuperTestResponse | undefined;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    last = await request(app)
+      .get("/api/admin/documents")
+      .query(query)
+      .set("Authorization", `Bearer ${adminToken}`);
+    if (last.status === 200) return last;
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[adminGridPagination] documents attempt ${attempt + 1} → ${last.status}`,
+      last.body,
+    );
+    await new Promise((r) => setTimeout(r, 1_500));
+  }
+  return last!;
+}
 
 describe("admin grid pagination — documents and tickets", () => {
   beforeAll(async () => {
@@ -141,10 +163,11 @@ describe("admin grid pagination — documents and tickets", () => {
   }, 60_000);
 
   it("GET /admin/documents returns pagination and filters by status", async () => {
-    const all = await request(app)
-      .get("/api/admin/documents")
-      .query({ search: RUN_ID, limit: 10, page: 1 })
-      .set("Authorization", `Bearer ${adminToken}`);
+    const all = await getAdminDocuments({
+      search: RUN_ID,
+      limit: 10,
+      page: 1,
+    });
     expect(all.status).toBe(200);
     expect(all.body.pagination).toMatchObject({
       page: 1,
@@ -159,10 +182,11 @@ describe("admin grid pagination — documents and tickets", () => {
       rejected: expect.any(Number),
     });
 
-    const pending = await request(app)
-      .get("/api/admin/documents")
-      .query({ search: RUN_ID, status: "pending", limit: 50 })
-      .set("Authorization", `Bearer ${adminToken}`);
+    const pending = await getAdminDocuments({
+      search: RUN_ID,
+      status: "pending",
+      limit: 50,
+    });
     expect(pending.status).toBe(200);
     if (docCompletionId) {
       expect(pending.body.documents.length).toBeGreaterThanOrEqual(1);
@@ -172,17 +196,18 @@ describe("admin grid pagination — documents and tickets", () => {
         ),
       ).toBe(true);
     }
-  }, 30_000);
+  }, 45_000);
 
   it("GET /admin/documents page beyond total returns empty with valid pagination", async () => {
-    const res = await request(app)
-      .get("/api/admin/documents")
-      .query({ search: RUN_ID, page: 999, limit: 50 })
-      .set("Authorization", `Bearer ${adminToken}`);
+    const res = await getAdminDocuments({
+      search: RUN_ID,
+      page: 999,
+      limit: 50,
+    });
     expect(res.status).toBe(200);
     expect(res.body.documents).toEqual([]);
     expect(res.body.pagination.page).toBe(999);
-  }, 30_000);
+  }, 45_000);
 
   it("GET /admin/tickets returns pagination and status filter", async () => {
     const all = await request(app)

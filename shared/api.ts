@@ -47,6 +47,13 @@ export interface AdminUser {
   assigned_phone_numbers?: AdminPhoneNumber[];
   /** Can choose SMS OTP on login when true */
   otp_sms_available?: boolean;
+  /**
+   * Social DM inbox (FB/IG) ready for live threads.
+   * False until SOCIAL_DM_INBOX_ENABLED + Meta credentials are set.
+   */
+  social_dm_enabled?: boolean;
+  /** Scaffold status for Social DM UI (locked / coming soon vs live). */
+  social_dm_mode?: "disabled" | "needs_credentials" | "ready" | "live";
 }
 
 /** One turn in Admin AI Ask (client ↔ API). */
@@ -96,6 +103,7 @@ export type AdminNotifyEventKey =
   | "voicemail"
   | "funding_doc_upload"
   | "funding_application_created"
+  | "get_credit_report_lead"
   | "progress_report_alerts"
   | "morning_digest";
 
@@ -443,8 +451,8 @@ export interface AdminPhoneNumber {
 
 /** Contact-centric inbox row (aggregates channel threads for one client or unknown). */
 export interface ConversationContactHubItem {
-  kind: "client" | "unknown";
-  /** clients.id or conversation_unknown_contacts.id */
+  kind: "client" | "unknown" | "contact";
+  /** clients.id, conversation_unknown_contacts.id, or contacts.id */
   contact_id: number;
   display_name: string;
   phone?: string | null;
@@ -460,6 +468,8 @@ export interface ConversationContactHubItem {
   primary_conversation_id?: number | null;
   client_id?: number | null;
   unknown_contact_id?: number | null;
+  /** CRM contacts.id when kind === "contact" */
+  crm_contact_id?: number | null;
   pipeline_stage?: string | null;
   client_status?: string | null;
 }
@@ -468,6 +478,7 @@ export interface Conversation {
   id: number;
   client_id: number | null;
   unknown_contact_id?: number | null;
+  contact_id?: number | null;
   ofg_number_id?: number | null;
   channel: "sms" | "call" | "email" | "internal" | "whatsapp";
   status: "open" | "snoozed" | "closed" | "archived";
@@ -500,6 +511,30 @@ export interface ConversationMessage {
   call_duration_sec?: number | null;
   recording_url?: string | null;
   metadata_json?: Record<string, unknown> | null;
+  call_insights_status?:
+    | "pending"
+    | "processing"
+    | "ready"
+    | "failed"
+    | "skipped"
+    | null;
+  call_insights_error?: string | null;
+  call_transcript?: string | null;
+  call_insights_json?: {
+    locale?: "en" | "es";
+    summary_bullets?: string[];
+    sentiment?: {
+      label?: string;
+      score?: number;
+      feelings?: string[];
+    };
+    topics?: string[];
+    action_items?: string[];
+    risk_flags?: string[];
+    interesting?: string[];
+    model?: string;
+    generated_at?: string;
+  } | null;
   created_at: string;
 }
 
@@ -652,6 +687,28 @@ export interface ClientCmsCredentialsSecrets {
   };
 }
 
+/** Gated MFSN affiliate API probe (no consumer ingest). */
+export type MfsnIntegrationMode =
+  | "disabled"
+  | "needs_credentials"
+  | "ready_to_probe";
+
+export interface MfsnIntegrationStatus {
+  enabled: boolean;
+  credentials_present: boolean;
+  client_token_present: boolean;
+  base_url: string | null;
+  mode: MfsnIntegrationMode;
+  warnings: string[];
+}
+
+export interface MfsnProbeLoginResponse {
+  success: boolean;
+  http_status: number;
+  message: string;
+  token_received: boolean;
+}
+
 // ============================================================
 // CREDIT REPAIR CASES
 // ============================================================
@@ -673,6 +730,16 @@ export interface CreditRepairCase {
   preferred_language?: "en" | "es" | null;
   pipeline_stage: PipelineStage;
   pipeline_stage_changed_at?: string | null;
+  /** Max OFG progress rounds (5 default; up to 12 for special clients). */
+  max_rounds?: number;
+  /** Optional next dispute target date (extended rounds calendar). */
+  next_dispute_target_date?: string | null;
+  /** baseline (default) = vs enrollment; chain = vs prior After. */
+  report_compare_mode?: ReportCompareMode;
+  /** Highest published client_round_reports.round_number for this client. */
+  highest_published_round?: number | null;
+  /** Pipeline legend when max_rounds > 5, e.g. "Special · R6/8". */
+  extended_rounds_legend?: string | null;
   /** active | completed | cancelled | on_hold */
   status: "active" | "completed" | "cancelled" | "on_hold";
   client_status: string;
@@ -775,6 +842,9 @@ export interface AdminDashboardUpcomingRound {
   round_number: number;
   target_date: string;
   days_until: number;
+  /** schedule = case_round_schedules R1–5; extended = next_dispute_target_date */
+  kind?: "schedule" | "extended";
+  label?: string;
 }
 
 export interface ConversationTemplate {
@@ -1143,7 +1213,10 @@ export type ReminderFlowTriggerEvent =
   | "round_3_complete"
   | "round_4_complete"
   | "round_5_complete"
+  | "round_extended_complete"
   | "completed";
+
+export type ReportCompareMode = "baseline" | "chain";
 
 export type ReminderFlowStepType = "send_email" | "internal_alert";
 
@@ -1157,6 +1230,8 @@ export interface ReminderFlowStep {
   subject?: string | null;
   body?: string | null;
   template_slug?: string | null;
+  /** When true (default) and Settings master is on, SMS after email succeeds. */
+  also_sms?: number | boolean;
   created_at: string;
   updated_at: string;
 }
@@ -1282,6 +1357,78 @@ export type AdminClientsListQuery = {
   sort_by?: string;
   sort_dir?: "ASC" | "DESC";
 };
+
+/** CRM address-book contact (independent of pipeline clients). */
+export interface AdminCrmContact {
+  id: number;
+  first_name: string;
+  last_name: string;
+  email: string | null;
+  phone: string | null;
+  address_line1?: string | null;
+  address_line2?: string | null;
+  city?: string | null;
+  state?: string | null;
+  zip?: string | null;
+  preferred_language: "en" | "es";
+  admin_notes?: string | null;
+  assigned_admin_id?: number | null;
+  created_by_admin_id?: number | null;
+  converted_client_id?: number | null;
+  converted_at?: string | null;
+  deleted_at?: string | null;
+  created_at: string;
+  updated_at?: string;
+}
+
+export type AdminCrmContactsListQuery = {
+  search?: string;
+  language?: string;
+  has_notes?: string;
+  /** Include soft-deleted rows (default: exclude). */
+  include_deleted?: boolean;
+  /** Include converted contacts (default: exclude). */
+  include_converted?: boolean;
+  page?: number;
+  limit?: number;
+  sort_by?: string;
+  sort_dir?: "ASC" | "DESC";
+};
+
+export interface AdminCrmContactsListResponse {
+  contacts: AdminCrmContact[];
+  pagination: PaginationInfo;
+}
+
+export type AdminCrmContactWritePayload = {
+  first_name: string;
+  last_name: string;
+  email?: string | null;
+  phone?: string | null;
+  address_line1?: string | null;
+  address_line2?: string | null;
+  city?: string | null;
+  state?: string | null;
+  zip?: string | null;
+  preferred_language?: "en" | "es";
+  admin_notes?: string | null;
+  /** Soft-warn duplicates; set true to proceed anyway. */
+  confirm_duplicate?: boolean;
+};
+
+export type ConvertCrmContactPayload = {
+  id: number;
+  /** Soft-warn phone/email duplicates on clients; set true to proceed. */
+  confirm_duplicate?: boolean;
+};
+
+export interface ConvertCrmContactResponse {
+  ok: boolean;
+  contact_id: number;
+  client_id: number;
+  preferred_language: "en" | "es";
+  duplicate_warning?: boolean;
+}
 
 export interface AdminTicketsListResponse {
   tickets: SupportTicket[];
@@ -1427,6 +1574,97 @@ export interface CreateCasePayload {
   round_schedule?: RoundScheduleInput | null;
 }
 
+// ============================================================
+// PREPAID ONBOARD INVITES (already-paid unknown → New Client)
+// ============================================================
+
+export type PrepaidOnboardPaymentMethod =
+  | "cash"
+  | "zelle"
+  | "venmo"
+  | "card_offline"
+  | "other";
+
+export interface PrepaidOnboardRemainingSplit {
+  label: string;
+  amount_cents: number;
+  due_date: string;
+  /** Optional later /pay link; public join page never charges. */
+  send_payment_link?: boolean;
+}
+
+export interface CreatePrepaidOnboardInvitePayload {
+  package_id: number;
+  paid_amount_cents: number;
+  paid_label?: string;
+  payment_method: PrepaidOnboardPaymentMethod;
+  payment_note?: string | null;
+  remaining_splits?: PrepaidOnboardRemainingSplit[];
+  preferred_language?: "en" | "es" | null;
+  referral_category?: "realtor_broker" | "one_off" | "affiliate_partner" | null;
+  referrer_id?: number | null;
+  staff_notes?: string | null;
+  /** Hours until expiry (default 168 = 7 days). */
+  expires_in_hours?: number;
+}
+
+export interface PrepaidOnboardInvite {
+  id: number;
+  package_id: number;
+  package_name: string | null;
+  paid_amount_cents: number;
+  paid_label: string;
+  payment_method: PrepaidOnboardPaymentMethod;
+  payment_note: string | null;
+  remaining_splits: PrepaidOnboardRemainingSplit[];
+  preferred_language: "en" | "es" | null;
+  referral_category: string | null;
+  referrer_id: number | null;
+  staff_notes: string | null;
+  created_by_admin_id: number;
+  expires_at: string;
+  revoked_at: string | null;
+  redeemed_at: string | null;
+  redeemed_client_id: number | null;
+  redeemed_case_id: number | null;
+  created_at: string;
+  /** Only present on create response. */
+  url?: string;
+  /** Only present on create response. */
+  token?: string;
+  is_open?: boolean;
+}
+
+export interface PrepaidOnboardPublicInvite {
+  package_name: string;
+  paid_amount_cents: number;
+  paid_label: string;
+  remaining_count: number;
+  preferred_language: "en" | "es" | null;
+  expires_at: string;
+}
+
+export interface RedeemPrepaidOnboardPayload {
+  first_name: string;
+  last_name: string;
+  /** Required for portal OTP / welcome email. */
+  email: string;
+  phone?: string | null;
+  preferred_language?: "en" | "es";
+}
+
+export interface RedeemPrepaidOnboardResponse {
+  token: string | null;
+  user: {
+    id: number;
+    email: string | null;
+    first_name: string;
+    last_name: string;
+  };
+  case: { id: number; case_number: string };
+  redirect: string;
+}
+
 /** Five expected round-completion dates (YYYY-MM-DD), all-day calendar targets. */
 export interface RoundScheduleDates {
   round_1_date: string;
@@ -1500,6 +1738,9 @@ export interface CalendarRoundEvent {
   client_last_name: string | null;
   round_number: number;
   target_date: string;
+  /** schedule = case_round_schedules R1–5; extended = next_dispute_target_date */
+  kind?: "schedule" | "extended";
+  label?: string;
 }
 
 /** Open Work Hub task with a due date on the admin calendar. */
@@ -1698,6 +1939,21 @@ export interface OfGReportWizardOptions {
   enhance_with_claude?: boolean;
 }
 
+export interface OfGWinRow {
+  itemRemoved: string;
+  bureaus: ("TU" | "EX" | "EQ")[];
+  impact: string;
+  status: string;
+  highlighted?: boolean;
+}
+
+export interface OfGTargetRow {
+  item: string;
+  bureaus: ("TU" | "EX" | "EQ")[];
+  detail: string;
+  priority: "high" | "medium" | "low";
+}
+
 export interface OfGReportData {
   client: { firstName: string; lastName?: string };
   reportDate: { before: string; after: string };
@@ -1707,19 +1963,18 @@ export interface OfGReportData {
     equifax: { before: number; after: number };
   };
   middleScore: { before: number; after: number };
-  wins: Array<{
-    itemRemoved: string;
-    bureaus: ("TU" | "EX" | "EQ")[];
-    impact: string;
-    status: string;
-    highlighted?: boolean;
-  }>;
-  targets: Array<{
-    item: string;
-    bureaus: ("TU" | "EX" | "EQ")[];
-    detail: string;
-    priority: "high" | "medium" | "low";
-  }>;
+  /** Primary wins (baseline → since enrollment; chain → this round). */
+  wins: OfGWinRow[];
+  /** Primary targets (same mode rule as wins). */
+  targets: OfGTargetRow[];
+  /** Incremental removals this round (vs prior After). */
+  winsThisRound?: OfGWinRow[];
+  /** Cumulative removals since enrollment / Round 1 Before. */
+  winsSinceEnrollment?: OfGWinRow[];
+  targetsThisRound?: OfGTargetRow[];
+  targetsSinceEnrollment?: OfGTargetRow[];
+  /** How Before PDF was selected for score deltas. */
+  compareMode?: ReportCompareMode;
   utilization: Array<{
     account: string;
     limit: number;
@@ -1788,6 +2043,10 @@ export interface ReportWizardBeforeContext {
   report_date_after: string | null;
   score_after: number | null;
   middle_score_after: number | null;
+  /** baseline (default) or chain — which PDF is reused as Before. */
+  compare_mode?: ReportCompareMode;
+  /** Which PDF role to load from prior_session_id when reusing. */
+  reuse_pdf_role?: "before" | "after";
 }
 
 // ============================================================
@@ -2051,6 +2310,8 @@ export interface PipelineColumnPage<T = CreditRepairCase | Prospect> {
 export interface AdminPipelineResponse {
   cases: CreditRepairCase[];
   prospects: Prospect[];
+  /** Public web leads awaiting staff review (excluded from main Prospect). */
+  web_review_prospects?: Prospect[];
   limit?: number;
   columns?: Record<string, PipelineColumnPage>;
 }
@@ -2092,6 +2353,8 @@ export interface CreditAnalysisNegativeItem {
   creditor?: string;
   bureaus?: string[];
   detail?: string;
+  /** OFG dispute round 1–4 when classified by the rules engine. */
+  dispute_round?: 1 | 2 | 3 | 4;
 }
 
 export interface ProspectLeadPayload {
@@ -2130,4 +2393,10 @@ export interface CreditAnalysisResult {
   chars_extracted?: number;
   /** Full flat analyst JSON (scores, lending conversion, plan, SMS copy, HTML tables). */
   analyst?: CreditAnalysisAnalystFlat | null;
+  /** Language used when generating narrative (en|es). */
+  text_language?: "en" | "es";
+  /** True when Claude narrative enhancement ran successfully on top of the rules engine. */
+  claude_enhanced?: boolean;
+  /** True when email_opt_in was set but no valid client email was on file. */
+  email_skipped_no_address?: boolean;
 }

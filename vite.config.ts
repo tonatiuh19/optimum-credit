@@ -22,6 +22,11 @@ export default defineConfig(() => ({
         changeOrigin: true,
         secure: false,
       },
+      "/go": {
+        target: `http://localhost:${API_PORT}`,
+        changeOrigin: true,
+        secure: false,
+      },
     },
     fs: {
       allow: [".", "./client", "./shared"],

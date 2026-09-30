@@ -7,12 +7,17 @@ import { useTranslation } from "react-i18next";
 import { Loader2, Phone, Search, User, X } from "lucide-react";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { searchClients } from "@/store/slices/adminSlice";
+import { searchAdminContacts } from "@/store/slices/contactsSlice";
 import { useDebounce } from "@/hooks/use-debounce";
 import { isProspectLead } from "@/lib/pipelineFilters";
-import type { AdminClientListItem } from "@shared/api";
+import { parseComposePhoneInput } from "@/lib/parseComposePhone";
+import type { AdminClientListItem, AdminCrmContact } from "@shared/api";
+
+export { parseComposePhoneInput } from "@/lib/parseComposePhone";
 
 export type ConversationComposeTarget =
   | { kind: "client"; client: AdminClientListItem }
+  | { kind: "contact"; contact: AdminCrmContact }
   | { kind: "phone"; phone: string; label: string };
 
 interface Props {
@@ -28,27 +33,6 @@ function Initials({ first, last }: { first: string; last: string }) {
       {(last[0] ?? "").toUpperCase()}
     </div>
   );
-}
-
-/** US-focused: 10+ digits → E.164-ish string for API. */
-export function parseComposePhoneInput(raw: string): {
-  phone: string;
-  label: string;
-} | null {
-  const trimmed = raw.trim();
-  if (!trimmed) return null;
-  const digits = trimmed.replace(/\D/g, "");
-  if (digits.length < 10) return null;
-  const last10 = digits.slice(-10);
-  const phone =
-    digits.length === 11 && digits.startsWith("1")
-      ? `+${digits}`
-      : `+1${last10}`;
-  const label =
-    last10.length === 10
-      ? `(${last10.slice(0, 3)}) ${last10.slice(3, 6)}-${last10.slice(6)}`
-      : trimmed;
-  return { phone, label };
 }
 
 function looksLikePhoneQuery(q: string): boolean {
@@ -68,6 +52,9 @@ export function ConversationComposeTargetPicker({
   const { clientSearchResults, clientSearchLoading } = useAppSelector(
     (s) => s.admin,
   );
+  const { contactSearchResults, contactSearchLoading } = useAppSelector(
+    (s) => s.contacts,
+  );
 
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
@@ -81,6 +68,7 @@ export function ConversationComposeTargetPicker({
   useEffect(() => {
     if (debouncedQuery.trim().length >= 1) {
       dispatch(searchClients(debouncedQuery.trim()));
+      dispatch(searchAdminContacts(debouncedQuery.trim()));
     }
   }, [debouncedQuery, dispatch]);
 
@@ -104,10 +92,13 @@ export function ConversationComposeTargetPicker({
   }, [query]);
 
   const clientRows = clientSearchResults;
+  const contactRows = contactSearchResults;
+  const searching = clientSearchLoading || contactSearchLoading;
 
   type Row =
     | { type: "phone"; phone: string; label: string }
-    | { type: "client"; client: AdminClientListItem };
+    | { type: "client"; client: AdminClientListItem }
+    | { type: "contact"; contact: AdminCrmContact };
 
   const rows: Row[] = useMemo(() => {
     const out: Row[] = [];
@@ -118,16 +109,21 @@ export function ConversationComposeTargetPicker({
         label: phoneOption.label,
       });
     }
+    for (const c of contactRows) {
+      out.push({ type: "contact", contact: c });
+    }
     for (const c of clientRows) {
       out.push({ type: "client", client: c });
     }
     return out;
-  }, [phoneOption, clientRows]);
+  }, [phoneOption, clientRows, contactRows]);
 
   const selectRow = useCallback(
     (row: Row) => {
       if (row.type === "phone") {
         onChange({ kind: "phone", phone: row.phone, label: row.label });
+      } else if (row.type === "contact") {
+        onChange({ kind: "contact", contact: row.contact });
       } else {
         onChange({ kind: "client", client: row.client });
       }
@@ -201,6 +197,24 @@ export function ConversationComposeTargetPicker({
               </span>
             )}
           </>
+        ) : value.kind === "contact" ? (
+          <>
+            <Initials
+              first={value.contact.first_name}
+              last={value.contact.last_name}
+            />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-foreground truncate">
+                {value.contact.first_name} {value.contact.last_name}
+              </p>
+              <p className="text-xs text-muted-foreground truncate">
+                {value.contact.phone || value.contact.email}
+              </p>
+            </div>
+            <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full border border-primary/30 text-primary bg-primary/10 shrink-0">
+              {t("conversations.contactBadge")}
+            </span>
+          </>
         ) : (
           <>
             <div className="w-7 h-7 rounded-full bg-muted text-muted-foreground flex items-center justify-center shrink-0">
@@ -239,7 +253,7 @@ export function ConversationComposeTargetPicker({
             : "border-input hover:border-input/80"
         } ${disabled ? "opacity-50 pointer-events-none" : ""}`}
       >
-        {clientSearchLoading ? (
+        {clientSearchLoading || contactSearchLoading ? (
           <Loader2 className="w-4 h-4 text-muted-foreground animate-spin shrink-0" />
         ) : (
           <Search className="w-4 h-4 text-muted-foreground shrink-0" />
@@ -279,7 +293,7 @@ export function ConversationComposeTargetPicker({
 
       {showDropdown && (
         <div className="absolute z-50 mt-1 w-full bg-card border border-border rounded-xl shadow-lg overflow-hidden">
-          {rows.length === 0 && !clientSearchLoading ? (
+          {rows.length === 0 && !searching ? (
             <div className="flex items-center gap-2 px-4 py-3 text-sm text-muted-foreground">
               <User className="w-4 h-4 shrink-0" />
               {t("conversations.composeNoMatch")}
@@ -335,9 +349,66 @@ export function ConversationComposeTargetPicker({
                     </li>
                   );
                 }
+                if (row.type === "contact") {
+                  const c = row.contact;
+                  return (
+                    <li key={`contact-${c.id}`}>
+                      <button
+                        type="button"
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          selectRow(row);
+                        }}
+                        className={`w-full flex items-center gap-3 px-3 py-2.5 text-left transition-colors ${
+                          i === activeIdx
+                            ? "bg-primary text-white"
+                            : "hover:bg-muted"
+                        }`}
+                      >
+                        <div
+                          className={`w-7 h-7 rounded-full text-[11px] font-bold flex items-center justify-center shrink-0 ${
+                            i === activeIdx
+                              ? "bg-white/20 text-white"
+                              : "bg-primary/10 text-primary"
+                          }`}
+                        >
+                          {(c.first_name[0] ?? "").toUpperCase()}
+                          {(c.last_name[0] ?? "").toUpperCase()}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p
+                            className={`text-sm font-medium truncate ${
+                              i === activeIdx ? "text-white" : "text-foreground"
+                            }`}
+                          >
+                            {c.first_name} {c.last_name}
+                          </p>
+                          <p
+                            className={`text-xs truncate ${
+                              i === activeIdx
+                                ? "text-white/70"
+                                : "text-muted-foreground"
+                            }`}
+                          >
+                            {c.phone || c.email}
+                          </p>
+                        </div>
+                        <span
+                          className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 ${
+                            i === activeIdx
+                              ? "bg-white/20 text-white"
+                              : "border border-primary/30 text-primary bg-primary/10"
+                          }`}
+                        >
+                          {t("conversations.contactBadge")}
+                        </span>
+                      </button>
+                    </li>
+                  );
+                }
                 const c = row.client;
                 return (
-                  <li key={c.id}>
+                  <li key={`client-${c.id}`}>
                     <button
                       type="button"
                       onMouseDown={(e) => {

@@ -145,15 +145,42 @@ export const createReportWizardSession = createAsyncThunk<
   },
   { rejectValue: string }
 >("reportWizard/createSession", async (args, { rejectWithValue }) => {
-  const { assertFilesUnderUploadLimit } = await import("@/lib/uploadLimits");
-  const sizeCheck = assertFilesUnderUploadLimit(
+  const { assertEachFileUnderUploadLimit } = await import("@/lib/uploadLimits");
+  const sizeCheck = assertEachFileUnderUploadLimit(
     [args.beforePdf, args.afterPdf].filter(Boolean) as File[],
   );
   if (sizeCheck.ok === false) {
     return rejectWithValue(sizeCheck.message);
   }
+
+  let stagedBeforeId: number | null = null;
+  // Two Ultra credit-report PDFs often exceed Vercel’s ~4.5 MB body limit when
+  // sent together — stage Before first, then create with After only.
+  if (args.beforePdf && !args.reuseBeforeSessionId) {
+    try {
+      const stageFd = new FormData();
+      stageFd.append("pdf", args.beforePdf);
+      const { data: staged } = await api.post<{
+        staged_id: number;
+        file_name: string;
+        byte_size: number;
+      }>(`/admin/cases/${args.caseId}/report-wizard/stage-pdf`, stageFd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      stagedBeforeId = staged.staged_id;
+    } catch (e: any) {
+      return rejectWithValue(
+        e?.response?.data?.error || "Failed to upload Before PDF",
+      );
+    }
+  }
+
   const fd = new FormData();
-  if (args.beforePdf) fd.append("before_pdf", args.beforePdf);
+  if (stagedBeforeId) {
+    fd.append("staged_before_id", String(stagedBeforeId));
+  } else if (args.beforePdf) {
+    fd.append("before_pdf", args.beforePdf);
+  }
   fd.append("after_pdf", args.afterPdf);
   fd.append("round_number", String(args.roundNumber));
   if (args.reuseBeforeSessionId) {
@@ -289,8 +316,17 @@ export const finalizeReportWizard = createAsyncThunk<
       detail: string;
     }>;
     alerts_count?: number;
+    notify_partners?: boolean;
+    partners_emailed?: number;
+    partners_linked?: number;
+    partners_with_email?: number;
+    partners_pdf_load_failed?: boolean;
   },
-  { sessionId: number; acknowledgeScoreAnomalies?: boolean },
+  {
+    sessionId: number;
+    acknowledgeScoreAnomalies?: boolean;
+    notifyPartners?: boolean;
+  },
   { rejectValue: string }
 >("reportWizard/finalize", async (args, { rejectWithValue }) => {
   try {
@@ -304,9 +340,15 @@ export const finalizeReportWizard = createAsyncThunk<
         detail: string;
       }>;
       alerts_count?: number;
+      notify_partners?: boolean;
+      partners_emailed?: number;
+      partners_linked?: number;
+      partners_with_email?: number;
+      partners_pdf_load_failed?: boolean;
     }>(`/admin/report-wizard/sessions/${args.sessionId}/finalize`, {
       compliance_acknowledged: true,
       acknowledge_score_anomalies: !!args.acknowledgeScoreAnomalies,
+      notify_partners: args.notifyPartners !== false,
     });
     return data;
   } catch (e: any) {

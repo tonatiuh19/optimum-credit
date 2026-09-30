@@ -92,6 +92,11 @@ const VoiceCallPanel: React.FC<VoiceCallPanelProps> = ({
   const deviceRef = useRef<Device | null>(null);
   const callRef = useRef<Call | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Keep duration/CallSid in refs so disconnect handlers don't close over stale
+  // React state (otherwise voice/log gets null CallSid → Twilio recording
+  // callback can never attach recording_url).
+  const durationRef = useRef(0);
+  const callSidRef = useRef<string | null>(null);
   // Prevents double-logging: when the broker clicks hang-up, handleHangUp calls
   // logCall() AND callRef.current.disconnect(), which fires the "disconnect" event
   // that would call logCall() a second time — resulting in two DB rows for one call.
@@ -436,9 +441,29 @@ const VoiceCallPanel: React.FC<VoiceCallPanelProps> = ({
 
   const startTimer = useCallback(() => {
     stopTimer();
+    durationRef.current = 0;
     setDuration(0);
-    timerRef.current = setInterval(() => setDuration((d) => d + 1), 1000);
+    timerRef.current = setInterval(() => {
+      durationRef.current += 1;
+      setDuration(durationRef.current);
+    }, 1000);
   }, [stopTimer]);
+
+  const rememberCallSid = useCallback((sid: string | null | undefined) => {
+    const next = sid ? String(sid) : null;
+    callSidRef.current = next;
+    setCallSid(next);
+  }, []);
+
+  /** Prefer live Twilio params — never trust a stale closed-over callSid state. */
+  const resolveCallSid = useCallback((fallback?: string | null) => {
+    return (
+      callRef.current?.parameters?.CallSid ||
+      fallback ||
+      callSidRef.current ||
+      null
+    );
+  }, []);
 
   const cleanupDevice = useCallback(() => {
     stopTimer();
@@ -454,8 +479,8 @@ const VoiceCallPanel: React.FC<VoiceCallPanelProps> = ({
     (status = "completed") => {
       setCallState("ending");
       stopTimer();
-      const sid = callSid;
-      const dur = duration;
+      const sid = resolveCallSid(callSid);
+      const dur = durationRef.current;
       if (callRef.current) {
         callRef.current.disconnect();
       }
@@ -464,7 +489,7 @@ const VoiceCallPanel: React.FC<VoiceCallPanelProps> = ({
         setCallState("ended");
       });
     },
-    [callSid, duration, logCall, stopTimer, cleanupDevice],
+    [callSid, logCall, stopTimer, cleanupDevice, resolveCallSid],
   );
 
   const initiateCall = useCallback(async () => {
@@ -524,7 +549,7 @@ const VoiceCallPanel: React.FC<VoiceCallPanelProps> = ({
       call.on("ringing", () => setCallState("ringing"));
 
       call.on("accept", async (c: Call) => {
-        setCallSid(c.parameters?.CallSid ?? null);
+        rememberCallSid(c.parameters?.CallSid);
         setCallState("in-call");
         startTimer();
 
@@ -540,13 +565,21 @@ const VoiceCallPanel: React.FC<VoiceCallPanelProps> = ({
       call.on("disconnect", () => {
         stopTimer();
         setCallState("ended");
-        logCall("completed", duration, callSid).finally(cleanupDevice);
+        logCall(
+          "completed",
+          durationRef.current,
+          resolveCallSid(call.parameters?.CallSid),
+        ).finally(cleanupDevice);
       });
 
       call.on("cancel", () => {
         stopTimer();
         setCallState("ended");
-        logCall("no-answer", duration, callSid).finally(cleanupDevice);
+        logCall(
+          "no-answer",
+          durationRef.current,
+          resolveCallSid(call.parameters?.CallSid),
+        ).finally(cleanupDevice);
       });
 
       call.on("error", (err: Error) => {
@@ -554,7 +587,11 @@ const VoiceCallPanel: React.FC<VoiceCallPanelProps> = ({
         setErrorMsg(err.message || "Call error");
         stopTimer();
         setCallState("error");
-        logCall("failed", duration, callSid).finally(cleanupDevice);
+        logCall(
+          "failed",
+          durationRef.current,
+          resolveCallSid(call.parameters?.CallSid),
+        ).finally(cleanupDevice);
       });
     } catch (err: any) {
       logger.error("[VoiceCallPanel] Failed to initiate call:", err);
@@ -573,8 +610,8 @@ const VoiceCallPanel: React.FC<VoiceCallPanelProps> = ({
     stopTimer,
     cleanupDevice,
     logCall,
-    duration,
-    callSid,
+    rememberCallSid,
+    resolveCallSid,
   ]);
 
   // Auto-start call when component mounts (outbound only)
@@ -583,23 +620,27 @@ const VoiceCallPanel: React.FC<VoiceCallPanelProps> = ({
       // Incoming call already accepted — wire up event listeners & start timer
       callAlreadyLoggedRef.current = false; // Reset for this new call leg
       callRef.current = activeCall;
-      setCallSid(activeCall.parameters?.CallSid ?? null);
+      rememberCallSid(activeCall.parameters?.CallSid);
       startTimer();
 
       activeCall.on("disconnect", () => {
         stopTimer();
         setCallState("ended");
-        logCall("completed", 0, activeCall.parameters?.CallSid).finally(
-          cleanupDevice,
-        );
+        logCall(
+          "completed",
+          durationRef.current,
+          resolveCallSid(activeCall.parameters?.CallSid),
+        ).finally(cleanupDevice);
       });
 
       activeCall.on("cancel", () => {
         stopTimer();
         setCallState("ended");
-        logCall("no-answer", 0, activeCall.parameters?.CallSid).finally(
-          cleanupDevice,
-        );
+        logCall(
+          "no-answer",
+          durationRef.current,
+          resolveCallSid(activeCall.parameters?.CallSid),
+        ).finally(cleanupDevice);
       });
 
       activeCall.on("error", (err: Error) => {
@@ -607,9 +648,11 @@ const VoiceCallPanel: React.FC<VoiceCallPanelProps> = ({
         setErrorMsg(err.message || "Call error");
         stopTimer();
         setCallState("error");
-        logCall("failed", 0, activeCall.parameters?.CallSid).finally(
-          cleanupDevice,
-        );
+        logCall(
+          "failed",
+          durationRef.current,
+          resolveCallSid(activeCall.parameters?.CallSid),
+        ).finally(cleanupDevice);
       });
 
       return () => {

@@ -10,6 +10,7 @@ import {
   pipelineStageIndex,
   inferAnalysisLabelSlugs,
   resolveExtractionStatus,
+  isProspectClientRow,
   buildProspectAnalysisHtml,
   missingRequiredLabelSlugs,
 } from "./index";
@@ -128,6 +129,21 @@ describe("resolveExtractionStatus", () => {
     expect(resolveExtractionStatus("application/pdf", longText, false)).toBe(
       "ok",
     );
+  });
+});
+
+describe("isProspectClientRow", () => {
+  it("accepts status=prospect or pipeline_stage=prospect", () => {
+    expect(isProspectClientRow({ status: "prospect", pipeline_stage: "prospect" } as any)).toBe(true);
+    expect(isProspectClientRow({ status: "active", pipeline_stage: "prospect" } as any)).toBe(true);
+    expect(isProspectClientRow({ status: "prospect", pipeline_stage: "new_client" } as any)).toBe(true);
+  });
+
+  it("rejects cancelled, funding, and enrolled-only leads", () => {
+    expect(isProspectClientRow({ status: "cancelled", pipeline_stage: "prospect" } as any)).toBe(false);
+    expect(isProspectClientRow({ status: "funding", pipeline_stage: "prospect" } as any)).toBe(false);
+    expect(isProspectClientRow({ status: "active", pipeline_stage: "round_1" } as any)).toBe(false);
+    expect(isProspectClientRow(null)).toBe(false);
   });
 });
 

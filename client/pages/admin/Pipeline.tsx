@@ -14,8 +14,11 @@ import {
   RefreshCw,
   Plus,
   UserPlus,
+  Link2,
+  Globe2,
 } from "lucide-react";
 import AdminPageHeader from "@/components/AdminPageHeader";
+import PrepaidOnboardInviteModal from "@/components/admin/PrepaidOnboardInviteModal";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
   fetchPipeline,
@@ -24,7 +27,7 @@ import {
   createAdminCase,
   fetchAdminTeam,
 } from "@/store/slices/adminSlice";
-import { fetchLabels } from "@/store/slices/prospectsSlice";
+import { fetchLabels, setClientLabels } from "@/store/slices/prospectsSlice";
 import type {
   CreditRepairCase,
   PipelineStage,
@@ -80,6 +83,7 @@ import {
 import { buildNewCaseCreatePayload } from "@/lib/newCasePayload";
 import PipelineFilterBar from "@/components/admin/PipelineFilterBar";
 import PipelineBoardSkeleton from "@/components/admin/PipelineBoardSkeleton";
+import { extendedRoundsLegend } from "@/lib/extendedRounds";
 
 // ─── Column definitions ───────────────────────────────────────────────────────
 
@@ -190,6 +194,7 @@ function KanbanCard({
   onDragEnd: () => void;
   onClick: () => void;
 }) {
+  const { t } = useTranslation();
   const isPaid =
     client.client_status === "onboarding" || client.client_status === "active";
   const tasksApproved = client.tasks_approved ?? 0;
@@ -207,6 +212,13 @@ function KanbanCard({
     tasksRequired > 0
       ? Math.min((tasksApproved / tasksRequired) * 100, 100)
       : 0;
+  const specialLegend =
+    client.extended_rounds_legend ||
+    extendedRoundsLegend({
+      maxRounds: client.max_rounds,
+      highestPublished: client.highest_published_round,
+    });
+  const isChainCompare = client.report_compare_mode === "chain";
 
   return (
     <div
@@ -273,15 +285,33 @@ function KanbanCard({
               )}
             </div>
           </div>
-          {isPaid ? (
-            <span className="text-[9px] font-bold bg-accent/10 text-accent border border-accent/25 px-1.5 py-0.5 rounded-full shrink-0 leading-tight">
-              Paid
-            </span>
-          ) : (
-            <span className="text-[9px] font-bold bg-muted text-muted-foreground border border-border px-1.5 py-0.5 rounded-full shrink-0 leading-tight">
-              Unpaid
-            </span>
-          )}
+          <div className="flex flex-col items-end gap-1 shrink-0">
+            {specialLegend ? (
+              <span
+                className="text-[9px] font-bold bg-secondary text-secondary-foreground border border-border px-1.5 py-0.5 rounded-full leading-tight"
+                title={specialLegend}
+              >
+                {specialLegend}
+              </span>
+            ) : null}
+            {isChainCompare ? (
+              <span
+                className="text-[9px] font-bold bg-primary/10 text-primary border border-primary/25 px-1.5 py-0.5 rounded-full leading-tight"
+                title={t("adminPipeline.chainModeBadgeTitle")}
+              >
+                {t("adminPipeline.chainModeBadge")}
+              </span>
+            ) : null}
+            {isPaid ? (
+              <span className="text-[9px] font-bold bg-accent/10 text-accent border border-accent/25 px-1.5 py-0.5 rounded-full leading-tight">
+                Paid
+              </span>
+            ) : (
+              <span className="text-[9px] font-bold bg-muted text-muted-foreground border border-border px-1.5 py-0.5 rounded-full leading-tight">
+                Unpaid
+              </span>
+            )}
+          </div>
         </div>
 
         {/* Tasks progress */}
@@ -355,34 +385,55 @@ function ProspectKanbanCard({
   onDragStart,
   onDragEnd,
   onClick,
+  onPromoteToProspect,
+  promoting,
+  reviewBucket,
 }: {
   prospect: Prospect;
   onDragStart: () => void;
   onDragEnd: () => void;
   onClick: () => void;
+  onPromoteToProspect?: () => void;
+  promoting?: boolean;
+  reviewBucket?: boolean;
 }) {
+  const { t } = useTranslation();
   const initials =
     `${prospect.first_name?.[0] ?? ""}${prospect.last_name?.[0] ?? ""}`.toUpperCase();
+  const borderCls = reviewBucket
+    ? "border-dashed border-secondary-foreground/30 hover:border-secondary-foreground/50"
+    : "border-dashed border-accent/40 hover:border-accent hover:shadow-md hover:shadow-accent/10";
+  const barCls = reviewBucket ? "bg-secondary-foreground/30" : "bg-accent/40";
+  const avatarCls = reviewBucket
+    ? "bg-secondary border border-border text-foreground"
+    : "bg-accent/10 border border-accent/25 text-accent";
 
   return (
     <div
-      draggable
+      draggable={!reviewBucket}
       onDragStart={(e) => {
+        if (reviewBucket) {
+          e.preventDefault();
+          return;
+        }
         e.dataTransfer.setData("text/plain", `prospect:${prospect.id}`);
         e.dataTransfer.effectAllowed = "move";
         onDragStart();
       }}
       onDragEnd={onDragEnd}
       onClick={onClick}
-      className="group select-none rounded-xl bg-card border border-dashed border-accent/40
-                 hover:border-accent hover:shadow-md hover:shadow-accent/10
-                 cursor-grab active:cursor-grabbing active:opacity-60
-                 transition-all duration-150 shadow-sm overflow-hidden"
+      className={`group select-none rounded-xl bg-card border ${borderCls}
+                 cursor-pointer active:opacity-60
+                 transition-all duration-150 shadow-sm overflow-hidden ${
+                   reviewBucket ? "" : "cursor-grab active:cursor-grabbing"
+                 }`}
     >
-      <div className="h-[3px] bg-accent/40" />
+      <div className={`h-[3px] ${barCls}`} />
       <div className="p-3.5">
         <div className="flex items-start gap-2.5 mb-2.5">
-          <div className="w-8 h-8 rounded-full bg-accent/10 border border-accent/25 flex items-center justify-center text-[11px] font-bold text-accent shrink-0">
+          <div
+            className={`w-8 h-8 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0 ${avatarCls}`}
+          >
             {initials}
           </div>
           <div className="min-w-0 flex-1">
@@ -393,7 +444,7 @@ function ProspectKanbanCard({
               <LangBadge lang={prospect.preferred_language} />
             </div>
             <div className="text-[11px] text-muted-foreground truncate mt-0.5">
-              {prospect.email}
+              {prospect.email || prospect.phone || "—"}
             </div>
           </div>
         </div>
@@ -406,15 +457,35 @@ function ProspectKanbanCard({
 
         <LabelChips labels={prospect.labels} max={3} className="mb-2" />
 
-        <div className="flex items-center justify-between text-[10px] text-muted-foreground">
-          <span className="uppercase tracking-wide font-semibold text-accent/80">
+        <div className="flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
+          <span
+            className={`uppercase tracking-wide font-semibold truncate ${
+              reviewBucket ? "text-muted-foreground" : "text-accent/80"
+            }`}
+          >
             {prospect.case_number
               ? prospect.case_number
               : (prospect.source_label ?? "prospect").replace(/_/g, " ")}
           </span>
-          <span className="opacity-0 group-hover:opacity-100 transition-opacity text-accent font-semibold flex items-center gap-0.5">
-            Open <ArrowRight className="w-2.5 h-2.5" />
-          </span>
+          {reviewBucket && onPromoteToProspect ? (
+            <button
+              type="button"
+              disabled={promoting}
+              onClick={(e) => {
+                e.stopPropagation();
+                onPromoteToProspect();
+              }}
+              className="shrink-0 text-[10px] font-semibold text-primary hover:underline disabled:opacity-50"
+            >
+              {promoting
+                ? t("adminPipeline.webReviewPromoting")
+                : t("adminPipeline.webReviewPromote")}
+            </button>
+          ) : (
+            <span className="opacity-0 group-hover:opacity-100 transition-opacity text-accent font-semibold flex items-center gap-0.5">
+              Open <ArrowRight className="w-2.5 h-2.5" />
+            </span>
+          )}
         </div>
       </div>
     </div>
@@ -730,6 +801,7 @@ function NewCaseModal({
 export default function AdminPipeline() {
   const dispatch = useAppDispatch();
   const { t } = useTranslation();
+  const { toast } = useToast();
   const {
     pipelineCases,
     team,
@@ -738,8 +810,13 @@ export default function AdminPipeline() {
     pipelineLoadingMore,
     pipelinePageLimit,
   } = useAppSelector((s) => s.admin);
-  const { prospects, labels } = useAppSelector((s) => s.prospects);
+  const { prospects, webReviewProspects, labels } = useAppSelector(
+    (s) => s.prospects,
+  );
+  const [promotingId, setPromotingId] = useState<number | null>(null);
   const { packages } = useAppSelector((s) => s.packages);
+  const adminUser = useAppSelector((s) => s.adminAuth.user);
+  const isAffiliate = adminUser?.role === "affiliate";
   const [searchParams, setSearchParams] = useSearchParams();
 
   const [panelOpen, setPanelOpen] = useState(false);
@@ -747,6 +824,7 @@ export default function AdminPipeline() {
   const [panelClientId, setPanelClientId] = useState<number | null>(null);
 
   const [showNewCase, setShowNewCase] = useState(false);
+  const [showPrepaidInvite, setShowPrepaidInvite] = useState(false);
   const [convertingProspect, setConvertingProspect] = useState<Prospect | null>(
     null,
   );
@@ -952,10 +1030,35 @@ export default function AdminPipeline() {
 
   const prospectTotal =
     pipelineColumns.prospect?.total ?? prospects.length;
+  const webReviewTotal =
+    pipelineColumns.web_review?.total ?? webReviewProspects.length;
   const caseTotal = COLUMNS.reduce(
     (sum, c) => sum + (pipelineColumns[c.stage]?.total ?? grouped[c.stage]?.length ?? 0),
     0,
   );
+
+  const promoteWebLead = async (clientId: number) => {
+    setPromotingId(clientId);
+    try {
+      const result = await dispatch(
+        setClientLabels({
+          clientId,
+          remove: ["web_lead_review"],
+        }),
+      );
+      if (setClientLabels.fulfilled.match(result)) {
+        toast({ title: t("adminPipeline.webReviewPromoted") });
+        void dispatch(fetchPipeline(pipelineQuery));
+      } else {
+        toast({
+          title: t("adminPipeline.webReviewPromoteFailed"),
+          variant: "destructive",
+        });
+      }
+    } finally {
+      setPromotingId(null);
+    }
+  };
 
   const loadMoreColumn = (column: string, shown: number) => {
     const page = pipelineColumns[column];
@@ -973,7 +1076,8 @@ export default function AdminPipeline() {
   const showBoardSkeleton =
     pipelineLoading &&
     pipelineCases.length === 0 &&
-    prospects.length === 0;
+    prospects.length === 0 &&
+    webReviewProspects.length === 0;
 
   return (
     <div className="flex flex-col space-y-5">
@@ -988,6 +1092,16 @@ export default function AdminPipeline() {
         }
         actions={
           <div className="flex items-center gap-2">
+            {!isAffiliate ? (
+              <button
+                onClick={() => setShowPrepaidInvite(true)}
+                className="inline-flex items-center gap-1.5 text-xs font-medium text-foreground bg-card border border-border hover:border-primary/40 hover:text-primary px-3 py-2 rounded-lg transition-colors"
+                data-testid="prepaid-onboard-open"
+              >
+                <Link2 className="w-3.5 h-3.5" />{" "}
+                {t("prepaidOnboard.pipelineCta")}
+              </button>
+            ) : null}
             <button
               onClick={() => setShowNewCase(true)}
               className="inline-flex items-center gap-1.5 text-xs font-medium text-white bg-primary hover:bg-primary/90 px-3 py-2 rounded-lg transition-colors"
@@ -1018,7 +1132,7 @@ export default function AdminPipeline() {
         onFiltersChange={setFilters}
         activeFilterCount={activeFilterCount}
         caseCount={caseTotal}
-        prospectCount={prospectTotal}
+        prospectCount={prospectTotal + webReviewTotal}
         packages={packages}
         team={team}
         labels={labels}
@@ -1026,6 +1140,7 @@ export default function AdminPipeline() {
           (activeFilterCount > 0 || !!debouncedSearch) &&
           caseTotal === 0 &&
           prospectTotal === 0 &&
+          webReviewTotal === 0 &&
           !pipelineLoading
         }
       />
@@ -1054,6 +1169,89 @@ export default function AdminPipeline() {
         ].join(" ")}
       >
         <div className="flex gap-3 w-max min-w-full pr-2">
+          {/* ── Web leads review (public form spam / unverified) ── */}
+          {(() => {
+            const webPage = pipelineColumns.web_review;
+            return (
+              <div
+                className="w-[min(280px,calc(100vw-2.5rem))] sm:w-[270px] shrink-0 flex flex-col rounded-2xl border-t-[3px] border-t-secondary-foreground/40 overflow-hidden shadow-sm bg-card border border-border"
+                data-testid="pipeline-web-review"
+              >
+                <div className="px-3.5 py-2.5 border-b border-border">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <Globe2 className="w-3 h-3 text-muted-foreground shrink-0" />
+                      <h3 className="font-bold text-[11px] uppercase tracking-[0.1em] text-muted-foreground truncate">
+                        {t("adminPipeline.webReviewLabel")}
+                      </h3>
+                    </div>
+                    <span
+                      className={`min-w-[20px] h-5 flex items-center justify-center text-[10px] font-bold px-1.5 rounded-md tabular-nums ${
+                        webReviewTotal > 0
+                          ? "bg-secondary text-secondary-foreground"
+                          : "text-muted-foreground/40 bg-muted"
+                      }`}
+                    >
+                      {webReviewTotal}
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-muted-foreground mt-1 leading-snug">
+                    {t("adminPipeline.webReviewHint")}
+                  </p>
+                </div>
+                <div className="flex-1 p-2 space-y-2 overflow-y-auto max-h-[calc(100vh-230px)] min-h-[120px] bg-muted/20">
+                  {webReviewProspects.map((p) => (
+                    <ProspectKanbanCard
+                      key={p.id}
+                      prospect={p}
+                      reviewBucket
+                      promoting={promotingId === p.id}
+                      onPromoteToProspect={() => void promoteWebLead(p.id)}
+                      onDragStart={() => {}}
+                      onDragEnd={() => {}}
+                      onClick={() => {
+                        if (p.case_id) {
+                          openPanel(p.case_id, p.id);
+                          return;
+                        }
+                        setPanelCaseId(null);
+                        setPanelClientId(p.id);
+                        setPanelOpen(true);
+                      }}
+                    />
+                  ))}
+                  {webReviewProspects.length === 0 && (
+                    <div className="h-20 flex flex-col items-center justify-center gap-1.5 rounded-xl border-2 border-dashed border-border/40">
+                      <span className="text-[10px] text-muted-foreground/40 font-medium">
+                        {t("adminPipeline.webReviewEmpty")}
+                      </span>
+                    </div>
+                  )}
+                  {webPage?.has_more && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="w-full"
+                      disabled={pipelineLoadingMore === "web_review"}
+                      onClick={() =>
+                        loadMoreColumn("web_review", webReviewProspects.length)
+                      }
+                    >
+                      {pipelineLoadingMore === "web_review" ? (
+                        <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                      ) : null}
+                      {t("adminPipeline.loadMore", {
+                        shown: webReviewProspects.length,
+                        total: webReviewTotal,
+                      })}
+                    </Button>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+
           {/* ── Prospect column (virtual — pre-conversion leads) ── */}
           {(() => {
             const isDragTarget = dragOverStage === "prospect";
@@ -1283,6 +1481,10 @@ export default function AdminPipeline() {
         open={showNewCase}
         onClose={() => setShowNewCase(false)}
         onCreated={reloadPipeline}
+      />
+      <PrepaidOnboardInviteModal
+        open={showPrepaidInvite}
+        onClose={() => setShowPrepaidInvite(false)}
       />
 
       {/* Convert Prospect Modal */}

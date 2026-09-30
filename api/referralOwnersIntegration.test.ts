@@ -100,6 +100,7 @@ describe("referral owners + prospect create — HTTP smoke", () => {
         first_name: "Pat",
         last_name: `Broker-${RUN_ID}`,
         email: `broker-${RUN_ID}@example.test`,
+        phone: "+15555550100",
         preferred_language: "en",
       });
     expect(res.status).toBe(201);
@@ -169,12 +170,84 @@ describe("referral owners + prospect create — HTTP smoke", () => {
     caseId = Number(res.body.case.id);
 
     const [rows] = await pool.query<RowDataPacket[]>(
-      `SELECT status, pipeline_stage FROM clients WHERE id = ?`,
+      `SELECT status, pipeline_stage, activation_notified_at FROM clients WHERE id = ?`,
       [clientId],
     );
     expect(rows[0].status).not.toBe("prospect");
     expect(rows[0].pipeline_stage).toBe("new_client");
+
+    // Activation is fire-and-forget — poll briefly for the claim stamp.
+    let stamped: unknown = rows[0].activation_notified_at;
+    for (let i = 0; i < 20 && !stamped; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      const [again] = await pool.query<RowDataPacket[]>(
+        `SELECT activation_notified_at FROM clients WHERE id = ?`,
+        [clientId],
+      );
+      stamped = again[0]?.activation_notified_at;
+    }
+    expect(stamped).toBeTruthy();
+
+    const [links] = await pool.query<RowDataPacket[]>(
+      `SELECT notify_on_round FROM client_referrers WHERE client_id = ?`,
+      [clientId],
+    );
+    if (links.length) {
+      expect(links.every((l) => Number(l.notify_on_round) === 1)).toBe(true);
+    }
+  }, 45_000);
+
+  it("forces notify_on_round ON even when client sends false", async () => {
+    expect(clientId).toBeGreaterThan(0);
+    expect(referrerId).toBeGreaterThan(0);
+    // Partner validation requires phone when referral_category is set.
+    await pool.query(`UPDATE referrers SET phone = ? WHERE id = ?`, [
+      "+15555550100",
+      referrerId,
+    ]);
+    const res = await request(app)
+      .put(`/api/admin/clients/${clientId}/referrers`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({
+        referrers: [
+          {
+            referrer_id: referrerId,
+            notify_on_round: false,
+            role: "primary",
+          },
+        ],
+      });
+    expect(res.status).toBe(200);
+    const [links] = await pool.query<RowDataPacket[]>(
+      `SELECT notify_on_round FROM client_referrers WHERE client_id = ? AND referrer_id = ?`,
+      [clientId, referrerId],
+    );
+    expect(links[0]).toBeTruthy();
+    expect(Number(links[0].notify_on_round)).toBe(1);
   }, 30_000);
+
+  it("activation stamp stays set (idempotent — no second fan-out stamp clear)", async () => {
+    expect(clientId).toBeGreaterThan(0);
+    const [before] = await pool.query<RowDataPacket[]>(
+      `SELECT activation_notified_at FROM clients WHERE id = ?`,
+      [clientId],
+    );
+    expect(before[0]?.activation_notified_at).toBeTruthy();
+    const stampedAt = before[0].activation_notified_at;
+    // Simulate payment-path claim: UPDATE only when NULL — must not clear.
+    const [claim] = await pool.query<ResultSetHeader>(
+      `UPDATE clients
+       SET activation_notified_at = NOW()
+       WHERE id = ? AND activation_notified_at IS NULL`,
+      [clientId],
+    );
+    expect(Number(claim.affectedRows || 0)).toBe(0);
+    const [after] = await pool.query<RowDataPacket[]>(
+      `SELECT activation_notified_at FROM clients WHERE id = ?`,
+      [clientId],
+    );
+    expect(String(after[0].activation_notified_at)).toBe(String(stampedAt));
+  }, 15_000);
 
   it("advances to round_1 without error (referrer round update best-effort)", async () => {
     expect(caseId).toBeGreaterThan(0);

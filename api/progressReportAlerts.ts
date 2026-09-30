@@ -11,7 +11,8 @@
 export type ProgressReportAlertType =
   | "personal_info_mismatch"
   | "closed_still_reporting"
-  | "hard_inquiry_open";
+  | "hard_inquiry_open"
+  | "utilization_increase";
 
 export interface ProgressReportAlert {
   type: ProgressReportAlertType;
@@ -379,6 +380,45 @@ export interface BuildDeterministicProgressAlertsOpts {
   afterAccounts: NegativeAccountLike[];
   priorTargets?: NegativeAccountLike[];
   priorWins?: Array<{ label: string }>;
+  utilizationBeforePct?: number | null;
+  utilizationAfterPct?: number | null;
+  utilizationIncreaseThresholdPp?: number;
+}
+
+export const DEFAULT_UTIL_INCREASE_THRESHOLD_PP = 10;
+
+export function detectUtilizationIncrease(opts: {
+  beforePct?: number | null;
+  afterPct?: number | null;
+  thresholdPp?: number;
+}): ProgressReportAlert[] {
+  const before = opts.beforePct;
+  const after = opts.afterPct;
+  const threshold = opts.thresholdPp ?? DEFAULT_UTIL_INCREASE_THRESHOLD_PP;
+  if (
+    before == null ||
+    after == null ||
+    !Number.isFinite(before) ||
+    !Number.isFinite(after)
+  ) {
+    return [];
+  }
+  const delta = after - before;
+  if (delta < threshold) return [];
+  return [
+    {
+      type: "utilization_increase",
+      severity: delta >= threshold * 2 ? "critical" : "warning",
+      title: "Utilization increased",
+      detail: `Revolving utilization rose ${Math.round(delta)}pp (${Math.round(before)}% → ${Math.round(after)}%). Review paydown before next funding push.`,
+      meta: {
+        before_pct: Math.round(before),
+        after_pct: Math.round(after),
+        delta_pp: Math.round(delta),
+        threshold_pp: threshold,
+      },
+    },
+  ];
 }
 
 /** Combine detectors and dedupe by type+detail. */
@@ -393,6 +433,11 @@ export function buildDeterministicProgressAlerts(
       opts.priorTargets,
       opts.priorWins,
     ),
+    ...detectUtilizationIncrease({
+      beforePct: opts.utilizationBeforePct,
+      afterPct: opts.utilizationAfterPct,
+      thresholdPp: opts.utilizationIncreaseThresholdPp,
+    }),
   ];
 
   const seen = new Set<string>();
@@ -412,5 +457,6 @@ export const ProgressReportAlerts = {
   detectPersonalInfoMismatches,
   detectClosedStillReporting,
   detectHardInquiriesStillOpen,
+  detectUtilizationIncrease,
   buildDeterministicProgressAlerts,
 } as const;

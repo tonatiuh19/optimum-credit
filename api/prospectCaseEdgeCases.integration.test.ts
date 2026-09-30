@@ -25,13 +25,16 @@ const caseIds: number[] = [];
 
 async function createProspect(suffix: string): Promise<number> {
   const email = `${RUN_ID}-${suffix}@example.test`;
+  // Unique phone per lead — public upsert matches last-10 and must not collapse twins.
+  const last10 = `555${String(Date.now() + clientIds.length).slice(-7)}`;
+  const phone = `+1${last10}`;
   const res = await request(app)
     .post("/api/public/prospect-lead")
     .send({
       first_name: "Edge",
       last_name: suffix,
       email,
-      phone: "+15555550100",
+      phone,
       source_label: "web_analysis",
     })
     .expect(200);
@@ -80,6 +83,7 @@ describe("prospect-stage case edge cases — HTTP", () => {
         id,
       ]);
       await pool.query(`DELETE FROM notification_queue WHERE client_id = ?`, [id]);
+      await pool.query(`DELETE FROM onboarding_tokens WHERE client_id = ?`, [id]);
       await pool.query(`DELETE FROM client_task_completions WHERE client_id = ?`, [
         id,
       ]);
@@ -159,9 +163,16 @@ describe("prospect-stage case edge cases — HTTP", () => {
       .query({ search: `${RUN_ID}-pipeline-vis` })
       .expect(200);
 
-    const prospect = (pipe.body.prospects as any[]).find(
+    // Public web leads land in web_review (not main Prospect).
+    const inMainProspect = (pipe.body.prospects as any[] | undefined)?.some(
       (p) => Number(p.id) === clientId,
     );
+    expect(inMainProspect).toBeFalsy();
+    const prospect = (
+      (pipe.body.web_review_prospects as any[]) ||
+      pipe.body.columns?.web_review?.items ||
+      []
+    ).find((p: any) => Number(p.id) === clientId);
     expect(prospect).toBeTruthy();
     expect(Number(prospect.case_id)).toBe(caseId);
     expect(prospect.case_number).toMatch(/^CR-/);
@@ -500,5 +511,93 @@ describe("prospect-stage case edge cases — HTTP", () => {
 
     const second = await createProspectCase(clientId);
     expect(second.status).toBe(409);
+  });
+
+  it("New Case → New Client always sends convert-welcome with portal upload link", async () => {
+    const { __testClearEmailDryRuns, __testGetEmailDryRuns } = await import(
+      "./index"
+    );
+    __testClearEmailDryRuns();
+
+    const email = `${RUN_ID}-nc-welcome@example.test`;
+    const [rows] = await pool.query<ResultSetHeader>(
+      `INSERT INTO clients (first_name, last_name, email, status, pipeline_stage, preferred_language)
+       VALUES ('NewCase', 'Welcome', ?, 'active', 'new_client', 'en')`,
+      [email],
+    );
+    const clientId = Number((rows as any).insertId);
+    clientIds.push(clientId);
+
+    const res = await request(app)
+      .post("/api/admin/cases")
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ client_id: clientId, pipeline_stage: "new_client" })
+      .expect(201);
+
+    const caseId = Number(res.body.case?.id ?? res.body.case_id);
+    expect(caseId).toBeGreaterThan(0);
+    caseIds.push(caseId);
+    const caseNumber = String(res.body.case?.case_number ?? res.body.case_number);
+
+    const welcome = __testGetEmailDryRuns().filter(
+      (e) =>
+        e.to === email &&
+        String(e.subject).includes("Welcome to Optimum Credit") &&
+        String(e.subject).includes(caseNumber),
+    );
+    expect(welcome.length).toBeGreaterThanOrEqual(1);
+    expect(welcome[0].brandedChrome).toBe(true);
+
+    const [tokens] = await pool.query<RowDataPacket[]>(
+      `SELECT id FROM onboarding_tokens WHERE client_id = ? ORDER BY id DESC LIMIT 1`,
+      [clientId],
+    );
+    expect(tokens.length).toBe(1);
+
+    // Day-0 skipped — only future Day 2/3 upload nudges when payment_confirmed flow exists
+    await new Promise((r) => setTimeout(r, 1500));
+    const [flows] = await pool.query<RowDataPacket[]>(
+      `SELECT id FROM reminder_flows WHERE trigger_event = 'payment_confirmed' AND is_active = 1 LIMIT 1`,
+    );
+    if (flows.length > 0) {
+      const [execs] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM reminder_flow_executions
+         WHERE flow_id = ? AND client_id = ?
+         ORDER BY id DESC LIMIT 1`,
+        [flows[0].id, clientId],
+      );
+      expect(execs.length).toBe(1);
+
+      const [queuedFuture] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM notification_queue
+         WHERE client_id = ? AND channel = 'email' AND scheduled_for > NOW()
+         LIMIT 5`,
+        [clientId],
+      );
+      expect(queuedFuture.length).toBeGreaterThanOrEqual(1);
+    }
+  }, 45_000);
+
+  it("New Case → Prospect does not send welcome email", async () => {
+    const { __testClearEmailDryRuns, __testGetEmailDryRuns } = await import(
+      "./index"
+    );
+    __testClearEmailDryRuns();
+
+    const clientId = await createProspect("no-welcome-prospect-case");
+    const created = await createProspectCase(clientId);
+    expect(created.status).toBe(201);
+    caseIds.push(Number(created.body.case.id));
+
+    const welcome = __testGetEmailDryRuns().filter((e) =>
+      String(e.subject).includes("Welcome to Optimum Credit"),
+    );
+    expect(welcome.length).toBe(0);
+
+    const [tokens] = await pool.query<RowDataPacket[]>(
+      `SELECT id FROM onboarding_tokens WHERE client_id = ?`,
+      [clientId],
+    );
+    expect(tokens.length).toBe(0);
   });
 });

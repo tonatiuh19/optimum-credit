@@ -7,11 +7,13 @@ import {
   Loader2,
   ExternalLink,
   Landmark,
+  MessageSquare,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import AdminPageHeader from "@/components/AdminPageHeader";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { fetchSettings, saveSetting } from "@/store/slices/adminSlice";
 import {
@@ -25,6 +27,8 @@ import NotifyExtraEmailsPanel from "@/components/admin/NotifyExtraEmailsPanel";
 import OfgPhoneNumbersPanel from "@/components/admin/OfgPhoneNumbersPanel";
 
 const FUNDING_SMS_SETTING_KEY = "funding_sms_from_phone_number_id";
+const SIGNUP_SMS_SETTING_KEY = "signup_notify_sms_from_phone_number_id";
+const CLIENT_REMINDER_SMS_SETTING_KEY = "client_reminder_sms_enabled";
 
 export default function AdminSettings() {
   const { t } = useTranslation();
@@ -47,16 +51,30 @@ export default function AdminSettings() {
   const fundingSmsFromId =
     settings.find((s) => s.setting_key === FUNDING_SMS_SETTING_KEY)
       ?.setting_value ?? "";
+  const signupSmsFromId =
+    settings.find((s) => s.setting_key === SIGNUP_SMS_SETTING_KEY)
+      ?.setting_value ?? "";
+  const reminderSmsRaw =
+    settings.find((s) => s.setting_key === CLIENT_REMINDER_SMS_SETTING_KEY)
+      ?.setting_value ?? "1";
+  const reminderSmsEnabled = ["1", "true", "on", "yes"].includes(
+    String(reminderSmsRaw).trim().toLowerCase(),
+  );
   const visibleSettings = settings.filter(
     (s) =>
       s.setting_key !== "app_version" &&
       s.setting_key !== "contract_template_html" &&
-      s.setting_key !== FUNDING_SMS_SETTING_KEY,
+      s.setting_key !== FUNDING_SMS_SETTING_KEY &&
+      s.setting_key !== SIGNUP_SMS_SETTING_KEY &&
+      s.setting_key !== CLIENT_REMINDER_SMS_SETTING_KEY,
   );
 
   const [edits, setEdits] = useState<Record<string, string>>({});
   const [fundingPhoneEdit, setFundingPhoneEdit] = useState<string | null>(null);
   const [fundingPhoneSaving, setFundingPhoneSaving] = useState(false);
+  const [signupPhoneEdit, setSignupPhoneEdit] = useState<string | null>(null);
+  const [signupPhoneSaving, setSignupPhoneSaving] = useState(false);
+  const [reminderSmsSaving, setReminderSmsSaving] = useState(false);
   const [legalEdits, setLegalEdits] = useState<
     Record<string, { title: string; content_md: string; source_url: string }>
   >({});
@@ -114,6 +132,38 @@ export default function AdminSettings() {
     }
   };
 
+  const saveSignupPhone = async () => {
+    if (signupPhoneEdit === null) return;
+    setSignupPhoneSaving(true);
+    try {
+      await dispatch(
+        saveSetting({
+          setting_key: SIGNUP_SMS_SETTING_KEY,
+          setting_value: signupPhoneEdit,
+        }),
+      );
+      setSignupPhoneEdit(null);
+      dispatch(fetchSettings());
+    } finally {
+      setSignupPhoneSaving(false);
+    }
+  };
+
+  const saveReminderSmsEnabled = async (enabled: boolean) => {
+    setReminderSmsSaving(true);
+    try {
+      await dispatch(
+        saveSetting({
+          setting_key: CLIENT_REMINDER_SMS_SETTING_KEY,
+          setting_value: enabled ? "1" : "0",
+        }),
+      );
+      dispatch(fetchSettings());
+    } finally {
+      setReminderSmsSaving(false);
+    }
+  };
+
   const saveLegal = async (slug: string) => {
     const draft = legalEdits[slug];
     if (!draft) return;
@@ -142,6 +192,8 @@ export default function AdminSettings() {
 
   const fundingPhoneValue =
     fundingPhoneEdit !== null ? fundingPhoneEdit : fundingSmsFromId;
+  const signupPhoneValue =
+    signupPhoneEdit !== null ? signupPhoneEdit : signupSmsFromId;
 
   return (
     <div className="space-y-6">
@@ -208,6 +260,95 @@ export default function AdminSettings() {
           </select>
         )}
         <FieldHint>{t("adminSettings.fundingSmsFieldHint")}</FieldHint>
+      </div>
+
+      {/* ── Signup / activation SMS From (Lecca) ───────────────── */}
+      <div className="bg-card border border-border rounded-2xl p-5 space-y-3">
+        <div className="flex items-start gap-3">
+          <div className="w-10 h-10 rounded-xl bg-accent/10 flex items-center justify-center shrink-0">
+            <Landmark className="w-5 h-5 text-accent" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="text-sm font-semibold text-foreground">
+              {t("adminSettings.signupSmsTitle")}
+            </h2>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {t("adminSettings.signupSmsHint")}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void saveSignupPhone()}
+            disabled={
+              signupPhoneEdit === null ||
+              signupPhoneEdit === signupSmsFromId ||
+              signupPhoneSaving
+            }
+            className="btn-primary text-sm inline-flex items-center gap-1.5 disabled:opacity-40 shrink-0"
+          >
+            {signupPhoneSaving ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Save className="w-4 h-4" />
+            )}
+            {t("adminSettings.signupSmsSave")}
+          </button>
+        </div>
+        {phoneNumbersLoading && phoneNumbers.length === 0 ? (
+          <Skeleton className="h-10 w-full" />
+        ) : (
+          <select
+            className="w-full h-10 px-3 rounded-lg border border-input bg-background text-sm text-foreground"
+            value={signupPhoneValue}
+            onChange={(e) => setSignupPhoneEdit(e.target.value)}
+          >
+            <option value="">{t("adminSettings.signupSmsNone")}</option>
+            {phoneNumbers
+              .filter((n) => n.is_active)
+              .map((n) => (
+                <option key={n.id} value={String(n.id)}>
+                  {n.friendly_name
+                    ? `${n.friendly_name} (${n.e164})`
+                    : n.e164}
+                </option>
+              ))}
+          </select>
+        )}
+        <FieldHint>{t("adminSettings.signupSmsFieldHint")}</FieldHint>
+      </div>
+
+      {/* ── Client reminder SMS (master) ───────────────────────── */}
+      <div className="bg-card border border-border rounded-2xl p-5 space-y-3">
+        <div className="flex items-start gap-3">
+          <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
+            <MessageSquare className="w-5 h-5 text-primary" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="text-sm font-semibold text-foreground">
+              {t("adminSettings.reminderSmsTitle")}
+            </h2>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {t("adminSettings.reminderSmsHint")}
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {reminderSmsSaving ? (
+              <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+            ) : null}
+            <Switch
+              checked={reminderSmsEnabled}
+              disabled={reminderSmsSaving}
+              onCheckedChange={(v) => void saveReminderSmsEnabled(v)}
+              aria-label={t("adminSettings.reminderSmsToggleAria")}
+            />
+          </div>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          {reminderSmsEnabled
+            ? t("adminSettings.reminderSmsOn")
+            : t("adminSettings.reminderSmsOff")}
+        </p>
+        <FieldHint>{t("adminSettings.reminderSmsFieldHint")}</FieldHint>
       </div>
 
       {/* ── App Version ───────────────────────────────────────── */}

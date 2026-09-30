@@ -37,7 +37,14 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { Resend } from "resend";
 import twilio from "twilio";
-import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import {
+  PDFDocument,
+  StandardFonts,
+  rgb,
+  type PDFPage,
+  type PDFFont,
+  type PDFImage,
+} from "pdf-lib";
 import type {
   OfGReportData,
   OfGReportWizardOptions,
@@ -50,6 +57,7 @@ import type {
   CreditAnalysisMode,
   CreditAnalysisNegativeItem,
   CreditAnalysisResult,
+  CreditAnalysisAnalystFlat as SharedCreditAnalysisAnalystFlat,
   AdminNotifyEventKey,
   AdminNotifyChannel,
   AdminNotificationPrefs,
@@ -58,14 +66,17 @@ import type {
 // ============================================================================
 // INLINED HELPERS (Vercel serverless — do NOT runtime-import sibling api/*.ts)
 // Unit tests import from ./progressReportAlerts, ./ofgReportClaudeEnhance,
-// ./adminMorningDigest directly. Keep those files in sync when editing below.
+// ./adminMorningDigest, ./creditAnalysisClaudeEnhance, ./creditAnalysisEngine,
+// ./callInsights, ./mfsnClient, ./ofgProgressReportPdf, ./clientReminderSms directly.
+// Keep those files in sync when editing below.
 // Deploy gate: `npm run check:api-inline` (also in deploy:prod pre-checks).
 // ============================================================================
 
 type ProgressReportAlertType =
   | "personal_info_mismatch"
   | "closed_still_reporting"
-  | "hard_inquiry_open";
+  | "hard_inquiry_open"
+  | "utilization_increase";
 
 interface ProgressReportAlert {
   type: ProgressReportAlertType;
@@ -433,6 +444,48 @@ interface BuildDeterministicProgressAlertsOpts {
   afterAccounts: NegativeAccountLike[];
   priorTargets?: NegativeAccountLike[];
   priorWins?: Array<{ label: string }>;
+  /** Locked default: flag when after revolving util rises ≥10pp vs before. */
+  utilizationBeforePct?: number | null;
+  utilizationAfterPct?: number | null;
+  utilizationIncreaseThresholdPp?: number;
+}
+
+/** Alex/César default: 10 percentage points until Settings override exists. */
+const DEFAULT_UTIL_INCREASE_THRESHOLD_PP = 10;
+
+function detectUtilizationIncrease(opts: {
+  beforePct?: number | null;
+  afterPct?: number | null;
+  thresholdPp?: number;
+}): ProgressReportAlert[] {
+  const before = opts.beforePct;
+  const after = opts.afterPct;
+  const threshold =
+    opts.thresholdPp ?? DEFAULT_UTIL_INCREASE_THRESHOLD_PP;
+  if (
+    before == null ||
+    after == null ||
+    !Number.isFinite(before) ||
+    !Number.isFinite(after)
+  ) {
+    return [];
+  }
+  const delta = after - before;
+  if (delta < threshold) return [];
+  return [
+    {
+      type: "utilization_increase",
+      severity: delta >= threshold * 2 ? "critical" : "warning",
+      title: "Utilization increased",
+      detail: `Revolving utilization rose ${Math.round(delta)}pp (${Math.round(before)}% → ${Math.round(after)}%). Review paydown before next funding push.`,
+      meta: {
+        before_pct: Math.round(before),
+        after_pct: Math.round(after),
+        delta_pp: Math.round(delta),
+        threshold_pp: threshold,
+      },
+    },
+  ];
 }
 
 /** Combine detectors and dedupe by type+detail. */
@@ -447,6 +500,11 @@ function buildDeterministicProgressAlerts(
       opts.priorTargets,
       opts.priorWins,
     ),
+    ...detectUtilizationIncrease({
+      beforePct: opts.utilizationBeforePct,
+      afterPct: opts.utilizationAfterPct,
+      thresholdPp: opts.utilizationIncreaseThresholdPp,
+    }),
   ];
 
   const seen = new Set<string>();
@@ -466,6 +524,7 @@ const ProgressReportAlerts = {
   detectPersonalInfoMismatches,
   detectClosedStillReporting,
   detectHardInquiriesStillOpen,
+  detectUtilizationIncrease,
   buildDeterministicProgressAlerts,
 } as const;
 
@@ -545,14 +604,8 @@ function mergeClaudeNarrativeEnhancement(
     if (!byKey) return w;
     return {
       ...w,
-      impact:
-        typeof byKey.impact === "string" && byKey.impact.trim()
-          ? byKey.impact.trim().slice(0, 160)
-          : w.impact,
-      status:
-        typeof byKey.status === "string" && byKey.status.trim()
-          ? byKey.status.trim().slice(0, 80)
-          : w.status,
+      impact: clipDecodedStr(byKey.impact, 160) || w.impact,
+      status: clipDecodedStr(byKey.status, 80) || w.status,
     };
   });
 
@@ -569,10 +622,7 @@ function mergeClaudeNarrativeEnhancement(
         : t.priority;
     return {
       ...t,
-      detail:
-        typeof byKey.detail === "string" && byKey.detail.trim()
-          ? byKey.detail.trim().slice(0, 200)
-          : t.detail,
+      detail: clipDecodedStr(byKey.detail, 200) || t.detail,
       priority,
     };
   });
@@ -583,9 +633,7 @@ function mergeClaudeNarrativeEnhancement(
       .slice(0, 5)
       .map((a, idx) => ({
         step: Number(a.step) > 0 ? Number(a.step) : idx + 1,
-        description: String(a.description || "")
-          .trim()
-          .slice(0, 220),
+        description: clipDecodedStr(a.description, 220) || "",
         owner: (a.owner === "client" ? "client" : "ofg") as "client" | "ofg",
       }))
       .filter((a) => a.description.length > 0);
@@ -597,22 +645,22 @@ function mergeClaudeNarrativeEnhancement(
     // Never overwrite numeric score goals from Claude — only milestone copy.
     if (Array.isArray(draft.roadmap.milestones) && draft.roadmap.milestones.length) {
       roadmap.milestones = draft.roadmap.milestones
-        .map((m) => String(m).trim().slice(0, 120))
-        .filter(Boolean)
+        .map((m) => clipDecodedStr(m, 120))
+        .filter((m): m is string => !!m)
         .slice(0, 6);
     }
   }
 
   const positiveAccounts = Array.isArray(draft.positiveAccounts)
     ? draft.positiveAccounts
-        .map((s) => String(s).trim().slice(0, 120))
-        .filter(Boolean)
+        .map((s) => clipDecodedStr(s, 120))
+        .filter((s): s is string => !!s)
         .slice(0, 8)
     : base.positiveAccounts;
   const actionNeeded = Array.isArray(draft.actionNeeded)
     ? draft.actionNeeded
-        .map((s) => String(s).trim().slice(0, 160))
-        .filter(Boolean)
+        .map((s) => clipDecodedStr(s, 160))
+        .filter((s): s is string => !!s)
         .slice(0, 8)
     : base.actionNeeded;
 
@@ -623,7 +671,8 @@ function mergeClaudeNarrativeEnhancement(
     typeof draft.fundingReadinessNote === "string" &&
     draft.fundingReadinessNote.trim()
   ) {
-    fundingReadinessNote = draft.fundingReadinessNote.trim().slice(0, 280);
+    fundingReadinessNote =
+      clipDecodedStr(draft.fundingReadinessNote, 280) || undefined;
   }
 
   let tradelineRecommendation = base.tradelineRecommendation;
@@ -637,18 +686,18 @@ function mergeClaudeNarrativeEnhancement(
     if (/^IH-\d+$/i.test(code)) {
       tradelineRecommendation = {
         code,
-        projectedImpact: String(
-          draft.tradelineRecommendation.projectedImpact ||
-            base.tradelineRecommendation?.projectedImpact ||
-            "",
-        )
-          .trim()
-          .slice(0, 200),
+        projectedImpact:
+          clipDecodedStr(
+            draft.tradelineRecommendation.projectedImpact ||
+              base.tradelineRecommendation?.projectedImpact ||
+              "",
+            200,
+          ) || "",
       };
     }
   }
 
-  return {
+  return syncPrimaryDualFieldsInline({
     ...base,
     wins,
     targets,
@@ -660,6 +709,32 @@ function mergeClaudeNarrativeEnhancement(
     actionNeeded: actionNeeded.length ? actionNeeded : base.actionNeeded,
     fundingReadinessNote,
     tradelineRecommendation,
+  });
+}
+
+/**
+ * Keep dual win/target arrays aligned with primary `wins`/`targets` after
+ * staff review edits or Claude polish (baseline → sinceEnrollment; chain → thisRound).
+ */
+function syncPrimaryDualFieldsInline(data: OfGReportData): OfGReportData {
+  const mode = normalizeReportCompareModeInline(data.compareMode);
+  if (mode === "chain") {
+    return {
+      ...data,
+      compareMode: mode,
+      winsThisRound: data.wins,
+      targetsThisRound: data.targets,
+      winsSinceEnrollment: data.winsSinceEnrollment ?? data.wins,
+      targetsSinceEnrollment: data.targetsSinceEnrollment ?? data.targets,
+    };
+  }
+  return {
+    ...data,
+    compareMode: mode,
+    winsSinceEnrollment: data.wins,
+    targetsSinceEnrollment: data.targets,
+    winsThisRound: data.winsThisRound ?? data.wins,
+    targetsThisRound: data.targetsThisRound ?? data.targets,
   };
 }
 
@@ -675,6 +750,136 @@ function parseClaudeNarrativeJson(
   } catch {
     return null;
   }
+}
+
+type ClaudeBureauScoresDraft = {
+  before?: {
+    transunion?: number | null;
+    experian?: number | null;
+    equifax?: number | null;
+  };
+  after?: {
+    transunion?: number | null;
+    experian?: number | null;
+    equifax?: number | null;
+  };
+  reportDate?: { before?: string | null; after?: string | null };
+};
+
+const OFG_CLAUDE_SCORE_EXTRACT_SYSTEM = `You extract ONLY credit bureau scores and report dates from tri-merge PDF text for Optimum Financial Group.
+Rules (non-negotiable):
+- Return ONLY JSON (no markdown)
+- Scores must be integers 300–850 from the PDF text — NEVER invent or guess
+- If a bureau score is not clearly present, use null
+- Prefer VantageScore / FICO / "Credit Score and Rating" blocks over balances, limits, or $ amounts
+- reportDate values must be YYYY-MM-DD when a clear report date exists, else null
+
+JSON shape:
+{
+  "before": { "transunion": number|null, "experian": number|null, "equifax": number|null },
+  "after": { "transunion": number|null, "experian": number|null, "equifax": number|null },
+  "reportDate": { "before": "YYYY-MM-DD"|null, "after": "YYYY-MM-DD"|null }
+}`;
+
+function clampClaudeBureauScore(n: unknown): number | null {
+  const v = typeof n === "number" ? n : Number(n);
+  if (!Number.isFinite(v) || !Number.isInteger(v)) return null;
+  if (v < 300 || v > 850) return null;
+  return v;
+}
+
+function parseClaudeBureauScoresJson(
+  text: string,
+): ClaudeBureauScoresDraft | null {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  const objMatch = raw.match(/\{[\s\S]*\}/);
+  if (!objMatch) return null;
+  try {
+    return JSON.parse(objMatch[0]) as ClaudeBureauScoresDraft;
+  } catch {
+    return null;
+  }
+}
+
+function needsClaudeScoreFallback(
+  data: OfGReportData,
+  confidence?: Record<string, number> | null,
+): boolean {
+  const bureaus = ["transunion", "experian", "equifax"] as const;
+  for (const b of bureaus) {
+    const before = data.bureauScores[b]?.before ?? 0;
+    const after = data.bureauScores[b]?.after ?? 0;
+    if (!before || !after) return true;
+    if (confidence && (confidence[b] ?? 0) < 0.6) return true;
+  }
+  return false;
+}
+
+function mergeClaudeBureauScores(
+  data: OfGReportData,
+  draft: ClaudeBureauScoresDraft | null | undefined,
+  opts?: { fillDates?: boolean },
+): { data: OfGReportData; filled: string[] } {
+  if (!draft || typeof draft !== "object") {
+    return { data, filled: [] };
+  }
+  const filled: string[] = [];
+  const next: OfGReportData = {
+    ...data,
+    bureauScores: {
+      transunion: { ...data.bureauScores.transunion },
+      experian: { ...data.bureauScores.experian },
+      equifax: { ...data.bureauScores.equifax },
+    },
+    middleScore: { ...data.middleScore },
+    reportDate: { ...data.reportDate },
+  };
+  const sides = ["before", "after"] as const;
+  const bureaus = ["transunion", "experian", "equifax"] as const;
+  for (const side of sides) {
+    const block = draft[side];
+    if (!block || typeof block !== "object") continue;
+    for (const b of bureaus) {
+      const current = next.bureauScores[b][side] ?? 0;
+      if (current > 0) continue;
+      const v = clampClaudeBureauScore(block[b]);
+      if (v == null) continue;
+      next.bureauScores[b][side] = v;
+      filled.push(`${side}.${b}`);
+    }
+  }
+  if (opts?.fillDates && draft.reportDate) {
+    for (const side of sides) {
+      const iso = String(draft.reportDate[side] || "").trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) continue;
+      next.reportDate[side] = iso;
+      filled.push(`reportDate.${side}`);
+    }
+  }
+
+  const midBefore = [
+    next.bureauScores.transunion.before,
+    next.bureauScores.experian.before,
+    next.bureauScores.equifax.before,
+  ]
+    .filter((n): n is number => typeof n === "number" && n > 0)
+    .sort((a, b) => a - b);
+  const midAfter = [
+    next.bureauScores.transunion.after,
+    next.bureauScores.experian.after,
+    next.bureauScores.equifax.after,
+  ]
+    .filter((n): n is number => typeof n === "number" && n > 0)
+    .sort((a, b) => a - b);
+  if (midBefore.length) {
+    next.middleScore.before = midBefore[Math.floor(midBefore.length / 2)];
+  }
+  if (midAfter.length) {
+    next.middleScore.after = midAfter[Math.floor(midAfter.length / 2)];
+  }
+
+  return { data: next, filled };
 }
 
 type MorningDigestLang = "en" | "es";
@@ -968,9 +1173,11 @@ function parseClaudeMorningDigestJson(
   }
   if (!parsed || typeof parsed !== "object") return null;
   const o = parsed as Record<string, unknown>;
-  const headline = String(o.headline || "").trim();
-  const quote = String(o.quote || "").trim();
-  const energy_note = String(o.energy_note || "").trim();
+  const d = (v: unknown) =>
+    decodeLiteralUnicodeEscapes(String(v ?? "").trim());
+  const headline = d(o.headline);
+  const quote = d(o.quote);
+  const energy_note = d(o.energy_note);
   if (!headline || !quote || !energy_note) return null;
 
   const prioritiesRaw = Array.isArray(o.priorities) ? o.priorities : [];
@@ -979,8 +1186,8 @@ function parseClaudeMorningDigestJson(
     .map((p) => {
       const row = (p || {}) as Record<string, unknown>;
       return {
-        title: String(row.title || "").trim(),
-        why: String(row.why || "").trim(),
+        title: d(row.title),
+        why: d(row.why),
         href: row.href != null ? String(row.href) : null,
       };
     })
@@ -993,28 +1200,26 @@ function parseClaudeMorningDigestJson(
     .map((c) => {
       const row = (c || {}) as Record<string, unknown>;
       return {
-        who: String(row.who || "").trim(),
-        resume: String(row.resume || "").trim(),
+        who: d(row.who),
+        resume: d(row.resume),
       };
     })
     .filter((c) => c.who && c.resume);
 
   const risks = (Array.isArray(o.risks) ? o.risks : [])
-    .map((r) => String(r || "").trim())
+    .map((r) => d(r))
     .filter(Boolean)
     .slice(0, 4);
 
   return {
     headline,
     quote,
-    quote_attribution: o.quote_attribution
-      ? String(o.quote_attribution).trim()
-      : null,
+    quote_attribution: o.quote_attribution ? d(o.quote_attribution) : null,
     energy_note,
     priorities,
     conversation_resumes,
     risks,
-    wins_or_quiet_note: String(o.wins_or_quiet_note || "").trim(),
+    wins_or_quiet_note: d(o.wins_or_quiet_note),
   };
 }
 
@@ -1782,6 +1987,8 @@ export type AnalystNegativeInput = {
   creditor?: string;
   bureaus?: string[];
   detail?: string;
+  comments?: string;
+  derogatory_date?: string | null;
 };
 
 export type AnalystUtilRow = {
@@ -1815,31 +2022,40 @@ export type CreditAnalysisAnalystFlat = {
   gap_ex: number | null;
   gap_eq: number | null;
 
+  /** standard | complex — OFG program tier (§10) */
+  program_tier: string;
+  program_tier_label: string;
+
   neg_1_account: string;
   neg_1_type: string;
   neg_1_bureaus: string;
   neg_1_priority: string;
   neg_1_dispute_basis: string;
+  neg_1_round: string;
   neg_2_account: string;
   neg_2_type: string;
   neg_2_bureaus: string;
   neg_2_priority: string;
   neg_2_dispute_basis: string;
+  neg_2_round: string;
   neg_3_account: string;
   neg_3_type: string;
   neg_3_bureaus: string;
   neg_3_priority: string;
   neg_3_dispute_basis: string;
+  neg_3_round: string;
   neg_4_account: string;
   neg_4_type: string;
   neg_4_bureaus: string;
   neg_4_priority: string;
   neg_4_dispute_basis: string;
+  neg_4_round: string;
   neg_5_account: string;
   neg_5_type: string;
   neg_5_bureaus: string;
   neg_5_priority: string;
   neg_5_dispute_basis: string;
+  neg_5_round: string;
 
   utilization_critical_note: string;
   util_1_account: string;
@@ -1945,8 +2161,12 @@ type RankedNeg = {
   account: string;
   type: string;
   bureaus: string;
+  bureau_count: number;
   priority: DisputePriority;
   dispute_basis: string;
+  dispute_round: 1 | 2 | 3 | 4;
+  derogatory_date: string | null;
+  score_lift: number;
 };
 
 type TFn = (en: string, es: string) => string;
@@ -2017,6 +2237,8 @@ export function resolveTextLanguage(
   lastName: string,
 ): AnalystLang {
   if (language === "es") return "Spanish";
+  if (language === "en") return "English";
+  // Implicit default only (should not occur for explicit form picks).
   if (HISPANIC_SURNAME_HINT.test(lastName.trim())) return "Spanish";
   return "English";
 }
@@ -2041,7 +2263,7 @@ export function extractUtilizationFromText(text: string): AnalystUtilRow[] {
       payTo10: Math.max(0, Math.ceil(balance - limit * 0.1)),
     });
   }
-  return results.slice(0, 12);
+  return filterRevolvingUtilizationInline(results).slice(0, 12);
 }
 
 function utilColor(pct: number): string {
@@ -2083,13 +2305,19 @@ function formatBureaus(hay: string, explicit?: string[]): string {
   return found.length ? found.join("/") : "TU/EX/EQ";
 }
 
-export function rankNegativeItem(n: AnalystNegativeInput): RankedNeg {
-  const hay = `${n.type} ${n.creditor || ""} ${n.detail || ""}`;
+export function rankNegativeItem(
+  n: AnalystNegativeInput,
+  opts?: { triBureau?: boolean },
+): RankedNeg {
+  const hay = `${n.type} ${n.creditor || ""} ${n.detail || ""} ${n.comments || ""}`;
   const type = n.type || "Derogatory Item";
-  const account = (n.creditor || type).slice(0, 60);
+  let account = (n.creditor || type).slice(0, 60);
+  if (isJunkNegativeAccountName(account)) account = type;
   const bureauCount = countBureaus(hay, n.bureaus);
   const bureaus = formatBureaus(hay, n.bureaus);
   const bal = extractBalanceHint(n.detail || "");
+  const derogatory_date =
+    n.derogatory_date || parseDerogatoryDateHintInline(n.detail || "");
 
   let priority: DisputePriority = "MEDIUM";
   let basis =
@@ -2098,52 +2326,254 @@ export function rankNegativeItem(n: AnalystNegativeInput): RankedNeg {
   if (/inqui/i.test(hay)) {
     priority = "LOWER";
     basis =
-      "Hard inquiry — verify permissible purpose under FCRA; dispute unauthorized inquiries.";
+      "Hard inquiry — verify permissible purpose under FCRA §604; dispute unauthorized inquiries (FCRA §611).";
   } else if (
     /personal|address|name|ssn|dob|identity/i.test(hay) &&
     /error|incorrect|wrong/i.test(hay)
   ) {
     priority = "LOWER";
     basis =
-      "Personal information error — request correction of inaccurate consumer data (FCRA).";
+      "Personal information error — request correction of inaccurate consumer data (FCRA §611).";
   } else if (
     /90\+|90 day|120/i.test(hay) &&
     /late|delinquen|past due|active/i.test(hay)
   ) {
     priority = "CRITICAL";
     basis =
-      "Active 90+ delinquency — high-impact; dispute inaccurate status/dates with all reporting bureaus.";
+      "Active 90+ delinquency — high-impact; dispute inaccurate status/dates with all reporting bureaus (FCRA §611).";
   } else if (/charge.?off|charged off/i.test(hay)) {
     if (bureauCount > 0 && bureauCount < 3) {
       priority = "CRITICAL";
       basis =
-        "Charge-off not consistent across all 3 bureaus — prioritize metro inconsistency dispute (FCRA).";
+        "Charge-off not consistent across all 3 bureaus — prioritize metro inconsistency dispute (FCRA §611).";
     } else {
       priority = "HIGH";
       basis =
-        "Charge-off on file — dispute inaccurate balance, status, or dates; request method of verification.";
+        "Charge-off on file — dispute inaccurate balance, status, or dates; request method of verification (FCRA §611 / §623).";
     }
   } else if (/collection/i.test(hay)) {
     if (bal != null && bal < 500) {
       priority = "MEDIUM";
       basis =
-        "Small collection (<$500) — dispute validation under FDCPA/FCRA; verify original creditor & amount.";
+        "Small collection (<$500) — dispute validation under FDCPA §809 / FCRA §611; verify original creditor & amount.";
     } else {
       priority = "HIGH";
       basis =
-        "Collection account — demand validation (FDCPA) and dispute inaccurate reporting (FCRA).";
+        "Collection account — demand validation (FDCPA §809) and dispute inaccurate reporting (FCRA §611).";
     }
   } else if (/late|past due|delinquen/i.test(hay)) {
     priority = "HIGH";
     basis =
-      "Recent late payment — dispute incorrect late marks; verify payment history dates.";
+      "Recent late payment — dispute incorrect late marks; verify payment history dates (FCRA §611).";
   } else if (/bankrupt|foreclos|repossess|judgment|lien/i.test(hay)) {
     priority = "HIGH";
     basis =
-      "Public-record / severe derogatory — verify court data accuracy and reporting period (FCRA).";
+      "Public-record / severe derogatory — verify court data accuracy and reporting period (FCRA §611).";
   }
 
-  return { account, type, bureaus, priority, dispute_basis: basis };
+  const dispute_round = assignDisputeRoundInline(n, {
+    triBureau: opts?.triBureau,
+    bureauCount,
+  });
+  const score_lift = estimateDisputeScoreLiftInline(n);
+
+  return {
+    account,
+    type,
+    bureaus,
+    bureau_count: bureauCount,
+    priority,
+    dispute_basis: basis,
+    dispute_round,
+    derogatory_date,
+    score_lift,
+  };
+}
+
+/** Keep in sync with api/creditAnalysisEngine.ts — inlined for Vercel (no sibling import). */
+function parseDerogatoryDateHintInline(
+  detail: string | null | undefined,
+): string | null {
+  if (!detail) return null;
+  const m = detail.match(
+    /\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\b|\b((?:19|20)\d{2})-(\d{2})-(\d{2})\b/,
+  );
+  if (!m) return null;
+  if (m[4]) return `${m[4]}-${m[5]}-${m[6]}`;
+  let month = Number(m[1]);
+  let day = Number(m[2]);
+  let year = Number(m[3]);
+  if (year < 100) year += 2000;
+  if (month > 12 && day <= 12) {
+    const tmp = month;
+    month = day;
+    day = tmp;
+  }
+  if (month < 1 || month > 12 || day < 1 || day > 31 || year < 1990) return null;
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function estimateDisputeScoreLiftInline(input: AnalystNegativeInput): number {
+  const hay = `${input.type} ${input.creditor || ""} ${input.detail || ""} ${input.comments || ""}`;
+  if (/bankrupt|foreclos|repossess|tax\s*lien|judgment/i.test(hay)) return 45;
+  if (/charge.?off|charged off/i.test(hay)) return 35;
+  if (/collection/i.test(hay)) return 28;
+  if (/90\+|120|150/i.test(hay) && /late|delinquen|past due/i.test(hay))
+    return 22;
+  if (/late|past due|delinquen/i.test(hay)) return 12;
+  if (/inqui/i.test(hay)) return 8;
+  return 10;
+}
+
+function assignDisputeRoundInline(
+  input: AnalystNegativeInput,
+  opts?: { triBureau?: boolean; bureauCount?: number },
+): 1 | 2 | 3 | 4 {
+  const hay = `${input.type} ${input.creditor || ""} ${input.detail || ""} ${input.comments || ""}`;
+  const bureauCount =
+    opts?.bureauCount ??
+    (input.bureaus?.length ? input.bureaus.length : countBureaus(hay));
+  if (/inqui/i.test(hay)) return 1;
+  if (
+    /collection/i.test(hay) ||
+    /\b(midland|portfolio recovery|lvnv|resurgent|cavalry|placed for collection|purchased debt|debt buyer)\b/i.test(
+      hay,
+    )
+  ) {
+    return 2;
+  }
+  const inconsistency =
+    (opts?.triBureau && bureauCount > 0 && bureauCount < 3) ||
+    /consumer disputes|disputes this information|inconsisten/i.test(hay);
+  if (inconsistency) return 3;
+  if (
+    /charge.?off|charged off/i.test(hay) ||
+    (/90\+|120|150/i.test(hay) && /late|delinquen|past due/i.test(hay))
+  ) {
+    return 4;
+  }
+  return 3;
+}
+
+function classifyProgramTierInline(
+  negatives: AnalystNegativeInput[],
+  reportText = "",
+): "standard" | "complex" {
+  const hay = `${negatives.map((n) => `${n.type} ${n.creditor || ""} ${n.detail || ""} ${n.comments || ""}`).join(" ")} ${reportText}`;
+  return /\b(bankrupt|repossession|repossessed|\brepo\b|foreclos|tax\s*lien|irs\b|sba\b|student\s*loan|navient|sallie mae|dept\.?\s*of\s*education|medical|hospital|clinic)/i.test(
+    hay,
+  )
+    ? "complex"
+    : "standard";
+}
+
+function sortNegativesForDisputePlanInline(items: RankedNeg[]): RankedNeg[] {
+  return [...items].sort((a, b) => {
+    if (a.dispute_round !== b.dispute_round)
+      return a.dispute_round - b.dispute_round;
+    if (a.dispute_round === 1) {
+      const pr = PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority];
+      if (pr !== 0) return pr;
+      return a.account.localeCompare(b.account);
+    }
+    const ad = a.derogatory_date || "9999-99-99";
+    const bd = b.derogatory_date || "9999-99-99";
+    if (ad !== bd) return ad.localeCompare(bd);
+    return PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority];
+  });
+}
+
+function projectScoresFromDisputesInline(opts: {
+  today: number | null;
+  goalScore: number;
+  ranked: RankedNeg[];
+}): {
+  score_30: number | null;
+  score_60: number | null;
+  score_90: number | null;
+  score_target: number | null;
+} {
+  const { today, goalScore, ranked } = opts;
+  if (today == null) {
+    return {
+      score_30: null,
+      score_60: null,
+      score_90: null,
+      score_target: goalScore,
+    };
+  }
+  const liftFor = (rounds: Array<1 | 2 | 3 | 4>) =>
+    ranked
+      .filter((n) => rounds.includes(n.dispute_round))
+      .reduce((s, n) => s + n.score_lift, 0);
+  const r1 = liftFor([1]);
+  const r2 = liftFor([2]);
+  const r34 = liftFor([3, 4]);
+  if (ranked.length === 0) {
+    return {
+      score_30: today,
+      score_60: today,
+      score_90: clampScore(today + 5),
+      score_target: Math.min(goalScore, clampScore(today + 15)),
+    };
+  }
+  const afterR1 = clampScore(today + Math.round(r1 * 0.55));
+  const afterR2 = clampScore(
+    afterR1 + Math.round(r2 * 0.55) + Math.round(r1 * 0.25),
+  );
+  const afterR34 = clampScore(
+    afterR2 + Math.round(r34 * 0.5) + Math.round(r2 * 0.25),
+  );
+  const target = clampScore(
+    Math.min(goalScore, afterR34 + Math.round((r1 + r2 + r34) * 0.1)),
+  );
+  return {
+    score_30: afterR1,
+    score_60: afterR2,
+    score_90: afterR34,
+    score_target: target,
+  };
+}
+
+function filterRevolvingUtilizationInline(
+  rows: AnalystUtilRow[],
+): AnalystUtilRow[] {
+  return rows.filter((u) => {
+    if (!(u.limit > 0)) return false;
+    if (
+      /\b(installment|auto\s*loan|vehicle|mortgage|heloc|home\s*equity|student|personal\s*loan)\b/i.test(
+        u.account,
+      )
+    ) {
+      return false;
+    }
+    if (u.pctUsed < 0 || u.pctUsed > 100) return false;
+    return true;
+  });
+}
+
+function looksLikeTradelineNegativeInline(line: string): boolean {
+  const t = String(line || "").trim();
+  if (t.length < 8 || t.length > 160) return false;
+  if (
+    !/collection|charge.?off|late payment|inquiry|repossession|foreclosure|bankruptcy|lien|judgment|delinquent|past due|derogatory|charged off/i.test(
+      t,
+    )
+  ) {
+    return false;
+  }
+  const hasCreditorPrefix =
+    /^[A-Z0-9*\/&.'-]{2,}[A-Za-z0-9*\/\s&.'-]{0,40}\s*[-–—:]?\s*(collection|charge|late|inquiry|repossession|foreclosure|bankruptcy|lien|judgment|delinquent|past due|derogatory)/i.test(
+      t,
+    ) ||
+    /\b(LLC|INC|BANK|FINANCE|CREDIT|FUNDING|CAPITAL|N\.?A\.?)\b/i.test(t);
+  const hasTrailingCreditor =
+    /^(collection|charge.?off|late payment|hard inquiry|inquiry|delinquent|past due|derogatory)\s+(on|from|at|–|-)\s+[A-Za-z0-9]/i.test(
+      t,
+    );
+  const hasAccountSignal =
+    /\$\s*[\d,]+/.test(t) || /\*{2,}\d{2,}/.test(t) || /#\s*\d{3,}/.test(t);
+  return hasCreditorPrefix || hasTrailingCreditor || hasAccountSignal;
 }
 
 function adjustmentFactors(
@@ -2217,54 +2647,115 @@ function hasBusinessLine(text: string): boolean {
 
 function localizeDisputeBasis(basis: string, lang: AnalystLang): string {
   if (lang !== "Spanish") return basis;
-  return basis
-    .replace(
-      "FCRA accuracy review — verify reporting and dispute unsupported items.",
+  const map: Record<string, string> = {
+    "FCRA accuracy review — verify reporting and dispute unsupported items.":
       "Revisión de exactitud FCRA — verificar el reporte y disputar ítems no respaldados.",
-    )
-    .replace(
-      "Hard inquiry — verify permissible purpose under FCRA; dispute unauthorized inquiries.",
-      "Consulta dura — verificar propósito permisible bajo FCRA; disputar consultas no autorizadas.",
-    )
-    .replace(
-      "Personal information error — request correction of inaccurate consumer data (FCRA).",
-      "Error de información personal — solicitar corrección de datos inexactos (FCRA).",
-    )
-    .replace(
-      "Active 90+ delinquency — high-impact; dispute inaccurate status/dates with all reporting bureaus.",
-      "Morosidad activa 90+ — alto impacto; disputar estado/fechas inexactas con las 3 agencias.",
-    )
-    .replace(
-      "Charge-off not consistent across all 3 bureaus — prioritize metro inconsistency dispute (FCRA).",
-      "Cargo fallido inconsistente entre las 3 agencias — priorizar disputa por inconsistencia (FCRA).",
-    )
-    .replace(
-      "Charge-off on file — dispute inaccurate balance, status, or dates; request method of verification.",
-      "Cargo fallido en el archivo — disputar saldo, estado o fechas; solicitar método de verificación.",
-    )
-    .replace(
-      "Small collection (<$500) — dispute validation under FDCPA/FCRA; verify original creditor & amount.",
-      "Cobro pequeño (<$500) — disputar validación bajo FDCPA/FCRA; verificar acreedor original y monto.",
-    )
-    .replace(
-      "Collection account — demand validation (FDCPA) and dispute inaccurate reporting (FCRA).",
-      "Cuenta en cobro — exigir validación (FDCPA) y disputar reporte inexacto (FCRA).",
-    )
-    .replace(
-      "Recent late payment — dispute incorrect late marks; verify payment history dates.",
-      "Pago atrasado reciente — disputar marcas incorrectas; verificar fechas del historial.",
-    )
-    .replace(
-      "Public-record / severe derogatory — verify court data accuracy and reporting period (FCRA).",
-      "Registro público / negativo severo — verificar exactitud judicial y período de reporte (FCRA).",
-    );
+    "Hard inquiry — verify permissible purpose under FCRA §604; dispute unauthorized inquiries (FCRA §611).":
+      "Consulta dura — verificar propósito permisible bajo FCRA §604; disputar consultas no autorizadas (FCRA §611).",
+    "Personal information error — request correction of inaccurate consumer data (FCRA §611).":
+      "Error de información personal — solicitar corrección de datos inexactos (FCRA §611).",
+    "Active 90+ delinquency — high-impact; dispute inaccurate status/dates with all reporting bureaus (FCRA §611).":
+      "Morosidad activa 90+ — alto impacto; disputar estado/fechas inexactas con las 3 agencias (FCRA §611).",
+    "Charge-off not consistent across all 3 bureaus — prioritize metro inconsistency dispute (FCRA §611).":
+      "Cargo fallido inconsistente entre las 3 agencias — priorizar disputa por inconsistencia (FCRA §611).",
+    "Charge-off on file — dispute inaccurate balance, status, or dates; request method of verification (FCRA §611 / §623).":
+      "Cargo fallido en el archivo — disputar saldo, estado o fechas; solicitar método de verificación (FCRA §611 / §623).",
+    "Small collection (<$500) — dispute validation under FDCPA §809 / FCRA §611; verify original creditor & amount.":
+      "Cobro pequeño (<$500) — disputar validación bajo FDCPA §809 / FCRA §611; verificar acreedor original y monto.",
+    "Collection account — demand validation (FDCPA §809) and dispute inaccurate reporting (FCRA §611).":
+      "Cuenta en cobro — exigir validación (FDCPA §809) y disputar reporte inexacto (FCRA §611).",
+    "Recent late payment — dispute incorrect late marks; verify payment history dates (FCRA §611).":
+      "Pago atrasado reciente — disputar marcas incorrectas; verificar fechas del historial (FCRA §611).",
+    "Public-record / severe derogatory — verify court data accuracy and reporting period (FCRA §611).":
+      "Registro público / negativo severo — verificar exactitud judicial y período de reporte (FCRA §611).",
+  };
+  if (map[basis]) return map[basis];
+  // Fallback: strip common English prefixes if exact match missed
+  return basis
+    .replace(/Hard inquiry/gi, "Consulta dura")
+    .replace(/Collection account/gi, "Cuenta en cobro")
+    .replace(/Charge-off/gi, "Cargo fallido");
+}
+
+/** Spec §8: display IH-N only — never cardholder/creditor names on client-facing output. */
+function applyIhAccountCodes(ranked: RankedNeg[]): RankedNeg[] {
+  return ranked.map((n, i) => ({
+    ...n,
+    account: `IH-${i + 1}`,
+  }));
+}
+
+/** Detect likely duplicate inquiry pairs → Round 1 strength (keep in sync with creditAnalysisEngine). */
+function flagDuplicateInquiryPairsInline(
+  inquiries: Array<{ creditor: string; date?: string | null }>,
+): Set<string> {
+  const flagged = new Set<string>();
+  const norm = (s: string) =>
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "")
+      .slice(0, 24);
+  for (let i = 0; i < inquiries.length; i++) {
+    for (let j = i + 1; j < inquiries.length; j++) {
+      const a = inquiries[i];
+      const b = inquiries[j];
+      if (norm(a.creditor) !== norm(b.creditor) || !norm(a.creditor)) continue;
+      if (!a.date || !b.date) {
+        flagged.add(norm(a.creditor));
+        continue;
+      }
+      const da = Date.parse(a.date);
+      const db = Date.parse(b.date);
+      if (!Number.isFinite(da) || !Number.isFinite(db)) continue;
+      if (Math.abs(da - db) / 86_400_000 <= 7) {
+        flagged.add(norm(a.creditor));
+      }
+    }
+  }
+  return flagged;
+}
+
+/** Keep in sync with api/creditAnalysisEngine.ts roundLabel. */
+function roundLabelInline(round: 1 | 2 | 3 | 4, lang: "en" | "es"): string {
+  if (lang === "es") return `Ronda ${round}`;
+  return `Round ${round}`;
+}
+
+/** Keep in sync with api/creditAnalysisEngine.ts programTierLabel. */
+function programTierLabelInline(
+  tier: "standard" | "complex",
+  lang: "en" | "es",
+): string {
+  if (tier === "complex") {
+    return lang === "es" ? "Reparación Compleja" : "Complex Repair";
+  }
+  return lang === "es" ? "Reparación Estándar" : "Standard Repair";
+}
+
+function sanitizeCreditAnalysisActionTime(
+  time: string,
+  lang: AnalystLang,
+): string {
+  const raw = String(time || "").trim();
+  const isEs = lang === "Spanish";
+  const round = (n: string) => (isEs ? `Ronda ${n}` : `Round ${n}`);
+  const m = raw.match(/(?:round|ronda)\s*([1-4])/i);
+  if (m) return round(m[1]);
+  if (/90\s*d|90\s*day|día\s*90/i.test(raw)) return round("3");
+  if (/60\s*d|60\s*day|día\s*60/i.test(raw)) return round("2");
+  if (/30\s*d|30\s*day|día\s*30/i.test(raw)) return round("1");
+  if (/week|month|semana|mes|in\s+\d+\s*days/i.test(raw)) return round("1");
+  if (!raw) return round("1");
+  // Non-round calendar phrasing → Round 1
+  if (!/^(round|ronda)\s*[1-4]$/i.test(raw)) return round("1");
+  return raw;
 }
 
 function buildNegativeHtml(items: RankedNeg[]): string {
   return items
     .map(
       (n) =>
-        `<tr><td style="padding:8px;border-bottom:1px solid ${OFG_COLORS.border};"><strong>${escapeHtml(n.account)}</strong></td><td style="padding:8px;border-bottom:1px solid ${OFG_COLORS.border};">${escapeHtml(n.type)}</td><td style="padding:8px;border-bottom:1px solid ${OFG_COLORS.border};text-align:center;">${escapeHtml(n.bureaus)}</td><td style="padding:8px;border-bottom:1px solid ${OFG_COLORS.border};text-align:center;color:${priorityColor(n.priority)};font-weight:bold;">${n.priority}</td><td style="padding:8px;border-bottom:1px solid ${OFG_COLORS.border};font-size:12px;">${escapeHtml(n.dispute_basis)}</td></tr>`,
+        `<tr><td style="padding:8px;border-bottom:1px solid ${OFG_COLORS.border};"><strong>${escapeHtml(n.account)}</strong></td><td style="padding:8px;border-bottom:1px solid ${OFG_COLORS.border};">${escapeHtml(n.type)}</td><td style="padding:8px;border-bottom:1px solid ${OFG_COLORS.border};text-align:center;">${escapeHtml(n.bureaus)}</td><td style="padding:8px;border-bottom:1px solid ${OFG_COLORS.border};text-align:center;">R${n.dispute_round}</td><td style="padding:8px;border-bottom:1px solid ${OFG_COLORS.border};text-align:center;color:${priorityColor(n.priority)};font-weight:bold;">${n.priority}</td><td style="padding:8px;border-bottom:1px solid ${OFG_COLORS.border};font-size:12px;">${escapeHtml(n.dispute_basis)}</td></tr>`,
     )
     .join("");
 }
@@ -2689,14 +3180,55 @@ export function runCreditAnalysisAlgorithm(
   const goalKind = classifyGoalKind(input.clientGoal);
   const scores = input.scores;
   const mid = computeMiddleScore(scores);
-  const util =
+  const utilRaw =
     input.utilization ?? extractUtilizationFromText(input.reportText || "");
-  const ranked = [...input.negatives.map(rankNegativeItem)].sort(
-    (a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority],
+  const util = filterRevolvingUtilizationInline(utilRaw);
+  const triBureau = isTriBureauReport(input.reportText || "");
+  const dupInquiryKeys = flagDuplicateInquiryPairsInline(
+    input.negatives
+      .filter((n) => /inqui/i.test(`${n.type} ${n.creditor || ""}`))
+      .map((n) => ({
+        creditor: n.creditor || n.type || "",
+        date: n.derogatory_date || null,
+      })),
   );
+  let ranked = sortNegativesForDisputePlanInline(
+    input.negatives.map((n) => {
+      const item = rankNegativeItem(n, { triBureau });
+      const key = String(n.creditor || n.type || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "")
+        .slice(0, 24);
+      if (key && dupInquiryKeys.has(key) && /inqui/i.test(item.type)) {
+        item.dispute_round = 1;
+        if (item.priority === "LOWER") item.priority = "MEDIUM";
+        item.dispute_basis = `${item.dispute_basis} Duplicate inquiry pair — prioritize Round 1.`;
+      }
+      return item;
+    }),
+  );
+  ranked = applyIhAccountCodes(ranked);
   for (const n of ranked) {
     n.dispute_basis = localizeDisputeBasis(n.dispute_basis, lang);
+    if (
+      lang === "Spanish" &&
+      /Duplicate inquiry pair/i.test(n.dispute_basis)
+    ) {
+      n.dispute_basis = n.dispute_basis.replace(
+        /Duplicate inquiry pair — prioritize Round 1\./gi,
+        "Par de consultas duplicadas — priorizar Ronda 1.",
+      );
+    }
   }
+
+  const programTier = classifyProgramTierInline(
+    input.negatives,
+    input.reportText || "",
+  );
+  const programTierLabel = programTierLabelInline(
+    programTier,
+    lang === "Spanish" ? "es" : "en",
+  );
 
   const delta = adjustmentFactors(util, ranked, input.reportText || "");
   const lending = lendingConversion(goalKind, scores, mid, delta, t);
@@ -2710,26 +3242,24 @@ export function runCreditAnalysisAlgorithm(
 
   const goalScore = lending.goal_score;
   const today = lendingToday;
-  const gapToGoal = today != null ? Math.max(0, goalScore - today) : goalScore;
-  const score_30 =
-    today == null
-      ? null
-      : clampScore(today + Math.min(25, Math.round(gapToGoal * 0.2)));
-  const score_60 =
-    today == null
-      ? null
-      : clampScore(today + Math.min(45, Math.round(gapToGoal * 0.45)));
-  const score_90 =
-    today == null
-      ? null
-      : clampScore(today + Math.min(70, Math.round(gapToGoal * 0.7)));
-  const score_target =
-    today == null ? goalScore : clampScore(Math.min(goalScore, score_90! + 15));
+  const projected = projectScoresFromDisputesInline({
+    today,
+    goalScore,
+    ranked,
+  });
+  const score_30 = projected.score_30;
+  const score_60 = projected.score_60;
+  const score_90 = projected.score_90;
+  const score_target = projected.score_target;
 
   const top5 = ranked.slice(0, 5);
   const negSlots = [0, 1, 2, 3, 4].map((i) => top5[i] || null);
 
-  const utilSlots = [0, 1, 2].map((i) => topUtil[i] || null);
+  const utilSlots = [0, 1, 2].map((i) => {
+    const u = topUtil[i];
+    if (!u) return null;
+    return { ...u, account: `RU-${i + 1}` };
+  });
 
   const fs = buildFileStrength(
     goalKind,
@@ -2740,47 +3270,50 @@ export function runCreditAnalysisAlgorithm(
     t,
   );
 
-  const topNames = top5.map((n) => n.account).filter(Boolean);
+  const byRound = (r: 1 | 2 | 3 | 4) =>
+    ranked.filter((n) => n.dispute_round === r);
+  const round1Items = byRound(1);
+  const round2Items = byRound(2);
+  const round3Items = byRound(3);
+  const round4Items = byRound(4);
+  const rl = (r: 1 | 2 | 3 | 4) =>
+    roundLabelInline(r, lang === "Spanish" ? "es" : "en");
   const round1 = bullet(
     [
-      topNames[0]
+      ...round1Items.slice(0, 2).map((n) =>
+        t(
+          `${rl(1)} — verify/dispute inquiry ${n.account} (FCRA §604 / §611)`,
+          `${rl(1)} — verificar/disputar consulta ${n.account} (FCRA §604 / §611)`,
+        ),
+      ),
+      round1Items.length === 0
         ? t(
-            `Dispute ${topNames[0]} (${top5[0]?.priority}) with all reporting bureaus`,
-            `Disputar ${topNames[0]} (${top5[0]?.priority}) con todas las agencias`,
+            `${rl(1)} — audit personal info & freeze unauthorized inquiries`,
+            `${rl(1)} — auditar info personal y congelar consultas no autorizadas`,
           )
-        : t(
-            "Audit personal info & freeze unauthorized inquiries",
-            "Auditar info personal y congelar consultas no autorizadas",
-          ),
-      topNames[1]
-        ? t(
-            `Package documentation for ${topNames[1]}`,
-            `Preparar documentación para ${topNames[1]}`,
-          )
-        : t(
-            "Pull method-of-verification requests for top derogatories",
-            "Solicitar método de verificación de los principales negativos",
-          ),
+        : null,
       t(
         "Keep all open accounts current — no new late marks",
         "Mantener todas las cuentas al corriente — sin nuevos atrasos",
       ),
-    ].slice(0, 4),
+    ].filter(Boolean) as string[],
   );
 
   const round2 = bullet([
-    t(
-      "Follow up Round 1 disputes; escalate inconsistent bureau responses",
-      "Seguimiento de disputas Ronda 1; escalar respuestas inconsistentes",
+    ...round2Items.slice(0, 2).map((n) =>
+      t(
+        `Round 2 — collection validation on ${n.account} (FDCPA §809)`,
+        `Ronda 2 — validación de cobro sobre ${n.account} (FDCPA §809)`,
+      ),
     ),
-    topNames[2]
+    round2Items.length === 0
       ? t(
-          `Second-wave dispute on ${topNames[2]}`,
-          `Segunda ola de disputa sobre ${topNames[2]}`,
+          "Round 2 — package collection validation letters if any third-party debt appears",
+          "Ronda 2 — preparar cartas de validación si aparece deuda de terceros",
         )
       : t(
-          "Re-dispute remaining HIGH items with fresh evidence",
-          "Redisputar ítems HIGH restantes con evidencia nueva",
+          "Follow up Round 1 replies; escalate incomplete bureau responses",
+          "Seguimiento de respuestas Ronda 1; escalar respuestas incompletas",
         ),
     totalPct > 30
       ? t(
@@ -2794,9 +3327,17 @@ export function runCreditAnalysisAlgorithm(
   ]);
 
   const round3 = bullet([
-    t(
-      "Final challenge on stubborn negatives still reporting",
-      "Desafío final a negativos persistentes que siguen reportando",
+    ...round3Items.slice(0, 2).map((n) =>
+      t(
+        `Round 3 — bureau inconsistency dispute on ${n.account} (FCRA §611)`,
+        `Ronda 3 — disputa por inconsistencia sobre ${n.account} (FCRA §611)`,
+      ),
+    ),
+    ...round4Items.slice(0, 1).map((n) =>
+      t(
+        `Round 4 — substantive challenge on ${n.account} (FCRA §611 / §623)`,
+        `Ronda 4 — desafío sustantivo sobre ${n.account} (FCRA §611 / §623)`,
+      ),
     ),
     t(
       "Confirm deletions/updates across TU, EX, and EQ",
@@ -2815,7 +3356,7 @@ export function runCreditAnalysisAlgorithm(
 
   const actions = [
     {
-      time: t("WEEK 1", "SEMANA 1"),
+      time: t("Round 1", "Ronda 1"),
       action: t(
         "Complete credit analysis review & dispute intake",
         "Completar revisión del análisis e ingreso de disputas",
@@ -2826,7 +3367,7 @@ export function runCreditAnalysisAlgorithm(
       ),
     },
     {
-      time: t("WEEK 1–2", "SEMANA 1–2"),
+      time: t("Round 1", "Ronda 1"),
       action: t(
         "File Round 1 disputes on CRITICAL/HIGH items",
         "Presentar disputas Ronda 1 en ítems CRITICAL/HIGH",
@@ -2837,7 +3378,7 @@ export function runCreditAnalysisAlgorithm(
       ),
     },
     {
-      time: t("MONTH 1", "MES 1"),
+      time: t("Round 2", "Ronda 2"),
       action:
         totalPct > 30
           ? t(
@@ -2854,7 +3395,7 @@ export function runCreditAnalysisAlgorithm(
       ),
     },
     {
-      time: t("MONTH 2", "MES 2"),
+      time: t("Round 2", "Ronda 2"),
       action: t(
         "Round 2 follow-ups + bureau consistency checks",
         "Seguimientos Ronda 2 + chequeos de consistencia entre agencias",
@@ -2865,7 +3406,7 @@ export function runCreditAnalysisAlgorithm(
       ),
     },
     {
-      time: t("MONTH 2–3", "MES 2–3"),
+      time: t("Round 3", "Ronda 3"),
       action: t(
         "Round 3 + goal-specific readiness check",
         "Ronda 3 + revisión de preparación según la meta",
@@ -2873,7 +3414,7 @@ export function runCreditAnalysisAlgorithm(
       reason: lending.goal_description,
     },
     {
-      time: t("MONTH 3+", "MES 3+"),
+      time: t("Round 4", "Ronda 4"),
       action: fs.tradelineNeeded
         ? t(
             "Consider file-strength options (tradeline / mix)",
@@ -2980,31 +3521,39 @@ export function runCreditAnalysisAlgorithm(
     gap_ex: gap(lending.mortgage_ex ?? scores.experian),
     gap_eq: gap(lending.mortgage_eq ?? scores.equifax),
 
+    program_tier: programTier,
+    program_tier_label: programTierLabel,
+
     neg_1_account: negSlots[0]?.account || "",
     neg_1_type: negSlots[0]?.type || "",
     neg_1_bureaus: negSlots[0]?.bureaus || "",
     neg_1_priority: negSlots[0]?.priority || "",
     neg_1_dispute_basis: negSlots[0]?.dispute_basis || "",
+    neg_1_round: negSlots[0] ? String(negSlots[0].dispute_round) : "",
     neg_2_account: negSlots[1]?.account || "",
     neg_2_type: negSlots[1]?.type || "",
     neg_2_bureaus: negSlots[1]?.bureaus || "",
     neg_2_priority: negSlots[1]?.priority || "",
     neg_2_dispute_basis: negSlots[1]?.dispute_basis || "",
+    neg_2_round: negSlots[1] ? String(negSlots[1].dispute_round) : "",
     neg_3_account: negSlots[2]?.account || "",
     neg_3_type: negSlots[2]?.type || "",
     neg_3_bureaus: negSlots[2]?.bureaus || "",
     neg_3_priority: negSlots[2]?.priority || "",
     neg_3_dispute_basis: negSlots[2]?.dispute_basis || "",
+    neg_3_round: negSlots[2] ? String(negSlots[2].dispute_round) : "",
     neg_4_account: negSlots[3]?.account || "",
     neg_4_type: negSlots[3]?.type || "",
     neg_4_bureaus: negSlots[3]?.bureaus || "",
     neg_4_priority: negSlots[3]?.priority || "",
     neg_4_dispute_basis: negSlots[3]?.dispute_basis || "",
+    neg_4_round: negSlots[3] ? String(negSlots[3].dispute_round) : "",
     neg_5_account: negSlots[4]?.account || "",
     neg_5_type: negSlots[4]?.type || "",
     neg_5_bureaus: negSlots[4]?.bureaus || "",
     neg_5_priority: negSlots[4]?.priority || "",
     neg_5_dispute_basis: negSlots[4]?.dispute_basis || "",
+    neg_5_round: negSlots[4] ? String(negSlots[4].dispute_round) : "",
 
     utilization_critical_note: utilNote,
     util_1_account: utilSlots[0]?.account || "",
@@ -3054,7 +3603,7 @@ export function runCreditAnalysisAlgorithm(
     score_60_days: score_60,
     score_90_days: score_90,
     score_target,
-    target_timeframe: `${timelineLabel(goalKind, t)} · ${t("≈ 90 days", "≈ 90 días")}`,
+    target_timeframe: `${timelineLabel(goalKind, t)} · ${t("Rounds 1–4", "Rondas 1–4")}`,
 
     round_1_actions: round1,
     round_2_actions: round2,
@@ -3098,7 +3647,9 @@ export function runCreditAnalysisAlgorithm(
     negative_count: ranked.length,
     critical_count: ranked.filter((n) => n.priority === "CRITICAL").length,
     high_count: ranked.filter((n) => n.priority === "HIGH").length,
-    utilization_html: buildUtilHtml(util),
+    utilization_html: buildUtilHtml(
+      util.map((u, i) => ({ ...u, account: `RU-${i + 1}` })),
+    ),
     action_plan_html: buildActionPlanHtml(actions),
     mortgage_tu: lending.mortgage_tu,
     mortgage_ex: lending.mortgage_ex,
@@ -3188,12 +3739,19 @@ export function buildAnalystAnalysisHtml(opts: {
           <th style="padding:8px;text-align:left;">${isEs ? "Cuenta" : "Account"}</th>
           <th style="padding:8px;text-align:left;">${isEs ? "Tipo" : "Type"}</th>
           <th style="padding:8px;text-align:center;">${isEs ? "Agencias" : "Bureaus"}</th>
+          <th style="padding:8px;text-align:center;">${isEs ? "Ronda" : "Round"}</th>
           <th style="padding:8px;text-align:center;">${isEs ? "Prioridad" : "Priority"}</th>
           <th style="padding:8px;text-align:left;">${isEs ? "Base" : "Basis"}</th>
         </tr>
         ${a.negative_items_html}
       </table>`
         : `<p style="margin:0 0 20px;font-size:14px;color:${C.utilOk};font-weight:600;">${isEs ? "No detectamos ítems negativos obvios." : "No obvious negative items detected."}</p>`
+    }
+
+    ${
+      a.program_tier_label
+        ? `<p style="margin:0 0 16px;font-size:14px;color:#334155;"><strong style="color:${C.navy};">${isEs ? "Nivel de programa" : "Program tier"}:</strong> ${escapeHtml(a.program_tier_label)}</p>`
+        : ""
     }
 
     ${
@@ -3809,8 +4367,137 @@ function normalizePhoneLast10(phone: string | null | undefined): string | null {
   return digits.slice(-10);
 }
 
+// Keep in sync with api/clientPhoneGuards.ts
+const PLACEHOLDER_PHONE_LAST10 = new Set([
+  "0000000000",
+  "1111111111",
+  "2222222222",
+  "3333333333",
+  "4444444444",
+  "5555555555",
+  "6666666666",
+  "7777777777",
+  "8888888888",
+  "9999999999",
+  "1234567890",
+  "0123456789",
+  "0987654321",
+]);
+
+/** Fake / staff-placeholder phones that must never create a client. */
+function isPlaceholderPhone(phone: string | null | undefined): boolean {
+  const last10 = normalizePhoneLast10(phone);
+  if (!last10) return false;
+  if (PLACEHOLDER_PHONE_LAST10.has(last10)) return true;
+  if (/^(\d)\1{9}$/.test(last10)) return true;
+  return false;
+}
+
+/**
+ * Likely bot / gibberish person names (public Get Started spam).
+ * Conservative: only flags when both names look synthetic.
+ */
+function looksLikeSpamPersonName(
+  firstName: string | null | undefined,
+  lastName: string | null | undefined,
+): boolean {
+  const first = String(firstName || "")
+    .trim()
+    .toLowerCase();
+  const last = String(lastName || "")
+    .trim()
+    .toLowerCase();
+  if (!first || !last) return false;
+
+  const junkExact = new Set([
+    "test",
+    "testing",
+    "demo",
+    "asdf",
+    "qwerty",
+    "xxx",
+    "sample",
+    "fake",
+    "none",
+    "n/a",
+    "na",
+    "tbd",
+    "unknown",
+    "crmcontact",
+  ]);
+  if (junkExact.has(first) || junkExact.has(last)) return true;
+  if (first.includes("test") && last.includes("test")) return true;
+
+  const lettersOnly = (s: string) => s.replace(/[^a-z]/g, "");
+  const vowelRatio = (s: string) => {
+    const letters = lettersOnly(s);
+    if (letters.length < 3) return 1;
+    const vowels = (letters.match(/[aeiou]/g) || []).length;
+    return vowels / letters.length;
+  };
+
+  const f = lettersOnly(first);
+  const l = lettersOnly(last);
+  if (
+    f.length >= 4 &&
+    l.length >= 4 &&
+    vowelRatio(f) <= 0.26 &&
+    vowelRatio(l) <= 0.26
+  ) {
+    return true;
+  }
+
+  if (/^[a-z]{5,}$/.test(f) && /^[a-z]{5,}$/.test(l)) {
+    const entropy = (s: string) => new Set(s).size / s.length;
+    if (
+      entropy(f) >= 0.8 &&
+      entropy(l) >= 0.8 &&
+      vowelRatio(f) < 0.3 &&
+      vowelRatio(l) < 0.3
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/** Dotted Gmail locals common in bot signups: a.b.c.d.e@gmail.com */
+function looksLikeSpamEmail(email: string | null | undefined): boolean {
+  const e = String(email || "")
+    .trim()
+    .toLowerCase();
+  if (!e || !e.includes("@")) return false;
+  const [local, domain] = e.split("@");
+  if (!local || !domain) return false;
+  if (domain.endsWith(".test") || domain === "example.com") return true;
+  const dotParts = local.split(".").filter(Boolean);
+  if (dotParts.length >= 4 && domain === "gmail.com") return true;
+  return false;
+}
+
+const WEB_LEAD_REVIEW_LABEL = "web_lead_review";
+
 function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+/** Reserved / integration-test domains that must never receive real team alerts. */
+export function isUndeliverableNotifyEmail(email: string): boolean {
+  const domain = String(email || "")
+    .trim()
+    .toLowerCase()
+    .split("@")[1];
+  if (!domain) return true;
+  return (
+    domain === "example.test" ||
+    domain === "example.com" ||
+    domain === "example.org" ||
+    domain === "example.net" ||
+    domain.endsWith(".test") ||
+    domain.endsWith(".invalid") ||
+    domain === "localhost"
+  );
 }
 
 function isValidDateIso(value: string): boolean {
@@ -4317,9 +5004,13 @@ const IS_LOCAL =
 /**
  * Stay under Vercel serverless request body limits (~4.5MB including multipart
  * overhead). Shared by MMS, admin case docs, report-wizard PDFs, and related
- * multipart routes. MCP base64 tools use a tighter ~3MB decoded cap.
+ * multipart routes. MCP base64 tools use the same 4MB decoded ceiling.
  */
 const VERCEL_SAFE_UPLOAD_MAX_BYTES = 4 * 1024 * 1024;
+/** In-memory encrypted blobs for VITEST CDN stubs (vitest:// URLs are not fetchable). */
+const vitestCdnPlaintextByUrl = new Map<string, Buffer>();
+/** Twilio concatenated SMS ceiling (Conversations hub + MCP send_sms). */
+const SMS_MAX_BODY_CHARS = 1600;
 
 /**
  * Affiliates feature flag. Set AFFILIATES_ENABLED=0|false to hide the admin
@@ -4332,6 +5023,27 @@ function affiliatesFeatureEnabled(): boolean {
     .trim()
     .toLowerCase();
   return v !== "0" && v !== "false" && v !== "off" && v !== "no";
+}
+
+/** Social DM inbox (Meta FB/IG) — env-gated until Graph messaging is live. */
+function socialDmFeatureStatus(): {
+  enabled: boolean;
+  credentials_present: boolean;
+  mode: "disabled" | "needs_credentials" | "ready" | "live";
+} {
+  const enabled =
+    process.env.SOCIAL_DM_INBOX_ENABLED === "1" ||
+    process.env.SOCIAL_DM_INBOX_ENABLED === "true";
+  const credentials_present = !!(
+    process.env.META_WEBHOOK_VERIFY_TOKEN ||
+    process.env.META_PAGE_ACCESS_TOKEN ||
+    process.env.META_APP_SECRET
+  );
+  let mode: "disabled" | "needs_credentials" | "ready" | "live" = "disabled";
+  if (enabled && credentials_present) mode = "live";
+  else if (enabled) mode = "needs_credentials";
+  else if (credentials_present) mode = "ready";
+  return { enabled, credentials_present, mode };
 }
 
 /**
@@ -4358,20 +5070,25 @@ Rules:
 - Prefer concise, actionable answers. Use light Markdown (bold, lists, links). Avoid raw HTML.
 - When relevant, mention admin deep links as paths (e.g. /admin/pipeline, /admin/my-tasks).
 
-WRITE TOOLS (create_prospect, create_work_task, add_case_note, upload_case_document, send_email, send_sms, update_pipeline_stage, convert_prospect, update_client_status, upsert_progress_report, upsert_payment_splits, update_payment_split) — guided intake:
+WRITE TOOLS (create_prospect, create_contact, update_contact, convert_contact, send_contact_sms, send_contact_email, create_work_task, update_work_task, add_case_note, upload_case_document, run_credit_analysis, send_email, send_round_report, send_sms, update_pipeline_stage, convert_prospect, update_client, update_client_status, upsert_progress_report, set_case_payment_plan, upsert_payment_splits, update_payment_split, create_coupon) — guided intake:
 - NEVER call a write tool with confirm=true until you have collected every required field from the user and they explicitly approve the preview.
 - Always call the write tool first with confirm=false (or omit confirm) to get a dry-run preview + missing_fields / duplicates. For prospect→client, prefer preview_convert_prospect (read-only) instead of convert_prospect dry-run.
 - Show the preview to the user in plain language and ask them to confirm.
-- Only then re-call with confirm=true AND confirm_phrase=\"CONFIRM\" (exact string). Also confirm_duplicate=true if phone duplicates were listed.
+- Only then re-call with confirm=true AND confirm_phrase=\"CONFIRM\" (exact string). For create_contact (address book), also confirm_duplicate=true if phone/email duplicates were listed. create_prospect and convert_contact NEVER create phone/email twins — they return the existing client (existing:true) or link the contact to that client; do not pass confirm_duplicate for those tools.
 - client_id must be the OFG platform id from search_clients/get_case — NOT a HubSpot contact id. Unconverted leads have no case_id; that is normal. They live on Pipeline Prospect. Do NOT tell the user the client is missing from the back-office because case_id is empty or status is pending_payment. Always share href with client= (and case= when a case exists).
+- CRM Contacts (address book, NOT pipeline): use search_contacts / get_contact / create_contact / update_contact to save someone for text/call without putting them on Pipeline. To message a Contact, use send_contact_sms / send_contact_email (contact_id from search_contacts) — do NOT use send_sms/send_email with a contact_id (those tools only accept client_id or referrer_id). Use create_prospect only when they should appear on Pipeline Prospect immediately. When a saved contact is ready for the pipeline, use convert_contact (dry-run then confirm) — creates a prospect client (or links to an existing client if phone/email already matches), archives the contact, and re-links Conversations.contact_id → client_id. contact_id is contacts.id from search_contacts (not HubSpot, not clients.id).
 - Prospect → paying client: call preview_convert_prospect first (safe, no write), show the user the preview, then convert_prospect with confirm=true and confirm_phrase=\"CONFIRM\". Convert works for unconverted leads even if status was wrongly set to active/pending_payment earlier — as long as they have no enrolled case. Do not use update_pipeline_stage to leave prospect. Never use update_client_status to set pending_payment/onboarding/active on a lead without a case — that is blocked; use convert_prospect instead. Unconverted leads should stay status=prospect. To put a lead back on Prospect, use update_client_status status=prospect. Closed/lost: status=cancelled and/or stage=cancelled.
-- Credit analysis for Lecca/Angel: upsert_progress_report with structured scores/summary (PDF optional later via admin wizard).
-- Collections: upsert_payment_splits / update_payment_split so list_clients_owing reflects reality (OFG is source of truth once synced).
-- Email: use send_email (after confirm) via the platform mailer (Resend). Target a client with client_id (auto EMAIL case note; include_doc_upload_link mints a portal upload link) OR a realtor/loan-officer with referrer_id (logs on the referrer record; pass client_id too to also stamp the client's file). include_doc_upload_link is client-only — never mint portal links for referrers.
-- SMS: use send_sms or send_text (aliases; after confirm) via Twilio from the acting admin's assigned OFG number. Target a client with client_id (logs into Conversations hub + SMS case note) OR a referrer with referrer_id. Use list_sms, get_texts, or get_conversation to read recent SMS/call timeline before replying. list_ofg_phone_numbers verifies which OFG business numbers are live. Inbound client replies auto-log to the case file. Do NOT charge cards.
-- Documents: when a user shares an ID/SSN/utility bill/PDF in chat, use upload_case_document (dry-run then confirm) to attach it to the client's OFG file. Use list_case_documents to see what's already on file. Pick doc_type (id_front, id_back, ssn_card, proof_of_address, other). JPEG/PNG/HEIC/PDF only; max ~3MB. Pass expected_byte_length (and ideally expected_sha256) from the source file; refuse if integrity_ok is false.
+- Credit analysis for Lecca/Angel: upsert_progress_report for **staff notes only** with real score_before/score_after (never invent scores). Round PDFs + Before/After extract = CRM Reports → Generate (OFG Progress Report Wizard) — MCP cannot upload those PDFs or publish the branded client PDF.
+- Round publish / next round: do NOT use MCP as the round engine. Tell staff to open Pipeline → client → Reports → Generate. Prefer list_progress_reports / get_progress_report to read wizard status.
+- Resend a published Round PDF (secure download link): use send_round_report (dry-run then confirm). Mints /api/public/round-report-pdf/:token, sends tplRoundComplete branded email (PDF attach + secure CTA) and optional twin SMS (same copy as publish). Prefer pdf_id / round_report_id / round_number from list_progress_reports or get_progress_report (has_pdf/pdf_id). Defaults include notify_partners=true (email linked referral partners with the PDF). Do NOT hand-roll URLs with send_email + send_sms. If has_pdf is false, tell staff to publish via CRM Reports → Generate — do not invent a PDF.
+- Collections: list_installments first. Discounted Zelle/cash deals (offline, no checkout code) → set_case_payment_plan so OFG balance = agreed total. Checkout promo codes for /register → create_coupon (list with list_coupons). Mark received money with update_payment_split(status=paid) or mark_paid on the plan.
+- Email: use send_email (after confirm) via the platform mailer (Resend) for CLIENTS (client_id), REFERRERS (referrer_id), or STAFF (to_admin_id / to_admin_name from search_admins). For CRM Contacts address-book people, use send_contact_email with contact_id instead. Client emails auto EMAIL case note; include_doc_upload_link mints a portal upload link (client-only). Referrer emails log on the partner record; pass client_id too to also stamp the client's file. Optional attachment: attachment_case_document_id, attachment_round_report_id, or attachment_base64+attachment_filename (one PDF/file, ~4MB max). If send_email returns no_email, call update_client to set email first. For Round progress PDFs with secure link + SMS, prefer send_round_report over send_email.
+- SMS: use send_sms or send_text (aliases; after confirm) via Twilio. Default From is the MCP-connected admin's assigned OFG number. When the user wants a different staff line (e.g. Lecca or Angel), pass from_admin_id / from_admin_name (search_admins) or from_phone_number_id from list_ofg_phone_numbers all=true. To SMS a staff member, pass to_admin_id / to_admin_name. CLIENTS use client_id; REFERRERS use referrer_id. For CRM Contacts, use send_contact_sms with contact_id (same from_admin_* override). Use list_sms, get_texts, or get_conversation to read recent SMS/call timeline before replying to a client. For call/voicemail Claude resumes (sentiment, feelings, action items, transcript), use get_call_insights. list_ofg_phone_numbers verifies which OFG business numbers are live. Inbound client replies auto-log to the case file. Do NOT charge cards.
+- Documents: when a user shares an ID/SSN/utility bill/PDF in chat, use upload_case_document (dry-run then confirm) to attach it to the client's OFG file. Use list_case_documents to see what's already on file. Pick doc_type (id_front, id_back, ssn_card, proof_of_address, other). JPEG/PNG/HEIC/PDF only; max ~4MB. Pass expected_byte_length (and ideally expected_sha256) from the source file; refuse if integrity_ok is false.
+- Pre-sale credit analysis (prospect leads, no enrolled case): use run_credit_analysis with client_id + credit-report PDF (dry-run then confirm). Same output as /credit-analysis Agent mode. Does NOT require convert or an active case (unlike upload_case_document).
 - CRM HANDOFF: If a tool result includes crm_required: true (or error=\"crm_required\"), STOP retrying that action via MCP. Immediately tell the staff the exact user_message and share the crm_href path. Do not invent alternate MCP workarounds for size limits, Report Wizard PDF generation, document deletes, or other CRM-only flows.
-- Language routing: English/Spanish clients and tasks assign to the admin with matching language_owner_for in the DB. Prefer preferred_language en|es on the client; do not hardcode assignee names unless the user says so.
+- Language routing: English/Spanish **clients** assign to the admin with matching language_owner_for in the DB ONLY when no staff person was named. If the user names staff (Alex Gomez, Angel, Lecca, Lika=Lecca), you MUST assign that person — call search_admins, then pass assigned_admin_id or assigned_admin_name on create_prospect / create_contact / convert_contact / update_client. Never hardcode "en→Lecca / es→Angel" as a substitute for a named person.
+- Work tasks: if the user names a staff person (e.g. Alex Gomez, Angel, Lecca), you MUST assign that person. Call search_admins, then create_work_task or update_work_task with assignee_admin_id or assignee_name. Never put \"ASSIGN TO …\" in the title as a substitute. language_owner_for / preferred_language is ONLY the default when no staff person was named. Do not hardcode emails; look staff up. Use update_work_task to reassign, retitle, change due date, or move status — do not create a duplicate task.
 - Realtor/agent referrals: capture as referral partner (referrer), NOT as the client. Use referral_category=realtor_broker plus referrer_first_name/referrer_last_name (+ referrer_phone, referrer_email). To email that partner later, use send_email with referrer_id.
 - create_work_task creates the task on OFG only by default (source of truth). Do NOT also create a HubSpot task in Claude — that duplicates work. Set push_hubspot=true only when the user explicitly asks to sync that task to HubSpot.
 
@@ -4380,10 +5097,12 @@ OFG progress reports (process knowledge):
 - Open via Pipeline → client panel → Reports → Generate (OFG Progress Report Wizard).
 - Available once the case is in Docs Ready or any Round stage.
 - Round 1: upload enrollment Before + After; review scores/wins; Preview → Publish.
-- Rounds 2–5: prefer reusing prior After as Before; upload new After only.
+- Rounds 2+ (default baseline mode): reuse Round 1 enrollment Before; upload new After only. Optional chain mode reuses prior After as Before.
+- Special clients may have max_rounds raised to 6–12 on Reports (stage stays Round 5 until the final max round → Completed). Raising max after Completed reopens Round 5 in CRM — tell staff to use Reports → max rounds, not MCP.
 - Publishing shows the report in the client portal and advances the pipeline when configured.
+- MCP upsert_progress_report is staff analysis only (requires score_before + score_after). It does not replace the Wizard. If a published PDF already exists, return crm_required unless the user explicitly approves replace_published.
 
-Pipeline stages (high level): Prospect → New Client → Docs Ready → Round 1–5 → Completed.`;
+Pipeline stages (high level): Prospect → New Client → Docs Ready → Round 1–5 → Completed (extended cases stay on Round 5 for rounds 6+ until max).`;
 
 const ADMIN_AI_CASE_STAGES = [
   "new_client",
@@ -4435,6 +5154,256 @@ const ADMIN_AI_TOOLS: Array<{
     },
   },
   {
+    name: "search_contacts",
+    description:
+      "Search CRM Contacts address-book (not pipeline clients). Active contacts only (not soft-deleted, not converted). Use for text/call people who are not on Pipeline yet. Returns contact_id for get_contact / update_contact / convert_contact. Prefer create_contact over create_prospect when staff only need an address-book entry.",
+    input_schema: {
+      type: "object",
+      properties: {
+        q: { type: "string", description: "Search query (name, email, phone)" },
+        limit: {
+          type: "integer",
+          description: "Max rows (1–20, default 10)",
+        },
+      },
+      required: ["q"],
+    },
+  },
+  {
+    name: "get_contact",
+    description:
+      "Fetch one CRM contact by contacts.id from search_contacts. Address book only — not a pipeline client. Use convert_contact when ready to add them to Pipeline as a prospect.",
+    input_schema: {
+      type: "object",
+      properties: {
+        contact_id: {
+          type: "integer",
+          description: "contacts.id from search_contacts",
+        },
+      },
+      required: ["contact_id"],
+    },
+  },
+  {
+    name: "create_contact",
+    description:
+      'Create a CRM Contacts address-book entry (NOT a pipeline prospect). Use when staff want to save someone for text/call without putting them on Pipeline — use create_prospect instead for immediate Pipeline Prospect leads. Required: first_name, last_name, and phone and/or email. ALWAYS dry-run first (confirm=false); only confirm=true + confirm_phrase="CONFIRM" after approval. If phone/email duplicates exist, also confirm_duplicate=true after the user approves.',
+    input_schema: {
+      type: "object",
+      properties: {
+        first_name: { type: "string" },
+        last_name: { type: "string" },
+        phone: {
+          type: "string",
+          description: "Required if email omitted. Used for duplicate check.",
+        },
+        email: {
+          type: "string",
+          description: "Required if phone omitted.",
+        },
+        preferred_language: {
+          type: "string",
+          enum: ["en", "es"],
+          description: "Defaults to en when omitted",
+        },
+        notes: {
+          type: "string",
+          description: "Optional admin notes (stored as admin_notes)",
+        },
+        assigned_admin_id: {
+          type: "integer",
+          description:
+            "Staff owner from search_admins when the user names a person",
+        },
+        assigned_admin_name: {
+          type: "string",
+          description:
+            "Staff name (e.g. Alex Gomez). Overrides language-owner fallback.",
+        },
+        assigned_admin_email: { type: "string" },
+        address_line1: { type: "string" },
+        address_line2: { type: "string" },
+        city: { type: "string" },
+        state: { type: "string" },
+        zip: { type: "string" },
+        confirm: {
+          type: "boolean",
+          description:
+            "false/omit = dry-run preview; true = create after user approval",
+        },
+        confirm_phrase: {
+          type: "string",
+          description: "Required with confirm=true. Must be exactly CONFIRM",
+        },
+        confirm_duplicate: {
+          type: "boolean",
+          description:
+            "Required true when phone/email duplicates exist and user still wants to create",
+        },
+      },
+      required: ["first_name", "last_name"],
+    },
+  },
+  {
+    name: "update_contact",
+    description:
+      'Update an active CRM contact (not converted/deleted). Patch name, phone, email, language, notes, address. ALWAYS dry-run first (confirm=false), then confirm=true + confirm_phrase=CONFIRM. contact_id from search_contacts. Does not add to pipeline (use convert_contact).',
+    input_schema: {
+      type: "object",
+      properties: {
+        contact_id: {
+          type: "integer",
+          description: "contacts.id from search_contacts",
+        },
+        first_name: { type: "string" },
+        last_name: { type: "string" },
+        phone: { type: "string" },
+        email: { type: "string" },
+        preferred_language: { type: "string", enum: ["en", "es"] },
+        notes: {
+          type: "string",
+          description: "Optional admin notes (stored as admin_notes)",
+        },
+        assigned_admin_id: {
+          type: "integer",
+          description:
+            "Staff owner from search_admins when the user names a person",
+        },
+        assigned_admin_name: {
+          type: "string",
+          description:
+            "Staff name (e.g. Alex Gomez). Overrides language-owner fallback.",
+        },
+        assigned_admin_email: { type: "string" },
+        address_line1: { type: "string" },
+        address_line2: { type: "string" },
+        city: { type: "string" },
+        state: { type: "string" },
+        zip: { type: "string" },
+        confirm: { type: "boolean" },
+        confirm_phrase: { type: "string" },
+        confirm_duplicate: {
+          type: "boolean",
+          description:
+            "Required true when phone/email duplicates exist and user still wants to save",
+        },
+      },
+      required: ["contact_id"],
+    },
+  },
+  {
+    name: "convert_contact",
+    description:
+      'Convert a CRM contact into a Pipeline prospect client (status=prospect). Archives the contact (converted_client_id) and re-links Conversations from contact_id → client_id. ALWAYS dry-run first (confirm=false); only confirm=true + confirm_phrase="CONFIRM" after approval. If phone/email already matches a client, links the contact to that existing client (returns existing:true) — never creates a twin. Use create_prospect only for brand-new pipeline leads with no contact row.',
+    input_schema: {
+      type: "object",
+      properties: {
+        contact_id: {
+          type: "integer",
+          description: "contacts.id from search_contacts",
+        },
+        assigned_admin_id: {
+          type: "integer",
+          description:
+            "Staff owner from search_admins when the user names who should own the new prospect",
+        },
+        assigned_admin_name: {
+          type: "string",
+          description:
+            "Staff name (e.g. Alex Gomez). Overrides the contact's current owner / language owner.",
+        },
+        assigned_admin_email: { type: "string" },
+        confirm: {
+          type: "boolean",
+          description:
+            "false/omit = dry-run preview; true = convert after user approval",
+        },
+        confirm_phrase: {
+          type: "string",
+          description: "Required with confirm=true. Must be exactly CONFIRM",
+        },
+      },
+      required: ["contact_id"],
+    },
+  },
+  {
+    name: "send_contact_sms",
+    description:
+      'Send an SMS via Twilio from the acting admin\'s assigned OFG business number to a CRM Contact (address book — NOT a pipeline client). ALWAYS dry-run first with confirm=false; only confirm=true with confirm_phrase="CONFIRM" after approval. contact_id from search_contacts (contacts.id, not clients.id). Logs into Conversations hub + appends [SMS …] to contacts.admin_notes. Requires phone on the contact and an OFG number on the acting admin. Closed contact threads auto-reopen on confirm. Do NOT use send_sms for contacts (send_sms is client/referrer only). Does not send email (use send_contact_email).',
+    input_schema: {
+      type: "object",
+      properties: {
+        contact_id: {
+          type: "integer",
+          description: "contacts.id from search_contacts (not clients.id)",
+        },
+        body: {
+          type: "string",
+          description:
+            "SMS body (plain text). Keep concise; long texts may segment. Max 1600 chars.",
+        },
+        from_admin_id: {
+          type: "integer",
+          description:
+            "Send from this staff member's assigned OFG number instead of the MCP-connected admin",
+        },
+        from_admin_name: {
+          type: "string",
+          description: "Staff name whose OFG line to send from (search_admins)",
+        },
+        from_admin_email: { type: "string" },
+        from_phone_number_id: {
+          type: "integer",
+          description:
+            "admin_phone_numbers.id from list_ofg_phone_numbers (all=true)",
+        },
+        confirm: {
+          type: "boolean",
+          description:
+            "false/omit = dry-run preview; true = send after approval",
+        },
+        confirm_phrase: {
+          type: "string",
+          description: "Required with confirm=true. Must be exactly CONFIRM",
+        },
+      },
+      required: ["contact_id", "body"],
+    },
+  },
+  {
+    name: "send_contact_email",
+    description:
+      'Send a branded email via the OFG platform mailer (Resend) to a CRM Contact (address book — NOT a pipeline client). ALWAYS dry-run first with confirm=false; only confirm=true with confirm_phrase="CONFIRM" after approval. contact_id from search_contacts (contacts.id, not clients.id). Appends [EMAIL …] to contacts.admin_notes. Requires email on the contact. No portal upload links (contacts are not clients). Do NOT use send_email for contacts (send_email is client/referrer only). Does not send SMS (use send_contact_sms).',
+    input_schema: {
+      type: "object",
+      properties: {
+        contact_id: {
+          type: "integer",
+          description: "contacts.id from search_contacts (not clients.id)",
+        },
+        subject: {
+          type: "string",
+          description: "Email subject line",
+        },
+        body: {
+          type: "string",
+          description:
+            "Plain-text body (newlines preserved). Do not include raw HTML. Hi/Hola greeting added automatically when missing.",
+        },
+        confirm: {
+          type: "boolean",
+          description:
+            "false/omit = dry-run preview; true = send after approval",
+        },
+        confirm_phrase: {
+          type: "string",
+          description: "Required with confirm=true. Must be exactly CONFIRM",
+        },
+      },
+      required: ["contact_id", "subject", "body"],
+    },
+  },
+  {
     name: "search_referrers",
     description:
       "Search referral partners (realtor, loan officer, one-off, affiliate partner) by name, email, phone, or company. Use the returned id as send_email referrer_id. Does not search clients.",
@@ -4471,6 +5440,49 @@ const ADMIN_AI_TOOLS: Array<{
     },
   },
   {
+    name: "update_client",
+    description:
+      'Update core contact fields on an existing OFG client (email, phone, first_name, last_name, preferred_language, assigned owner). Use when send_email fails with "no_email", or to reassign the People owner. If the user names staff, pass assigned_admin_id / assigned_admin_name (search_admins) — that wins over language-owner reassignment. preferred_language alone reassigns to language_owner_for only when assigned_admin_* is omitted. ALWAYS dry-run first (confirm=false), then confirm=true + confirm_phrase=CONFIRM. client_id from search_clients (not HubSpot). Does not change status/pipeline (use update_client_status / update_pipeline_stage / convert_prospect).',
+    input_schema: {
+      type: "object",
+      properties: {
+        client_id: { type: "integer" },
+        case_id: { type: "integer" },
+        case_number: { type: "string" },
+        email: {
+          type: "string",
+          description: "New email, or empty string to clear (phone must remain)",
+        },
+        phone: {
+          type: "string",
+          description: "New phone, or empty string to clear (email must remain)",
+        },
+        first_name: { type: "string" },
+        last_name: { type: "string" },
+        preferred_language: {
+          type: "string",
+          enum: ["en", "es"],
+          description:
+            "Client preferred language. Reassigns assigned_admin_id to the language owner only when assigned_admin_* is omitted.",
+        },
+        assigned_admin_id: {
+          type: "integer",
+          description:
+            "Staff owner from search_admins when the user names a person",
+        },
+        assigned_admin_name: {
+          type: "string",
+          description:
+            "Staff name (e.g. Alex Gomez). Overrides language-owner fallback.",
+        },
+        assigned_admin_email: { type: "string" },
+        confirm: { type: "boolean" },
+        confirm_phrase: { type: "string" },
+      },
+      required: [],
+    },
+  },
+  {
     name: "attach_referrer",
     description:
       "Attach a referral partner to an existing client (multi-referrer, max 3 slots). Pass referrer_id from search_referrers, or create inline with referrer_first_name/last_name (+ email/phone). role: primary|secondary|tertiary. ALWAYS dry-run then confirm=true + confirm_phrase=CONFIRM.",
@@ -4494,7 +5506,11 @@ const ADMIN_AI_TOOLS: Array<{
           enum: ["primary", "secondary", "tertiary"],
           description: "Default secondary if client already has a primary",
         },
-        notify_on_round: { type: "boolean" },
+        notify_on_round: {
+          type: "boolean",
+          description:
+            "Ignored — partners are always notified on signup/rounds (always stored true).",
+        },
         confirm: { type: "boolean" },
         confirm_phrase: { type: "string" },
       },
@@ -4533,7 +5549,7 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "list_progress_reports",
     description:
-      "List published OFG progress report rounds for a case (metadata/scores only).",
+      "List OFG progress report rounds + in-progress Wizard drafts for a case (scores/metadata/confidence; no PDF bytes). Use before advising next round. To publish PDFs, direct staff to CRM Reports → Generate — do not use upsert_progress_report as the round engine.",
     input_schema: {
       type: "object",
       properties: {
@@ -4655,7 +5671,7 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "upload_funding_document",
     description:
-      "Upload a funding document (drivers license, corp statement, bank months 1–6) to a funding application via file_base64. Dry-run then confirm. JPEG/PNG/HEIC/PDF ~3MB max.",
+      "Upload a funding document (drivers license, corp statement, bank months 1–6) to a funding application via file_base64. Dry-run then confirm. JPEG/PNG/HEIC/PDF ~4MB max.",
     input_schema: {
       type: "object",
       properties: {
@@ -4685,7 +5701,7 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "get_progress_report",
     description:
-      "Get one published OFG progress report round (structured fields; no PDF bytes).",
+      "Get one OFG progress report round (published scores/summary + latest Wizard session status/confidence when present; no PDF bytes). Returns crm_required when neither report nor wizard draft exists — staff should open Reports → Generate.",
     input_schema: {
       type: "object",
       properties: {
@@ -4693,10 +5709,29 @@ const ADMIN_AI_TOOLS: Array<{
         case_number: { type: "string" },
         round: {
           type: "integer",
-          description: "Round number 1–5",
+          description: "Round number 1–12 (case max_rounds; default program is 1–5)",
         },
       },
       required: ["round"],
+    },
+  },
+  {
+    name: "search_admins",
+    description:
+      "Look up OFG staff (super_admin/admin/agent) for work-task assignment and staff SMS. Returns id, name, email, phone, has_phone, language_owner_for. phone / has_phone = personal cell on People (admins.phone) used by send_sms to_admin_*; distinct from OFG Twilio business lines (list_ofg_phone_numbers). Use before create_work_task when the user names a person (e.g. Alex Gomez). Do not use for clients — that is search_clients.",
+    input_schema: {
+      type: "object",
+      properties: {
+        q: {
+          type: "string",
+          description:
+            "Optional name or email. Omit to list all assignable staff.",
+        },
+        limit: {
+          type: "integer",
+          description: "1–20, default 20",
+        },
+      },
     },
   },
   {
@@ -4809,7 +5844,7 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "create_prospect",
     description:
-      'Create a new prospect lead on OFG. ALWAYS call first with confirm=false to preview + phone duplicate check; show preview to the user; only re-call with confirm=true and confirm_phrase="CONFIRM" after they approve. Required: first_name, last_name, phone, preferred_language (en|es). If realtor/agent referred them, set referral_category=realtor_broker and referrer_first_name + referrer_last_name (+ referrer_phone). Realtor is NOT the client. If duplicates found, also pass confirm_duplicate=true and confirm_phrase="CONFIRM" after user approves.',
+      'Create a new prospect lead on OFG. ALWAYS call first with confirm=false to preview + phone/email duplicate check; show preview to the user; only re-call with confirm=true and confirm_phrase="CONFIRM" after they approve. Required: first_name, last_name, phone, preferred_language (en|es). If realtor/agent referred them, set referral_category=realtor_broker and referrer_first_name + referrer_last_name (+ referrer_phone). Realtor is NOT the client. If phone or email already matches a client, returns existing:true with that client_id/href — NEVER inserts a twin (no confirm_duplicate). Rejects placeholder phones.',
     input_schema: {
       type: "object",
       properties: {
@@ -4817,13 +5852,15 @@ const ADMIN_AI_TOOLS: Array<{
         last_name: { type: "string" },
         phone: {
           type: "string",
-          description: "Required. Used for duplicate check (last 10 digits).",
+          description:
+            "Required. Duplicate check uses last 10 digits (all client statuses). Placeholder phones are rejected.",
         },
         email: { type: "string" },
         preferred_language: {
           type: "string",
           enum: ["en", "es"],
-          description: "en → English owner (Lecca); es → Spanish owner (Angel)",
+          description:
+            "Client language. Language-owner assignment (People) is used only when assigned_admin_* is omitted.",
         },
         referral_category: {
           type: "string",
@@ -4839,6 +5876,17 @@ const ADMIN_AI_TOOLS: Array<{
             "Optional partner email — needed later for send_email to the referrer",
         },
         notes: { type: "string", description: "Optional intake notes" },
+        assigned_admin_id: {
+          type: "integer",
+          description:
+            "Staff admins.id from search_admins when the user names who owns this lead",
+        },
+        assigned_admin_name: {
+          type: "string",
+          description:
+            "Staff name (e.g. Alex Gomez). Overrides language-owner fallback.",
+        },
+        assigned_admin_email: { type: "string" },
         confirm: {
           type: "boolean",
           description:
@@ -4848,11 +5896,6 @@ const ADMIN_AI_TOOLS: Array<{
           type: "string",
           description: "Required with confirm=true. Must be exactly CONFIRM",
         },
-        confirm_duplicate: {
-          type: "boolean",
-          description:
-            "Required true when phone duplicates exist and user still wants to create",
-        },
       },
       required: ["first_name", "last_name", "phone", "preferred_language"],
     },
@@ -4860,7 +5903,7 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "create_work_task",
     description:
-      'Create a My Tasks / work-hub task on OFG (source of truth). HubSpot push is OFF by default — set push_hubspot=true only if the user asks to sync (avoids Claude+OFG duplicate HubSpot tasks). ALWAYS dry-run first (confirm=false), show preview, then confirm=true with confirm_phrase="CONFIRM". Auto-assigns the DB language owner (admins.language_owner_for matching preferred_language) unless assignee_admin_id is set. Never set status=done. Does not email clients.',
+      'Create a My Tasks / work-hub task on OFG (source of truth). HubSpot push is OFF by default — set push_hubspot=true only if the user asks to sync (avoids Claude+OFG duplicate HubSpot tasks). ALWAYS dry-run first (confirm=false), show preview, then confirm=true with confirm_phrase="CONFIRM". If the user names staff, pass assignee_admin_id or assignee_name (look up via search_admins) — NEVER encode the assignee only in the title. Language owner (admins.language_owner_for) is used only when no assignee is given. Never set status=done. Does not email clients.',
     input_schema: {
       type: "object",
       properties: {
@@ -4870,11 +5913,21 @@ const ADMIN_AI_TOOLS: Array<{
           type: "string",
           enum: ["en", "es"],
           description:
-            "Routes to the admin with language_owner_for=en|es when assignee omitted",
+            "Fallback only: routes to language_owner_for=en|es when no assignee_admin_id / assignee_name / assignee_email is set",
         },
         assignee_admin_id: {
           type: "integer",
-          description: "Optional override; otherwise DB language owner",
+          description:
+            "Staff admins.id from search_admins. Prefer this when the user names a person.",
+        },
+        assignee_name: {
+          type: "string",
+          description:
+            "Staff full or first name (e.g. \"Alex Gomez\"). Unique match required; do not use for clients.",
+        },
+        assignee_email: {
+          type: "string",
+          description: "Staff email if known",
         },
         case_id: { type: "integer" },
         case_number: { type: "string" },
@@ -4910,6 +5963,53 @@ const ADMIN_AI_TOOLS: Array<{
         },
       },
       required: ["title"],
+    },
+  },
+  {
+    name: "update_work_task",
+    description:
+      'Update an existing My Tasks / work-hub task (reassign, retitle, due date, status, priority, case link). ALWAYS dry-run first (confirm=false), then confirm=true with confirm_phrase="CONFIRM". If the user names staff, pass assignee_admin_id or assignee_name via search_admins — do not create a duplicate task. Does not email clients.',
+    input_schema: {
+      type: "object",
+      properties: {
+        task_id: {
+          type: "integer",
+          description: "admin_work_tasks.id from search_work_tasks",
+        },
+        title: { type: "string" },
+        description: { type: "string" },
+        status: {
+          type: "string",
+          enum: ["backlog", "doing", "done"],
+        },
+        priority: {
+          type: "string",
+          enum: ["low", "medium", "high", "urgent"],
+        },
+        due_at: {
+          type: "string",
+          description: "ISO datetime, YYYY-MM-DD, or empty string to clear",
+        },
+        labels: {
+          type: "array",
+          items: { type: "string" },
+        },
+        assignee_admin_id: {
+          type: "integer",
+          description: "Staff admins.id from search_admins",
+        },
+        assignee_name: {
+          type: "string",
+          description: 'Staff full or first name (e.g. "Alex Gomez")',
+        },
+        assignee_email: { type: "string" },
+        case_id: { type: "integer" },
+        case_number: { type: "string" },
+        client_id: { type: "integer" },
+        confirm: { type: "boolean" },
+        confirm_phrase: { type: "string" },
+      },
+      required: ["task_id"],
     },
   },
   {
@@ -4950,7 +6050,7 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "upload_case_document",
     description:
-      'Upload a client document (ID, SSN card, proof of address, PDF bank statement, etc.) into the OFG case file — same encryption/CDN path as the admin portal. ALWAYS dry-run first with confirm=false (safe preview — does not upload); only confirm=true with confirm_phrase="CONFIRM" after the user approves. client_id must be OFG id from search_clients (not HubSpot). Pass file_base64 (raw base64 or data: URL) + file_name; optional mime_type. Supported: JPEG, PNG, HEIC/HEIF, PDF (max ~3MB decoded). Optional expected_byte_length / expected_sha256 — if provided, the server rejects mismatches before storing (detects truncated base64). Response always includes source_byte_length, source_sha256, stored_byte_length, integrity_ok. doc_type: id_front | id_back | ssn_card | proof_of_address | other. Resolves latest active case when only client_id is given.',
+      'Upload a client document (ID, SSN card, proof of address, PDF bank statement, etc.) into the OFG case file — same encryption/CDN path as the admin portal. ALWAYS dry-run first with confirm=false (safe preview — does not upload); only confirm=true with confirm_phrase="CONFIRM" after the user approves. client_id must be OFG id from search_clients (not HubSpot). Pass file_base64 (raw base64 or data: URL) + file_name; optional mime_type. Supported: JPEG, PNG, HEIC/HEIF, PDF (max ~4MB decoded). Optional expected_byte_length / expected_sha256 — if provided, the server rejects mismatches before storing (detects truncated base64). Response always includes source_byte_length, source_sha256, stored_byte_length, integrity_ok. doc_type: id_front | id_back | ssn_card | proof_of_address | other. Resolves latest active case when only client_id is given.',
     input_schema: {
       type: "object",
       properties: {
@@ -5010,9 +6110,54 @@ const ADMIN_AI_TOOLS: Array<{
     },
   },
   {
+    name: "run_credit_analysis",
+    description:
+      "Run the free pre-sale credit analysis for a PROSPECT (no enrolled case required). Upload a credit report PDF and generate scores, negatives, action plan, and HTML narrative — same as /credit-analysis Agent mode. Use for leads before convert (e.g. closing call prep). ALWAYS dry-run first with confirm=false; only confirm=true with confirm_phrase=\"CONFIRM\" after approval. client_id from search_clients. Does NOT require an active case (unlike upload_case_document). PDF only; max ~4MB decoded. Optional client_goal, text_language (en|es), notes, email_opt_in (default false for staff runs).",
+    input_schema: {
+      type: "object",
+      properties: {
+        client_id: {
+          type: "integer",
+          description: "OFG clients.id from search_clients (prospect lead)",
+        },
+        file_name: {
+          type: "string",
+          description: "Original filename with .pdf extension",
+        },
+        file_base64: {
+          type: "string",
+          description:
+            "PDF bytes as base64 (optionally data:application/pdf;base64,...). Omit on dry-run to validate client only.",
+        },
+        client_goal: { type: "string" },
+        text_language: { type: "string", enum: ["en", "es"] },
+        notes: { type: "string" },
+        email_opt_in: {
+          type: "boolean",
+          description:
+            "If true, email the analysis to the client (default false for staff)",
+        },
+        rep_name: {
+          type: "string",
+          description: "Agent/rep name for agent mode narrative (optional)",
+        },
+        agent_phone: { type: "string" },
+        confirm: {
+          type: "boolean",
+          description: "false/omit = dry-run; true = run analysis",
+        },
+        confirm_phrase: {
+          type: "string",
+          description: "Required with confirm=true. Must be exactly CONFIRM",
+        },
+      },
+      required: ["client_id", "file_name"],
+    },
+  },
+  {
     name: "send_email",
     description:
-      'Send a branded email via the OFG platform mailer (Resend) to a CLIENT or a REFERRER (realtor/loan officer). ALWAYS dry-run first with confirm=false (safe preview — does not send); only confirm=true with confirm_phrase="CONFIRM" after the user approves the exact To/subject/body. Client: client_id from search_clients (not HubSpot); auto EMAIL case note; include_doc_upload_link mints a portal upload button. Referrer: referrer_id from search_referrers or get_client; logs on referrers.notes; pass client_id too to also stamp that client\'s file (e.g. email Miguel about Sofia). include_doc_upload_link is ignored for referrer sends (never mint client portal links for partners). Body is message content only (Hi/Hola added automatically). Does not send SMS (use send_sms). Refuses cancelled/inactive records and missing email.',
+      'Send a branded email via the OFG platform mailer (Resend) to a CLIENT or a REFERRER (realtor/loan officer). ALWAYS dry-run first with confirm=false (safe preview — does not send); only confirm=true with confirm_phrase="CONFIRM" after the user approves the exact To/subject/body. Client: client_id from search_clients (not HubSpot); auto EMAIL case note; include_doc_upload_link mints a portal upload button. Referrer: referrer_id from search_referrers or get_client; logs on referrers.notes; pass client_id too to also stamp that client\'s file (e.g. email Miguel about Sofia). include_doc_upload_link is ignored for referrer sends (never mint client portal links for partners). Optional single PDF/file attachment: attachment_case_document_id (from list_case_documents), attachment_round_report_id (published progress PDF), or attachment_base64 + attachment_filename (max ~4MB). Body is message content only (Hi/Hola added automatically). Does not send SMS (use send_sms). Refuses cancelled/inactive records and missing email. If client has no email, use update_client first.',
     input_schema: {
       type: "object",
       properties: {
@@ -5028,6 +6173,16 @@ const ADMIN_AI_TOOLS: Array<{
           description:
             "OFG referrers.id from search_referrers / get_client. When set, the email is sent to the referrer (not the client).",
         },
+        to_admin_id: {
+          type: "integer",
+          description:
+            "Staff admins.id from search_admins. When set, email goes to that staff member (not the client).",
+        },
+        to_admin_name: {
+          type: "string",
+          description: "Staff name (e.g. Alex Gomez) — look up via search_admins",
+        },
+        to_admin_email: { type: "string" },
         subject: {
           type: "string",
           description: "Email subject line",
@@ -5041,6 +6196,26 @@ const ADMIN_AI_TOOLS: Array<{
           type: "boolean",
           description:
             "Client emails only. If true, mint a portal /onboarding magic link and add an Upload documents button. Ignored when emailing a referrer.",
+        },
+        attachment_case_document_id: {
+          type: "integer",
+          description:
+            "Optional. client_documents.id from list_case_documents — attach that file (must belong to the client when emailing a client).",
+        },
+        attachment_round_report_id: {
+          type: "integer",
+          description:
+            "Optional. client_round_reports.id with a published PDF — attach that progress report PDF.",
+        },
+        attachment_base64: {
+          type: "string",
+          description:
+            "Optional. Raw base64 or data:…;base64,… file bytes when the PDF is not yet a case document (max ~4MB decoded).",
+        },
+        attachment_filename: {
+          type: "string",
+          description:
+            "Required with attachment_base64. Safe filename ending in .pdf/.png/.jpg/.jpeg/.gif/.webp/.txt/.csv",
         },
         confirm: {
           type: "boolean",
@@ -5056,9 +6231,68 @@ const ADMIN_AI_TOOLS: Array<{
     },
   },
   {
+    name: "send_round_report",
+    description:
+      'Resend a published OFG Round progress PDF to the CLIENT with the same secure delivery as Wizard publish: mint a short-lived /api/public/round-report-pdf/:token, send branded tplRoundComplete email (portal CTA + Download PDF CTA + optional PDF attachment), and optional twin SMS with the secure download URL. ALWAYS dry-run first with confirm=false (does not mint or send); only confirm=true with confirm_phrase="CONFIRM" after the user approves. Resolve the PDF via pdf_id (round_report_pdfs.id), round_report_id (client_round_reports.id), or round_number — use list_progress_reports first. Defaults: also_email=true, also_sms=true, attach_pdf=true, notify_partners=true (emails linked referral partners with the PDF). Does not publish/create rounds (use CRM Reports → Generate). Does not replace send_email for arbitrary mail.',
+    input_schema: {
+      type: "object",
+      properties: {
+        client_id: {
+          type: "integer",
+          description: "OFG clients.id from search_clients / list_progress_reports",
+        },
+        case_id: { type: "integer" },
+        case_number: { type: "string" },
+        pdf_id: {
+          type: "integer",
+          description:
+            "Preferred. round_report_pdfs.id from list_progress_reports.pdf_id",
+        },
+        round_report_id: {
+          type: "integer",
+          description: "client_round_reports.id from list_progress_reports.id",
+        },
+        round_number: {
+          type: "integer",
+          description:
+            "Round 1–12 when pdf_id / round_report_id are unknown (respects case max_rounds)",
+        },
+        also_email: {
+          type: "boolean",
+          description: "Default true. Send branded Round-complete email.",
+        },
+        also_sms: {
+          type: "boolean",
+          description:
+            "Default true. Twin SMS with secure download URL (respects client_reminder_sms_enabled).",
+        },
+        attach_pdf: {
+          type: "boolean",
+          description:
+            "Default true. Attach the Round PDF to the client (and partner) email.",
+        },
+        notify_partners: {
+          type: "boolean",
+          description:
+            "Default true. Also email linked referral partners with the PDF (same as wizard publish partner fan-out). Set false to skip partners.",
+        },
+        confirm: {
+          type: "boolean",
+          description:
+            "false/omit = dry-run preview; true = mint token + send after approval",
+        },
+        confirm_phrase: {
+          type: "string",
+          description: "Required with confirm=true. Must be exactly CONFIRM",
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: "send_sms",
     description:
-      'Send an SMS via Twilio from the acting admin\'s assigned OFG business number to a CLIENT or REFERRER. ALWAYS dry-run first with confirm=false (safe preview — does not send); only confirm=true with confirm_phrase="CONFIRM" after the user approves the exact To/body. Client: client_id from search_clients; logs into Conversations hub + SMS case note; returns message_id / provider_message_id / provider_status for HubSpot logging. Referrer: referrer_id from search_referrers; SMS to partner phone + notes on referrer (and optional client stamp). Requires the MCP-connected admin to have an OFG number in People. Closed threads auto-reopen on confirmed client sends. Does not send email (use send_email).',
+      'Send an SMS via Twilio from the acting admin\'s assigned OFG business number to a CLIENT or REFERRER. ALWAYS dry-run first with confirm=false (safe preview — does not send); only confirm=true with confirm_phrase="CONFIRM" after the user approves the exact To/body. Body must use real line breaks (never the two characters backslash-n). Client: client_id from search_clients; logs into Conversations hub + SMS case note; returns message_id / provider_message_id / provider_status for HubSpot logging. Referrer: referrer_id from search_referrers; SMS to partner phone + notes on referrer (and optional client stamp). Requires the MCP-connected admin to have an OFG number in People. Closed threads auto-reopen on confirmed client sends. Does not send email (use send_email).',
     input_schema: {
       type: "object",
       properties: {
@@ -5073,6 +6307,31 @@ const ADMIN_AI_TOOLS: Array<{
           type: "integer",
           description:
             "OFG referrers.id. When set, SMS goes to the referrer phone (not the client).",
+        },
+        to_admin_id: {
+          type: "integer",
+          description:
+            "Staff admins.id from search_admins. When set, SMS goes to that staff member.",
+        },
+        to_admin_name: {
+          type: "string",
+          description: "Staff name to text (e.g. Alex Gomez)",
+        },
+        to_admin_email: { type: "string" },
+        from_admin_id: {
+          type: "integer",
+          description:
+            "Send from this staff member's assigned OFG number instead of the MCP-connected admin",
+        },
+        from_admin_name: {
+          type: "string",
+          description: "Staff name whose OFG line to send from (search_admins)",
+        },
+        from_admin_email: { type: "string" },
+        from_phone_number_id: {
+          type: "integer",
+          description:
+            "admin_phone_numbers.id from list_ofg_phone_numbers (all=true)",
         },
         body: {
           type: "string",
@@ -5095,7 +6354,7 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "list_sms",
     description:
-      "Read recent SMS/MMS/call timeline messages for a client from the Conversations hub (inbound + outbound). Use before drafting a reply with send_sms. Returns message id, direction, channel, body preview, provider_status, timestamps. client_id from search_clients (not HubSpot).",
+      "Read recent SMS/MMS/call timeline messages for a client from the Conversations hub (inbound + outbound). Use before drafting a reply with send_sms. Returns message id, direction, channel, body preview, provider_status, timestamps. Call rows include call_insights_status and a short insights_summary when Claude call insights are ready — use get_call_insights for full transcript/sentiment/actions. client_id from search_clients (not HubSpot).",
     input_schema: {
       type: "object",
       properties: {
@@ -5105,6 +6364,30 @@ const ADMIN_AI_TOOLS: Array<{
         limit: {
           type: "integer",
           description: "Max messages (1–50, default 20)",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "get_call_insights",
+    description:
+      "Read Claude call/voicemail insights for a client (summary bullets, sentiment/feelings, topics, action items, risk flags, full transcript). Prefer message_id from list_sms when known; otherwise returns the latest ready call insights (or pending/failed status). Requires Conversations call recordings + CALL_INSIGHTS_ENABLED pipeline. client_id from search_clients.",
+    input_schema: {
+      type: "object",
+      properties: {
+        client_id: { type: "integer" },
+        case_id: { type: "integer" },
+        case_number: { type: "string" },
+        message_id: {
+          type: "integer",
+          description:
+            "conversation_messages.id for a specific call/voicemail row (from list_sms).",
+        },
+        limit: {
+          type: "integer",
+          description:
+            "When message_id omitted: max recent call rows to return (1–10, default 3)",
         },
       },
       required: [],
@@ -5128,6 +6411,31 @@ const ADMIN_AI_TOOLS: Array<{
           type: "integer",
           description:
             "OFG referrers.id. When set, SMS goes to the referrer phone (not the client).",
+        },
+        to_admin_id: {
+          type: "integer",
+          description:
+            "Staff admins.id from search_admins. When set, SMS goes to that staff member.",
+        },
+        to_admin_name: {
+          type: "string",
+          description: "Staff name to text (e.g. Alex Gomez)",
+        },
+        to_admin_email: { type: "string" },
+        from_admin_id: {
+          type: "integer",
+          description:
+            "Send from this staff member's assigned OFG number instead of the MCP-connected admin",
+        },
+        from_admin_name: {
+          type: "string",
+          description: "Staff name whose OFG line to send from (search_admins)",
+        },
+        from_admin_email: { type: "string" },
+        from_phone_number_id: {
+          type: "integer",
+          description:
+            "admin_phone_numbers.id from list_ofg_phone_numbers (all=true)",
         },
         body: {
           type: "string",
@@ -5309,16 +6617,25 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "upsert_progress_report",
     description:
-      "Create/update a structured staff credit-analysis on the client file (scores, summary). ALWAYS dry-run first. Client portal only shows PDF-published wizard reports — MCP drafts without PDF stay staff-only. Refuses to overwrite a published PDF row unless replace_published=true. No PDF bytes via MCP.",
+      "Staff-only progress notes on a round (summary + scores). NOT the OFG Progress Report Wizard — cannot upload Before/After PDFs or publish the branded client PDF. ALWAYS dry-run first. Requires score_before AND score_after (300–850); never invent scores. Client portal only shows Wizard-published PDFs. Refuses overwrite of a published PDF/wizard row unless replace_published=true after explicit user approval; prefer directing staff to Reports → Generate. For 'run Round N / generate progress PDF', return CRM handoff instead of writing.",
     input_schema: {
       type: "object",
       properties: {
         client_id: { type: "integer" },
         case_id: { type: "integer" },
         case_number: { type: "string" },
-        round: { type: "integer", description: "Round 1–5" },
-        score_before: { type: "integer" },
-        score_after: { type: "integer" },
+        round: {
+          type: "integer",
+          description: "Round 1–12 (case max_rounds; default program is 1–5)",
+        },
+        score_before: {
+          type: "integer",
+          description: "Required middle/overall before score 300–850 (from staff or Wizard)",
+        },
+        score_after: {
+          type: "integer",
+          description: "Required middle/overall after score 300–850 (from staff or Wizard)",
+        },
         items_removed: { type: "integer" },
         items_disputed: { type: "integer" },
         file_strength_score: { type: "integer", description: "0–100" },
@@ -5334,18 +6651,18 @@ const ADMIN_AI_TOOLS: Array<{
         replace_published: {
           type: "boolean",
           description:
-            "Required true to overwrite an existing round that already has a published PDF",
+            "Required true to overwrite an existing round that already has a published PDF — only after explicit user approval",
         },
         confirm: { type: "boolean" },
         confirm_phrase: { type: "string" },
       },
-      required: ["round", "summary_md"],
+      required: ["round", "summary_md", "score_before", "score_after"],
     },
   },
   {
     name: "upsert_payment_splits",
     description:
-      "Create payment installment (payment_splits) rows so list_clients_owing reflects real balances. ALWAYS dry-run first. Match client by OFG client_id or case. Does not charge cards. Pass splits_json as a JSON array. Optional send_payment_link=true mints Authorize.net /pay/:token URLs (returned as payment_links). Set replace_open=true to cancel existing pending/overdue splits on the case before insert (safe HubSpot backfill).",
+      "Create or update payment installment (payment_splits) rows so list_clients_owing reflects real balances. ALWAYS dry-run first. Match client by OFG client_id or case. Does not charge cards. Pass splits_json as a JSON array. To mark an existing installment paid, prefer update_payment_split(split_id) — upsert with status=paid matches open rows by due_date+amount and updates them (does not leave a pending twin). Skips insert when the same due_date+amount is already paid. Optional send_payment_link=true mints Authorize.net /pay/:token URLs. Set replace_open=true to cancel existing pending/overdue splits on the case before insert (HubSpot backfill). For a simple discounted Zelle/cash deal, prefer set_case_payment_plan.",
     input_schema: {
       type: "object",
       properties: {
@@ -5355,7 +6672,7 @@ const ADMIN_AI_TOOLS: Array<{
         splits_json: {
           type: "string",
           description:
-            "JSON array of {label, amount_cents, due_date (YYYY-MM-DD), status?: pending|paid|overdue|cancelled, notes?, send_payment_link?: boolean}. Max 20.",
+            "JSON array of {label, amount_cents, due_date (YYYY-MM-DD), status?: pending|paid|overdue|cancelled, notes?, send_payment_link?: boolean}. Max 20. status=paid updates a matching open installment when present.",
         },
         send_payment_link: {
           type: "boolean",
@@ -5367,10 +6684,80 @@ const ADMIN_AI_TOOLS: Array<{
           description:
             "If true, cancel existing pending/overdue/processing splits on the case before creating new ones",
         },
+        payment_method: {
+          type: "string",
+          enum: ["cash", "zelle", "venmo", "card_offline", "other"],
+          description:
+            "When marking rows paid, stored on the manual payments.metadata_json",
+        },
         confirm: { type: "boolean" },
         confirm_phrase: { type: "string" },
       },
       required: ["splits_json"],
+    },
+  },
+  {
+    name: "set_case_payment_plan",
+    description:
+      "Set (or replace) a client's OFG payment plan at an agreed total — use for discounted Zelle/cash/offline deals so Pipeline balance matches what they owe (NOT coupon codes). ALWAYS dry-run first. Defaults to replace_open=true (cancels pending/overdue/processing installments, keeps paid history). Pass total_cents (required). Optional installments_json for multi-pay; if omitted, creates one installment for the full total. Optional case_note for staff audit. Optional mark_paid + payment_method when money already received. Does not charge cards or create Stripe/Authorize promo codes.",
+    input_schema: {
+      type: "object",
+      properties: {
+        client_id: { type: "integer" },
+        case_id: { type: "integer" },
+        case_number: { type: "string" },
+        total_cents: {
+          type: "integer",
+          description:
+            "Agreed contract total in cents (e.g. 99700 for $997). Must equal sum of installments.",
+        },
+        due_date: {
+          type: "string",
+          description:
+            "YYYY-MM-DD for single-payment plan when installments_json omitted (default: today LA)",
+        },
+        label: {
+          type: "string",
+          description: "Label for single-payment plan (default: Agreed payment plan)",
+        },
+        installments_json: {
+          type: "string",
+          description:
+            "Optional JSON array of {label?, amount_cents, due_date, notes?}. Sum must equal total_cents. Max 20.",
+        },
+        notes: {
+          type: "string",
+          description: "Notes stored on each new installment row",
+        },
+        case_note: {
+          type: "string",
+          description:
+            "Optional staff case note appended on confirm (e.g. Zelle deal summary)",
+        },
+        replace_open: {
+          type: "boolean",
+          description:
+            "Default true — cancel open installments before inserting the new plan",
+        },
+        mark_paid: {
+          type: "boolean",
+          description:
+            "If true, create the plan as paid and write manual ledger rows (money already received)",
+        },
+        payment_method: {
+          type: "string",
+          enum: ["cash", "zelle", "venmo", "card_offline", "other"],
+          description: "How they paid / will pay (stored on ledger when mark_paid)",
+        },
+        send_payment_link: {
+          type: "boolean",
+          description:
+            "Default false for offline deals. If true, mint Authorize.net /pay links on open rows",
+        },
+        confirm: { type: "boolean" },
+        confirm_phrase: { type: "string" },
+      },
+      required: ["total_cents"],
     },
   },
   {
@@ -5388,10 +6775,87 @@ const ADMIN_AI_TOOLS: Array<{
         amount_cents: { type: "integer" },
         due_date: { type: "string" },
         notes: { type: "string" },
+        payment_method: {
+          type: "string",
+          enum: ["cash", "zelle", "venmo", "card_offline", "other"],
+          description: "Stored on manual payments.metadata_json when marking paid",
+        },
         confirm: { type: "boolean" },
         confirm_phrase: { type: "string" },
       },
       required: ["split_id"],
+    },
+  },
+  {
+    name: "list_coupons",
+    description:
+      "List checkout promo coupons (Admin → Payments → Coupons). Use before create_coupon to avoid duplicate codes. These apply at public /register checkout — NOT for offline Zelle deals (use set_case_payment_plan for those).",
+    input_schema: {
+      type: "object",
+      properties: {
+        active_only: {
+          type: "boolean",
+          description: "If true, only return is_active=1 coupons (default true)",
+        },
+        q: {
+          type: "string",
+          description: "Optional search by code or description",
+        },
+        limit: { type: "integer", description: "Max rows (default 20, max 50)" },
+      },
+    },
+  },
+  {
+    name: "create_coupon",
+    description:
+      "Create a checkout promo coupon code for public registration (/register). ALWAYS dry-run first. Code is uppercased A-Z0-9_-. discount_type=percentage (0–100) or fixed (cents). For offline Zelle/cash agreed totals on an enrolled client, use set_case_payment_plan instead — do not create a coupon.",
+    input_schema: {
+      type: "object",
+      properties: {
+        code: {
+          type: "string",
+          description: "Promo code e.g. SAVE200 or CESAR50 (letters/digits/_/-)",
+        },
+        description: { type: "string" },
+        discount_type: {
+          type: "string",
+          enum: ["percentage", "fixed"],
+          description:
+            "percentage = off list price (1–100); fixed = cents off (e.g. 20000 = $200)",
+        },
+        discount_value: {
+          type: "integer",
+          description: "Percent 1–100 or fixed cents > 0",
+        },
+        min_amount_cents: {
+          type: "integer",
+          description: "Minimum cart cents before coupon applies (default 0)",
+        },
+        max_uses: {
+          type: "integer",
+          description: "Optional max redemptions; omit for unlimited",
+        },
+        applicable_package_ids: {
+          type: "string",
+          description:
+            "Optional JSON array of package IDs this coupon applies to; omit = all packages",
+        },
+        valid_from: {
+          type: "string",
+          description: "Optional ISO datetime when coupon becomes valid",
+        },
+        expires_at: {
+          type: "string",
+          description: "Optional ISO datetime when coupon expires",
+        },
+        is_active: {
+          type: "boolean",
+          description: "Default true",
+        },
+        confirm: { type: "boolean" },
+        confirm_phrase: { type: "string" },
+      },
+      required: ["code", "discount_type", "discount_value"],
     },
   },
 ];
@@ -5409,6 +6873,10 @@ type AdminAiToolResult =
       ok: false;
       error: string;
       message: string;
+      /** Machine-readable refuse reason (e.g. contact_required). */
+      code?: string;
+      /** Extra payload (e.g. ambiguous staff matches). */
+      data?: unknown;
       /** Present when the action must be finished in the OFG CRM admin UI. */
       crm_required?: AdminAiCrmRequiredPayload;
     };
@@ -5476,6 +6944,37 @@ function adminAiTruncateJson(value: unknown): string {
   const s = JSON.stringify(value);
   if (s.length <= ADMIN_AI_TOOL_RESULT_MAX) return s;
   return `${s.slice(0, ADMIN_AI_TOOL_RESULT_MAX)}…[truncated]`;
+}
+
+/** LLM / JSON sometimes stores escapes as literal `\u00e9`, `\n`, `\t`. */
+export function decodeLiteralUnicodeEscapes(input: string): string {
+  if (!input || !input.includes("\\")) return input;
+  if (!/\\[nrtu]/.test(input)) return input;
+  return input
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, hex: string) =>
+      String.fromCharCode(parseInt(hex, 16)),
+    )
+    .replace(/\\n/g, "\n")
+    .replace(/\\r/g, "\r")
+    .replace(/\\t/g, "\t");
+}
+
+/** Trim + decode + clip — use for all Claude / tool string fields before store or display. */
+function clipDecodedStr(s: unknown, max: number): string | null {
+  if (typeof s !== "string") return null;
+  const t = decodeLiteralUnicodeEscapes(s.trim());
+  if (!t) return null;
+  return t.slice(0, max);
+}
+
+function normalizeWorkTaskTitle(raw: unknown): string {
+  return decodeLiteralUnicodeEscapes(String(raw ?? "").trim()).slice(0, 255);
+}
+
+function normalizeWorkTaskDescription(raw: unknown): string | null {
+  const s = decodeLiteralUnicodeEscapes(String(raw ?? "").trim());
+  if (!s) return null;
+  return s.slice(0, 5000);
 }
 
 async function adminAiResolveCaseRow(
@@ -5595,6 +7094,13 @@ function adminAiConfirmTrue(raw: unknown): boolean {
   return raw === true || raw === "true" || raw === 1 || raw === "1";
 }
 
+/** Optional booleans that default true when omitted (Claude often omits). */
+function adminAiBoolDefaultTrue(raw: unknown): boolean {
+  if (raw === undefined || raw === null || raw === "") return true;
+  if (raw === false || raw === "false" || raw === 0 || raw === "0") return false;
+  return adminAiConfirmTrue(raw);
+}
+
 /** Writes require confirm=true AND exact confirm_phrase CONFIRM. */
 const ADMIN_AI_WRITE_CONFIRM_PHRASE = "CONFIRM";
 
@@ -5619,6 +7125,326 @@ function adminAiWriteConfirmed(
   return { ok: true };
 }
 
+type AdminAiEmailAttachment = {
+  filename: string;
+  content: Buffer;
+  contentType: string;
+  source:
+    | "case_document"
+    | "round_report"
+    | "base64"
+    | null;
+  source_id?: number | null;
+};
+
+async function adminAiLoadEmailAttachment(opts: {
+  args: Record<string, unknown>;
+  clientId: number | null;
+}): Promise<
+  | { ok: true; attachment: AdminAiEmailAttachment | null }
+  | { ok: false; error: string; message: string }
+> {
+  const docId =
+    opts.args.attachment_case_document_id != null &&
+    Number(opts.args.attachment_case_document_id) > 0
+      ? Number(opts.args.attachment_case_document_id)
+      : null;
+  const reportId =
+    opts.args.attachment_round_report_id != null &&
+    Number(opts.args.attachment_round_report_id) > 0
+      ? Number(opts.args.attachment_round_report_id)
+      : null;
+  const b64Raw =
+    typeof opts.args.attachment_base64 === "string"
+      ? String(opts.args.attachment_base64).trim()
+      : "";
+  const sources = [docId, reportId, b64Raw ? true : null].filter(Boolean);
+  if (sources.length === 0) {
+    return { ok: true, attachment: null };
+  }
+  if (sources.length > 1) {
+    return {
+      ok: false,
+      error: "invalid_args",
+      message:
+        "Use only one of attachment_case_document_id, attachment_round_report_id, or attachment_base64",
+    };
+  }
+
+  const maxBytes = VERCEL_SAFE_UPLOAD_MAX_BYTES;
+
+  if (docId) {
+    if (!opts.clientId) {
+      return {
+        ok: false,
+        error: "invalid_args",
+        message:
+          "attachment_case_document_id requires a client_id (or case) so ownership can be verified",
+      };
+    }
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, client_id, file_name, mime_type, file_size, storage_provider,
+              storage_key, encrypted, enc_iv, enc_tag
+       FROM client_documents WHERE id = ? LIMIT 1`,
+      [docId],
+    );
+    if (!rows[0] || Number(rows[0].client_id) !== opts.clientId) {
+      return {
+        ok: false,
+        error: "not_found",
+        message: "Case document not found for this client",
+      };
+    }
+    const doc = rows[0];
+    if (Number(doc.file_size || 0) > maxBytes) {
+      return {
+        ok: false,
+        error: "too_large",
+        message: `Attachment exceeds ${Math.round(maxBytes / (1024 * 1024))}MB limit`,
+      };
+    }
+    let buf: Buffer;
+    try {
+      if (doc.storage_provider === "cdn") {
+        const cdnRes = await fetch(String(doc.storage_key));
+        if (!cdnRes.ok) {
+          return {
+            ok: false,
+            error: "send_failed",
+            message: "Could not download case document from storage",
+          };
+        }
+        const raw = Buffer.from(await cdnRes.arrayBuffer());
+        buf =
+          doc.encrypted && doc.enc_iv && doc.enc_tag
+            ? decryptFile(raw, String(doc.enc_iv), String(doc.enc_tag))
+            : raw;
+      } else {
+        const raw = await fs.promises.readFile(
+          path.join(UPLOADS_DIR, String(doc.storage_key)),
+        );
+        buf =
+          doc.encrypted && doc.enc_iv && doc.enc_tag
+            ? decryptFile(raw, String(doc.enc_iv), String(doc.enc_tag))
+            : raw;
+      }
+    } catch (e: any) {
+      return {
+        ok: false,
+        error: "send_failed",
+        message: String(e?.message || "Failed to load case document").slice(
+          0,
+          300,
+        ),
+      };
+    }
+    if (buf.length > maxBytes) {
+      return {
+        ok: false,
+        error: "too_large",
+        message: `Attachment exceeds ${Math.round(maxBytes / (1024 * 1024))}MB limit`,
+      };
+    }
+    return {
+      ok: true,
+      attachment: {
+        filename: String(doc.file_name || `document-${docId}.bin`),
+        content: buf,
+        contentType: String(doc.mime_type || "application/octet-stream"),
+        source: "case_document",
+        source_id: docId,
+      },
+    };
+  }
+
+  if (reportId) {
+    if (!opts.clientId) {
+      return {
+        ok: false,
+        error: "invalid_args",
+        message:
+          "attachment_round_report_id requires a client_id (or case) so ownership can be verified",
+      };
+    }
+    // Wizard publish stores the file in round_report_pdfs; legacy rows may only
+    // have client_round_reports.pdf_storage_key.
+    const pdfRow = await findRoundReportPdfRow({
+      clientId: opts.clientId,
+      roundReportId: reportId,
+    });
+    if (pdfRow) {
+      const buf = await loadRoundReportPdfBytes(pdfRow);
+      if (!buf || buf.length === 0) {
+        return {
+          ok: false,
+          error: "send_failed",
+          message: "Could not download round report PDF from storage",
+        };
+      }
+      if (buf.length > maxBytes) {
+        return {
+          ok: false,
+          error: "too_large",
+          message: `Attachment exceeds ${Math.round(maxBytes / (1024 * 1024))}MB limit`,
+        };
+      }
+      const fname =
+        String(pdfRow.file_name || "").trim() ||
+        `OFG_Progress_Report_R${pdfRow.round_number}.pdf`;
+      return {
+        ok: true,
+        attachment: {
+          filename: fname,
+          content: buf,
+          contentType: "application/pdf",
+          source: "round_report",
+          source_id: reportId,
+        },
+      };
+    }
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, client_id, round_number, pdf_file_name, pdf_storage_key,
+              pdf_storage_provider, pdf_encrypted, pdf_enc_iv, pdf_enc_tag
+       FROM client_round_reports
+       WHERE id = ? AND pdf_storage_key IS NOT NULL LIMIT 1`,
+      [reportId],
+    );
+    if (!rows[0] || Number(rows[0].client_id) !== opts.clientId) {
+      return {
+        ok: false,
+        error: "not_found",
+        message: "Round report PDF not found for this client",
+      };
+    }
+    const rep = rows[0];
+    let buf: Buffer;
+    try {
+      if (rep.pdf_storage_provider === "cdn") {
+        const cdnRes = await fetch(String(rep.pdf_storage_key));
+        if (!cdnRes.ok) {
+          return {
+            ok: false,
+            error: "send_failed",
+            message: "Could not download round report PDF from storage",
+          };
+        }
+        const raw = Buffer.from(await cdnRes.arrayBuffer());
+        buf =
+          rep.pdf_encrypted && rep.pdf_enc_iv && rep.pdf_enc_tag
+            ? decryptFile(raw, String(rep.pdf_enc_iv), String(rep.pdf_enc_tag))
+            : raw;
+      } else {
+        const raw = await fs.promises.readFile(
+          path.join(UPLOADS_DIR, String(rep.pdf_storage_key)),
+        );
+        buf =
+          rep.pdf_encrypted && rep.pdf_enc_iv && rep.pdf_enc_tag
+            ? decryptFile(raw, String(rep.pdf_enc_iv), String(rep.pdf_enc_tag))
+            : raw;
+      }
+    } catch (e: any) {
+      return {
+        ok: false,
+        error: "send_failed",
+        message: String(e?.message || "Failed to load round report PDF").slice(
+          0,
+          300,
+        ),
+      };
+    }
+    if (buf.length > maxBytes) {
+      return {
+        ok: false,
+        error: "too_large",
+        message: `Attachment exceeds ${Math.round(maxBytes / (1024 * 1024))}MB limit`,
+      };
+    }
+    const fname =
+      String(rep.pdf_file_name || "").trim() ||
+      `OFG_Progress_Report_R${rep.round_number}.pdf`;
+    return {
+      ok: true,
+      attachment: {
+        filename: fname,
+        content: buf,
+        contentType: "application/pdf",
+        source: "round_report",
+        source_id: reportId,
+      },
+    };
+  }
+
+  // base64 path
+  const filename = String(opts.args.attachment_filename || "")
+    .trim()
+    .replace(/[/\\]/g, "_")
+    .slice(0, 180);
+  if (!filename) {
+    return {
+      ok: false,
+      error: "invalid_args",
+      message: "attachment_filename is required with attachment_base64",
+    };
+  }
+  if (
+    !/\.(pdf|png|jpe?g|gif|webp|txt|csv)$/i.test(filename)
+  ) {
+    return {
+      ok: false,
+      error: "invalid_args",
+      message:
+        "attachment_filename must end in .pdf, .png, .jpg, .jpeg, .gif, .webp, .txt, or .csv",
+    };
+  }
+  let b64 = b64Raw;
+  const dataUrl = /^data:([^;]+);base64,(.+)$/i.exec(b64);
+  let contentType = "application/octet-stream";
+  if (dataUrl) {
+    contentType = dataUrl[1] || contentType;
+    b64 = dataUrl[2];
+  } else if (/\.pdf$/i.test(filename)) {
+    contentType = "application/pdf";
+  } else if (/\.png$/i.test(filename)) {
+    contentType = "image/png";
+  } else if (/\.jpe?g$/i.test(filename)) {
+    contentType = "image/jpeg";
+  }
+  let buf: Buffer;
+  try {
+    buf = Buffer.from(b64.replace(/\s/g, ""), "base64");
+  } catch {
+    return {
+      ok: false,
+      error: "invalid_args",
+      message: "attachment_base64 is not valid base64",
+    };
+  }
+  if (!buf.length) {
+    return {
+      ok: false,
+      error: "invalid_args",
+      message: "attachment_base64 decoded to empty file",
+    };
+  }
+  if (buf.length > maxBytes) {
+    return {
+      ok: false,
+      error: "too_large",
+      message: `Attachment exceeds ${Math.round(maxBytes / (1024 * 1024))}MB limit`,
+    };
+  }
+  return {
+    ok: true,
+    attachment: {
+      filename,
+      content: buf,
+      contentType,
+      source: "base64",
+      source_id: null,
+    },
+  };
+}
+
 /** When MCP marks a split paid, mirror admin PUT: ledger row + commission. */
 async function adminAiRecordManualSplitPayment(opts: {
   splitId: number;
@@ -5627,12 +7453,21 @@ async function adminAiRecordManualSplitPayment(opts: {
   amountCents: number;
   currency?: string | null;
   label?: string | null;
+  paymentMethod?: string | null;
 }): Promise<number | null> {
+  const methodRaw = String(opts.paymentMethod || "")
+    .trim()
+    .toLowerCase();
+  const allowedMethods = ["cash", "zelle", "venmo", "card_offline", "other"];
+  const paymentMethod = allowedMethods.includes(methodRaw) ? methodRaw : null;
+  const metadata = paymentMethod
+    ? JSON.stringify({ payment_method: paymentMethod, source: "admin_ai" })
+    : null;
   const [manualPayment] = await pool.query<ResultSetHeader>(
     `INSERT INTO payments
        (client_id, case_id, split_id, amount_cents, currency,
-        status, provider, provider_transaction_id, paid_at)
-     VALUES (?, ?, ?, ?, ?, 'succeeded', 'manual', ?, NOW())`,
+        status, provider, provider_transaction_id, metadata_json, paid_at)
+     VALUES (?, ?, ?, ?, ?, 'succeeded', 'manual', ?, ?, NOW())`,
     [
       opts.clientId,
       opts.caseId,
@@ -5640,6 +7475,7 @@ async function adminAiRecordManualSplitPayment(opts: {
       opts.amountCents,
       opts.currency || "USD",
       `manual-ai-${crypto.randomUUID()}`,
+      metadata,
     ],
   );
   const paymentId = Number(manualPayment.insertId);
@@ -5670,6 +7506,32 @@ async function adminAiRecordManualSplitPayment(opts: {
   return paymentId;
 }
 
+/**
+ * Find an existing installment on the same case with the same due date + amount.
+ * Used to prevent duplicate pending/paid twins when MCP/admin records payment
+ * by inserting a new row instead of updating the open one.
+ */
+async function findMatchingPaymentSplit(opts: {
+  caseId: number;
+  dueDate: string;
+  amountCents: number;
+  statuses: Array<"pending" | "processing" | "paid" | "overdue" | "cancelled">;
+}): Promise<RowDataPacket | null> {
+  if (!(opts.caseId > 0) || !opts.statuses.length) return null;
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT *
+     FROM payment_splits
+     WHERE case_id = ?
+       AND due_date = ?
+       AND amount_cents = ?
+       AND status IN (?)
+     ORDER BY id ASC
+     LIMIT 1`,
+    [opts.caseId, opts.dueDate, opts.amountCents, opts.statuses],
+  );
+  return rows[0] || null;
+}
+
 async function adminAiHubspotPushPreview(adminId: number): Promise<string> {
   const mode = hubspotAuthMode();
   if (!mode) return "ofg_only_hubspot_not_configured";
@@ -5693,7 +7555,8 @@ async function adminAiFindPhoneDuplicates(
 ): Promise<Array<Record<string, unknown>>> {
   const last10 = normalizePhoneLast10(phone);
   if (!last10) return [];
-  const where = ["c.status <> 'cancelled'", "c.phone IS NOT NULL"];
+  // Include ALL statuses (incl. cancelled) so cancelled phones still block twins.
+  const where = ["c.phone IS NOT NULL"];
   const params: any[] = [];
   if (scopedAffiliateIds && scopedAffiliateIds.length > 0) {
     where.push("c.affiliate_id IN (?)");
@@ -5868,6 +7731,116 @@ async function executeAdminAiTool(
       };
     }
 
+    if (
+      name === "search_contacts" ||
+      name === "get_contact" ||
+      name === "create_contact" ||
+      name === "update_contact" ||
+      name === "convert_contact" ||
+      name === "send_contact_sms" ||
+      name === "send_contact_email"
+    ) {
+      // CRM Contacts are admin-only (same as denyAffiliateAccess on REST routes)
+      if (scope) {
+        return {
+          ok: false,
+          error: "forbidden",
+          message: "Contacts tools are not available to affiliate accounts",
+        };
+      }
+    }
+
+    if (name === "search_contacts") {
+      const q = String(args.q || "")
+        .trim()
+        .slice(0, 120);
+      if (!q) {
+        return { ok: false, error: "invalid_args", message: "q is required" };
+      }
+      const limit = adminAiClampLimit(args.limit, 10);
+      const like = likeContains(q);
+      const parts = [
+        `c.email LIKE ? ESCAPE '!'`,
+        `c.first_name LIKE ? ESCAPE '!'`,
+        `c.last_name LIKE ? ESCAPE '!'`,
+        `CONCAT(c.first_name,' ',c.last_name) LIKE ? ESCAPE '!'`,
+        `c.phone LIKE ? ESCAPE '!'`,
+      ];
+      const params: any[] = [like, like, like, like, like];
+      const digits = String(q || "").replace(/\D/g, "");
+      if (digits.length >= 7 && digits.length <= 15) {
+        parts.push(`${mysqlPhoneDigitsExpr("c.phone")} LIKE ?`);
+        params.push(`%${digits}%`);
+      }
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT c.id, c.first_name, c.last_name, c.email, c.phone,
+                c.preferred_language, c.city, c.state
+         FROM contacts c
+         WHERE c.deleted_at IS NULL
+           AND c.converted_client_id IS NULL
+           AND (${parts.join(" OR ")})
+         ORDER BY c.updated_at DESC, c.id DESC
+         LIMIT ?`,
+        [...params, limit],
+      );
+      return {
+        ok: true,
+        data: {
+          contacts: rows.map((r) => ({
+            id: Number(r.id),
+            name: `${r.first_name || ""} ${r.last_name || ""}`.trim(),
+            email: r.email,
+            phone: r.phone,
+            preferred_language: r.preferred_language === "es" ? "es" : "en",
+            city: r.city || null,
+            state: r.state || null,
+            href: `/admin/contacts`,
+          })),
+        },
+      };
+    }
+
+    if (name === "get_contact") {
+      const contactId =
+        args.contact_id != null && Number(args.contact_id) > 0
+          ? Number(args.contact_id)
+          : 0;
+      if (!contactId) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message: "contact_id is required",
+        };
+      }
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM contacts
+         WHERE id = ? AND deleted_at IS NULL
+         LIMIT 1`,
+        [contactId],
+      );
+      if (!rows[0]) {
+        return {
+          ok: false,
+          error: "not_found",
+          message: "Contact not found",
+        };
+      }
+      const mapped = mapCrmContactRow(rows[0]);
+      return {
+        ok: true,
+        data: {
+          ...mapped,
+          name: `${mapped.first_name} ${mapped.last_name}`.trim(),
+          href: `/admin/contacts`,
+          on_pipeline: mapped.converted_client_id != null,
+          guidance:
+            mapped.converted_client_id != null
+              ? `Already converted to client_id=${mapped.converted_client_id}. Open /admin/pipeline?client=${mapped.converted_client_id}.`
+              : "Address-book contact (not on Pipeline). Use convert_contact to add as prospect when ready.",
+        },
+      };
+    }
+
     if (name === "search_referrers") {
       const q = String(args.q || "")
         .trim()
@@ -6032,6 +8005,193 @@ async function executeAdminAiTool(
       };
     }
 
+    if (name === "update_client") {
+      const resolved = await adminAiResolveClientId(args, scopedIds);
+      if (resolved.ok === false) {
+        return {
+          ok: false,
+          error: resolved.error,
+          message: resolved.message,
+        };
+      }
+      const clientId = resolved.clientId;
+      const [existing] = await pool.query<RowDataPacket[]>(
+        `SELECT id, first_name, last_name, email, phone, preferred_language,
+                assigned_admin_id, status
+         FROM clients WHERE id = ? LIMIT 1`,
+        [clientId],
+      );
+      if (!existing[0]) {
+        return {
+          ok: false,
+          error: "not_found",
+          message: "Client not found",
+        };
+      }
+
+      const patch: Record<string, string | number | null> = {};
+      if (args.email !== undefined) {
+        const email = String(args.email || "")
+          .trim()
+          .toLowerCase();
+        if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message: "Invalid email address",
+          };
+        }
+        patch.email = email || null;
+      }
+      if (args.phone !== undefined) {
+        patch.phone = String(args.phone || "").trim().slice(0, 20) || null;
+      }
+      if (args.first_name !== undefined) {
+        const v = String(args.first_name || "").trim().slice(0, 100);
+        if (!v) {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message: "first_name cannot be empty",
+          };
+        }
+        patch.first_name = v;
+      }
+      if (args.last_name !== undefined) {
+        const v = String(args.last_name || "").trim().slice(0, 100);
+        if (!v) {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message: "last_name cannot be empty",
+          };
+        }
+        patch.last_name = v;
+      }
+      if (args.preferred_language !== undefined) {
+        const lang = String(args.preferred_language || "").trim();
+        if (lang !== "en" && lang !== "es") {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message: "preferred_language must be en or es",
+          };
+        }
+        patch.preferred_language = lang;
+      }
+      const namedOwner = await resolveMcpStaffAssignee({
+        adminId: args.assigned_admin_id,
+        name: args.assigned_admin_name,
+        email: args.assigned_admin_email,
+      });
+      if (namedOwner.ok === false) return namedOwner;
+      if (namedOwner.requested) {
+        patch.assigned_admin_id = namedOwner.id;
+      } else if (
+        patch.preferred_language === "en" ||
+        patch.preferred_language === "es"
+      ) {
+        const ownerId = await resolveLanguageOwnerAdminId(
+          patch.preferred_language,
+        );
+        patch.assigned_admin_id = ownerId;
+      }
+
+      if (Object.keys(patch).length === 0) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message:
+            "Provide at least one of email, phone, first_name, last_name, preferred_language, assigned_admin_id / assigned_admin_name",
+        };
+      }
+
+      const nextEmail =
+        patch.email !== undefined
+          ? (patch.email as string | null)
+          : existing[0].email
+            ? String(existing[0].email)
+            : null;
+      const nextPhone =
+        patch.phone !== undefined
+          ? (patch.phone as string | null)
+          : existing[0].phone
+            ? String(existing[0].phone)
+            : null;
+      if (!nextEmail && !nextPhone) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message: "Email or phone is required — cannot clear both",
+          code: "contact_required",
+        };
+      }
+
+      const preview = {
+        client_id: clientId,
+        case_id: resolved.caseId,
+        case_number: resolved.caseNumber,
+        current: {
+          name: `${existing[0].first_name || ""} ${existing[0].last_name || ""}`.trim(),
+          email: existing[0].email,
+          phone: existing[0].phone,
+          preferred_language: existing[0].preferred_language,
+          assigned_admin_id: existing[0].assigned_admin_id,
+        },
+        patch,
+        note:
+          namedOwner.requested
+            ? "assigned_admin_* sets the People owner and is not overwritten by preferred_language."
+            : patch.preferred_language != null
+              ? "preferred_language change also updates assigned_admin_id to the language owner."
+              : undefined,
+      };
+
+      if (!adminAiWriteConfirmed(args).ok) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: true,
+            preview,
+            required_confirm_phrase: ADMIN_AI_WRITE_CONFIRM_PHRASE,
+            guidance: `Show client contact/language update. After approval, re-call with confirm=true and confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`,
+          },
+        };
+      }
+
+      const sets = Object.keys(patch).map((k) => `${k} = ?`);
+      try {
+        await pool.query(
+          `UPDATE clients SET ${sets.join(", ")} WHERE id = ?`,
+          [...Object.values(patch), clientId],
+        );
+      } catch (err: any) {
+        if (err?.code === "ER_DUP_ENTRY") {
+          return {
+            ok: false,
+            error: "duplicate_email",
+            message: "That email is already used by another client",
+          };
+        }
+        throw err;
+      }
+
+      const [updated] = await pool.query<RowDataPacket[]>(
+        `SELECT id, first_name, last_name, email, phone, preferred_language,
+                assigned_admin_id, status, pipeline_stage
+         FROM clients WHERE id = ? LIMIT 1`,
+        [clientId],
+      );
+      return {
+        ok: true,
+        data: {
+          client: updated[0],
+          href: `/admin/pipeline?client=${clientId}`,
+        },
+      };
+    }
+
     if (name === "attach_referrer") {
       const clientId = Number(args.client_id);
       if (!Number.isFinite(clientId) || clientId <= 0) {
@@ -6142,7 +8302,7 @@ async function executeAdminAiTool(
           : hasPrimary
             ? "secondary"
             : "primary";
-      const notifyOnRound = args.notify_on_round === false ? false : true;
+      const notifyOnRound = true; // Always on — César Sep 2026 (no toggle)
       const preview = {
         client_id: clientId,
         client_name:
@@ -6193,7 +8353,7 @@ async function executeAdminAiTool(
       const links = existing.map((l) => ({
         referrer_id: Number(l.referrer_id),
         role: String(l.role || "secondary"),
-        notify_on_round: Number(l.notify_on_round) !== 0,
+        notify_on_round: true,
       }));
       if (role === "primary") {
         for (const l of links) {
@@ -6850,7 +9010,7 @@ async function executeAdminAiTool(
         }
         if (fileBuffer && fileBuffer.length > ADMIN_AI_DOC_MAX_BYTES) {
           validationErrors.push(
-            `File exceeds ${ADMIN_AI_DOC_MAX_BYTES} bytes (~3MB)`,
+            `File exceeds ${ADMIN_AI_DOC_MAX_BYTES} bytes (~${Math.round(ADMIN_AI_DOC_MAX_BYTES / (1024 * 1024))}MB)`,
           );
         }
 
@@ -7062,47 +9222,131 @@ async function executeAdminAiTool(
         const [reports] = await pool.query<RowDataPacket[]>(
           `SELECT id, round_number, score_before, score_after, items_removed,
                   items_disputed, report_locale, pdf_file_name, created_at,
-                  CASE WHEN pdf_storage_key IS NOT NULL OR wizard_session_id IS NOT NULL
-                       THEN 1 ELSE 0 END AS has_pdf
+                  wizard_session_id,
+                  CASE WHEN pdf_storage_key IS NOT NULL THEN 1 ELSE 0 END AS has_legacy_pdf
            FROM client_round_reports
            WHERE client_id = ? AND (case_id = ? OR case_id IS NULL)
            ORDER BY round_number ASC`,
           [row.client_id, row.id],
         );
+        const [pdfRows] = await pool.query<RowDataPacket[]>(
+          `SELECT id, round_number, round_report_id, file_name
+           FROM round_report_pdfs
+           WHERE client_id = ?
+           ORDER BY id DESC`,
+          [row.client_id],
+        );
+        const pdfByReportId = new Map<number, RowDataPacket>();
+        const pdfByRound = new Map<number, RowDataPacket>();
+        for (const p of pdfRows) {
+          const rid = p.round_report_id != null ? Number(p.round_report_id) : 0;
+          const rn = Number(p.round_number);
+          if (rid > 0 && !pdfByReportId.has(rid)) pdfByReportId.set(rid, p);
+          if (Number.isFinite(rn) && !pdfByRound.has(rn)) pdfByRound.set(rn, p);
+        }
+        const [drafts] = await pool.query<RowDataPacket[]>(
+          `SELECT id, round_number, status, before_source,
+                  before_reused_from_session_id, extraction_meta, updated_at,
+                  error_message
+           FROM report_wizard_sessions
+           WHERE case_id = ?
+             AND status IN ('draft','extracting','review','generating','failed')
+           ORDER BY round_number ASC, id DESC`,
+          [row.id],
+        );
+        const wizard_drafts = drafts.map((d) => {
+          const meta =
+            typeof d.extraction_meta === "string"
+              ? (() => {
+                  try {
+                    return JSON.parse(d.extraction_meta);
+                  } catch {
+                    return null;
+                  }
+                })()
+              : d.extraction_meta;
+          return {
+            session_id: Number(d.id),
+            round: Number(d.round_number),
+            status: d.status,
+            before_source: d.before_source ?? null,
+            before_reused_from_session_id: d.before_reused_from_session_id
+              ? Number(d.before_reused_from_session_id)
+              : null,
+            confidence: meta?.confidence ?? null,
+            scores_suspicious:
+              meta?.confidence &&
+              typeof meta.confidence === "object" &&
+              Object.values(meta.confidence as Record<string, number>).some(
+                (c) => typeof c === "number" && c < 0.6,
+              )
+                ? true
+                : false,
+            error_message: d.error_message
+              ? String(d.error_message).slice(0, 240)
+              : null,
+            updated_at: d.updated_at,
+          };
+        });
         return {
           ok: true,
           data: {
             case_id: row.id,
             case_number: row.case_number,
             client_id: row.client_id,
-            reports: reports.map((r) => ({
-              round: r.round_number,
-              score_before: r.score_before,
-              score_after: r.score_after,
-              items_removed: r.items_removed,
-              items_disputed: r.items_disputed,
-              report_locale: r.report_locale,
-              has_pdf: !!Number(r.has_pdf),
-              created_at: r.created_at,
-            })),
-            href: `/admin/pipeline?case=${row.id}`,
+            reports: reports.map((r) => {
+              const reportId = Number(r.id);
+              const rn = Number(r.round_number);
+              const pdf =
+                pdfByReportId.get(reportId) || pdfByRound.get(rn) || null;
+              const hasPdf = !!pdf || !!Number(r.has_legacy_pdf);
+              return {
+                id: reportId,
+                round: rn,
+                score_before: r.score_before,
+                score_after: r.score_after,
+                items_removed: r.items_removed,
+                items_disputed: r.items_disputed,
+                report_locale: r.report_locale,
+                has_pdf: hasPdf,
+                pdf_id: pdf ? Number(pdf.id) : null,
+                pdf_file_name: pdf
+                  ? String(pdf.file_name || r.pdf_file_name || "")
+                  : r.pdf_file_name
+                    ? String(r.pdf_file_name)
+                    : null,
+                wizard_session_id: r.wizard_session_id
+                  ? Number(r.wizard_session_id)
+                  : null,
+                created_at: r.created_at,
+              };
+            }),
+            wizard_drafts,
+            guidance:
+              "To publish or continue a round PDF, open CRM Reports → Generate (OFG Progress Report Wizard). When has_pdf/pdf_id is set, resend via send_round_report (secure email + SMS). MCP upsert_progress_report is staff notes only.",
+            href: `/admin/pipeline?client=${row.client_id}&case=${row.id}`,
           },
         };
       }
 
       const round = Number(args.round);
-      if (!Number.isFinite(round) || round < 1 || round > 5) {
+      const caseMaxRounds = await loadCaseMaxRounds(pool, Number(row.id));
+      if (
+        !Number.isFinite(round) ||
+        round < 1 ||
+        round > caseMaxRounds
+      ) {
         return {
           ok: false,
           error: "invalid_args",
-          message: "round must be 1–5",
+          message: `round must be 1–${caseMaxRounds}`,
         };
       }
       const [reports] = await pool.query<RowDataPacket[]>(
         `SELECT id, round_number, score_before, score_after, items_removed,
                 items_disputed, summary_md, bureau_scores_json, file_strength_score,
-                report_locale, created_at,
-                CASE WHEN pdf_storage_key IS NOT NULL THEN 1 ELSE 0 END AS has_pdf
+                report_locale, created_at, wizard_session_id,
+                CASE WHEN pdf_storage_key IS NOT NULL THEN 1 ELSE 0 END AS has_legacy_pdf
          FROM client_round_reports
          WHERE client_id = ? AND round_number = ?
            AND (case_id = ? OR case_id IS NULL)
@@ -7110,42 +9354,142 @@ async function executeAdminAiTool(
          LIMIT 1`,
         [row.client_id, round, row.id],
       );
-      if (!reports[0]) {
+      const [wizRows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, status, before_source, before_reused_from_session_id,
+                extraction_meta, error_message, updated_at, published_at,
+                output_pdf_id, round_report_id
+         FROM report_wizard_sessions
+         WHERE case_id = ? AND round_number = ?
+         ORDER BY id DESC
+         LIMIT 1`,
+        [row.id, round],
+      );
+      if (!reports[0] && !wizRows[0]) {
         return {
           ok: false,
           error: "not_found",
           message: `No progress report for round ${round}`,
+          crm_required: adminAiCrmRequired({
+            reason: "progress_report_wizard",
+            userMessage: `No Round ${round} report yet. Open the client → Reports → Generate (OFG Progress Report Wizard) to upload Before/After PDFs and publish.`,
+            clientId: Number(row.client_id),
+            caseId: Number(row.id),
+            crmAction: "open_reports_wizard",
+            details: { round },
+          }),
         };
       }
       const r = reports[0];
       let bureau_scores: unknown = null;
-      try {
-        bureau_scores =
-          typeof r.bureau_scores_json === "string"
-            ? JSON.parse(r.bureau_scores_json)
-            : r.bureau_scores_json;
-      } catch {
-        bureau_scores = null;
+      if (r) {
+        try {
+          bureau_scores =
+            typeof r.bureau_scores_json === "string"
+              ? JSON.parse(r.bureau_scores_json)
+              : r.bureau_scores_json;
+        } catch {
+          bureau_scores = null;
+        }
       }
-      const summary = String(r.summary_md || "").slice(0, 1500);
+      const summary = r
+        ? decodeLiteralUnicodeEscapes(String(r.summary_md || "")).slice(0, 1500)
+        : null;
+      const wiz = wizRows[0] || null;
+      let wizMeta: Record<string, unknown> | null = null;
+      if (wiz?.extraction_meta) {
+        try {
+          wizMeta =
+            typeof wiz.extraction_meta === "string"
+              ? JSON.parse(wiz.extraction_meta)
+              : (wiz.extraction_meta as Record<string, unknown>);
+        } catch {
+          wizMeta = null;
+        }
+      }
+      const pdf = await findRoundReportPdfRow({
+        clientId: Number(row.client_id),
+        pdfId: wiz?.output_pdf_id ? Number(wiz.output_pdf_id) : null,
+        roundReportId: r?.id
+          ? Number(r.id)
+          : wiz?.round_report_id
+            ? Number(wiz.round_report_id)
+            : null,
+        roundNumber: round,
+      });
+      const hasPdf = !!pdf || !!(r && Number(r.has_legacy_pdf));
       return {
         ok: true,
         data: {
           case_id: row.id,
           case_number: row.case_number,
           client_id: row.client_id,
-          round: r.round_number,
-          score_before: r.score_before,
-          score_after: r.score_after,
-          items_removed: r.items_removed,
-          items_disputed: r.items_disputed,
-          file_strength_score: r.file_strength_score,
-          report_locale: r.report_locale,
+          round,
+          round_report_id: r ? Number(r.id) : null,
+          score_before: r?.score_before ?? null,
+          score_after: r?.score_after ?? null,
+          items_removed: r?.items_removed ?? null,
+          items_disputed: r?.items_disputed ?? null,
+          file_strength_score: r?.file_strength_score ?? null,
+          report_locale: r?.report_locale ?? null,
           bureau_scores,
           summary_excerpt: summary || null,
-          has_pdf: !!Number(r.has_pdf),
-          created_at: r.created_at,
-          href: `/admin/pipeline?case=${row.id}`,
+          has_pdf: hasPdf,
+          pdf_id: pdf ? Number(pdf.id) : null,
+          pdf_file_name: pdf
+            ? String(pdf.file_name || "")
+            : null,
+          created_at: r?.created_at ?? null,
+          wizard: wiz
+            ? {
+                session_id: Number(wiz.id),
+                status: wiz.status,
+                before_source: wiz.before_source ?? null,
+                before_reused_from_session_id: wiz.before_reused_from_session_id
+                  ? Number(wiz.before_reused_from_session_id)
+                  : null,
+                confidence: wizMeta?.confidence ?? null,
+                scores_suspicious:
+                  wizMeta?.confidence &&
+                  typeof wizMeta.confidence === "object" &&
+                  Object.values(
+                    wizMeta.confidence as Record<string, number>,
+                  ).some((c) => typeof c === "number" && c < 0.6)
+                    ? true
+                    : false,
+                error_message: wiz.error_message
+                  ? String(wiz.error_message).slice(0, 240)
+                  : null,
+                published_at: wiz.published_at ?? null,
+                updated_at: wiz.updated_at,
+              }
+            : null,
+          guidance: hasPdf
+            ? `Branded PDF is available (pdf_id=${pdf ? Number(pdf.id) : "legacy"}). Resend to the client with send_round_report (dry-run then confirm) using pdf_id or round_number=${round}.`
+            : "No branded PDF on file yet. Publish via CRM Reports → Generate (OFG Progress Report Wizard). This tool is read-only for status.",
+          href: `/admin/pipeline?client=${row.client_id}&case=${row.id}`,
+        },
+      };
+    }
+
+    if (name === "search_admins") {
+      const q = String(args.q || "").trim();
+      const limit = adminAiClampLimit(args.limit, 20);
+      const staff = await loadAssignableStaffAdmins();
+      const matched = q ? matchStaffAdmins(staff, q) : staff;
+      return {
+        ok: true,
+        data: {
+          admins: matched.slice(0, limit).map((r) => ({
+            id: r.id,
+            name: `${r.first_name} ${r.last_name}`.trim(),
+            first_name: r.first_name,
+            last_name: r.last_name,
+            email: r.email,
+            phone: r.phone || null,
+            has_phone: !!(r.phone && String(r.phone).trim()),
+            role: r.role,
+            language_owner_for: r.language_owner_for,
+          })),
         },
       };
     }
@@ -7182,8 +9526,11 @@ async function executeAdminAiTool(
           OR COALESCE(c.first_name,'') LIKE ? ESCAPE '!'
           OR COALESCE(c.last_name,'') LIKE ? ESCAPE '!'
           OR CONCAT(COALESCE(c.first_name,''), ' ', COALESCE(c.last_name,'')) LIKE ? ESCAPE '!'
+          OR COALESCE(a.first_name,'') LIKE ? ESCAPE '!'
+          OR COALESCE(a.last_name,'') LIKE ? ESCAPE '!'
+          OR CONCAT(COALESCE(a.first_name,''), ' ', COALESCE(a.last_name,'')) LIKE ? ESCAPE '!'
         )`);
-        params.push(like, like, like, like, like, like);
+        params.push(like, like, like, like, like, like, like, like, like);
       }
       const [rows] = await pool.query<RowDataPacket[]>(
         `SELECT t.id, t.title, t.status, t.priority, t.due_at, t.case_id,
@@ -7204,7 +9551,7 @@ async function executeAdminAiTool(
         data: {
           tasks: rows.map((r) => ({
             id: r.id,
-            title: r.title,
+            title: decodeLiteralUnicodeEscapes(String(r.title)),
             status: r.status,
             priority: r.priority,
             due_at: r.due_at,
@@ -7341,7 +9688,9 @@ async function executeAdminAiTool(
               : null,
           affiliate_id: r.affiliate_id,
           contract_signed_at: r.contract_signed_at,
-          notes_excerpt: r.notes_excerpt || null,
+          notes_excerpt: r.notes_excerpt
+            ? decodeLiteralUnicodeEscapes(String(r.notes_excerpt))
+            : null,
           referral_category: r.referral_category || null,
           /** @deprecated Prefer `referrers[]` — primary partner only (legacy). */
           referrer: r.referrer_id
@@ -7629,7 +9978,10 @@ async function executeAdminAiTool(
       const where = ["c.status <> 'cancelled'"];
       const params: any[] = [];
       if (mode === "overdue") {
-        where.push("ps.status = 'overdue'");
+        // DB status=overdue OR past-due pending (no cron flips pending→overdue).
+        where.push(
+          `(ps.status = 'overdue' OR (ps.status = 'pending' AND ps.due_date < CURDATE()))`,
+        );
       } else if (mode === "pending") {
         where.push("ps.status = 'pending'");
       } else {
@@ -7771,17 +10123,27 @@ async function executeAdminAiTool(
 
     if (
       name === "create_prospect" ||
+      name === "create_contact" ||
+      name === "update_contact" ||
+      name === "convert_contact" ||
+      name === "send_contact_sms" ||
+      name === "send_contact_email" ||
       name === "create_work_task" ||
+      name === "update_work_task" ||
       name === "add_case_note" ||
       name === "upload_case_document" ||
       name === "send_email" ||
+      name === "send_round_report" ||
       name === "send_sms" ||
       name === "update_pipeline_stage" ||
       name === "convert_prospect" ||
+      name === "update_client" ||
       name === "update_client_status" ||
       name === "upsert_progress_report" ||
+      name === "set_case_payment_plan" ||
       name === "upsert_payment_splits" ||
-      name === "update_payment_split"
+      name === "update_payment_split" ||
+      name === "create_coupon"
     ) {
       // Any affiliate scope (including orphan empty scopedIds) blocks writes
       if (scope) {
@@ -7791,6 +10153,1049 @@ async function executeAdminAiTool(
           message: "Write tools are not available to affiliate accounts",
         };
       }
+    }
+
+    if (name === "create_contact") {
+      const firstName = String(args.first_name || "")
+        .trim()
+        .slice(0, 100);
+      const lastName = String(args.last_name || "")
+        .trim()
+        .slice(0, 100);
+      const phoneRaw = String(args.phone || "")
+        .trim()
+        .slice(0, 20);
+      const emailRaw = String(args.email || "")
+        .trim()
+        .toLowerCase()
+        .slice(0, 255);
+      const phone = phoneRaw || null;
+      const email = emailRaw || null;
+      const langExplicit =
+        args.preferred_language === "es" || args.preferred_language === "en"
+          ? (args.preferred_language as "en" | "es")
+          : null;
+      const lang = langExplicit || "en";
+      const notesRaw =
+        args.notes != null
+          ? args.notes
+          : args.admin_notes != null
+            ? args.admin_notes
+            : "";
+      const notes = decodeLiteralUnicodeEscapes(String(notesRaw || ""))
+        .trim()
+        .slice(0, 5000);
+      const addressLine1 =
+        String(args.address_line1 || "")
+          .trim()
+          .slice(0, 255) || null;
+      const addressLine2 =
+        String(args.address_line2 || "")
+          .trim()
+          .slice(0, 255) || null;
+      const city =
+        String(args.city || "")
+          .trim()
+          .slice(0, 100) || null;
+      const state =
+        String(args.state || "")
+          .trim()
+          .slice(0, 50) || null;
+      const zip =
+        String(args.zip || "")
+          .trim()
+          .slice(0, 20) || null;
+
+      const missing: string[] = [];
+      if (!firstName) missing.push("first_name");
+      if (!lastName) missing.push("last_name");
+      if (!phone && !email) missing.push("phone or email");
+      if (email && !isValidEmail(email)) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message: "email is invalid",
+        };
+      }
+      let phoneNormalized: string | null = phone;
+      if (phone && !normalizePhoneLast10(phone)) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message: "phone must include at least 10 digits",
+        };
+      }
+      if (phoneNormalized) {
+        phoneNormalized = toSmsE164(phoneNormalized).slice(0, 20);
+      }
+
+      const duplicates = await findCrmContactDuplicates({
+        phone: phoneNormalized,
+        email,
+      });
+      const hasDups =
+        duplicates.clients.length > 0 || duplicates.contacts.length > 0;
+      const namedOwner = await resolveMcpStaffAssignee({
+        adminId: args.assigned_admin_id,
+        name: args.assigned_admin_name,
+        email: args.assigned_admin_email,
+      });
+      if (namedOwner.ok === false) return namedOwner;
+      const ownerId = namedOwner.requested
+        ? namedOwner.id
+        : await resolveLanguageOwnerAdminId(lang);
+      const preview = {
+        first_name: firstName || null,
+        last_name: lastName || null,
+        phone: phoneNormalized,
+        email,
+        preferred_language: lang,
+        notes: notes || null,
+        address_line1: addressLine1,
+        address_line2: addressLine2,
+        city,
+        state,
+        zip,
+        assigned_admin_id: ownerId ?? ctx.adminId,
+      };
+
+      if (missing.length > 0) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: false,
+            missing_fields: missing,
+            preview,
+            duplicates,
+            guidance:
+              "Ask the user for the missing fields, then call create_contact again (still confirm=false) until ready. Use create_prospect instead if they should go on Pipeline immediately.",
+          },
+        };
+      }
+
+      if (!adminAiConfirmTrue(args.confirm)) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: true,
+            preview,
+            duplicates,
+            requires_confirm_duplicate: hasDups,
+            required_confirm_phrase: ADMIN_AI_WRITE_CONFIRM_PHRASE,
+            guidance: hasDups
+              ? `Matching phone/email found. Show duplicates. If they still want a new contact, re-call with confirm=true, confirm_duplicate=true, and confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`
+              : `Show this address-book preview (not Pipeline). After approval, re-call with confirm=true and confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`,
+          },
+        };
+      }
+
+      const writeGate = adminAiWriteConfirmed(args);
+      if (writeGate.ok === false) {
+        return {
+          ok: false,
+          error: "confirm_required",
+          message: writeGate.message,
+        };
+      }
+
+      if (hasDups && !adminAiConfirmTrue(args.confirm_duplicate)) {
+        return {
+          ok: false,
+          error: "duplicate",
+          message:
+            "Matching phone or email already exists. Set confirm_duplicate=true only after the user approves creating another contact.",
+        };
+      }
+
+      const [ins] = await pool.query<ResultSetHeader>(
+        `INSERT INTO contacts
+           (first_name, last_name, email, phone, address_line1, address_line2,
+            city, state, zip, preferred_language, admin_notes,
+            assigned_admin_id, created_by_admin_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          firstName,
+          lastName,
+          email,
+          phoneNormalized,
+          addressLine1,
+          addressLine2,
+          city,
+          state,
+          zip,
+          lang,
+          notes || null,
+          ownerId ?? ctx.adminId,
+          ctx.adminId,
+        ],
+      );
+      const contactId = Number(ins.insertId);
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM contacts WHERE id = ? LIMIT 1`,
+        [contactId],
+      );
+      return {
+        ok: true,
+        data: {
+          created: true,
+          contact: mapCrmContactRow(rows[0]),
+          href: `/admin/contacts`,
+          guidance:
+            "Saved to CRM Contacts (not on Pipeline). Use convert_contact when ready to add as prospect.",
+        },
+      };
+    }
+
+    if (name === "update_contact") {
+      const contactId =
+        args.contact_id != null && Number(args.contact_id) > 0
+          ? Number(args.contact_id)
+          : 0;
+      if (!contactId) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message: "contact_id is required",
+        };
+      }
+      const [existing] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM contacts
+         WHERE id = ? AND deleted_at IS NULL AND converted_client_id IS NULL
+         LIMIT 1`,
+        [contactId],
+      );
+      if (!existing[0]) {
+        return {
+          ok: false,
+          error: "not_found",
+          message:
+            "Contact not found (or already converted/deleted). Use search_contacts.",
+        };
+      }
+      const cur = existing[0];
+      const firstName =
+        args.first_name != null
+          ? String(args.first_name).trim().slice(0, 100)
+          : String(cur.first_name || "");
+      const lastName =
+        args.last_name != null
+          ? String(args.last_name).trim().slice(0, 100)
+          : String(cur.last_name || "");
+      const email =
+        args.email !== undefined
+          ? String(args.email || "")
+              .trim()
+              .toLowerCase()
+              .slice(0, 255) || null
+          : cur.email != null
+            ? String(cur.email)
+            : null;
+      let phoneNormalized: string | null =
+        args.phone !== undefined
+          ? String(args.phone || "")
+              .trim()
+              .slice(0, 40) || null
+          : cur.phone != null
+            ? String(cur.phone)
+            : null;
+      if (args.phone !== undefined && phoneNormalized) {
+        if (!normalizePhoneLast10(phoneNormalized)) {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message: "phone must include at least 10 digits",
+          };
+        }
+        phoneNormalized = toSmsE164(phoneNormalized).slice(0, 20);
+      } else if (phoneNormalized && !normalizePhoneLast10(phoneNormalized)) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message: "phone must include at least 10 digits",
+        };
+      }
+      const lang =
+        args.preferred_language === "es"
+          ? "es"
+          : args.preferred_language === "en"
+            ? "en"
+            : cur.preferred_language === "es"
+              ? "es"
+              : "en";
+      const notesProvided = args.notes !== undefined || args.admin_notes !== undefined;
+      const notesRaw = notesProvided
+        ? args.notes !== undefined
+          ? args.notes
+          : args.admin_notes
+        : cur.admin_notes;
+      const notes = notesProvided
+        ? decodeLiteralUnicodeEscapes(String(notesRaw || ""))
+            .trim()
+            .slice(0, 5000) || null
+        : cur.admin_notes != null
+          ? String(cur.admin_notes)
+          : null;
+      const addressLine1 =
+        args.address_line1 !== undefined
+          ? String(args.address_line1 || "")
+              .trim()
+              .slice(0, 255) || null
+          : cur.address_line1;
+      const addressLine2 =
+        args.address_line2 !== undefined
+          ? String(args.address_line2 || "")
+              .trim()
+              .slice(0, 255) || null
+          : cur.address_line2;
+      const city =
+        args.city !== undefined
+          ? String(args.city || "")
+              .trim()
+              .slice(0, 100) || null
+          : cur.city;
+      const state =
+        args.state !== undefined
+          ? String(args.state || "")
+              .trim()
+              .slice(0, 50) || null
+          : cur.state;
+      const zip =
+        args.zip !== undefined
+          ? String(args.zip || "")
+              .trim()
+              .slice(0, 20) || null
+          : cur.zip;
+
+      if (!firstName || !lastName) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message: "first_name and last_name are required",
+        };
+      }
+      if (!email && !phoneNormalized) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message: "email or phone is required",
+        };
+      }
+      if (email && !isValidEmail(email)) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message: "email is invalid",
+        };
+      }
+
+      const duplicates = await findCrmContactDuplicates({
+        phone: phoneNormalized,
+        email,
+        excludeContactId: contactId,
+      });
+      const hasDups =
+        duplicates.clients.length > 0 || duplicates.contacts.length > 0;
+      const namedOwner = await resolveMcpStaffAssignee({
+        adminId: args.assigned_admin_id,
+        name: args.assigned_admin_name,
+        email: args.assigned_admin_email,
+      });
+      if (namedOwner.ok === false) return namedOwner;
+      const ownerId = namedOwner.requested
+        ? namedOwner.id
+        : cur.assigned_admin_id != null
+          ? Number(cur.assigned_admin_id)
+          : null;
+      const preview = {
+        contact_id: contactId,
+        first_name: firstName,
+        last_name: lastName,
+        phone: phoneNormalized,
+        email,
+        preferred_language: lang,
+        assigned_admin_id: ownerId,
+        notes,
+        address_line1: addressLine1,
+        address_line2: addressLine2,
+        city,
+        state,
+        zip,
+      };
+
+      if (!adminAiConfirmTrue(args.confirm)) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: true,
+            preview,
+            duplicates,
+            requires_confirm_duplicate: hasDups,
+            required_confirm_phrase: ADMIN_AI_WRITE_CONFIRM_PHRASE,
+            guidance: hasDups
+              ? `Matching phone/email found. Show duplicates. If they still want to save, re-call with confirm=true, confirm_duplicate=true, and confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`
+              : `Show this contact update. After approval, re-call with confirm=true and confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`,
+          },
+        };
+      }
+
+      const writeGate = adminAiWriteConfirmed(args);
+      if (writeGate.ok === false) {
+        return {
+          ok: false,
+          error: "confirm_required",
+          message: writeGate.message,
+        };
+      }
+
+      if (hasDups && !adminAiConfirmTrue(args.confirm_duplicate)) {
+        return {
+          ok: false,
+          error: "duplicate",
+          message:
+            "Matching phone or email already exists. Set confirm_duplicate=true only after the user approves.",
+        };
+      }
+
+      await pool.query(
+        `UPDATE contacts SET
+           first_name = ?, last_name = ?, email = ?, phone = ?,
+           address_line1 = ?, address_line2 = ?, city = ?, state = ?, zip = ?,
+           preferred_language = ?, admin_notes = ?, assigned_admin_id = ?
+         WHERE id = ?`,
+        [
+          firstName,
+          lastName,
+          email,
+          phoneNormalized,
+          addressLine1,
+          addressLine2,
+          city,
+          state,
+          zip,
+          lang,
+          notes,
+          ownerId,
+          contactId,
+        ],
+      );
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM contacts WHERE id = ? LIMIT 1`,
+        [contactId],
+      );
+      return {
+        ok: true,
+        data: {
+          updated: true,
+          contact: mapCrmContactRow(rows[0]),
+          href: `/admin/contacts`,
+        },
+      };
+    }
+
+    if (name === "convert_contact") {
+      const contactId =
+        args.contact_id != null && Number(args.contact_id) > 0
+          ? Number(args.contact_id)
+          : 0;
+      if (!contactId) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message: "contact_id is required",
+        };
+      }
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM contacts
+         WHERE id = ? AND deleted_at IS NULL AND converted_client_id IS NULL
+         LIMIT 1`,
+        [contactId],
+      );
+      if (!rows[0]) {
+        return {
+          ok: false,
+          error: "not_found",
+          message:
+            "Contact not found (or already converted/deleted). Use search_contacts.",
+        };
+      }
+      const c = rows[0];
+      const phone = c.phone ? String(c.phone) : null;
+      const email = c.email ? String(c.email).toLowerCase() : null;
+      if (!phone && !email) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message:
+            "Contact needs phone or email before convert. Use update_contact first.",
+        };
+      }
+
+      const phoneDups = phone ? await adminAiFindPhoneDuplicates(phone) : [];
+      let emailDupClientId: number | null = null;
+      if (email) {
+        const [emailDup] = await pool.query<RowDataPacket[]>(
+          `SELECT id FROM clients WHERE LOWER(email) = ? LIMIT 1`,
+          [email],
+        );
+        if (emailDup[0]) emailDupClientId = Number(emailDup[0].id);
+      }
+      const existingClientId =
+        phoneDups.length > 0
+          ? Number(phoneDups[0].id)
+          : emailDupClientId != null
+            ? emailDupClientId
+            : null;
+      const lang = c.preferred_language === "es" ? "es" : "en";
+      const namedOwner = await resolveMcpStaffAssignee({
+        adminId: args.assigned_admin_id,
+        name: args.assigned_admin_name,
+        email: args.assigned_admin_email,
+      });
+      if (namedOwner.ok === false) return namedOwner;
+      const ownerId = namedOwner.requested
+        ? namedOwner.id
+        : c.assigned_admin_id != null
+          ? Number(c.assigned_admin_id)
+          : ((await resolveLanguageOwnerAdminId(lang)) ?? ctx.adminId);
+      const preview = {
+        contact_id: contactId,
+        first_name: c.first_name,
+        last_name: c.last_name,
+        phone,
+        email,
+        preferred_language: lang,
+        assigned_admin_id: ownerId,
+        status: "prospect",
+        pipeline_stage: "prospect",
+        notes: c.admin_notes
+          ? decodeLiteralUnicodeEscapes(String(c.admin_notes)).slice(0, 400)
+          : null,
+        will_link_existing_client_id: existingClientId,
+      };
+
+      if (!adminAiConfirmTrue(args.confirm)) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: true,
+            preview,
+            phone_duplicates: phoneDups,
+            email_duplicate_client_id: emailDupClientId,
+            existing_client_id: existingClientId,
+            required_confirm_phrase: ADMIN_AI_WRITE_CONFIRM_PHRASE,
+            guidance:
+              existingClientId != null
+                ? `Phone/email matches existing client_id=${existingClientId}. After approval, re-call with confirm=true and confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}" to LINK this contact to that client (no new prospect).`
+                : `Show convert preview (contact → Pipeline prospect). After approval, re-call with confirm=true and confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`,
+          },
+        };
+      }
+
+      const writeGate = adminAiWriteConfirmed(args);
+      if (writeGate.ok === false) {
+        return {
+          ok: false,
+          error: "confirm_required",
+          message: writeGate.message,
+        };
+      }
+
+      // Hard-block twins: link contact to existing client when phone/email matches.
+      if (existingClientId != null) {
+        await pool.query(
+          `UPDATE conversations
+           SET client_id = ?, contact_id = NULL
+           WHERE contact_id = ?`,
+          [existingClientId, contactId],
+        );
+        await pool.query(
+          `UPDATE contacts
+           SET converted_client_id = ?, converted_at = NOW()
+           WHERE id = ?`,
+          [existingClientId, contactId],
+        );
+        return {
+          ok: true,
+          data: {
+            existing: true,
+            converted: true,
+            linked_existing: true,
+            contact_id: contactId,
+            client_id: existingClientId,
+            preferred_language: lang,
+            href: `/admin/pipeline?client=${existingClientId}`,
+            message: `Contact linked to existing client_id=${existingClientId} (no twin created).`,
+          },
+        };
+      }
+
+      let clientId: number;
+      try {
+        const [ins] = await pool.query<ResultSetHeader>(
+          `INSERT INTO clients
+             (first_name, last_name, phone, email, status, pipeline_stage,
+              preferred_language, assigned_admin_id, admin_notes,
+              address_line1, address_line2, city, state, zip)
+           VALUES (?, ?, ?, ?, 'prospect', 'prospect', ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            c.first_name,
+            c.last_name,
+            phone,
+            email,
+            lang,
+            ownerId,
+            c.admin_notes,
+            c.address_line1,
+            c.address_line2,
+            c.city,
+            c.state,
+            c.zip,
+          ],
+        );
+        clientId = Number(ins.insertId);
+      } catch (e: any) {
+        if (
+          e?.code === "ER_DUP_ENTRY" ||
+          /Duplicate/i.test(String(e?.message))
+        ) {
+          const [dup] = await pool.query<RowDataPacket[]>(
+            `SELECT id FROM clients WHERE LOWER(email) = ? LIMIT 1`,
+            [email],
+          );
+          if (dup[0]) {
+            const dupId = Number(dup[0].id);
+            await pool.query(
+              `UPDATE conversations
+               SET client_id = ?, contact_id = NULL
+               WHERE contact_id = ?`,
+              [dupId, contactId],
+            );
+            await pool.query(
+              `UPDATE contacts
+               SET converted_client_id = ?, converted_at = NOW()
+               WHERE id = ?`,
+              [dupId, contactId],
+            );
+            return {
+              ok: true,
+              data: {
+                existing: true,
+                converted: true,
+                linked_existing: true,
+                contact_id: contactId,
+                client_id: dupId,
+                preferred_language: lang,
+                href: `/admin/pipeline?client=${dupId}`,
+                message: `Contact linked to existing client_id=${dupId} (no twin created).`,
+              },
+            };
+          }
+          return {
+            ok: false,
+            error: "duplicate",
+            message: "A client with this email already exists.",
+          };
+        }
+        throw e;
+      }
+      await pool.query(
+        `UPDATE conversations
+         SET client_id = ?, contact_id = NULL
+         WHERE contact_id = ?`,
+        [clientId, contactId],
+      );
+      await pool.query(
+        `UPDATE contacts
+         SET converted_client_id = ?, converted_at = NOW()
+         WHERE id = ?`,
+        [clientId, contactId],
+      );
+      return {
+        ok: true,
+        data: {
+          converted: true,
+          contact_id: contactId,
+          client_id: clientId,
+          preferred_language: lang,
+          href: `/admin/pipeline?client=${clientId}`,
+        },
+      };
+    }
+
+    if (name === "send_contact_sms") {
+      const contactId =
+        args.contact_id != null && Number(args.contact_id) > 0
+          ? Number(args.contact_id)
+          : 0;
+      const rawBody = decodeLiteralUnicodeEscapes(
+        String(args.body || args.message || ""),
+      ).trim();
+      if ([...rawBody].length > SMS_MAX_BODY_CHARS) {
+        return {
+          ok: false,
+          error: "sms_body_too_long",
+          message: `SMS body exceeds ${SMS_MAX_BODY_CHARS} characters`,
+        };
+      }
+      const body = rawBody;
+      const missing: string[] = [];
+      if (!contactId) missing.push("contact_id");
+      if (!body) missing.push("body");
+
+      let contactName: string | null = null;
+      let toPhone: string | null = null;
+      let conversationClosed = false;
+      let fromE164: string | null = null;
+      let fromAdminId = ctx.adminId;
+
+      if (missing.length === 0) {
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT id, first_name, last_name, phone, deleted_at, converted_client_id
+           FROM contacts WHERE id = ? LIMIT 1`,
+          [contactId],
+        );
+        if (!rows[0] || rows[0].deleted_at) {
+          return {
+            ok: false,
+            error: "not_found",
+            message:
+              "Contact not found (or soft-deleted). Use search_contacts.",
+          };
+        }
+        if (rows[0].converted_client_id != null) {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message:
+              "Contact was already converted to a pipeline prospect. Use send_sms with that client_id instead.",
+          };
+        }
+        contactName =
+          `${rows[0].first_name || ""} ${rows[0].last_name || ""}`.trim();
+        toPhone = rows[0].phone ? String(rows[0].phone).trim() : null;
+        if (!toPhone) {
+          return {
+            ok: false,
+            error: "no_phone",
+            message:
+              "Contact has no phone on file. Use update_contact to set phone, then retry.",
+          };
+        }
+        const fromResolved = await resolveMcpSmsFromE164(ctx.adminId, args);
+        if (fromResolved.ok === false) return fromResolved;
+        fromE164 = fromResolved.e164;
+        fromAdminId = fromResolved.from_admin_id;
+        conversationClosed = await contactComposeBlockedByClosed({
+          crmContactId: contactId,
+        });
+      }
+
+      const preview = {
+        audience: "contact" as const,
+        contact_id: contactId || null,
+        contact_name: contactName,
+        to: toPhone,
+        from: fromE164,
+        body,
+        conversation_closed: conversationClosed,
+        will_log_conversations_hub: true,
+        will_log_contact_note: true,
+        note: conversationClosed
+          ? "Conversation is closed. On confirm, it will reopen and the SMS will send via Conversations hub + contact admin_notes."
+          : "Dry-run does not send. On confirm, SMS sends via Twilio into Conversations hub and appends [SMS …] to contacts.admin_notes.",
+      };
+
+      if (missing.length > 0) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: false,
+            missing_fields: missing,
+            preview,
+            guidance:
+              "Collect contact_id (from search_contacts) and body. Do not pass client_id here — use send_sms for pipeline clients.",
+          },
+        };
+      }
+
+      if (!adminAiConfirmTrue(args.confirm)) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: true,
+            preview,
+            required_confirm_phrase: ADMIN_AI_WRITE_CONFIRM_PHRASE,
+            guidance: `Show the exact To / From / body. After approval, re-call with confirm=true and confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`,
+          },
+        };
+      }
+
+      const writeGate = adminAiWriteConfirmed(args);
+      if (writeGate.ok === false) {
+        return {
+          ok: false,
+          error: "confirm_required",
+          message: writeGate.message,
+        };
+      }
+
+      let reopened = false;
+      if (conversationClosed) {
+        await setContactConversationStatus({
+          crmContactId: contactId,
+          status: "open",
+          adminId: ctx.adminId,
+        });
+        reopened = true;
+      }
+
+      let messageId: number | null = null;
+      let conversationId: number | null = null;
+      let providerMessageId: string | null = null;
+      let providerStatus: string | null = null;
+      let contactNoteAppended = false;
+
+      try {
+        const result = await deliverHubConversationMessage({
+          adminId: fromAdminId,
+          crmContactId: contactId,
+          channel: "sms",
+          textBody: body,
+        });
+        messageId = result.message_id;
+        conversationId = result.conversation_id;
+        contactNoteAppended = !!result.contact_note_appended;
+        const [mrows] = await pool.query<RowDataPacket[]>(
+          `SELECT provider_message_id, provider_status, error_message
+           FROM conversation_messages WHERE id = ? LIMIT 1`,
+          [result.message_id],
+        );
+        providerMessageId = mrows[0]?.provider_message_id
+          ? String(mrows[0].provider_message_id)
+          : null;
+        providerStatus = mrows[0]?.provider_status
+          ? String(mrows[0].provider_status)
+          : result.provider_status;
+        if (!result.ok && result.error) {
+          return {
+            ok: false,
+            error: "send_failed",
+            message: String(result.error).slice(0, 400),
+          };
+        }
+      } catch (e: any) {
+        const msg = String(e?.message || e);
+        if (
+          msg === "conversation_closed" ||
+          e?.code === "conversation_closed"
+        ) {
+          return {
+            ok: false,
+            error: "conversation_closed",
+            message:
+              "Conversation is still closed. Reopen in Conversations, then retry send_contact_sms.",
+          };
+        }
+        return {
+          ok: false,
+          error: "send_failed",
+          message: msg.slice(0, 400),
+        };
+      }
+
+      return {
+        ok: true,
+        data: {
+          sent: true,
+          audience: "contact",
+          contact_id: contactId,
+          contact_name: contactName,
+          to: toPhone,
+          from: fromE164,
+          body,
+          message_id: messageId,
+          conversation_id: conversationId,
+          provider_message_id: providerMessageId,
+          provider_status: providerStatus,
+          reopened,
+          sent_at: new Date().toISOString(),
+          note_appended: contactNoteAppended,
+          contact_note_appended: contactNoteAppended,
+          href: `/admin/conversations?contact=${contactId}`,
+        },
+      };
+    }
+
+    if (name === "send_contact_email") {
+      const contactId =
+        args.contact_id != null && Number(args.contact_id) > 0
+          ? Number(args.contact_id)
+          : 0;
+      const subject = decodeLiteralUnicodeEscapes(String(args.subject || ""))
+        .trim()
+        .slice(0, 200);
+      const body = decodeLiteralUnicodeEscapes(String(args.body || ""))
+        .trim()
+        .slice(0, 8000);
+      const missing: string[] = [];
+      if (!contactId) missing.push("contact_id");
+      if (!subject) missing.push("subject");
+      if (!body) missing.push("body");
+
+      let contactName: string | null = null;
+      let toEmail: string | null = null;
+      let toLang: "en" | "es" = "en";
+
+      if (missing.length === 0) {
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT id, first_name, last_name, email, preferred_language,
+                  deleted_at, converted_client_id
+           FROM contacts WHERE id = ? LIMIT 1`,
+          [contactId],
+        );
+        if (!rows[0] || rows[0].deleted_at) {
+          return {
+            ok: false,
+            error: "not_found",
+            message:
+              "Contact not found (or soft-deleted). Use search_contacts.",
+          };
+        }
+        if (rows[0].converted_client_id != null) {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message:
+              "Contact was already converted to a pipeline prospect. Use send_email with that client_id instead.",
+          };
+        }
+        contactName =
+          `${rows[0].first_name || ""} ${rows[0].last_name || ""}`.trim();
+        toEmail = rows[0].email ? String(rows[0].email).trim() : null;
+        toLang = rows[0].preferred_language === "es" ? "es" : "en";
+        if (!toEmail) {
+          return {
+            ok: false,
+            error: "no_email",
+            message:
+              "Contact has no email on file. Use update_contact to set email, then retry.",
+          };
+        }
+        if (!isValidEmail(toEmail)) {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message: "Contact email is invalid. Fix with update_contact.",
+          };
+        }
+      }
+
+      const preview = {
+        audience: "contact" as const,
+        contact_id: contactId || null,
+        contact_name: contactName,
+        to: toEmail,
+        subject,
+        body,
+        will_log_contact_note: true,
+        note: "Dry-run does not send. On confirm, branded email is sent via OFG mailer and [EMAIL …] is appended to contacts.admin_notes.",
+      };
+
+      if (missing.length > 0) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: false,
+            missing_fields: missing,
+            preview,
+            guidance:
+              "Collect contact_id (from search_contacts), subject, and body. Do not pass client_id here — use send_email for pipeline clients.",
+          },
+        };
+      }
+
+      if (!adminAiConfirmTrue(args.confirm)) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: true,
+            preview,
+            required_confirm_phrase: ADMIN_AI_WRITE_CONFIRM_PHRASE,
+            guidance: `Show the exact To / subject / body. After approval, re-call with confirm=true and confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`,
+          },
+        };
+      }
+
+      const writeGate = adminAiWriteConfirmed(args);
+      if (writeGate.ok === false) {
+        return {
+          ok: false,
+          error: "confirm_required",
+          message: writeGate.message,
+        };
+      }
+
+      const isEs = toLang === "es";
+      const firstName =
+        (contactName || "").split(/\s+/).filter(Boolean)[0] ||
+        (isEs ? "amigo" : "there");
+      const bodyLooksGreeted = /^(hi|hola|hello|dear)\b/i.test(body);
+      const safeBodyHtml = escapeHtml(body).replace(/\r?\n/g, "<br/>");
+      const greetingHtml = bodyLooksGreeted
+        ? ""
+        : `<p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">${
+            isEs ? "Hola" : "Hi"
+          } ${escapeHtml(firstName)},</p>`;
+      const html = emailLayout({
+        title: subject,
+        preheader: subject,
+        bodyHtml: `${greetingHtml}<div style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">${safeBodyHtml}</div>`,
+        lang: toLang,
+      });
+
+      try {
+        await sendEmail({
+          to: toEmail as string,
+          subject,
+          html,
+        });
+      } catch (e: any) {
+        return {
+          ok: false,
+          error: "send_failed",
+          message: String(e?.message || "Email send failed").slice(0, 400),
+        };
+      }
+
+      const ts = new Date().toISOString().slice(0, 16).replace("T", " ");
+      const stamped = `[EMAIL ${ts} UTC] Sent to ${toEmail}\nSubject: ${subject}\n${body.slice(0, 1500)}`;
+      const contactNoteAppended = await appendContactFileNote(
+        contactId,
+        stamped,
+      );
+
+      return {
+        ok: true,
+        data: {
+          sent: true,
+          audience: "contact",
+          contact_id: contactId,
+          contact_name: contactName,
+          to: toEmail,
+          subject,
+          note_appended: contactNoteAppended,
+          contact_note_appended: contactNoteAppended,
+          href: `/admin/contacts`,
+        },
+      };
     }
 
     if (name === "create_prospect") {
@@ -7813,7 +11218,7 @@ async function executeAdminAiTool(
           ? (args.preferred_language as "en" | "es")
           : null;
       const lang = langExplicit || "en";
-      const notes = String(args.notes || "")
+      const notes = decodeLiteralUnicodeEscapes(String(args.notes || ""))
         .trim()
         .slice(0, 2000);
       const refCatRaw = String(args.referral_category || "").trim();
@@ -7875,13 +11280,57 @@ async function executeAdminAiTool(
           message: "phone must include at least 10 digits",
         };
       }
+      if (phoneRaw && isPlaceholderPhone(phoneRaw)) {
+        return {
+          ok: false,
+          error: "placeholder_phone",
+          message:
+            "This phone looks like a placeholder (e.g. 555… / all same digits). Use the client's real phone.",
+        };
+      }
 
       const duplicates = phoneLast10
         ? await adminAiFindPhoneDuplicates(phoneRaw, scopedIds)
         : [];
-      const ownerId = langExplicit
-        ? await resolveLanguageOwnerAdminId(langExplicit)
-        : null;
+      let emailExistingId: number | null = null;
+      if (emailRaw) {
+        const [emailDup] = await pool.query<RowDataPacket[]>(
+          `SELECT id FROM clients WHERE email = ? LIMIT 1`,
+          [emailRaw],
+        );
+        if (emailDup[0]) emailExistingId = Number(emailDup[0].id);
+      }
+      const existingFromPhone =
+        duplicates.length > 0 ? Number(duplicates[0].id) : null;
+      const existingClientId = existingFromPhone ?? emailExistingId;
+      if (existingClientId != null) {
+        const href = `/admin/pipeline?client=${existingClientId}`;
+        return {
+          ok: true,
+          data: {
+            existing: true,
+            client_id: existingClientId,
+            href,
+            phone_duplicates: duplicates,
+            email_duplicate_client_id: emailExistingId,
+            message: existingFromPhone
+              ? `Phone already belongs to client_id=${existingClientId}. Open that record — a second client was not created.`
+              : `Email already belongs to client_id=${existingClientId}. Open that record — a second client was not created.`,
+          },
+        };
+      }
+
+      const namedOwner = await resolveMcpStaffAssignee({
+        adminId: args.assigned_admin_id,
+        name: args.assigned_admin_name,
+        email: args.assigned_admin_email,
+      });
+      if (namedOwner.ok === false) return namedOwner;
+      const ownerId = namedOwner.requested
+        ? namedOwner.id
+        : langExplicit
+          ? await resolveLanguageOwnerAdminId(langExplicit)
+          : null;
       const [ownerRows] = ownerId
         ? await pool.query<RowDataPacket[]>(
             `SELECT id, first_name, last_name, email, preferred_language
@@ -7945,12 +11394,8 @@ async function executeAdminAiTool(
             ready: true,
             preview,
             phone_duplicates: duplicates,
-            requires_confirm_duplicate: duplicates.length > 0,
             required_confirm_phrase: ADMIN_AI_WRITE_CONFIRM_PHRASE,
-            guidance:
-              duplicates.length > 0
-                ? `Phone matches existing client(s). Show duplicates. If they still want a new lead, re-call with confirm=true, confirm_duplicate=true, and confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`
-                : `Show this preview. After approval, re-call with confirm=true and confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`,
+            guidance: `Show this preview. After approval, re-call with confirm=true and confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`,
           },
         };
       }
@@ -7962,33 +11407,6 @@ async function executeAdminAiTool(
           error: "confirm_required",
           message: writeGate.message,
         };
-      }
-
-      if (
-        duplicates.length > 0 &&
-        !adminAiConfirmTrue(args.confirm_duplicate)
-      ) {
-        return {
-          ok: false,
-          error: "duplicate_phone",
-          message:
-            "Phone matches existing client(s). Set confirm_duplicate=true only after the user approves creating another record.",
-        };
-      }
-
-      // Preflight email uniqueness before any writes (avoid orphan referrers)
-      if (emailRaw) {
-        const [emailDup] = await pool.query<RowDataPacket[]>(
-          `SELECT id FROM clients WHERE email = ? LIMIT 1`,
-          [emailRaw],
-        );
-        if (emailDup[0]) {
-          return {
-            ok: false,
-            error: "duplicate_email",
-            message: `Email already used by client_id=${emailDup[0].id}`,
-          };
-        }
       }
 
       let referrerId = refIdArg;
@@ -8082,12 +11500,8 @@ async function executeAdminAiTool(
     }
 
     if (name === "create_work_task") {
-      const title = String(args.title || "")
-        .trim()
-        .slice(0, 255);
-      const description = String(args.description || "")
-        .trim()
-        .slice(0, 5000);
+      const title = normalizeWorkTaskTitle(args.title);
+      const description = normalizeWorkTaskDescription(args.description) ?? "";
       const missing: string[] = [];
       if (!title) missing.push("title");
 
@@ -8097,14 +11511,17 @@ async function executeAdminAiTool(
           : args.preferred_language === "en"
             ? "en"
             : null;
-      let assigneeId =
-        args.assignee_admin_id != null && Number(args.assignee_admin_id) > 0
-          ? Number(args.assignee_admin_id)
-          : null;
+      const namedStaff = await resolveMcpStaffAssignee({
+        adminId: args.assignee_admin_id,
+        name: args.assignee_name,
+        email: args.assignee_email,
+      });
+      if (namedStaff.ok === false) return namedStaff;
+      let assigneeId = namedStaff.requested ? namedStaff.id : null;
       if (!assigneeId) {
         if (!lang) {
           missing.push(
-            "preferred_language (en|es) or assignee_admin_id — needed to route to the DB language owner",
+            "assignee_admin_id / assignee_name (when a person is named) or preferred_language (en|es) to route to the DB language owner",
           );
         } else {
           assigneeId = await resolveLanguageOwnerAdminId(lang);
@@ -8138,7 +11555,9 @@ async function executeAdminAiTool(
         dueAt = d.toISOString().slice(0, 19).replace("T", " ");
       }
       const labels = Array.isArray(args.labels)
-        ? args.labels.map(String).slice(0, 20)
+        ? args.labels
+            .map((l) => decodeLiteralUnicodeEscapes(String(l)))
+            .slice(0, 20)
         : [];
       const pushHubspot = adminAiConfirmTrue(args.push_hubspot);
 
@@ -8336,36 +11755,48 @@ async function executeAdminAiTool(
       if (assigneeId && assigneeId !== ctx.adminId) {
         try {
           const [rows] = await pool.query<RowDataPacket[]>(
-            `SELECT email, first_name, phone, notification_prefs_json
+            `SELECT email, first_name, phone, preferred_language, notification_prefs_json
              FROM admins WHERE id = ? AND status = 'active' LIMIT 1`,
             [assigneeId],
           );
           if (rows[0]?.email) {
+            const adminLang = rows[0].preferred_language === "es" ? "es" : "en";
             const admin: TeamAdminRecipient = {
               id: assigneeId,
               email: String(rows[0].email),
               first_name: String(rows[0].first_name || "there"),
               phone: rows[0].phone ? String(rows[0].phone) : null,
-              preferred_language: "en",
+              preferred_language: adminLang,
               prefs: parseAdminNotificationPrefs(
                 rows[0].notification_prefs_json,
               ),
             };
             const link = `${APP_URL}/admin/my-tasks`;
-            const safeTitle = escapeHtml(title);
-            const safeName = escapeHtml(admin.first_name);
+            const emailTpl = tplAdminWorkTaskAssigned({
+              adminFirstName: admin.first_name,
+              title,
+              linkUrl: link,
+              lang: adminLang,
+            });
             await deliverAdminNotificationChannels({
               admin,
               eventKey: "work_task_assigned",
               tpl: {
-                subject: `Task assigned: ${title}`.slice(0, 200),
-                html: `<p>Hi ${safeName},</p>
-                <p>You were assigned a work task: <strong>${safeTitle}</strong>.</p>
-                <p><a href="${link}">Open My Tasks</a></p>`,
-                inAppTitle: `Task assigned: ${title}`.slice(0, 200),
-                inAppBody: "Open My Tasks to review the assignment.",
+                subject: emailTpl.subject,
+                html: emailTpl.html,
+                inAppTitle:
+                  adminLang === "es"
+                    ? `Tarea asignada: ${title}`.slice(0, 200)
+                    : `Task assigned: ${title}`.slice(0, 200),
+                inAppBody:
+                  adminLang === "es"
+                    ? "Abre Mis Tareas para revisar la asignación."
+                    : "Open My Tasks to review the assignment.",
                 linkUrl: link,
-                smsBody: `Optimum: task assigned — ${title}`.slice(0, 160),
+                smsBody:
+                  adminLang === "es"
+                    ? `Optimum: tarea asignada — ${title}`.slice(0, 160)
+                    : `Optimum: task assigned — ${title}`.slice(0, 160),
               },
             });
           }
@@ -8392,8 +11823,269 @@ async function executeAdminAiTool(
       };
     }
 
+    if (name === "update_work_task") {
+      const taskId =
+        args.task_id != null && Number(args.task_id) > 0
+          ? Number(args.task_id)
+          : 0;
+      if (!taskId) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message: "task_id is required (from search_work_tasks)",
+        };
+      }
+      const [existing] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM admin_work_tasks WHERE id = ? LIMIT 1`,
+        [taskId],
+      );
+      if (!existing[0]) {
+        return {
+          ok: false,
+          error: "not_found",
+          message: "Work task not found. Use search_work_tasks.",
+        };
+      }
+      const cur = existing[0];
+      const namedStaff = await resolveMcpStaffAssignee({
+        adminId: args.assignee_admin_id,
+        name: args.assignee_name,
+        email: args.assignee_email,
+      });
+      if (namedStaff.ok === false) return namedStaff;
+
+      const patch: Record<string, unknown> = {};
+      if (args.title != null) {
+        const title = normalizeWorkTaskTitle(args.title);
+        if (!title) {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message: "title cannot be empty",
+          };
+        }
+        patch.title = title;
+      }
+      if (args.description !== undefined) {
+        patch.description = normalizeWorkTaskDescription(args.description);
+      }
+      if (args.status != null) {
+        const status = String(args.status);
+        if (!["backlog", "doing", "done"].includes(status)) {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message: "status must be backlog, doing, or done",
+          };
+        }
+        patch.status = status;
+      }
+      if (args.priority != null) {
+        const priority = String(args.priority);
+        if (!["low", "medium", "high", "urgent"].includes(priority)) {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message: "priority must be low, medium, high, or urgent",
+          };
+        }
+        patch.priority = priority;
+      }
+      if (args.due_at !== undefined) {
+        const dueRaw = String(args.due_at || "").trim();
+        if (!dueRaw) {
+          patch.due_at = null;
+        } else {
+          const d = new Date(
+            dueRaw.length === 10 ? `${dueRaw}T12:00:00Z` : dueRaw,
+          );
+          if (isNaN(d.getTime())) {
+            return {
+              ok: false,
+              error: "invalid_args",
+              message: "due_at must be ISO datetime, YYYY-MM-DD, or empty",
+            };
+          }
+          patch.due_at = d.toISOString().slice(0, 19).replace("T", " ");
+        }
+      }
+      if (args.labels !== undefined) {
+        patch.labels_json = JSON.stringify(
+          Array.isArray(args.labels)
+            ? args.labels
+                .map((l) => decodeLiteralUnicodeEscapes(String(l)))
+                .slice(0, 20)
+            : [],
+        );
+      }
+      if (namedStaff.requested) {
+        patch.assignee_admin_id = namedStaff.id;
+      }
+
+      let caseId: number | null | undefined;
+      if (
+        args.case_id != null ||
+        (typeof args.case_number === "string" && args.case_number.trim()) ||
+        (args.client_id != null && Number(args.client_id) > 0)
+      ) {
+        if (
+          args.case_id != null ||
+          (typeof args.case_number === "string" && args.case_number.trim())
+        ) {
+          const caseRow = await adminAiResolveCaseRow(args, scopedIds);
+          if (!caseRow) {
+            return { ok: false, error: "not_found", message: "Case not found" };
+          }
+          caseId = Number(caseRow.id);
+        } else {
+          const clientId = Number(args.client_id);
+          const [cr] = await pool.query<RowDataPacket[]>(
+            `SELECT id FROM credit_repair_cases
+             WHERE client_id = ? AND status <> 'cancelled'
+             ORDER BY id DESC LIMIT 1`,
+            [clientId],
+          );
+          caseId = cr[0] ? Number(cr[0].id) : null;
+        }
+        patch.case_id = caseId;
+      }
+
+      if (Object.keys(patch).length === 0) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message:
+            "Provide at least one of title, description, status, priority, due_at, labels, assignee_admin_id / assignee_name, case_id",
+        };
+      }
+
+      const preview = {
+        task_id: taskId,
+        current: {
+          title: cur.title,
+          status: cur.status,
+          priority: cur.priority,
+          due_at: cur.due_at,
+          assignee_admin_id: cur.assignee_admin_id,
+        },
+        patch,
+      };
+
+      if (!adminAiWriteConfirmed(args).ok) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: true,
+            preview,
+            required_confirm_phrase: ADMIN_AI_WRITE_CONFIRM_PHRASE,
+            guidance: `Show this task update. After approval, re-call with confirm=true and confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`,
+          },
+        };
+      }
+
+      const sets = Object.keys(patch).map((k) => `${k} = ?`);
+      if (cur.hubspot_task_id) sets.push("pending_push = 1");
+      if (args.due_at !== undefined) sets.push("due_notified_at = NULL");
+      await pool.query(
+        `UPDATE admin_work_tasks SET ${sets.join(", ")} WHERE id = ?`,
+        [...Object.values(patch), taskId],
+      );
+
+      const nextAssignee = namedStaff.requested
+        ? namedStaff.id
+        : cur.assignee_admin_id != null
+          ? Number(cur.assignee_admin_id)
+          : null;
+      const prevAssignee =
+        cur.assignee_admin_id != null ? Number(cur.assignee_admin_id) : null;
+      if (nextAssignee && nextAssignee !== prevAssignee) {
+        try {
+          const [rows] = await pool.query<RowDataPacket[]>(
+            `SELECT email, first_name, phone, preferred_language, notification_prefs_json
+             FROM admins WHERE id = ? AND status = 'active' LIMIT 1`,
+            [nextAssignee],
+          );
+          if (rows[0]?.email) {
+            const adminLang = rows[0].preferred_language === "es" ? "es" : "en";
+            const title = String(patch.title ?? cur.title);
+            const admin: TeamAdminRecipient = {
+              id: nextAssignee,
+              email: String(rows[0].email),
+              first_name: String(rows[0].first_name || "there"),
+              phone: rows[0].phone ? String(rows[0].phone) : null,
+              preferred_language: adminLang,
+              prefs: parseAdminNotificationPrefs(
+                rows[0].notification_prefs_json,
+              ),
+            };
+            const link = `${APP_URL}/admin/my-tasks`;
+            const emailTpl = tplAdminWorkTaskAssigned({
+              adminFirstName: admin.first_name,
+              title,
+              linkUrl: link,
+              lang: adminLang,
+            });
+            await deliverAdminNotificationChannels({
+              admin,
+              eventKey: "work_task_assigned",
+              tpl: {
+                subject: emailTpl.subject,
+                html: emailTpl.html,
+                inAppTitle:
+                  adminLang === "es"
+                    ? `Tarea asignada: ${title}`.slice(0, 200)
+                    : `Task assigned: ${title}`.slice(0, 200),
+                inAppBody:
+                  adminLang === "es"
+                    ? "Abre Mis Tareas para revisar la asignación."
+                    : "Open My Tasks to review the assignment.",
+                linkUrl: link,
+                smsBody:
+                  adminLang === "es"
+                    ? `Optimum: tarea asignada — ${title}`.slice(0, 160)
+                    : `Optimum: task assigned — ${title}`.slice(0, 160),
+              },
+            });
+          }
+        } catch (e: any) {
+          console.error("[admin-ai] update_work_task notify", e?.message ?? e);
+        }
+      }
+
+      const [fresh] = await pool.query<RowDataPacket[]>(
+        `SELECT t.id, t.title, t.status, t.priority, t.due_at, t.assignee_admin_id,
+                t.case_id, a.first_name, a.last_name, a.email
+         FROM admin_work_tasks t
+         LEFT JOIN admins a ON a.id = t.assignee_admin_id
+         WHERE t.id = ? LIMIT 1`,
+        [taskId],
+      );
+      const row = fresh[0];
+      return {
+        ok: true,
+        data: {
+          updated: true,
+          task_id: taskId,
+          title: row?.title,
+          status: row?.status,
+          priority: row?.priority,
+          due_at: row?.due_at,
+          assignee: row?.assignee_admin_id
+            ? {
+                id: Number(row.assignee_admin_id),
+                name: `${row.first_name || ""} ${row.last_name || ""}`.trim(),
+                email: row.email,
+              }
+            : null,
+          case_id: row?.case_id != null ? Number(row.case_id) : null,
+          href: "/admin/my-tasks",
+        },
+      };
+    }
+
     if (name === "add_case_note") {
-      const note = String(args.note || "")
+      const note = decodeLiteralUnicodeEscapes(String(args.note || ""))
         .trim()
         .slice(0, 4000);
       const sourceRaw = String(args.source || "other").toLowerCase();
@@ -8838,11 +12530,252 @@ async function executeAdminAiTool(
       }
     }
 
+    if (name === "run_credit_analysis") {
+      const clientIdArg = Number(args.client_id);
+      const fileName = String(args.file_name || "")
+        .trim()
+        .replace(/[/\\]/g, "_")
+        .slice(0, 255);
+      const fileBase64Raw =
+        typeof args.file_base64 === "string" ? args.file_base64 : "";
+      const fileBuffer = fileBase64Raw
+        ? adminAiDecodeFileBase64(fileBase64Raw)
+        : null;
+      const mimeType = adminAiDocMimeFromFilename(
+        fileName,
+        "application/pdf",
+      );
+      const clientGoal = args.client_goal
+        ? String(args.client_goal).trim().slice(0, 255)
+        : null;
+      const notes = args.notes
+        ? decodeLiteralUnicodeEscapes(String(args.notes)).trim()
+        : null;
+      const emailOptIn = args.email_opt_in === true;
+      const repName = args.rep_name ? String(args.rep_name).trim() : null;
+      const agentPhone = args.agent_phone
+        ? String(args.agent_phone).trim()
+        : null;
+
+      const missing: string[] = [];
+      if (!clientIdArg || clientIdArg <= 0) missing.push("client_id");
+      if (!fileName) missing.push("file_name");
+
+      let clientId: number | null = null;
+      let clientName: string | null = null;
+      let clientEmail: string | null = null;
+      let clientPreferredLang: "en" | "es" = "en";
+      let isProspect = false;
+
+      if (missing.length === 0) {
+        const resolved = await adminAiResolveClientId(
+          { client_id: clientIdArg },
+          scopedIds,
+        );
+        if (resolved.ok === false) {
+          return {
+            ok: false,
+            error: resolved.error,
+            message: resolved.message,
+          };
+        }
+        const [cRows] = await pool.query<RowDataPacket[]>(
+          `SELECT id, email, first_name, last_name, phone, preferred_language, status, pipeline_stage
+           FROM clients WHERE id = ? LIMIT 1`,
+          [resolved.clientId],
+        );
+        if (!cRows[0]) {
+          return { ok: false, error: "not_found", message: "Client not found" };
+        }
+        clientId = Number(cRows[0].id);
+        clientName = `${cRows[0].first_name || ""} ${cRows[0].last_name || ""}`.trim();
+        clientEmail = String(cRows[0].email || "");
+        clientPreferredLang = cRows[0].preferred_language === "es" ? "es" : "en";
+        isProspect = isProspectClientRow(cRows[0]);
+      }
+
+      const textLanguage: "en" | "es" =
+        args.text_language === "es"
+          ? "es"
+          : args.text_language === "en"
+            ? "en"
+            : clientPreferredLang;
+
+      const validationErrors: string[] = [];
+      if (clientId && !isProspect) {
+        validationErrors.push(
+          "Client is not a prospect — credit analysis is for pre-sale leads only.",
+        );
+      }
+      if (mimeType !== "application/pdf") {
+        validationErrors.push(
+          "Credit analysis requires a PDF credit report (application/pdf).",
+        );
+      }
+      if (fileBase64Raw && !fileBuffer) {
+        validationErrors.push("file_base64 is not valid base64");
+      }
+      if (fileBuffer && fileBuffer.length > ADMIN_AI_DOC_MAX_BYTES) {
+        validationErrors.push(
+          `File exceeds ${ADMIN_AI_DOC_MAX_BYTES} bytes (~4MB). Compress the PDF first.`,
+        );
+      }
+
+      const preview = {
+        client_id: clientId,
+        client_name: clientName,
+        client_email: clientEmail,
+        is_prospect: isProspect,
+        file_name: fileName || null,
+        mime_type: mimeType,
+        file_size_bytes: fileBuffer?.length ?? null,
+        text_language: textLanguage,
+        client_goal: clientGoal,
+        email_opt_in: emailOptIn,
+        has_file_bytes: !!fileBuffer,
+      };
+
+      if (missing.length > 0) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: false,
+            missing_fields: missing,
+            preview,
+            guidance:
+              "Provide client_id (from search_clients) and file_name (.pdf), then file_base64 from the credit report attachment.",
+          },
+        };
+      }
+
+      if (validationErrors.length > 0) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: false,
+            validation_errors: validationErrors,
+            preview,
+            guidance: validationErrors.join(" "),
+          },
+        };
+      }
+
+      if (!fileBuffer) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: false,
+            missing_fields: ["file_base64"],
+            preview,
+            guidance:
+              "Client looks valid. Re-call with file_base64 (PDF) to preview size, then confirm after user approval.",
+          },
+        };
+      }
+
+      if (!adminAiConfirmTrue(args.confirm)) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: true,
+            preview,
+            required_confirm_phrase: ADMIN_AI_WRITE_CONFIRM_PHRASE,
+            guidance: `Preview: run free credit analysis for ${clientName} (${clientEmail}). After approval, re-call with confirm=true and confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`,
+          },
+        };
+      }
+
+      const writeGate = adminAiWriteConfirmed(args);
+      if (writeGate.ok === false) {
+        return {
+          ok: false,
+          error: "confirm_required",
+          message: writeGate.message,
+        };
+      }
+
+      const [prospectRows] = await pool.query<RowDataPacket[]>(
+        `SELECT status, pipeline_stage FROM clients WHERE id = ? LIMIT 1`,
+        [clientId!],
+      );
+      if (!prospectRows[0] || !isProspectClientRow(prospectRows[0])) {
+        return {
+          ok: false,
+          error: "conflict",
+          message:
+            "Client is no longer a prospect. Credit analysis is for pre-sale leads only.",
+        };
+      }
+
+      const [cRows] = await pool.query<RowDataPacket[]>(
+        `SELECT email, first_name, last_name, phone, preferred_language
+         FROM clients WHERE id = ? LIMIT 1`,
+        [clientId!],
+      );
+      const c = cRows[0];
+      const firstName = String(c.first_name || "").trim();
+      const lastName = String(c.last_name || "").trim();
+      const email = String(c.email || "").trim().toLowerCase();
+      const phone = String(c.phone || "").trim();
+      const lang: "en" | "es" = textLanguage;
+
+      try {
+        const result = await executeCreditAnalysisUpload({
+          mode: "agent",
+          firstName,
+          lastName,
+          email,
+          phone,
+          textLanguage: lang,
+          clientGoal,
+          notes,
+          agentPhone,
+          repName,
+          emailOptIn,
+          file: {
+            buffer: fileBuffer,
+            originalname: fileName,
+            mimetype: mimeType!,
+          },
+          fixedClientId: clientId!,
+          sourceLabel: "agent_submission",
+        });
+        return {
+          ok: true,
+          data: {
+            analysis_id: result.id,
+            client_id: result.client_id,
+            extraction_status: result.extraction_status,
+            scores: result.scores,
+            suggested_labels: result.suggested_labels,
+            email_sent: result.email_sent,
+            claude_enhanced: result.claude_enhanced === true,
+            generated_at: result.generated_at,
+            middle_score: result.analyst?.middle_score ?? null,
+            goal_score: result.analyst?.goal_score ?? null,
+            href: `/admin/pipeline?client=${clientId}`,
+            guidance:
+              "Analysis saved. Open the client panel Analysis tab or share the narrative from analysis_html in CRM.",
+          },
+        };
+      } catch (e: any) {
+        return {
+          ok: false,
+          error: "analysis_failed",
+          message: String(e?.message || e || "Credit analysis failed"),
+        };
+      }
+    }
+
     if (name === "send_email") {
-      const subject = String(args.subject || "")
+      const subject = decodeLiteralUnicodeEscapes(String(args.subject || ""))
         .trim()
         .slice(0, 200);
-      const body = String(args.body || "")
+      const body = decodeLiteralUnicodeEscapes(String(args.body || ""))
         .trim()
         .slice(0, 8000);
       const referrerIdArg =
@@ -8853,19 +12786,30 @@ async function executeAdminAiTool(
         (args.client_id != null && Number(args.client_id) > 0) ||
         (args.case_id != null && Number(args.case_id) > 0) ||
         (typeof args.case_number === "string" && !!args.case_number.trim());
-      const audience: "client" | "referrer" = referrerIdArg
-        ? "referrer"
-        : "client";
+      const namedTo = await resolveMcpStaffAssignee({
+        adminId: args.to_admin_id,
+        name: args.to_admin_name,
+        email: args.to_admin_email,
+      });
+      if (namedTo.ok === false) return namedTo;
+      const staffTo = namedTo.requested ? namedTo : null;
+      const audience: "client" | "referrer" | "staff" = staffTo
+        ? "staff"
+        : referrerIdArg
+          ? "referrer"
+          : "client";
       let includeDocUploadLink = adminAiConfirmTrue(
         args.include_doc_upload_link,
       );
-      if (audience === "referrer") includeDocUploadLink = false;
+      if (audience !== "client") includeDocUploadLink = false;
 
       const missing: string[] = [];
       if (!subject) missing.push("subject");
       if (!body) missing.push("body");
-      if (!referrerIdArg && !hasClientKey) {
-        missing.push("client_id / case_id / case_number, or referrer_id");
+      if (!referrerIdArg && !hasClientKey && !staffTo) {
+        missing.push(
+          "client_id / case_id / case_number, referrer_id, or to_admin_id / to_admin_name",
+        );
       }
 
       let clientId: number | null = null;
@@ -8882,7 +12826,21 @@ async function executeAdminAiTool(
       let toName: string | null = null;
       let toLang: "en" | "es" = "en";
 
-      if (missing.length === 0 && referrerId) {
+      if (missing.length === 0 && staffTo) {
+        toEmail = staffTo.meta.email ? String(staffTo.meta.email).trim() : null;
+        toName = staffTo.meta.name;
+        toLang = staffTo.meta.preferred_language === "es" ? "es" : "en";
+        if (!toEmail) {
+          return {
+            ok: false,
+            error: "no_email",
+            message:
+              "That staff member has no email on file. Use search_admins and pick someone with email.",
+          };
+        }
+      }
+
+      if (missing.length === 0 && referrerId && audience === "referrer") {
         const [refRows] = await pool.query<RowDataPacket[]>(
           `SELECT id, first_name, last_name, email, preferred_language, status
            FROM referrers WHERE id = ? LIMIT 1`,
@@ -8964,7 +12922,7 @@ async function executeAdminAiTool(
             ok: false,
             error: "no_email",
             message:
-              "Client has no email on file. Add an email in the CRM first, or use another channel.",
+              "Client has no email on file. Use update_client to set email first, or use another channel.",
           };
         }
         if (!caseId) {
@@ -8986,6 +12944,19 @@ async function executeAdminAiTool(
         }
       }
 
+      const attachmentLoad = await adminAiLoadEmailAttachment({
+        args,
+        clientId,
+      });
+      if (attachmentLoad.ok === false) {
+        return {
+          ok: false,
+          error: attachmentLoad.error,
+          message: attachmentLoad.message,
+        };
+      }
+      const attachment = attachmentLoad.attachment;
+
       const preview = {
         audience,
         client_id: clientId,
@@ -8998,13 +12969,24 @@ async function executeAdminAiTool(
         subject,
         body,
         include_doc_upload_link: includeDocUploadLink,
-        will_log_client_note: audience === "client" || !!clientId,
+        attachment: attachment
+          ? {
+              filename: attachment.filename,
+              content_type: attachment.contentType,
+              byte_length: attachment.content.length,
+              source: attachment.source,
+              source_id: attachment.source_id ?? null,
+            }
+          : null,
+        will_log_client_note: audience === "client",
         will_log_referrer_note: audience === "referrer",
         note:
           audience === "referrer"
             ? "Dry-run does not send. On confirm, email goes to the referrer; a note is saved on the partner record" +
               (clientId ? " and on the linked client's file." : ".")
-            : "Dry-run does not send or mint links. On confirm, email is sent via OFG mailer and an EMAIL note is appended.",
+            : audience === "staff"
+              ? "Dry-run does not send. On confirm, email goes to that staff member (no client file note unless this is a client/referrer send)."
+              : "Dry-run does not send or mint links. On confirm, email is sent via OFG mailer and an EMAIL note is appended.",
       };
 
       if (missing.length > 0) {
@@ -9016,7 +12998,7 @@ async function executeAdminAiTool(
             missing_fields: missing,
             preview,
             guidance:
-              "Collect subject + body, and either client_id (OFG) or referrer_id. Pass both to email a realtor/LO about a specific client.",
+              "Collect subject + body, and client_id (OFG), referrer_id, or to_admin_id / to_admin_name.",
           },
         };
       }
@@ -9084,6 +13066,15 @@ async function executeAdminAiTool(
           to: toEmail as string,
           subject,
           html,
+          attachments: attachment
+            ? [
+                {
+                  filename: attachment.filename,
+                  content: attachment.content,
+                  contentType: attachment.contentType,
+                },
+              ]
+            : undefined,
         });
       } catch (e: any) {
         if (mintedRawToken) {
@@ -9123,6 +13114,11 @@ async function executeAdminAiTool(
       const ts = new Date().toISOString().slice(0, 16).replace("T", " ");
       const noteParts = [`Subject: ${subject}`, body.slice(0, 1500)];
       if (portalUrl) noteParts.push(`Doc upload link: ${portalUrl}`);
+      if (attachment) {
+        noteParts.push(
+          `Attachment: ${attachment.filename} (${attachment.content.length} bytes)`,
+        );
+      }
       let clientNoteAppended = false;
       let referrerNoteAppended = false;
       if (audience === "client" && clientId) {
@@ -9207,12 +13203,463 @@ async function executeAdminAiTool(
           subject,
           include_doc_upload_link: includeDocUploadLink,
           doc_upload_link: portalUrl,
+          attachment: attachment
+            ? {
+                filename: attachment.filename,
+                content_type: attachment.contentType,
+                byte_length: attachment.content.length,
+                source: attachment.source,
+                source_id: attachment.source_id ?? null,
+              }
+            : null,
           note_appended: clientNoteAppended || referrerNoteAppended,
           client_note_appended: clientNoteAppended,
           referrer_note_appended: referrerNoteAppended,
           href: clientId
             ? `/admin/pipeline?client=${clientId}`
             : "/admin/clients",
+        },
+      };
+    }
+
+    if (name === "send_round_report") {
+      const alsoEmail = adminAiBoolDefaultTrue(args.also_email);
+      const alsoSms = adminAiBoolDefaultTrue(args.also_sms);
+      const attachPdf = adminAiBoolDefaultTrue(args.attach_pdf);
+      const notifyPartners = adminAiBoolDefaultTrue(args.notify_partners);
+      const pdfIdArg =
+        args.pdf_id != null && Number(args.pdf_id) > 0
+          ? Number(args.pdf_id)
+          : null;
+      const roundReportIdArg =
+        args.round_report_id != null && Number(args.round_report_id) > 0
+          ? Number(args.round_report_id)
+          : null;
+      const roundNumberArg =
+        args.round_number != null && Number(args.round_number) > 0
+          ? Number(args.round_number)
+          : null;
+
+      const hasClientKey =
+        (args.client_id != null && Number(args.client_id) > 0) ||
+        (args.case_id != null && Number(args.case_id) > 0) ||
+        (typeof args.case_number === "string" && !!args.case_number.trim());
+
+      const missing: string[] = [];
+      if (!hasClientKey) missing.push("client_id / case_id / case_number");
+      if (!pdfIdArg && !roundReportIdArg && !roundNumberArg) {
+        missing.push("pdf_id / round_report_id / round_number");
+      }
+      if (!alsoEmail && !alsoSms && !notifyPartners) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message:
+            "Set also_email, also_sms, and/or notify_partners (at least one must be true)",
+        };
+      }
+
+      if (missing.length > 0) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: false,
+            missing_fields: missing,
+            guidance:
+              "Use list_progress_reports to get client_id + pdf_id (or id / round), then dry-run send_round_report.",
+          },
+        };
+      }
+
+      const resolved = await adminAiResolveClientId(args, scopedIds);
+      if (resolved.ok === false) {
+        return {
+          ok: false,
+          error: resolved.error,
+          message: resolved.message,
+        };
+      }
+      const clientId = resolved.clientId;
+      let caseId = resolved.caseId;
+      let caseNumber = resolved.caseNumber;
+
+      const [cRows] = await pool.query<RowDataPacket[]>(
+        `SELECT first_name, last_name, email, phone, preferred_language, status
+         FROM clients WHERE id = ? LIMIT 1`,
+        [clientId],
+      );
+      if (!cRows[0]) {
+        return {
+          ok: false,
+          error: "not_found",
+          message: "Client not found",
+        };
+      }
+      const client = cRows[0];
+      if (String(client.status) === "cancelled") {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message: "Cannot send round report to a cancelled client",
+        };
+      }
+      const clientName =
+        `${client.first_name || ""} ${client.last_name || ""}`.trim();
+      const clientEmail = client.email ? String(client.email).trim() : null;
+      const clientPhone = client.phone ? String(client.phone).trim() : null;
+      const lang = client.preferred_language === "es" ? "es" : "en";
+
+      if (!caseId) {
+        const [cr] = await pool.query<RowDataPacket[]>(
+          `SELECT id, case_number FROM credit_repair_cases
+           WHERE client_id = ? AND status <> 'cancelled'
+           ORDER BY id DESC LIMIT 1`,
+          [clientId],
+        );
+        if (cr[0]) {
+          caseId = Number(cr[0].id);
+          caseNumber = cr[0].case_number ? String(cr[0].case_number) : null;
+        }
+      }
+
+      let pdfRow: RowDataPacket | null = null;
+      if (pdfIdArg) {
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT id, client_id, round_number, round_report_id, file_name,
+                  storage_key, storage_provider, encrypted, enc_iv, enc_tag
+           FROM round_report_pdfs WHERE id = ? LIMIT 1`,
+          [pdfIdArg],
+        );
+        pdfRow = rows[0] || null;
+        if (!pdfRow || Number(pdfRow.client_id) !== clientId) {
+          return {
+            ok: false,
+            error: "not_found",
+            message: "Round PDF not found for this client (check pdf_id)",
+          };
+        }
+      } else if (roundReportIdArg) {
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT id, client_id, round_number, round_report_id, file_name,
+                  storage_key, storage_provider, encrypted, enc_iv, enc_tag
+           FROM round_report_pdfs
+           WHERE client_id = ? AND round_report_id = ?
+           ORDER BY id DESC LIMIT 1`,
+          [clientId, roundReportIdArg],
+        );
+        pdfRow = rows[0] || null;
+        if (!pdfRow) {
+          return {
+            ok: false,
+            error: "not_found",
+            message:
+              "No round_report_pdfs row for that round_report_id. Publish from CRM Reports → Generate, or pass pdf_id.",
+          };
+        }
+      } else if (roundNumberArg) {
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT id, client_id, round_number, round_report_id, file_name,
+                  storage_key, storage_provider, encrypted, enc_iv, enc_tag
+           FROM round_report_pdfs
+           WHERE client_id = ? AND round_number = ?
+           ORDER BY id DESC LIMIT 1`,
+          [clientId, roundNumberArg],
+        );
+        pdfRow = rows[0] || null;
+        if (!pdfRow) {
+          return {
+            ok: false,
+            error: "not_found",
+            message: `No published Round ${roundNumberArg} PDF for this client. Publish from CRM Reports → Generate first.`,
+          };
+        }
+      }
+
+      if (!pdfRow) {
+        return {
+          ok: false,
+          error: "not_found",
+          message: "Could not resolve Round PDF",
+        };
+      }
+
+      const pdfId = Number(pdfRow.id);
+      const roundNumber = Number(pdfRow.round_number);
+      const roundReportId =
+        pdfRow.round_report_id != null ? Number(pdfRow.round_report_id) : null;
+
+      let scoreBefore: number | null = null;
+      let scoreAfter: number | null = null;
+      let itemsRemoved = 0;
+      if (roundReportId) {
+        const [rr] = await pool.query<RowDataPacket[]>(
+          `SELECT score_before, score_after, items_removed
+           FROM client_round_reports WHERE id = ? AND client_id = ? LIMIT 1`,
+          [roundReportId, clientId],
+        );
+        if (rr[0]) {
+          scoreBefore =
+            rr[0].score_before != null ? Number(rr[0].score_before) : null;
+          scoreAfter =
+            rr[0].score_after != null ? Number(rr[0].score_after) : null;
+          itemsRemoved = Number(rr[0].items_removed || 0);
+        }
+      } else {
+        const [rr] = await pool.query<RowDataPacket[]>(
+          `SELECT id, score_before, score_after, items_removed
+           FROM client_round_reports
+           WHERE client_id = ? AND round_number = ?
+           ORDER BY id DESC LIMIT 1`,
+          [clientId, roundNumber],
+        );
+        if (rr[0]) {
+          scoreBefore =
+            rr[0].score_before != null ? Number(rr[0].score_before) : null;
+          scoreAfter =
+            rr[0].score_after != null ? Number(rr[0].score_after) : null;
+          itemsRemoved = Number(rr[0].items_removed || 0);
+        }
+      }
+
+      if (alsoEmail && !clientEmail && !notifyPartners) {
+        return {
+          ok: false,
+          error: "no_email",
+          message:
+            "Client has no email on file. Use update_client to set email, or set also_email=false and also_sms=true (or notify_partners=true for partners only).",
+        };
+      }
+      if (alsoSms && !clientPhone && !alsoEmail && !notifyPartners) {
+        return {
+          ok: false,
+          error: "no_phone",
+          message:
+            "Client has no phone on file. Use update_client to set phone, or set also_sms=false and also_email=true (or notify_partners=true for partners only).",
+        };
+      }
+
+      const partnerEmailStats =
+        await countLinkedReferrerPartnersWithEmail(clientId);
+
+      const portalUrl = `${APP_URL}/portal/reports`;
+      const triggerEvent = `round_${roundNumber}_complete`;
+      const smsPreviewBody = smsClientReminderBody({
+        triggerEvent,
+        firstName: String(client.first_name || ""),
+        lang,
+        portalUrl: "[secure_pdf_url]",
+      });
+      const emailTplPreview = tplRoundComplete({
+        firstName: String(client.first_name || ""),
+        roundNumber,
+        scoreBefore,
+        scoreAfter,
+        itemsRemoved,
+        portalUrl,
+        securePdfUrl: "[secure_pdf_url]",
+        lang,
+      });
+
+      const preview = {
+        client_id: clientId,
+        client_name: clientName,
+        case_id: caseId,
+        case_number: caseNumber,
+        pdf_id: pdfId,
+        round_report_id: roundReportId,
+        round_number: roundNumber,
+        file_name: String(pdfRow.file_name || ""),
+        also_email: alsoEmail,
+        also_sms: alsoSms,
+        attach_pdf: attachPdf,
+        notify_partners: notifyPartners,
+        partners_linked: partnerEmailStats.linked,
+        partners_with_email: partnerEmailStats.withEmail,
+        to_email: alsoEmail ? clientEmail : null,
+        to_phone: alsoSms ? clientPhone : null,
+        email_subject: emailTplPreview.subject,
+        sms_preview: alsoSms ? smsPreviewBody : null,
+        secure_link_ttl_hours: ROUND_PDF_DOWNLOAD_TTL_HOURS,
+        note: "Dry-run does not mint tokens or send. On confirm: mint secure PDF URL, email Round-complete template, optional SMS + partner emails.",
+      };
+
+      if (!adminAiConfirmTrue(args.confirm)) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: true,
+            preview,
+            required_confirm_phrase: ADMIN_AI_WRITE_CONFIRM_PHRASE,
+            guidance: `Show Round ${roundNumber} secure email/SMS preview. After approval, re-call with confirm=true and confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`,
+          },
+        };
+      }
+
+      const writeGate = adminAiWriteConfirmed(args);
+      if (writeGate.ok === false) {
+        return {
+          ok: false,
+          error: "confirm_required",
+          message: writeGate.message,
+        };
+      }
+
+      let pdfAttachment:
+        | { filename: string; content: Buffer; contentType: string }
+        | undefined;
+      if (attachPdf || notifyPartners) {
+        const buf = await loadRoundReportPdfBytes(pdfRow);
+        if (buf && buf.length > 0) {
+          pdfAttachment = {
+            filename:
+              String(pdfRow.file_name || "").trim() ||
+              `OFG_Progress_Report_R${roundNumber}.pdf`,
+            content: buf,
+            contentType: "application/pdf",
+          };
+        } else if (attachPdf || notifyPartners) {
+          return {
+            ok: false,
+            error: "send_failed",
+            message:
+              "Could not load Round PDF bytes from storage. Try again or finish in CRM Reports.",
+          };
+        }
+      }
+
+      let securePdfUrl = "";
+      try {
+        const dlToken = await createRoundReportDownloadToken(pdfId, clientId);
+        securePdfUrl = `${APP_URL}/api/public/round-report-pdf/${dlToken}`;
+      } catch (e: any) {
+        return {
+          ok: false,
+          error: "send_failed",
+          message: String(e?.message || "Failed to mint secure PDF link").slice(
+            0,
+            300,
+          ),
+        };
+      }
+
+      let emailSent = false;
+      let smsSent = false;
+      let partnersEmailed = 0;
+
+      if (alsoEmail && clientEmail) {
+        const tpl = tplRoundComplete({
+          firstName: String(client.first_name || ""),
+          roundNumber,
+          scoreBefore,
+          scoreAfter,
+          itemsRemoved,
+          portalUrl,
+          securePdfUrl,
+          lang,
+        });
+        try {
+          await sendEmail({
+            to: clientEmail,
+            subject: tpl.subject,
+            html: tpl.html,
+            attachments:
+              attachPdf && pdfAttachment ? [pdfAttachment] : undefined,
+          });
+          emailSent = true;
+        } catch (e: any) {
+          return {
+            ok: false,
+            error: "send_failed",
+            message: `${String(e?.message || "Email send failed").slice(0, 300)} (secure link was minted: ${securePdfUrl})`,
+          };
+        }
+      }
+
+      if (alsoSms && clientPhone) {
+        const smsResult = await maybeSendClientReminderSms({
+          clientId,
+          triggerEvent,
+          alsoSms: true,
+          portalUrl: securePdfUrl,
+          smsFromAdminId: ctx.adminId,
+        }).catch((e: any) => {
+          console.error("[admin-ai] send_round_report sms", e?.message ?? e);
+          return { sent: false, reason: "error" as string };
+        });
+        smsSent = !!smsResult.sent;
+      }
+
+      if (notifyPartners && pdfAttachment) {
+        partnersEmailed = await emailLinkedReferrerPartnersRoundPdf({
+          clientId,
+          roundNumber,
+          clientName: clientName || "Client",
+          langFallback: lang,
+          pdfAttachment,
+        });
+      }
+
+      if (roundReportId && (emailSent || smsSent)) {
+        await pool
+          .query(
+            `UPDATE client_round_reports
+             SET delivered_via_email = IF(?, 1, delivered_via_email),
+                 delivered_via_sms = IF(?, 1, delivered_via_sms)
+             WHERE id = ?`,
+            [emailSent ? 1 : 0, smsSent ? 1 : 0, roundReportId],
+          )
+          .catch(() => null);
+      }
+
+      const ts = new Date().toISOString().slice(0, 16).replace("T", " ");
+      const noteBits = [
+        `[ROUND REPORT ${ts} UTC] Resent Round ${roundNumber} via MCP`,
+        emailSent ? `Email → ${clientEmail}` : null,
+        smsSent ? `SMS → ${clientPhone}` : null,
+        `Secure PDF: ${securePdfUrl}`,
+        attachPdf && pdfAttachment
+          ? `Attached: ${pdfAttachment.filename}`
+          : null,
+        partnersEmailed > 0 ? `Partners emailed: ${partnersEmailed}` : null,
+      ].filter(Boolean);
+      try {
+        await pool.query(
+          `UPDATE clients
+           SET admin_notes = CONCAT(
+                 COALESCE(admin_notes, ''),
+                 CASE WHEN admin_notes IS NULL OR admin_notes = '' THEN '' ELSE '\n' END,
+                 ?
+               )
+           WHERE id = ?`,
+          [noteBits.join("\n").slice(0, 8000), clientId],
+        );
+      } catch (noteErr: any) {
+        console.error(
+          "[admin-ai] send_round_report note",
+          noteErr?.message ?? noteErr,
+        );
+      }
+
+      return {
+        ok: true,
+        data: {
+          sent: true,
+          client_id: clientId,
+          client_name: clientName,
+          case_id: caseId,
+          case_number: caseNumber,
+          pdf_id: pdfId,
+          round_report_id: roundReportId,
+          round_number: roundNumber,
+          email_sent: emailSent,
+          sms_sent: smsSent,
+          partners_emailed: partnersEmailed,
+          attach_pdf: !!(attachPdf && pdfAttachment),
+          secure_pdf_url: securePdfUrl,
+          secure_link_ttl_hours: ROUND_PDF_DOWNLOAD_TTL_HOURS,
+          href: `/admin/pipeline?client=${clientId}${caseId ? `&case=${caseId}` : ""}`,
         },
       };
     }
@@ -9296,7 +13743,9 @@ async function executeAdminAiTool(
       const [msgs] = await pool.query<RowDataPacket[]>(
         `SELECT m.id, m.conversation_id, m.direction, m.channel, m.body,
                 m.provider_message_id, m.provider_status, m.error_message,
-                m.created_at, m.media_url IS NOT NULL AS has_media
+                m.created_at, m.media_url IS NOT NULL AS has_media,
+                m.call_duration_sec, m.recording_url IS NOT NULL AS has_recording,
+                m.call_insights_status, m.call_insights_json, m.metadata_json
          FROM conversation_messages m
          WHERE m.conversation_id IN (?)
          ORDER BY m.id DESC
@@ -9308,34 +13757,222 @@ async function executeAdminAiTool(
         data: {
           client_id: clientId,
           messages: msgs
-            .map((m) => ({
-              id: Number(m.id),
-              conversation_id: Number(m.conversation_id),
-              direction: String(m.direction || ""),
-              channel: String(m.channel || "sms"),
-              body: String(m.body || "").slice(0, 500),
-              has_media: Number(m.has_media) === 1,
-              provider_message_id: m.provider_message_id
-                ? String(m.provider_message_id)
-                : null,
-              provider_status: m.provider_status
-                ? String(m.provider_status)
-                : null,
-              error_message: m.error_message
-                ? String(m.error_message).slice(0, 200)
-                : null,
-              created_at: m.created_at,
-            }))
+            .map((m) => {
+              const channel = String(m.channel || "sms");
+              let insightsSummary: string | null = null;
+              let insightsStatus: string | null = m.call_insights_status
+                ? String(m.call_insights_status)
+                : null;
+              if (channel === "call" && m.call_insights_json) {
+                try {
+                  const raw =
+                    typeof m.call_insights_json === "string"
+                      ? JSON.parse(m.call_insights_json)
+                      : m.call_insights_json;
+                  const bullets = Array.isArray(raw?.summary_bullets)
+                    ? raw.summary_bullets.map(String)
+                    : [];
+                  const label = raw?.sentiment?.label
+                    ? String(raw.sentiment.label)
+                    : null;
+                  insightsSummary = [
+                    label ? `sentiment:${label}` : null,
+                    ...bullets.slice(0, 3),
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")
+                    .slice(0, 400);
+                } catch {
+                  insightsSummary = null;
+                }
+              }
+              let isVoicemail = false;
+              try {
+                const meta =
+                  typeof m.metadata_json === "string"
+                    ? JSON.parse(m.metadata_json)
+                    : m.metadata_json;
+                isVoicemail = !!(meta && meta.is_voicemail);
+              } catch {
+                isVoicemail = false;
+              }
+              return {
+                id: Number(m.id),
+                conversation_id: Number(m.conversation_id),
+                direction: String(m.direction || ""),
+                channel,
+                body: decodeLiteralUnicodeEscapes(String(m.body || "")).slice(
+                  0,
+                  500,
+                ),
+                has_media: Number(m.has_media) === 1,
+                has_recording: Number(m.has_recording) === 1,
+                call_duration_sec:
+                  m.call_duration_sec != null
+                    ? Number(m.call_duration_sec)
+                    : null,
+                is_voicemail: isVoicemail,
+                call_insights_status: insightsStatus,
+                insights_summary: insightsSummary,
+                provider_message_id: m.provider_message_id
+                  ? String(m.provider_message_id)
+                  : null,
+                provider_status: m.provider_status
+                  ? String(m.provider_status)
+                  : null,
+                error_message: m.error_message
+                  ? String(m.error_message).slice(0, 200)
+                  : null,
+                created_at: m.created_at,
+              };
+            })
             .reverse(),
           href: `/admin/conversations?client=${clientId}`,
         },
       };
     }
 
+    if (name === "get_call_insights") {
+      const resolved = await adminAiResolveClientId(args, scopedIds);
+      if (resolved.ok === false) {
+        return {
+          ok: false,
+          error: resolved.error,
+          message: resolved.message,
+        };
+      }
+      const clientId = resolved.clientId;
+      const messageIdArg =
+        args.message_id != null && Number(args.message_id) > 0
+          ? Number(args.message_id)
+          : null;
+      const rawLimit = Number(args.limit);
+      const limit = Number.isFinite(rawLimit)
+        ? Math.min(10, Math.max(1, Math.floor(rawLimit)))
+        : 3;
+
+      const [convRows] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM conversations WHERE client_id = ?`,
+        [clientId],
+      );
+      const convIds = convRows.map((r) => Number(r.id)).filter((id) => id > 0);
+      if (!convIds.length) {
+        return {
+          ok: true,
+          data: {
+            client_id: clientId,
+            calls: [],
+            note: "No Conversations hub threads yet for this client.",
+            href: `/admin/conversations?client=${clientId}`,
+            call_insights_enabled: callInsightsFeatureEnabled(),
+          },
+        };
+      }
+
+      const where = [
+        "m.conversation_id IN (?)",
+        "m.channel = 'call'",
+        "m.recording_url IS NOT NULL",
+      ];
+      const params: any[] = [convIds];
+      if (messageIdArg) {
+        where.push("m.id = ?");
+        params.push(messageIdArg);
+      }
+      params.push(messageIdArg ? 1 : limit);
+
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT m.id, m.conversation_id, m.direction, m.body, m.created_at,
+                m.call_duration_sec, m.recording_url IS NOT NULL AS has_recording,
+                m.call_insights_status, m.call_transcript, m.call_insights_json,
+                m.call_insights_error, m.metadata_json
+         FROM conversation_messages m
+         WHERE ${where.join(" AND ")}
+         ORDER BY m.id DESC
+         LIMIT ?`,
+        params,
+      );
+
+      const calls = rows.map((m) => {
+        let insights: unknown = null;
+        if (m.call_insights_json) {
+          try {
+            insights =
+              typeof m.call_insights_json === "string"
+                ? JSON.parse(m.call_insights_json)
+                : m.call_insights_json;
+          } catch {
+            insights = null;
+          }
+        }
+        let isVoicemail = false;
+        try {
+          const meta =
+            typeof m.metadata_json === "string"
+              ? JSON.parse(m.metadata_json)
+              : m.metadata_json;
+          isVoicemail = !!(meta && meta.is_voicemail);
+        } catch {
+          isVoicemail = false;
+        }
+        const transcript = m.call_transcript
+          ? decodeLiteralUnicodeEscapes(String(m.call_transcript))
+          : null;
+        return {
+          message_id: Number(m.id),
+          conversation_id: Number(m.conversation_id),
+          direction: String(m.direction || ""),
+          body: decodeLiteralUnicodeEscapes(String(m.body || "")).slice(0, 240),
+          is_voicemail: isVoicemail,
+          call_duration_sec:
+            m.call_duration_sec != null ? Number(m.call_duration_sec) : null,
+          has_recording: Number(m.has_recording) === 1,
+          call_insights_status: m.call_insights_status
+            ? String(m.call_insights_status)
+            : null,
+          call_insights_error: m.call_insights_error
+            ? String(m.call_insights_error).slice(0, 200)
+            : null,
+          insights,
+          transcript_preview: transcript
+            ? transcript.slice(0, 800)
+            : null,
+          transcript_full:
+            transcript && transcript.length <= 12000
+              ? transcript
+              : transcript
+                ? `${transcript.slice(0, 12000)}…`
+                : null,
+          created_at: m.created_at,
+        };
+      });
+
+      return {
+        ok: true,
+        data: {
+          client_id: clientId,
+          calls,
+          call_insights_enabled: callInsightsFeatureEnabled(),
+          href: `/admin/conversations?client=${clientId}`,
+          guidance: callInsightsFeatureEnabled()
+            ? "When status is pending/processing, ask again after the next cron cycle. Use insights for staff coaching — do not invent details missing from transcript."
+            : "CALL_INSIGHTS_ENABLED is off on this environment — recordings still play in CRM but Claude resumes are not generated.",
+        },
+      };
+    }
+
     if (name === "send_sms") {
-      const body = String(args.body || args.message || "")
-        .trim()
-        .slice(0, 1600);
+      const rawBody = decodeLiteralUnicodeEscapes(
+        String(args.body || args.message || ""),
+      ).trim();
+      if ([...rawBody].length > SMS_MAX_BODY_CHARS) {
+        return {
+          ok: false,
+          error: "sms_body_too_long",
+          message: `SMS body exceeds ${SMS_MAX_BODY_CHARS} characters`,
+        };
+      }
+      const body = rawBody;
       const referrerIdArg =
         args.referrer_id != null && Number(args.referrer_id) > 0
           ? Number(args.referrer_id)
@@ -9344,25 +13981,33 @@ async function executeAdminAiTool(
         (args.client_id != null && Number(args.client_id) > 0) ||
         (args.case_id != null && Number(args.case_id) > 0) ||
         (typeof args.case_number === "string" && !!args.case_number.trim());
-      const audience: "client" | "referrer" = referrerIdArg
-        ? "referrer"
-        : "client";
+
+      const namedTo = await resolveMcpStaffAssignee({
+        adminId: args.to_admin_id,
+        name: args.to_admin_name,
+        email: args.to_admin_email,
+      });
+      if (namedTo.ok === false) return namedTo;
+      const staffTo = namedTo.requested ? namedTo : null;
 
       const missing: string[] = [];
       if (!body) missing.push("body");
-      if (!referrerIdArg && !hasClientKey) {
-        missing.push("client_id / case_id / case_number, or referrer_id");
+      if (!referrerIdArg && !hasClientKey && !staffTo) {
+        missing.push(
+          "client_id / case_id / case_number, referrer_id, or to_admin_id / to_admin_name",
+        );
       }
 
-      const fromE164 = await resolveAssignedSmsFrom(ctx.adminId);
-      if (!fromE164) {
-        return {
-          ok: false,
-          error: "conversations_number_required",
-          message:
-            "This admin has no assigned OFG phone number. Assign one in People before send_sms.",
-        };
-      }
+      const fromResolved = await resolveMcpSmsFromE164(ctx.adminId, args);
+      if (fromResolved.ok === false) return fromResolved;
+      const fromE164 = fromResolved.e164;
+      const fromAdminId = fromResolved.from_admin_id;
+
+      const audience: "client" | "referrer" | "staff" = staffTo
+        ? "staff"
+        : referrerIdArg
+          ? "referrer"
+          : "client";
 
       let clientId: number | null = null;
       let caseId: number | null = null;
@@ -9377,7 +14022,33 @@ async function executeAdminAiTool(
       let toName: string | null = null;
       let conversationClosed = false;
 
-      if (missing.length === 0 && referrerId) {
+      if (missing.length === 0 && staffTo) {
+        const [staffRows] = await pool.query<RowDataPacket[]>(
+          `SELECT id, first_name, last_name, phone
+           FROM admins WHERE id = ? AND status = 'active' LIMIT 1`,
+          [staffTo.id],
+        );
+        if (!staffRows[0]) {
+          return {
+            ok: false,
+            error: "assignee_not_found",
+            message: "Staff not found or inactive. Use search_admins.",
+          };
+        }
+        toName =
+          `${staffRows[0].first_name || ""} ${staffRows[0].last_name || ""}`.trim();
+        toPhone = staffRows[0].phone ? String(staffRows[0].phone).trim() : null;
+        if (!toPhone) {
+          return {
+            ok: false,
+            error: "no_phone",
+            message:
+              "That staff member has no phone on file. Add a cell in People, then retry.",
+          };
+        }
+      }
+
+      if (missing.length === 0 && referrerId && audience === "referrer") {
         const [refRows] = await pool.query<RowDataPacket[]>(
           `SELECT id, first_name, last_name, phone, status
            FROM referrers WHERE id = ? LIMIT 1`,
@@ -9415,7 +14086,7 @@ async function executeAdminAiTool(
         toName = referrerName;
       }
 
-      if (missing.length === 0 && (hasClientKey || audience === "client")) {
+      if (missing.length === 0 && audience !== "staff" && (hasClientKey || audience === "client")) {
         const resolved = await adminAiResolveClientId(args, scopedIds);
         if (resolved.ok === false) {
           if (audience === "client") {
@@ -9496,15 +14167,17 @@ async function executeAdminAiTool(
         body,
         conversation_closed: conversationClosed,
         will_log_conversations_hub: audience === "client",
-        will_log_client_note: audience === "client" || !!clientId,
+        will_log_client_note: audience === "client",
         will_log_referrer_note: audience === "referrer",
         note:
           audience === "referrer"
             ? "Dry-run does not send. On confirm, SMS goes to the referrer from the OFG number; a note is saved on the partner record" +
               (clientId ? " and on the linked client's file." : ".")
-            : conversationClosed
-              ? "Conversation is closed. On confirm, it will reopen and the SMS will send via Conversations hub."
-              : "Dry-run does not send. On confirm, SMS sends via Twilio from the OFG number into Conversations hub + SMS case note.",
+            : audience === "staff"
+              ? "Dry-run does not send. On confirm, SMS goes to that staff member's phone from the chosen OFG From line."
+              : conversationClosed
+                ? "Conversation is closed. On confirm, it will reopen and the SMS will send via Conversations hub."
+                : "Dry-run does not send. On confirm, SMS sends via Twilio from the OFG number into Conversations hub + SMS case note.",
       };
 
       if (missing.length > 0) {
@@ -9516,7 +14189,7 @@ async function executeAdminAiTool(
             missing_fields: missing,
             preview,
             guidance:
-              "Collect body, and either client_id (OFG) or referrer_id. Pass both to text a realtor/LO about a specific client.",
+              "Collect body, and client_id (OFG), referrer_id, or to_admin_id / to_admin_name. Optional from_admin_* / from_phone_number_id to pick the OFG From line.",
           },
         };
       }
@@ -9562,7 +14235,7 @@ async function executeAdminAiTool(
       if (audience === "client" && clientId) {
         try {
           const result = await deliverHubConversationMessage({
-            adminId: ctx.adminId,
+            adminId: fromAdminId,
             clientId,
             channel: "sms",
             textBody: body,
@@ -9606,7 +14279,7 @@ async function executeAdminAiTool(
             message: msg.slice(0, 400),
           };
         }
-      } else if (audience === "referrer" && toPhone) {
+      } else if ((audience === "referrer" || audience === "staff") && toPhone) {
         try {
           const sent = await sendSms({
             to: toPhone,
@@ -9725,7 +14398,7 @@ async function executeAdminAiTool(
         "cancelled",
       ];
       const notes =
-        String(args.notes || "")
+        decodeLiteralUnicodeEscapes(String(args.notes || ""))
           .trim()
           .slice(0, 2000) || null;
       const missing: string[] = [];
@@ -9916,7 +14589,7 @@ async function executeAdminAiTool(
           ? Number(args.package_id)
           : null;
       const notes =
-        String(args.notes || "")
+        decodeLiteralUnicodeEscapes(String(args.notes || ""))
           .trim()
           .slice(0, 2000) || null;
       if (!clientId) {
@@ -10115,7 +14788,7 @@ async function executeAdminAiTool(
         "cancelled",
       ];
       const notes =
-        String(args.notes || "")
+        decodeLiteralUnicodeEscapes(String(args.notes || ""))
           .trim()
           .slice(0, 2000) || null;
       const missing: string[] = [];
@@ -10243,12 +14916,13 @@ async function executeAdminAiTool(
 
     if (name === "upsert_progress_report") {
       const round = Number(args.round);
-      const summary = String(args.summary_md || "")
+      const summary = decodeLiteralUnicodeEscapes(String(args.summary_md || ""))
         .trim()
         .slice(0, 20000);
       const missing: string[] = [];
-      if (!Number.isFinite(round) || round < 1 || round > 5) {
-        missing.push("round (1–5)");
+      // Round range validated after case resolve (uses case max_rounds)
+      if (!Number.isFinite(round) || round < 1 || round > ABSOLUTE_MAX_ROUNDS) {
+        missing.push(`round (1–${ABSOLUTE_MAX_ROUNDS})`);
       }
       if (!summary) missing.push("summary_md");
       if (
@@ -10283,6 +14957,12 @@ async function executeAdminAiTool(
             caseNumber = cr[0]?.case_number ? String(cr[0].case_number) : null;
           }
         }
+        if (caseId && Number.isFinite(round) && missing.length === 0) {
+          const caseMax = await loadCaseMaxRounds(pool, caseId);
+          if (round > caseMax) {
+            missing.push(`round (1–${caseMax} for this case)`);
+          }
+        }
       }
       const scoreBefore =
         args.score_before != null && Number.isFinite(Number(args.score_before))
@@ -10292,6 +14972,22 @@ async function executeAdminAiTool(
         args.score_after != null && Number.isFinite(Number(args.score_after))
           ? Number(args.score_after)
           : null;
+      if (
+        scoreBefore == null ||
+        !Number.isInteger(scoreBefore) ||
+        scoreBefore < 300 ||
+        scoreBefore > 850
+      ) {
+        missing.push("score_before (integer 300–850; never invent)");
+      }
+      if (
+        scoreAfter == null ||
+        !Number.isInteger(scoreAfter) ||
+        scoreAfter < 300 ||
+        scoreAfter > 850
+      ) {
+        missing.push("score_after (integer 300–850; never invent)");
+      }
       const itemsRemoved =
         args.items_removed != null &&
         Number.isFinite(Number(args.items_removed))
@@ -10355,7 +15051,7 @@ async function executeAdminAiTool(
         existing_published: existingPublished,
         replace_published: replacePublished,
         client_portal_visible: false,
-        note: "Without a PDF this stays staff-only; client portal lists PDF-published reports only.",
+        note: "Staff notes only — does not upload Before/After PDFs or publish the branded client PDF. Without a Wizard PDF this stays staff-only; client portal lists PDF-published reports only.",
       };
       if (missing.length > 0) {
         return {
@@ -10365,6 +15061,8 @@ async function executeAdminAiTool(
             ready: false,
             missing_fields: missing,
             preview,
+            guidance:
+              "Provide real score_before + score_after from staff or the Wizard. Never invent scores. To generate/publish a round PDF, open CRM Reports → Generate.",
           },
         };
       }
@@ -10373,7 +15071,18 @@ async function executeAdminAiTool(
           ok: false,
           error: "published_exists",
           message:
-            "Round already has a published PDF/wizard report. Pass replace_published=true only after the user explicitly approves overwriting staff+portal content.",
+            "Round already has a published PDF/wizard report. Prefer CRM Reports → Generate for the next round. Pass replace_published=true only after the user explicitly approves overwriting staff+portal content.",
+          crm_required: adminAiCrmRequired({
+            reason: "published_progress_report",
+            userMessage: `Round ${round} already has a published OFG progress PDF. Continue the next round (or re-publish) in CRM: open the client → Reports → Generate. Do not overwrite via MCP unless the user explicitly asks to replace published content.`,
+            clientId,
+            caseId,
+            crmAction: "open_reports_wizard",
+            details: {
+              round,
+              replace_published_required: true,
+            },
+          }),
         };
       }
       if (!adminAiConfirmTrue(args.confirm)) {
@@ -10384,7 +15093,7 @@ async function executeAdminAiTool(
             ready: true,
             preview,
             required_confirm_phrase: ADMIN_AI_WRITE_CONFIRM_PHRASE,
-            guidance: `Show analysis preview. After approval, confirm=true + confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`,
+            guidance: `Show analysis preview. After approval, confirm=true + confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}". This writes staff notes only — branded PDF publish stays in the Wizard.`,
           },
         };
       }
@@ -10417,8 +15126,8 @@ async function executeAdminAiTool(
           clientId,
           caseId,
           round,
-          Number.isFinite(scoreBefore as number) ? scoreBefore : null,
-          Number.isFinite(scoreAfter as number) ? scoreAfter : null,
+          scoreBefore,
+          scoreAfter,
           Number.isFinite(itemsRemoved) ? itemsRemoved : 0,
           Number.isFinite(itemsDisputed) ? itemsDisputed : 0,
           summary,
@@ -10449,31 +15158,27 @@ async function executeAdminAiTool(
         });
         alertsCount = progressAlerts.length;
         if (progressAlerts.length > 0) {
-          const alertSummary = progressAlerts
-            .slice(0, 8)
-            .map((a) => `• [${a.type}] ${a.title}: ${a.detail}`)
-            .join("\n");
           const clientName =
             `${profile.first_name || ""} ${profile.last_name || ""}`.trim() ||
             `Client #${clientId}`;
           const boardUrl = `${APP_URL}/admin/pipeline?client=${clientId}`;
           notifyAllTeamAdmins("progress_report_alerts", (admin) => {
             const lang = admin.preferred_language === "es" ? "es" : "en";
-            const subject =
-              lang === "es"
-                ? `Alertas de reporte R${round} — ${clientName}`
-                : `Progress report alerts R${round} — ${clientName}`;
-            const body =
-              lang === "es"
-                ? `${progressAlerts.length} alerta(s) al guardar Round ${round} (MCP):\n${alertSummary}`
-                : `${progressAlerts.length} alert(s) on Round ${round} save (MCP):\n${alertSummary}`;
-            return {
-              subject,
-              html: `<p><strong>${progressAlerts.length}</strong> progress-report alert(s) for <strong>${clientName}</strong> Round ${round}.</p><pre style="white-space:pre-wrap;font-size:13px">${alertSummary.replace(/</g, "&lt;")}</pre><p><a href="${boardUrl}">Open client</a></p>`,
-              inAppTitle: subject,
-              inAppBody: body.slice(0, 280),
+            const tpl = tplProgressReportAlerts({
+              clientName,
+              round,
+              alerts: progressAlerts,
               linkUrl: boardUrl,
-              smsBody: `${subject}`.slice(0, 320),
+              lang,
+              context: "mcp",
+            });
+            return {
+              subject: tpl.subject,
+              html: tpl.html,
+              inAppTitle: tpl.inAppTitle,
+              inAppBody: tpl.inAppBody,
+              linkUrl: tpl.linkUrl,
+              smsBody: tpl.smsBody,
             };
           }).catch((e: any) =>
             console.error("[progress_report_alerts:mcp]", e?.message ?? e),
@@ -10492,6 +15197,237 @@ async function executeAdminAiTool(
           round,
           alerts_count: alertsCount,
           href: `/admin/pipeline?client=${clientId}`,
+          note: "Staff analysis saved. Client-facing PDF still requires Reports → Generate (Wizard).",
+        },
+      };
+    }
+
+    if (name === "set_case_payment_plan") {
+      const missing: string[] = [];
+      if (
+        !(args.client_id != null && Number(args.client_id) > 0) &&
+        !(args.case_id != null && Number(args.case_id) > 0) &&
+        !(typeof args.case_number === "string" && args.case_number.trim())
+      ) {
+        missing.push("client_id or case_id/case_number");
+      }
+      const totalCents = Number(args.total_cents);
+      if (!(Number.isFinite(totalCents) && totalCents > 0)) {
+        missing.push("total_cents (>0)");
+      }
+
+      let installments: Array<Record<string, unknown>> = [];
+      const rawInstallments = args.installments_json;
+      if (rawInstallments != null && String(rawInstallments).trim()) {
+        try {
+          const parsed =
+            typeof rawInstallments === "string"
+              ? JSON.parse(String(rawInstallments))
+              : rawInstallments;
+          if (!Array.isArray(parsed) || parsed.length === 0) {
+            missing.push("installments_json (non-empty array)");
+          } else {
+            installments = parsed.slice(0, 20) as Array<Record<string, unknown>>;
+          }
+        } catch {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message: "installments_json must be a JSON array",
+          };
+        }
+      } else if (Number.isFinite(totalCents) && totalCents > 0) {
+        const due =
+          typeof args.due_date === "string" &&
+          /^\d{4}-\d{2}-\d{2}$/.test(args.due_date.trim())
+            ? args.due_date.trim()
+            : laCalendarDateYmd();
+        installments = [
+          {
+            label: String(args.label || "Agreed payment plan")
+              .trim()
+              .slice(0, 200),
+            amount_cents: totalCents,
+            due_date: due,
+            notes: args.notes != null ? String(args.notes).slice(0, 2000) : null,
+          },
+        ];
+      }
+
+      if (installments.length > 0 && Number.isFinite(totalCents)) {
+        const sum = installments.reduce(
+          (a, s) => a + (Number(s.amount_cents) || 0),
+          0,
+        );
+        if (sum !== totalCents) {
+          return {
+            ok: false,
+            error: "total_mismatch",
+            message: `Sum of installments (${sum}) must equal total_cents (${totalCents})`,
+            data: { sum_cents: sum, total_cents: totalCents },
+          };
+        }
+      }
+
+      const markPaid = adminAiConfirmTrue(args.mark_paid);
+      const replaceOpen =
+        args.replace_open === undefined || args.replace_open === null
+          ? true
+          : adminAiConfirmTrue(args.replace_open);
+      const paymentMethod = String(args.payment_method || "")
+        .trim()
+        .toLowerCase();
+      const notesShared =
+        args.notes != null ? String(args.notes).slice(0, 2000) : null;
+      const caseNote =
+        args.case_note != null
+          ? decodeLiteralUnicodeEscapes(String(args.case_note))
+              .trim()
+              .slice(0, 4000)
+          : "";
+
+      const splitsForUpsert = installments.map((s, i) => ({
+        label: String(s.label || `Payment ${i + 1}`)
+          .trim()
+          .slice(0, 200),
+        amount_cents: Number(s.amount_cents),
+        due_date: String(s.due_date || "").trim().slice(0, 10),
+        status: markPaid ? "paid" : s.status || "pending",
+        notes:
+          s.notes != null
+            ? String(s.notes).slice(0, 2000)
+            : notesShared,
+      }));
+
+      let packagePriceCents: number | null = null;
+      let packageName: string | null = null;
+      if (missing.length === 0) {
+        const resolved = await adminAiResolveClientId(args, scopedIds);
+        if (resolved.ok === false) {
+          return {
+            ok: false,
+            error: resolved.error,
+            message: resolved.message,
+          };
+        }
+        let caseId = resolved.caseId;
+        if (!caseId) {
+          caseId = await resolveActiveCaseId(pool, resolved.clientId, null);
+        }
+        if (caseId) {
+          const [pkgRows] = await pool.query<RowDataPacket[]>(
+            `SELECT p.name, p.price_cents
+             FROM credit_repair_cases cr
+             LEFT JOIN packages p ON p.id = cr.package_id
+             WHERE cr.id = ? LIMIT 1`,
+            [caseId],
+          );
+          if (pkgRows[0]?.price_cents != null) {
+            packagePriceCents = Number(pkgRows[0].price_cents);
+            packageName = pkgRows[0].name ? String(pkgRows[0].name) : null;
+          }
+        }
+      }
+
+      if (missing.length > 0) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: false,
+            missing_fields: missing,
+            guidance:
+              "Need OFG client/case + total_cents (agreed discounted total). Optional installments_json for multi-pay.",
+          },
+        };
+      }
+
+      const upsertArgs: Record<string, unknown> = {
+        client_id: args.client_id,
+        case_id: args.case_id,
+        case_number: args.case_number,
+        splits_json: JSON.stringify(splitsForUpsert),
+        replace_open: replaceOpen,
+        send_payment_link: adminAiConfirmTrue(args.send_payment_link),
+        payment_method: paymentMethod || undefined,
+        confirm: args.confirm,
+        confirm_phrase: args.confirm_phrase,
+      };
+
+      const upsertResult = await executeAdminAiTool(
+        "upsert_payment_splits",
+        upsertArgs,
+        ctx,
+      );
+
+      if (upsertResult.ok === false) return upsertResult;
+
+      const enrichDeal = (data: Record<string, unknown>) => {
+        const preview = (data.preview as Record<string, unknown>) || {};
+        const deal = {
+          kind: "discounted_payment_plan",
+          total_cents: totalCents,
+          package_list_price_cents: packagePriceCents,
+          package_name: packageName,
+          discount_vs_package_cents:
+            packagePriceCents != null
+              ? Math.max(0, packagePriceCents - totalCents)
+              : null,
+          replace_open: replaceOpen,
+          mark_paid: markPaid,
+          payment_method: paymentMethod || null,
+          case_note_pending: caseNote || null,
+          note:
+            "This sets OFG installment balance — it does not create a checkout coupon code.",
+        };
+        return {
+          ...data,
+          deal,
+          preview: { ...preview, deal },
+        };
+      };
+
+      if (
+        upsertResult.ok &&
+        upsertResult.data &&
+        typeof upsertResult.data === "object" &&
+        (upsertResult.data as any).dry_run
+      ) {
+        return {
+          ok: true,
+          data: enrichDeal(upsertResult.data as Record<string, unknown>),
+        };
+      }
+
+      // Confirmed write succeeded — optional staff case note (already gated).
+      let caseNoteAppended = false;
+      if (
+        caseNote &&
+        upsertResult.ok &&
+        upsertResult.data &&
+        typeof upsertResult.data === "object" &&
+        (upsertResult.data as any).created
+      ) {
+        const clientId = Number((upsertResult.data as any).client_id);
+        if (clientId > 0) {
+          const stamped = `[OTHER ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC] ${caseNote}`;
+          await pool.query(
+            `UPDATE clients
+             SET admin_notes = TRIM(CONCAT(COALESCE(admin_notes, ''), '\n', ?))
+             WHERE id = ?`,
+            [stamped, clientId],
+          );
+          caseNoteAppended = true;
+        }
+      }
+
+      return {
+        ok: true,
+        data: {
+          ...enrichDeal(
+            (upsertResult.data as Record<string, unknown>) || {},
+          ),
+          case_note_appended: caseNoteAppended,
         },
       };
     }
@@ -10610,6 +15546,14 @@ async function executeAdminAiTool(
 
       const replaceOpen = adminAiConfirmTrue(args.replace_open);
       let openSplitCount = 0;
+      const plan: Array<{
+        label: string;
+        amount_cents: number;
+        due_date: string;
+        status: string;
+        action: "create" | "update_open_to_paid" | "skip_already_paid" | "skip_open_exists";
+        match_split_id?: number;
+      }> = [];
       if (caseId && missing.length === 0) {
         const [[openRow]] = await pool.query<RowDataPacket[]>(
           `SELECT COUNT(*) AS n FROM payment_splits
@@ -10617,6 +15561,100 @@ async function executeAdminAiTool(
           [caseId],
         );
         openSplitCount = Number(openRow?.n || 0);
+
+        for (const s of normalized) {
+          if (!s.valid) continue;
+          if (s.status === "paid") {
+            const openMatch = await findMatchingPaymentSplit({
+              caseId,
+              dueDate: s.due_date,
+              amountCents: s.amount_cents,
+              statuses: ["pending", "overdue", "processing"],
+            });
+            if (openMatch) {
+              plan.push({
+                label: s.label,
+                amount_cents: s.amount_cents,
+                due_date: s.due_date,
+                status: s.status,
+                action: "update_open_to_paid",
+                match_split_id: Number(openMatch.id),
+              });
+              continue;
+            }
+            const paidMatch = await findMatchingPaymentSplit({
+              caseId,
+              dueDate: s.due_date,
+              amountCents: s.amount_cents,
+              statuses: ["paid"],
+            });
+            if (paidMatch) {
+              plan.push({
+                label: s.label,
+                amount_cents: s.amount_cents,
+                due_date: s.due_date,
+                status: s.status,
+                action: "skip_already_paid",
+                match_split_id: Number(paidMatch.id),
+              });
+              continue;
+            }
+            plan.push({
+              label: s.label,
+              amount_cents: s.amount_cents,
+              due_date: s.due_date,
+              status: s.status,
+              action: "create",
+            });
+            continue;
+          }
+          if (
+            (s.status === "pending" || s.status === "overdue") &&
+            !replaceOpen
+          ) {
+            const paidMatch = await findMatchingPaymentSplit({
+              caseId,
+              dueDate: s.due_date,
+              amountCents: s.amount_cents,
+              statuses: ["paid"],
+            });
+            if (paidMatch) {
+              plan.push({
+                label: s.label,
+                amount_cents: s.amount_cents,
+                due_date: s.due_date,
+                status: s.status,
+                action: "skip_already_paid",
+                match_split_id: Number(paidMatch.id),
+              });
+              continue;
+            }
+            const openMatch = await findMatchingPaymentSplit({
+              caseId,
+              dueDate: s.due_date,
+              amountCents: s.amount_cents,
+              statuses: ["pending", "overdue", "processing"],
+            });
+            if (openMatch) {
+              plan.push({
+                label: s.label,
+                amount_cents: s.amount_cents,
+                due_date: s.due_date,
+                status: s.status,
+                action: "skip_open_exists",
+                match_split_id: Number(openMatch.id),
+              });
+              continue;
+            }
+          }
+          plan.push({
+            label: s.label,
+            amount_cents: s.amount_cents,
+            due_date: s.due_date,
+            status: s.status,
+            action: "create",
+          });
+        }
       }
 
       const preview = {
@@ -10624,6 +15662,7 @@ async function executeAdminAiTool(
         case_id: caseId,
         case_number: caseNumber,
         splits: normalized,
+        plan,
         replace_open: replaceOpen,
         existing_open_splits: openSplitCount,
         total_cents: normalized.reduce(
@@ -10631,9 +15670,13 @@ async function executeAdminAiTool(
           0,
         ),
         warning:
-          openSplitCount > 0 && !replaceOpen
-            ? "Case already has open splits — re-running will DUPLICATE owing. Pass replace_open=true to cancel open splits first."
-            : null,
+          openSplitCount > 0 &&
+          !replaceOpen &&
+          plan.some((p) => p.action === "create" && p.status !== "paid")
+            ? "Case already has open splits — new non-matching rows will still be created. Pass replace_open=true to cancel open splits first, or use update_payment_split to mark an existing installment paid."
+            : plan.some((p) => p.action === "update_open_to_paid")
+              ? "status=paid will UPDATE matching open installment(s) by due_date+amount (no pending twin)."
+              : null,
       };
       if (missing.length > 0) {
         return {
@@ -10677,12 +15720,124 @@ async function executeAdminAiTool(
       }
 
       const createdIds: number[] = [];
+      const updatedIds: number[] = [];
+      const skipped: Array<{
+        action: string;
+        match_split_id: number;
+        label: string;
+        due_date: string;
+        amount_cents: number;
+      }> = [];
       const paymentLinks: Array<{
         split_id: number;
         payment_link: string | null;
       }> = [];
       for (const s of normalized) {
         const markPaid = s.status === "paid";
+
+        if (markPaid && caseId) {
+          const openMatch = await findMatchingPaymentSplit({
+            caseId,
+            dueDate: s.due_date,
+            amountCents: s.amount_cents,
+            statuses: ["pending", "overdue", "processing"],
+          });
+          if (openMatch) {
+            const matchId = Number(openMatch.id);
+            await pool.query(
+              `UPDATE payment_splits
+               SET status = 'paid',
+                   completion_source = 'manual',
+                   paid_at = COALESCE(paid_at, NOW()),
+                   label = COALESCE(NULLIF(?, ''), label),
+                   notes = CASE
+                     WHEN ? IS NULL OR ? = '' THEN notes
+                     WHEN notes IS NULL OR notes = '' THEN ?
+                     ELSE CONCAT(notes, ' | ', ?)
+                   END,
+                   updated_at = NOW()
+               WHERE id = ? AND status IN ('pending','overdue','processing')`,
+              [
+                s.label,
+                s.notes,
+                s.notes,
+                s.notes,
+                s.notes,
+                matchId,
+              ],
+            );
+            if (!openMatch.payments_id) {
+              await adminAiRecordManualSplitPayment({
+                splitId: matchId,
+                clientId: clientId!,
+                caseId,
+                amountCents: s.amount_cents,
+                label: s.label,
+                paymentMethod:
+                  typeof args.payment_method === "string"
+                    ? args.payment_method
+                    : null,
+              });
+            }
+            updatedIds.push(matchId);
+            paymentLinks.push({ split_id: matchId, payment_link: null });
+            continue;
+          }
+          const paidMatch = await findMatchingPaymentSplit({
+            caseId,
+            dueDate: s.due_date,
+            amountCents: s.amount_cents,
+            statuses: ["paid"],
+          });
+          if (paidMatch) {
+            skipped.push({
+              action: "skip_already_paid",
+              match_split_id: Number(paidMatch.id),
+              label: s.label,
+              due_date: s.due_date,
+              amount_cents: s.amount_cents,
+            });
+            continue;
+          }
+        } else if (
+          caseId &&
+          (s.status === "pending" || s.status === "overdue") &&
+          !replaceOpen
+        ) {
+          const paidMatch = await findMatchingPaymentSplit({
+            caseId,
+            dueDate: s.due_date,
+            amountCents: s.amount_cents,
+            statuses: ["paid"],
+          });
+          if (paidMatch) {
+            skipped.push({
+              action: "skip_already_paid",
+              match_split_id: Number(paidMatch.id),
+              label: s.label,
+              due_date: s.due_date,
+              amount_cents: s.amount_cents,
+            });
+            continue;
+          }
+          const openMatch = await findMatchingPaymentSplit({
+            caseId,
+            dueDate: s.due_date,
+            amountCents: s.amount_cents,
+            statuses: ["pending", "overdue", "processing"],
+          });
+          if (openMatch) {
+            skipped.push({
+              action: "skip_open_exists",
+              match_split_id: Number(openMatch.id),
+              label: s.label,
+              due_date: s.due_date,
+              amount_cents: s.amount_cents,
+            });
+            continue;
+          }
+        }
+
         const wantLink = !markPaid && !!s.send_payment_link;
         const [ins] = await pool.query<ResultSetHeader>(
           `INSERT INTO payment_splits
@@ -10727,16 +15882,22 @@ async function executeAdminAiTool(
             caseId: caseId!,
             amountCents: s.amount_cents,
             label: s.label,
+            paymentMethod:
+              typeof args.payment_method === "string"
+                ? args.payment_method
+                : null,
           });
         }
       }
       return {
         ok: true,
         data: {
-          created: true,
+          created: createdIds.length > 0 || updatedIds.length > 0,
           split_ids: createdIds,
+          updated_split_ids: updatedIds,
+          skipped,
           payment_links: paymentLinks,
-          count: createdIds.length,
+          count: createdIds.length + updatedIds.length,
           client_id: clientId,
           case_id: caseId,
           href: `/admin/pipeline?case=${caseId}`,
@@ -10794,7 +15955,7 @@ async function executeAdminAiTool(
           : null;
       const notes =
         args.notes !== undefined
-          ? String(args.notes || "").slice(0, 2000)
+          ? decodeLiteralUnicodeEscapes(String(args.notes || "")).slice(0, 2000)
           : undefined;
       const preview = {
         split_id: splitId,
@@ -10899,6 +16060,10 @@ async function executeAdminAiTool(
           amountCents: finalAmount,
           currency: cur.currency ? String(cur.currency) : "USD",
           label: cur.label ? String(cur.label) : null,
+          paymentMethod:
+            typeof args.payment_method === "string"
+              ? args.payment_method
+              : null,
         });
       }
 
@@ -10909,6 +16074,340 @@ async function executeAdminAiTool(
           split_id: splitId,
           payments_id: paymentId,
           href: `/admin/pipeline?case=${cur.case_id}`,
+        },
+      };
+    }
+
+    if (name === "list_coupons") {
+      const activeOnly =
+        args.active_only === undefined || args.active_only === null
+          ? true
+          : adminAiConfirmTrue(args.active_only);
+      const q = String(args.q || "")
+        .trim()
+        .slice(0, 80);
+      const limit = Math.min(
+        50,
+        Math.max(1, Number(args.limit) || 20),
+      );
+      const where: string[] = [];
+      const params: unknown[] = [];
+      if (activeOnly) where.push("c.is_active = 1");
+      if (q) {
+        where.push("(c.code LIKE ? ESCAPE '!' OR c.description LIKE ? ESCAPE '!')");
+        const like = likeContains(q);
+        params.push(like, like);
+      }
+      const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT c.id, c.code, c.description, c.discount_type, c.discount_value,
+                c.min_amount_cents, c.max_uses, c.uses_count, c.applicable_packages,
+                c.valid_from, c.expires_at, c.is_active, c.created_at,
+                CONCAT(a.first_name,' ',a.last_name) AS created_by_name
+         FROM coupons c
+         LEFT JOIN admins a ON a.id = c.created_by_admin_id
+         ${whereSql}
+         ORDER BY c.created_at DESC
+         LIMIT ${limit}`,
+        params,
+      );
+      return {
+        ok: true,
+        data: {
+          coupons: rows.map((r) => ({
+            id: Number(r.id),
+            code: String(r.code),
+            description: r.description != null ? String(r.description) : null,
+            discount_type: String(r.discount_type),
+            discount_value: Number(r.discount_value),
+            min_amount_cents: Number(r.min_amount_cents || 0),
+            max_uses: r.max_uses != null ? Number(r.max_uses) : null,
+            uses_count: Number(r.uses_count || 0),
+            applicable_packages: r.applicable_packages ?? null,
+            valid_from: r.valid_from
+              ? new Date(r.valid_from).toISOString()
+              : null,
+            expires_at: r.expires_at
+              ? new Date(r.expires_at).toISOString()
+              : null,
+            is_active: Number(r.is_active) === 1,
+            created_by_name: r.created_by_name
+              ? String(r.created_by_name).trim()
+              : null,
+            created_at: r.created_at
+              ? new Date(r.created_at).toISOString()
+              : null,
+            href: "/admin/payments",
+          })),
+          count: rows.length,
+          note: "Checkout promo codes for /register. Manage in Admin → Payments → Coupons. Offline Zelle deals → set_case_payment_plan.",
+        },
+      };
+    }
+
+    if (name === "create_coupon") {
+      const missing: string[] = [];
+      const rawCode = String(args.code || "").trim();
+      // Match coupons.code VARCHAR(50) + REST sanitize
+      const upperCode = rawCode
+        .toUpperCase()
+        .replace(/[^A-Z0-9_-]/g, "")
+        .slice(0, 50);
+      if (!upperCode) missing.push("code");
+      const discountType = String(args.discount_type || "").trim();
+      if (!["percentage", "fixed"].includes(discountType)) {
+        missing.push("discount_type (percentage|fixed)");
+      }
+      const discountValue = Number(args.discount_value);
+      if (!(Number.isFinite(discountValue) && discountValue > 0)) {
+        missing.push("discount_value (>0)");
+      } else if (!Number.isInteger(discountValue)) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message: "discount_value must be a whole number (percent or cents)",
+        };
+      } else if (discountType === "percentage" && discountValue > 100) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message: "Percentage discount cannot exceed 100",
+        };
+      }
+
+      let applicablePackages: number[] | null = null;
+      if (
+        args.applicable_package_ids != null &&
+        String(args.applicable_package_ids).trim()
+      ) {
+        try {
+          const parsed =
+            typeof args.applicable_package_ids === "string"
+              ? JSON.parse(String(args.applicable_package_ids))
+              : args.applicable_package_ids;
+          if (!Array.isArray(parsed)) {
+            return {
+              ok: false,
+              error: "invalid_args",
+              message: "applicable_package_ids must be a JSON array of package IDs",
+            };
+          }
+          applicablePackages = parsed
+            .map((n) => Number(n))
+            .filter((n) => Number.isFinite(n) && n > 0);
+          if (!applicablePackages.length) applicablePackages = null;
+        } catch {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message: "applicable_package_ids must be a JSON array of package IDs",
+          };
+        }
+      }
+
+      const description =
+        args.description != null
+          ? String(args.description).trim().slice(0, 255)
+          : null;
+      const minAmount = Number(args.min_amount_cents) || 0;
+      if (minAmount < 0 || !Number.isFinite(minAmount)) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message: "min_amount_cents must be >= 0",
+        };
+      }
+      const maxUses =
+        args.max_uses != null && args.max_uses !== ""
+          ? Number(args.max_uses)
+          : null;
+      if (maxUses != null && !(Number.isFinite(maxUses) && maxUses > 0)) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message: "max_uses must be a positive integer or omitted",
+        };
+      }
+      const parseCouponDt = (
+        raw: unknown,
+        field: string,
+      ): { ok: true; value: string | null } | { ok: false; message: string } => {
+        if (raw == null || !String(raw).trim()) return { ok: true, value: null };
+        const s = String(raw).trim();
+        const t = Date.parse(s);
+        if (!Number.isFinite(t)) {
+          return {
+            ok: false,
+            message: `${field} must be a valid ISO datetime`,
+          };
+        }
+        return { ok: true, value: s };
+      };
+      const validFromParsed = parseCouponDt(args.valid_from, "valid_from");
+      if (validFromParsed.ok === false) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message: validFromParsed.message,
+        };
+      }
+      const expiresAtParsed = parseCouponDt(args.expires_at, "expires_at");
+      if (expiresAtParsed.ok === false) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message: expiresAtParsed.message,
+        };
+      }
+      const validFrom = validFromParsed.value;
+      const expiresAt = expiresAtParsed.value;
+      if (validFrom && expiresAt && Date.parse(expiresAt) < Date.parse(validFrom)) {
+        return {
+          ok: false,
+          error: "invalid_args",
+          message: "expires_at must be on or after valid_from",
+        };
+      }
+      const isActive =
+        args.is_active === undefined || args.is_active === null
+          ? true
+          : adminAiConfirmTrue(args.is_active);
+
+      let existingId: number | null = null;
+      if (upperCode) {
+        const [existing] = await pool.query<RowDataPacket[]>(
+          `SELECT id FROM coupons WHERE code = ? LIMIT 1`,
+          [upperCode],
+        );
+        if (existing[0]) existingId = Number(existing[0].id);
+      }
+
+      const preview = {
+        code: upperCode || null,
+        description,
+        discount_type: discountType || null,
+        discount_value: Number.isFinite(discountValue) ? discountValue : null,
+        min_amount_cents: minAmount,
+        max_uses: maxUses,
+        applicable_packages: applicablePackages,
+        valid_from: validFrom,
+        expires_at: expiresAt,
+        is_active: isActive,
+        already_exists: existingId != null,
+        existing_coupon_id: existingId,
+        applies_to: "Public /register checkout (not offline Zelle installment plans)",
+        href: "/admin/payments",
+        crm_hint: "Admin → Payments → Coupons tab",
+      };
+
+      if (missing.length > 0) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: false,
+            missing_fields: missing,
+            preview,
+          },
+        };
+      }
+      if (existingId != null) {
+        return {
+          ok: false,
+          error: "duplicate_code",
+          message: `Coupon code ${upperCode} already exists (id ${existingId}). Use list_coupons or Admin → Payments → Coupons.`,
+          data: preview,
+        };
+      }
+      if (!adminAiConfirmTrue(args.confirm)) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: true,
+            preview,
+            required_confirm_phrase: ADMIN_AI_WRITE_CONFIRM_PHRASE,
+            guidance: `Show the coupon. After approval, confirm=true + confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`,
+          },
+        };
+      }
+      const writeGate = adminAiWriteConfirmed(args);
+      if (writeGate.ok === false) {
+        return {
+          ok: false,
+          error: "confirm_required",
+          message: writeGate.message,
+        };
+      }
+
+      let insertId = 0;
+      try {
+        const [ins] = await pool.query<ResultSetHeader>(
+          `INSERT INTO coupons
+             (code, description, discount_type, discount_value, min_amount_cents, max_uses,
+              applicable_packages, valid_from, expires_at, is_active, created_by_admin_id)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+          [
+            upperCode,
+            description || null,
+            discountType,
+            discountValue,
+            minAmount,
+            maxUses,
+            applicablePackages ? JSON.stringify(applicablePackages) : null,
+            validFrom,
+            expiresAt,
+            isActive ? 1 : 0,
+            ctx.adminId,
+          ],
+        );
+        insertId = Number(ins.insertId);
+      } catch (err: unknown) {
+        if (isDuplicateKeyError(err)) {
+          const [again] = await pool.query<RowDataPacket[]>(
+            `SELECT id FROM coupons WHERE code = ? LIMIT 1`,
+            [upperCode],
+          );
+          const raceId = again[0] ? Number(again[0].id) : null;
+          return {
+            ok: false,
+            error: "duplicate_code",
+            message: raceId
+              ? `Coupon code ${upperCode} already exists (id ${raceId}). Use list_coupons or Admin → Payments → Coupons.`
+              : `Coupon code ${upperCode} already exists.`,
+            data: { ...preview, already_exists: true, existing_coupon_id: raceId },
+          };
+        }
+        throw err;
+      }
+      const [created] = await pool.query<RowDataPacket[]>(
+        `SELECT c.*, CONCAT(a.first_name,' ',a.last_name) AS created_by_name
+         FROM coupons c LEFT JOIN admins a ON a.id = c.created_by_admin_id
+         WHERE c.id = ? LIMIT 1`,
+        [insertId],
+      );
+      return {
+        ok: true,
+        data: {
+          created: true,
+          coupon: {
+            id: Number(created[0].id),
+            code: String(created[0].code),
+            description: created[0].description,
+            discount_type: String(created[0].discount_type),
+            discount_value: Number(created[0].discount_value),
+            min_amount_cents: Number(created[0].min_amount_cents || 0),
+            max_uses:
+              created[0].max_uses != null ? Number(created[0].max_uses) : null,
+            uses_count: Number(created[0].uses_count || 0),
+            is_active: Number(created[0].is_active) === 1,
+            created_by_name: created[0].created_by_name
+              ? String(created[0].created_by_name).trim()
+              : null,
+          },
+          href: "/admin/payments",
+          crm_hint: "Admin → Payments → Coupons tab",
+          note: "Client enters this code at /register checkout. For an enrolled client's Zelle deal, use set_case_payment_plan instead.",
         },
       };
     }
@@ -11087,7 +16586,7 @@ async function runAdminAiChatWithTools(opts: {
 
     if (toolUses.length === 0) {
       return {
-        reply: textReply || "(No response)",
+        reply: decodeLiteralUnicodeEscapes(textReply || "(No response)"),
         model: lastModel,
         input_tokens: inputTokens,
         output_tokens: outputTokens,
@@ -11295,7 +16794,7 @@ const pool = mysql.createPool({
   database: process.env.DB_NAME,
   ssl: { rejectUnauthorized: true },
   waitForConnections: true,
-  connectionLimit: process.env.VITEST ? 2 : 10,
+  connectionLimit: process.env.VITEST ? 5 : 10,
   queueLimit: 0,
   timezone: "+00:00", // Always use UTC — prevents expires_at mismatch with TiDB NOW()
   // TiDB Cloud Serverless closes idle connections aggressively (~5 min).
@@ -11361,14 +16860,186 @@ export function canDragProspect(from: string, to: string): boolean {
   return from === "prospect" && to === "new_client";
 }
 
-function pipelineStageAfterRoundReport(roundNumber: number): string {
-  if (roundNumber >= 5) return "completed";
+// ---------------------------------------------------------------------------
+// Extended dispute rounds (keep in sync with api/extendedRounds.ts)
+// Vercel: do NOT runtime-import sibling api/*.ts — inline copies only.
+// ---------------------------------------------------------------------------
+const DEFAULT_MAX_ROUNDS = 5;
+const ABSOLUTE_MAX_ROUNDS = 12;
+
+function clampMaxRounds(raw: unknown): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return DEFAULT_MAX_ROUNDS;
+  return Math.min(
+    ABSOLUTE_MAX_ROUNDS,
+    Math.max(DEFAULT_MAX_ROUNDS, Math.floor(n)),
+  );
+}
+
+function isExtendedRoundsCase(maxRounds: number): boolean {
+  return clampMaxRounds(maxRounds) > DEFAULT_MAX_ROUNDS;
+}
+
+// ---------------------------------------------------------------------------
+// Report compare mode (keep in sync with api/reportCompareMode.ts)
+// ---------------------------------------------------------------------------
+type ReportCompareModeInline = "baseline" | "chain";
+
+function normalizeReportCompareModeInline(raw: unknown): ReportCompareModeInline {
+  return String(raw || "").toLowerCase() === "chain" ? "chain" : "baseline";
+}
+
+function reminderTriggerForRoundInline(roundNumber: number): string {
+  const n = Math.floor(Number(roundNumber) || 0);
+  if (n >= 1 && n <= 5) return `round_${n}_complete`;
+  if (n > 5) return "round_extended_complete";
+  return `round_${n}_complete`;
+}
+
+function serializeDualWinsJsonInline(opts: {
+  compareMode: ReportCompareModeInline;
+  thisRound: OfGReportData["wins"];
+  sinceEnrollment: OfGReportData["wins"];
+}): Record<string, unknown> {
+  return {
+    v: 2,
+    compare_mode: opts.compareMode,
+    this_round: opts.thisRound,
+    since_enrollment: opts.sinceEnrollment,
+  };
+}
+
+function serializeDualTargetsJsonInline(opts: {
+  compareMode: ReportCompareModeInline;
+  thisRound: OfGReportData["targets"];
+  sinceEnrollment: OfGReportData["targets"];
+}): Record<string, unknown> {
+  return {
+    v: 2,
+    compare_mode: opts.compareMode,
+    this_round: opts.thisRound,
+    since_enrollment: opts.sinceEnrollment,
+  };
+}
+
+function projectExtendedRoundDatesInline(opts: {
+  round5Date: string;
+  intervalDays: number;
+  maxRounds: number;
+  overrides?: Record<string, string> | null;
+}): Array<{ round: number; date: string }> {
+  const max = Math.min(
+    ABSOLUTE_MAX_ROUNDS,
+    Math.max(DEFAULT_MAX_ROUNDS, Math.floor(Number(opts.maxRounds) || 5)),
+  );
+  if (max <= DEFAULT_MAX_ROUNDS) return [];
+  const interval = Math.max(1, Math.floor(Number(opts.intervalDays) || 35));
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(opts.round5Date || ""));
+  if (!m) return [];
+  const base = new Date(
+    Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])),
+  );
+  if (Number.isNaN(base.getTime())) return [];
+  const overrides = opts.overrides || {};
+  const out: Array<{ round: number; date: string }> = [];
+  for (let r = 6; r <= max; r++) {
+    const key = String(r);
+    if (overrides[key] && /^\d{4}-\d{2}-\d{2}$/.test(overrides[key])) {
+      out.push({ round: r, date: overrides[key] });
+      continue;
+    }
+    const d = new Date(base.getTime());
+    d.setUTCDate(d.getUTCDate() + interval * (r - 5));
+    const y = d.getUTCFullYear();
+    const mo = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const day = String(d.getUTCDate()).padStart(2, "0");
+    out.push({ round: r, date: `${y}-${mo}-${day}` });
+  }
+  return out;
+}
+
+/**
+ * Stage after publishing round N.
+ * Rounds 1–4 advance as today; R5+ stay on round_5 until the final max round → completed.
+ */
+function pipelineStageAfterRoundReport(
+  roundNumber: number,
+  maxRounds: number = DEFAULT_MAX_ROUNDS,
+): string {
+  const max = clampMaxRounds(maxRounds);
+  if (roundNumber >= max) return "completed";
   if (roundNumber < 1) return "docs_ready";
+  if (roundNumber >= DEFAULT_MAX_ROUNDS) return "round_5";
   return `round_${roundNumber + 1}`;
 }
 
 /** @deprecated use pipelineStageAfterRoundReport */
 export const roundNumberToPipelineStage = pipelineStageAfterRoundReport;
+
+function validatePublishRoundNumber(
+  roundNumber: number,
+  maxRounds: number = DEFAULT_MAX_ROUNDS,
+): string | null {
+  const max = clampMaxRounds(maxRounds);
+  if (!(roundNumber >= 1 && roundNumber <= max)) {
+    return `round_number must be 1–${max}`;
+  }
+  return null;
+}
+
+/** Rounds cleared by Reset from N through max (inclusive). */
+function cascadeRoundsFrom(
+  fromRound: number,
+  maxRounds: number = DEFAULT_MAX_ROUNDS,
+): number[] {
+  const max = clampMaxRounds(maxRounds);
+  if (!(fromRound >= 1 && fromRound <= max)) return [];
+  const out: number[] = [];
+  for (let r = fromRound; r <= max; r++) out.push(r);
+  return out;
+}
+
+/** Pipeline card legend for extended cases, e.g. "Special · R6/8". */
+function extendedRoundsLegend(opts: {
+  maxRounds: number;
+  highestPublished?: number | null;
+  currentRoundHint?: number | null;
+}): string | null {
+  const max = clampMaxRounds(opts.maxRounds);
+  if (max <= DEFAULT_MAX_ROUNDS) return null;
+  const published = Math.max(0, Number(opts.highestPublished) || 0);
+  const hint = Number(opts.currentRoundHint) || 0;
+  const shown = Math.max(published, hint, DEFAULT_MAX_ROUNDS);
+  return `Special · R${Math.min(shown, max)}/${max}`;
+}
+
+function roundNumbersUpTo(maxRounds: number): number[] {
+  const max = clampMaxRounds(maxRounds);
+  return Array.from({ length: max }, (_, i) => i + 1);
+}
+
+async function highestPublishedRoundForClient(
+  db: Pick<Pool, "query">,
+  clientId: number,
+): Promise<number> {
+  const [rows] = await db.query<RowDataPacket[]>(
+    `SELECT COALESCE(MAX(round_number), 0) AS highest
+     FROM client_round_reports WHERE client_id = ?`,
+    [clientId],
+  );
+  return Number(rows[0]?.highest || 0);
+}
+
+async function loadCaseMaxRounds(
+  db: Pick<Pool, "query">,
+  caseId: number,
+): Promise<number> {
+  const [rows] = await db.query<RowDataPacket[]>(
+    `SELECT max_rounds FROM credit_repair_cases WHERE id = ? LIMIT 1`,
+    [caseId],
+  );
+  return clampMaxRounds(rows[0]?.max_rounds);
+}
 
 async function resolveActiveCaseId(
   pool: Pool,
@@ -11472,7 +17143,8 @@ function validatePdfUploadPair(
   before: Buffer,
   after: Buffer,
   maxBytes = VERCEL_SAFE_UPLOAD_MAX_BYTES,
-  maxTotalBytes = VERCEL_SAFE_UPLOAD_MAX_BYTES,
+  /** Default: each file ≤ maxBytes; combined may be up to 2× (sequential uploads). */
+  maxTotalBytes = VERCEL_SAFE_UPLOAD_MAX_BYTES * 2,
 ): string | null {
   if (!before?.length || !after?.length) {
     return "Both PDF files are required";
@@ -11491,29 +17163,67 @@ function validatePdfUploadPair(
   return null;
 }
 
-/** Pipeline stage → which round report the client should publish next. */
-function expectedReportRoundForStage(pipelineStage: string): number | null {
+/**
+ * Highest round number currently unlocked for publish.
+ * On round_5 with max_rounds>5, unlocks highestPublished+1 up to max_rounds.
+ * Keep in sync with api/extendedRounds.ts.
+ */
+function expectedReportRoundForStage(
+  pipelineStage: string,
+  maxRounds: number = DEFAULT_MAX_ROUNDS,
+  highestPublished: number = 0,
+): number | null {
+  const max = clampMaxRounds(maxRounds);
+  const published = Math.max(0, Math.floor(Number(highestPublished) || 0));
+
   if (pipelineStage === "docs_ready") return 1;
-  const match = pipelineStage.match(/^round_(\d)$/);
-  if (match) return Number(match[1]);
-  if (pipelineStage === "completed") return 5;
-  return null;
+
+  if (pipelineStage === "completed") {
+    // Raised max after graduation: unlock the next report slot (special clients).
+    if (max > published && published >= DEFAULT_MAX_ROUNDS) {
+      return Math.min(max, published + 1);
+    }
+    // Standard completed: republish up to R5 (or last published).
+    return Math.min(
+      max,
+      Math.max(DEFAULT_MAX_ROUNDS, published || DEFAULT_MAX_ROUNDS),
+    );
+  }
+
+  const match = String(pipelineStage).match(/^round_(\d+)$/);
+  if (!match) return null;
+  const stageN = Number(match[1]);
+  if (stageN < DEFAULT_MAX_ROUNDS) return stageN;
+
+  // round_5 (or any round_N>=5): unlock next after last published, capped
+  const unlocked = Math.max(DEFAULT_MAX_ROUNDS, published + 1);
+  return Math.min(max, unlocked);
 }
 
 function validatePublishRound(params: {
   roundNumber: number;
   pipelineStage: string;
+  maxRounds?: number;
+  highestPublished?: number;
   allowRepublish?: boolean;
   hasExistingReport?: boolean;
 }): string | null {
   const { roundNumber, pipelineStage, allowRepublish, hasExistingReport } =
     params;
+  const maxRounds = clampMaxRounds(params.maxRounds);
+  const highestPublished = Math.max(
+    0,
+    Math.floor(Number(params.highestPublished) || 0),
+  );
 
-  if (roundNumber < 1 || roundNumber > 5) {
-    return "round_number must be 1–5";
-  }
+  const rangeErr = validatePublishRoundNumber(roundNumber, maxRounds);
+  if (rangeErr) return rangeErr;
 
-  const expected = expectedReportRoundForStage(pipelineStage);
+  const expected = expectedReportRoundForStage(
+    pipelineStage,
+    maxRounds,
+    highestPublished,
+  );
   if (expected == null) {
     return `Reports cannot be published while client is in stage "${pipelineStage}"`;
   }
@@ -11527,7 +17237,7 @@ function validatePublishRound(params: {
   }
 
   if (hasExistingReport && !allowRepublish) {
-    return `Round ${roundNumber} already has a published report — contact super admin to replace`;
+    return `Round ${roundNumber} already has a published report — use Reset Round in the client Reports tab to clear it first`;
   }
 
   return null;
@@ -11606,7 +17316,13 @@ function scoresRoughlyMatchMiddle(data: {
 // REPORT EXTRACTION CORE (inline)
 // ============================================================================
 
-type ReportProvider = "identityiq" | "smartcredit" | "myscoreiq" | "generic";
+type ReportProvider =
+  | "identityiq"
+  | "smartcredit"
+  | "myscoreiq"
+  | "myfreescore"
+  | "myfico"
+  | "generic";
 
 type BureauScores = {
   transunion: number | null;
@@ -11621,87 +17337,595 @@ function detectProvider(text: string): ReportProvider {
   if (t.includes("smartcredit") || t.includes("smart credit"))
     return "smartcredit";
   if (t.includes("myscoreiq") || t.includes("my score iq")) return "myscoreiq";
+  // myFICO 3-Bureau printable (secure.myfico.com) — FICO Score 8 summary.
+  // Avoid bare "my FICO" prose ("improve my FICO score") false positives.
+  if (
+    t.includes("myfico") ||
+    t.includes("secure.myfico.com") ||
+    /\bmy\s*fico\s*3[\s-]*bureau\b/i.test(text) ||
+    /fico[®\s]*score\s*3b/i.test(text)
+  ) {
+    return "myfico";
+  }
+  // MyFreeScoreNow / Equifax-powered Three Bureau (MFSN PDF export)
+  if (
+    t.includes("myfreescore") ||
+    t.includes("my free score") ||
+    t.includes("myfreescorenow") ||
+    (t.includes("three bureau credit report") &&
+      (t.includes("powered by") || t.includes("vantagescore")))
+  ) {
+    return "myfreescore";
+  }
+  // CRC / "Three Bureau Credit Report" exports (footnote Equifax1 style)
+  if (
+    t.includes("three bureau credit report") ||
+    /equifax\d[\s\S]{0,40}experian\d[\s\S]{0,40}trans\s*union\d/i.test(text)
+  ) {
+    return "identityiq";
+  }
   return "generic";
 }
 
-function extractBureauScoreGeneric(
-  text: string,
-  bureau: string,
-): number | null {
-  const patterns = [
-    new RegExp(`${bureau}[^\\d]{0,60}(\\d{3})`, "i"),
-    new RegExp(`${bureau.slice(0, 3)}[^\\d]{0,30}(\\d{3})`, "i"),
-    new RegExp(`(${bureau.slice(0, 2)})\\s*[:\\-]?\\s*(\\d{3})`, "i"),
+const BUREAU_SCORE_LABELS: Record<
+  keyof BureauScores,
+  { full: string[]; abbrev: string[] }
+> = {
+  transunion: {
+    full: ["transunion", "trans union"],
+    abbrev: ["tu"],
+  },
+  experian: {
+    full: ["experian"],
+    abbrev: ["exp", "ex"],
+  },
+  equifax: {
+    full: ["equifax"],
+    abbrev: ["eq"],
+  },
+};
+
+function isValidBureauScore(n: number): boolean {
+  return Number.isFinite(n) && n >= 300 && n <= 850;
+}
+
+function escapeRegExpLiteral(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Detect TU/EX/EQ column order on a header line (tri-merge PDFs). */
+function detectBureauOrderInLine(
+  line: string,
+): Array<keyof BureauScores> | null {
+  type Hit = { bureau: keyof BureauScores; index: number };
+  const hits: Hit[] = [];
+  const patterns: Array<{ bureau: keyof BureauScores; re: RegExp }> = [
+    { bureau: "transunion", re: /\btrans\s*union\b|\bTU\b/gi },
+    { bureau: "experian", re: /\bexperian\b|\bEX\b|\bEXP\b/gi },
+    { bureau: "equifax", re: /\bequifax\b|\bEQ\b/gi },
   ];
-  for (const re of patterns) {
-    const m = text.match(re);
-    const score = m ? Number(m[m.length - 1]) : NaN;
-    if (score >= 300 && score <= 850) return score;
+  for (const { bureau, re } of patterns) {
+    re.lastIndex = 0;
+    const m = re.exec(line);
+    if (m) hits.push({ bureau, index: m.index });
+  }
+  if (hits.length < 2) return null;
+  hits.sort((a, b) => a.index - b.index);
+  const seen = new Set<keyof BureauScores>();
+  const order: Array<keyof BureauScores> = [];
+  for (const h of hits) {
+    if (seen.has(h.bureau)) continue;
+    seen.add(h.bureau);
+    order.push(h.bureau);
+  }
+  return order.length >= 2 ? order : null;
+}
+
+function scoreNumbersInLine(line: string): number[] {
+  const out: number[] = [];
+  // Reject digits that are the tail of $1,348 / 12,500 money groups
+  // (JS \b matches between "," and "3", which falsely yields score 348).
+  for (const m of line.matchAll(/(?<![,\d])(\d{3})(?!\d)/g)) {
+    const n = Number(m[1]);
+    if (isValidBureauScore(n)) out.push(n);
+  }
+  return out;
+}
+
+/** Single bureau name on a line (SmartCredit stacks TU / EX / EQ vertically). */
+function detectSingleBureauInLine(line: string): keyof BureauScores | null {
+  // Skip utilization / balance rows: "TransUnion $153 $300 51%"
+  if (
+    /\$/.test(line) &&
+    !/\b(score|fico|vantage)\b/i.test(line)
+  ) {
+    return null;
+  }
+  if (/\b\d{1,3}%\b/.test(line) && !/\b(score|fico|vantage)\b/i.test(line)) {
+    return null;
+  }
+  // Optional trailing footnote digit: Equifax1 / Experian2 / TransUnion3
+  const patterns: Array<{ bureau: keyof BureauScores; re: RegExp }> = [
+    { bureau: "transunion", re: /\btrans\s*union\d*\b|\bTU\b/i },
+    { bureau: "experian", re: /\bexperian\d*\b|\bEX\b|\bEXP\b/i },
+    { bureau: "equifax", re: /\bequifax\d*\b|\bEQ\b/i },
+  ];
+  const hits: Array<keyof BureauScores> = [];
+  for (const { bureau, re } of patterns) {
+    if (re.test(line)) hits.push(bureau);
+  }
+  // Reject prose lines that mention a bureau plus other words
+  // ("Equifax Accounts Summary", "Factors … Equifax").
+  if (hits.length === 1) {
+    const only = line
+      .replace(/®/g, "")
+      .replace(/\b(trans\s*union|experian|equifax)\d*\b/gi, "")
+      .replace(/\b(TU|EX|EXP|EQ)\b/gi, "")
+      .replace(/[\s:.\-_/]+/g, "");
+    if (only.length > 0) return null;
+  }
+  return hits.length === 1 ? hits[0] : null;
+}
+
+/**
+ * Tri-merge "Credit Score and Rating" blocks (IdentityIQ-style / Three Bureau):
+ *   Equifax1
+ *   576
+ *   Fair
+ *   Experian2
+ *   580
+ *   Fair
+ *   TransUnion3
+ *   561
+ *   Fair
+ */
+function extractScoresFromInterleavedBureauBlocks(
+  text: string,
+): BureauScores | null {
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.replace(/\t+/g, " ").trim())
+    .filter((l) => l.length > 0);
+
+  const scores: BureauScores = {
+    transunion: null,
+    experian: null,
+    equifax: null,
+  };
+  let found = 0;
+
+  for (let i = 0; i < lines.length - 1; i++) {
+    const bureau = detectSingleBureauInLine(lines[i]);
+    if (!bureau || scores[bureau] != null) continue;
+
+    const next = lines[i + 1];
+    // Score line is typically just "576" or "576 Fair"
+    if (!/^\d{3}(\s+(poor|fair|good|excellent|very\s*good))?$/i.test(next)) {
+      continue;
+    }
+    const nums = scoreNumbersInLine(next);
+    if (nums.length !== 1) continue;
+
+    scores[bureau] = nums[0];
+    found += 1;
+    if (found === 3) break;
+  }
+
+  return found >= 2 ? scores : null;
+}
+
+/**
+ * SmartCredit (and similar) often emit:
+ *   TransUnion®
+ *   Experian®
+ *   Equifax®
+ *   576  567  545
+ * rather than all three names on one header row.
+ */
+function extractScoresFromStackedBureauHeaders(
+  text: string,
+): BureauScores | null {
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.replace(/\t+/g, " ").trim())
+    .filter((l) => l.length > 0);
+
+  for (let i = 0; i < lines.length - 2; i++) {
+    const b0 = detectSingleBureauInLine(lines[i]);
+    const b1 = detectSingleBureauInLine(lines[i + 1]);
+    if (!b0 || !b1 || b0 === b1) continue;
+
+    const order: Array<keyof BureauScores> = [b0, b1];
+    let scoreStart = i + 2;
+    const b2 = detectSingleBureauInLine(lines[scoreStart]);
+    if (b2 && !order.includes(b2)) {
+      order.push(b2);
+      scoreStart += 1;
+    }
+    if (order.length < 2) continue;
+
+    for (
+      let j = scoreStart;
+      j <= Math.min(scoreStart + 5, lines.length - 1);
+      j++
+    ) {
+      if (
+        /vantage|fico|score\s*range|rating|poor|fair|good|excellent/i.test(
+          lines[j],
+        ) &&
+        scoreNumbersInLine(lines[j]).length < order.length
+      ) {
+        continue;
+      }
+      // Don't treat another bureau header row as the score line.
+      if (detectSingleBureauInLine(lines[j]) || detectBureauOrderInLine(lines[j])) {
+        break;
+      }
+      const nums = scoreNumbersInLine(lines[j]);
+      if (nums.length < order.length) {
+        if (nums.length > 0) break;
+        continue;
+      }
+      const scores: BureauScores = {
+        transunion: null,
+        experian: null,
+        equifax: null,
+      };
+      for (let k = 0; k < order.length; k++) {
+        scores[order[k]] = nums[k];
+      }
+      return scores;
+    }
   }
   return null;
 }
 
-function extractBureauScoreProvider(
-  text: string,
-  bureau: "transunion" | "experian" | "equifax",
-  provider: ReportProvider,
-): number | null {
-  const labels: Record<typeof bureau, string[]> = {
-    transunion: ["transunion", "trans union", "tu"],
-    experian: ["experian", "exp", "ex"],
-    equifax: ["equifax", "eq"],
-  };
+/**
+ * myFICO 3B printable glues score + band on one cell, one bureau per line:
+ *   EQUIFAX   TRANSUNION   EXPERIAN
+ *   559Poor
+ *   300 850
+ *   510Poor
+ *   300 850
+ *   545Poor
+ * First complete block is FICO Score 8 summary; later model versions repeat
+ * the same pattern with different ranges (250–900) and must not win.
+ */
+function parseGluedScoreRatingLine(line: string): number | null {
+  const m = /^(\d{3})\s*(poor|fair|good|excellent|very\s*good)\b/i.exec(
+    line.trim(),
+  );
+  if (!m) return null;
+  const n = Number(m[1]);
+  return isValidBureauScore(n) ? n : null;
+}
 
-  const providerPatterns: RegExp[] = [];
-  const abbrev =
-    bureau === "transunion" ? "TU" : bureau === "experian" ? "EX" : "EQ";
-  providerPatterns.push(new RegExp(`\\b${abbrev}\\b[^\\d]{0,20}(\\d{3})`, "i"));
-
-  if (
-    provider === "identityiq" ||
-    provider === "smartcredit" ||
-    provider === "myscoreiq"
+function collectSequentialGluedRatingScores(
+  lines: string[],
+  startIdx: number,
+  need: number,
+): number[] | null {
+  const nums: number[] = [];
+  for (
+    let j = startIdx;
+    j < Math.min(startIdx + 24, lines.length) && nums.length < need;
+    j++
   ) {
-    for (const label of labels[bureau]) {
-      providerPatterns.push(
-        new RegExp(
-          `${label}[^\\d]{0,40}(?:score|vantage|fico)?[^\\d]{0,10}(\\d{3})`,
-          "i",
-        ),
-      );
-      providerPatterns.push(
-        new RegExp(
-          `(?:score|vantage|fico)[^\\d]{0,20}${label}[^\\d]{0,20}(\\d{3})`,
-          "i",
-        ),
-      );
+    const line = lines[j].replace(/\t+/g, " ").trim();
+    if (!line) continue;
+
+    const glued = parseGluedScoreRatingLine(line);
+    if (glued != null) {
+      nums.push(glued);
+      continue;
+    }
+
+    // Score-range endpoints between bureau cells ("300 850" / "250 900")
+    if (/^\d{3}\s+\d{3}$/.test(line)) continue;
+    // Date row between header and scores = later FICO model page (not Score 8
+    // summary). Reject this header so we do not prefer 503/482 over 559/510/545.
+    if (/^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}$/.test(line)) {
+      if (nums.length === 0) return null;
+      continue;
+    }
+    if (/^--\s*\d+\s+of\s+\d+\s*--$/i.test(line)) continue;
+    if (/myfico|https?:\/\//i.test(line)) continue;
+
+    if (nums.length > 0) break;
+    // Haven't started yet — allow a short skip window past noise, then give up
+    if (j > startIdx + 4) break;
+  }
+  return nums.length >= need ? nums.slice(0, need) : null;
+}
+
+/**
+ * Tri-merge PDF text often lays out as:
+ *   TransUnion  Experian  Equifax
+ *   650         680       620
+ * Naively matching "Bureau…(\d{3})" assigns the first score to every bureau.
+ */
+function extractScoresFromHeaderColumns(text: string): BureauScores | null {
+  // Prefer interleaved EQ1/576/Fair blocks (Three Bureau / IdentityIQ-style)
+  // before stacked SmartCredit headers — both are common and non-overlapping.
+  const interleaved = extractScoresFromInterleavedBureauBlocks(text);
+  if (interleaved) return interleaved;
+
+  const stacked = extractScoresFromStackedBureauHeaders(text);
+  if (stacked) return stacked;
+
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  for (let i = 0; i < lines.length; i++) {
+    const order = detectBureauOrderInLine(lines[i]);
+    if (!order) continue;
+
+    // Same line: "TransUnion 650 Experian 680 Equifax 620"
+    const inline = extractInlineBureauScores(lines[i]);
+    if (inline) return inline;
+
+    // myFICO: one "559Poor" line per bureau column (with scale rows between)
+    const gluedNums = collectSequentialGluedRatingScores(
+      lines,
+      i + 1,
+      order.length,
+    );
+    if (gluedNums) {
+      const scores: BureauScores = {
+        transunion: null,
+        experian: null,
+        equifax: null,
+      };
+      for (let k = 0; k < order.length; k++) {
+        scores[order[k]] = gluedNums[k];
+      }
+      return scores;
+    }
+
+    for (let j = i + 1; j <= Math.min(i + 6, lines.length - 1); j++) {
+      // Skip rating / model label rows between headers and numbers
+      if (/vantage|fico|score\s*range|rating|poor|fair|good|excellent/i.test(lines[j])
+        && scoreNumbersInLine(lines[j]).length < order.length) {
+        continue;
+      }
+      const nums = scoreNumbersInLine(lines[j]);
+      if (nums.length < order.length) continue;
+      const scores: BureauScores = {
+        transunion: null,
+        experian: null,
+        equifax: null,
+      };
+      for (let k = 0; k < order.length; k++) {
+        scores[order[k]] = nums[k];
+      }
+      return scores;
+    }
+  }
+  return null;
+}
+
+/** Parse "TransUnion 650 Experian 680 Equifax 620" on one line. */
+function extractInlineBureauScores(line: string): BureauScores | null {
+  const scores: BureauScores = {
+    transunion: null,
+    experian: null,
+    equifax: null,
+  };
+  const re =
+    /\b(trans\s*union|transunion|tu|experian|exp|ex|equifax|eq)\b[^\d]{0,24}(?<![,\d])(\d{3})(?!\d)/gi;
+  let m: RegExpExecArray | null;
+  let found = 0;
+  while ((m = re.exec(line))) {
+    const label = m[1].toLowerCase().replace(/\s+/g, "");
+    const n = Number(m[2]);
+    if (!isValidBureauScore(n)) continue;
+    let bureau: keyof BureauScores | null = null;
+    if (label === "transunion" || label === "tu") bureau = "transunion";
+    else if (label === "experian" || label === "exp" || label === "ex")
+      bureau = "experian";
+    else if (label === "equifax" || label === "eq") bureau = "equifax";
+    if (!bureau || scores[bureau] != null) continue;
+    scores[bureau] = n;
+    found += 1;
+  }
+  return found >= 2 ? scores : null;
+}
+
+/**
+ * Find a score after a bureau label, stopping before the next bureau name so we
+ * never reuse the first column's number for Experian/Equifax.
+ * Prefers FICO/Vantage/"score" context; rejects $balances / limits / past-due.
+ */
+function extractScoreAfterBureauLabel(
+  text: string,
+  bureau: keyof BureauScores,
+): number | null {
+  const own = BUREAU_SCORE_LABELS[bureau];
+  const labels = [...own.full, ...own.abbrev];
+  const stopLabels = (
+    Object.keys(BUREAU_SCORE_LABELS) as Array<keyof BureauScores>
+  )
+    .filter((b) => b !== bureau)
+    .flatMap((b) => [
+      ...BUREAU_SCORE_LABELS[b].full,
+      ...BUREAU_SCORE_LABELS[b].abbrev,
+    ]);
+
+  type Candidate = { value: number; quality: number; index: number };
+  const candidates: Candidate[] = [];
+
+  for (const label of labels) {
+    const labelRe = new RegExp(
+      `\\b${escapeRegExpLiteral(label)}\\d*\\b`,
+      "ig",
+    );
+    let lm: RegExpExecArray | null;
+    while ((lm = labelRe.exec(text))) {
+      const afterStart = lm.index + lm[0].length;
+      const after = text.slice(afterStart, afterStart + 140);
+      let cut = after.length;
+      for (const stop of stopLabels) {
+        const sm = new RegExp(`\\b${escapeRegExpLiteral(stop)}\\b`, "i").exec(
+          after,
+        );
+        if (sm && sm.index < cut) cut = sm.index;
+      }
+      const region = after.slice(0, cut);
+      // Same money-group guard as scoreNumbersInLine ($1,348 → not 348).
+      const numRe = /(?<![,\d])(\d{3})(?!\d)/g;
+      let nm: RegExpExecArray | null;
+      while ((nm = numRe.exec(region))) {
+        const n = Number(nm[1]);
+        if (!isValidBureauScore(n)) continue;
+        const idx = nm.index;
+        const before = region.slice(Math.max(0, idx - 48), idx);
+        const immediate = region.slice(Math.max(0, idx - 18), idx);
+        let quality = 0;
+        const hasImmediateScoreCue =
+          /(?:fico|vantage(?:\s*score)?|credit\s*score|\bscore|\bscoring)\s*[:=\-\s]*$/i.test(
+            before,
+          );
+        if (
+          /(?:fico|vantage(?:\s*score)?|credit\s*score)\s*[:=\-\s]*$/i.test(
+            before,
+          )
+        ) {
+          quality += 24;
+        } else if (/\b(?:score|scoring)\s*[:=\-\s]*$/i.test(before)) {
+          quality += 14;
+        } else if (/\bscore\b/i.test(before)) {
+          quality += 8;
+        }
+        if (/\$\s*$/.test(before)) quality -= 30;
+        // "$1," immediately before a 3-digit run → money thousands group
+        if (/\d,$/.test(before) || /\$[\d,]*$/.test(before)) quality -= 40;
+        // Only penalize money/balance language when it sits next to this number
+        // (not a prior line's "High Balance $500" before a later "Score: 596").
+        if (
+          !hasImmediateScoreCue &&
+          /\b(?:balance|high\s*balance|credit\s*limit|limit|past\s*due|amount\s*owed|monthly\s*payment|payment\s*amount|charge[\s-]?off)\b/i.test(
+            immediate,
+          )
+        ) {
+          quality -= 22;
+        }
+        if (/^\d{3}\.\d{2}\b/.test(region.slice(idx))) quality -= 18;
+        candidates.push({ value: n, quality, index: idx });
+      }
     }
   }
 
-  for (const re of providerPatterns) {
-    const m = text.match(re);
-    const score = m ? Number(m[1]) : NaN;
-    if (score >= 300 && score <= 850) return score;
-  }
-
-  const genericName =
-    bureau === "transunion"
-      ? "TransUnion"
-      : bureau === "experian"
-        ? "Experian"
-        : "Equifax";
-  return extractBureauScoreGeneric(text, genericName);
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => b.quality - a.quality || a.index - b.index);
+  const best = candidates[0];
+  // Reject money/balance-shaped hits. Bare numbers must sit close to the bureau label.
+  if (best.quality < 0) return null;
+  if (best.quality === 0 && best.index > 56) return null;
+  return best.value;
 }
 
+function extractBureauScoreProvider(
+  text: string,
+  bureau: keyof BureauScores,
+  _provider: ReportProvider,
+): number | null {
+  return extractScoreAfterBureauLabel(text, bureau);
+}
+
+/**
+ * Extract per-bureau scores independently. Never copies one bureau's value into
+ * another. Prefers tri-merge header/column layouts when present.
+ */
 function extractAllScores(
   text: string,
   provider: ReportProvider = detectProvider(text),
 ): BureauScores {
-  return {
+  const fromColumns = extractScoresFromHeaderColumns(text);
+  const labeled: BureauScores = {
     transunion: extractBureauScoreProvider(text, "transunion", provider),
     experian: extractBureauScoreProvider(text, "experian", provider),
     equifax: extractBureauScoreProvider(text, "equifax", provider),
   };
+
+  // Prefer column mapping when it yields more distinct values (the identical-
+  // score bug) or when labeled extraction missed bureaus that columns found.
+  let result: BureauScores = labeled;
+  if (fromColumns) {
+    const colVals = [
+      fromColumns.transunion,
+      fromColumns.experian,
+      fromColumns.equifax,
+    ].filter((n): n is number => n != null);
+    const labVals = [
+      labeled.transunion,
+      labeled.experian,
+      labeled.equifax,
+    ].filter((n): n is number => n != null);
+    const colDistinct = new Set(colVals).size;
+    const labDistinct = new Set(labVals).size;
+    if (
+      colDistinct > labDistinct ||
+      (labVals.length > 0 &&
+        labDistinct === 1 &&
+        labVals.length >= 2 &&
+        colDistinct >= 2) ||
+      labVals.length < colVals.length
+    ) {
+      result = {
+        transunion: fromColumns.transunion ?? labeled.transunion,
+        experian: fromColumns.experian ?? labeled.experian,
+        equifax: fromColumns.equifax ?? labeled.equifax,
+      };
+    }
+  }
+
+  // Identical TU/EX/EQ is almost always a junk grab (balances/limits) unless
+  // the PDF text explicitly repeats the same score with score/FICO/Vantage cues.
+  const vals = [
+    result.transunion,
+    result.experian,
+    result.equifax,
+  ].filter((n): n is number => n != null);
+  if (vals.length >= 2 && new Set(vals).size === 1) {
+    const v = vals[0];
+    const strongHits = (
+      text.match(
+        new RegExp(
+          `(?:fico|vantage|credit\\s*score|\\bscore\\b)\\D{0,12}${v}\\b`,
+          "gi",
+        ),
+      ) || []
+    ).length;
+    const moneyHits = (
+      text.match(new RegExp(`\\$\\s*${v}\\b|${v}\\.00\\b`, "g")) || []
+    ).length;
+    if (strongHits < 2 || moneyHits >= strongHits) {
+      return { transunion: null, experian: null, equifax: null };
+    }
+  }
+
+  // TU===EX with a different EQ is a common false pair (junk reused for two
+  // bureaus — e.g. 376/376/538). Prefer column/stacked mapping when distinct.
+  if (
+    result.transunion != null &&
+    result.experian != null &&
+    result.transunion === result.experian &&
+    result.equifax != null &&
+    result.equifax !== result.transunion &&
+    fromColumns &&
+    fromColumns.transunion != null &&
+    fromColumns.experian != null &&
+    fromColumns.transunion !== fromColumns.experian
+  ) {
+    result = {
+      transunion: fromColumns.transunion,
+      experian: fromColumns.experian,
+      equifax: fromColumns.equifax ?? result.equifax,
+    };
+  }
+
+  return result;
 }
 
 function middleScore(scores: BureauScores): number | null {
@@ -11711,6 +17935,69 @@ function middleScore(scores: BureauScores): number | null {
   if (vals.length === 0) return null;
   vals.sort((a, b) => a - b);
   return vals[Math.floor(vals.length / 2)];
+}
+
+/** PDF field labels and junk tokens that must not become "account" names in disputes. */
+export const JUNK_NEGATIVE_ACCOUNT =
+  /^(payment status|pay status|worst pay status|account status|comments?|remarks?|account type|account number|creditor name|original creditor|date opened|date reported|date of last activity|last reported|high balance|past due|past due amount|terms|responsibility|consumer statement|times 30|times 60|times 90|monthly payment|credit limit|current balance|date closed|date of status|verification|dispute|narrative|subscriber|industry|portfolio|data source|date of inquiry|requested on|permissible purpose)$/i;
+
+/** Risk-factor / score-factor narrative (never a tradeline creditor). */
+const RISK_FACTOR_NEGATIVE_NOISE =
+  /^(too many|you have|lack of|proportion of|length of|amount (of )?owed|serious delinquen|number of|average (credit )?age|recent inquir|balances? on|payment history on|credit card use|available credit|hard inquir|the (presence|absence|ratio|level)|insufficient|limited credit)/i;
+
+/** Summary-stat rows from tri-merge dashboards (counts / $ across bureaus). */
+const SUMMARY_STAT_NEGATIVE_NOISE =
+  /^(total|open|closed|delinquent|derogatory|collection|inquir(?:y|ies)|past due|public records?|accounts?|charge.?offs?)\s*(accounts?|items?|balance|amount)?\s*[:\-]?\s*[\d$]/i;
+
+export function isJunkNegativeAccountName(raw: string): boolean {
+  const t = String(raw || "")
+    .replace(/[:\s]+$/g, "")
+    .trim();
+  if (!t || t.length < 3) return true;
+  if (JUNK_NEGATIVE_ACCOUNT.test(t)) return true;
+  if (/^[A-Za-z][A-Za-z0-9\s\/\-]{2,38}:$/.test(t)) return true;
+  return false;
+}
+
+/**
+ * Spec §0.2 / §8 — reject summary stats, score-factor bullets, and sentence
+ * fragments that are not a specific tradeline block.
+ */
+export function isNonTradelineNegativeNoise(raw: string): boolean {
+  const t = String(raw || "")
+    .replace(/[:\s]+$/g, "")
+    .trim();
+  if (!t) return true;
+  if (isJunkNegativeAccountName(t)) return true;
+  if (RISK_FACTOR_NEGATIVE_NOISE.test(t)) return true;
+  if (SUMMARY_STAT_NEGATIVE_NOISE.test(t)) return true;
+  // "Collection: 1 0 0" / "Delinquent: 4 4 5" / "Past Due: $0.00 $0.00 $0.00"
+  if (
+    /^(collection|delinquent|derogatory|past due|charge.?offs?|inquir(?:y|ies)|total accounts?)\s*:\s*[\d$.,\s]+$/i.test(
+      t,
+    )
+  ) {
+    return true;
+  }
+  // Sentence-like narrative without a compact creditor token
+  const words = t.split(/\s+/).filter(Boolean);
+  if (
+    words.length >= 6 &&
+    /\b(the|your|this|these|there|because|which|when|that|have|has|are|were)\b/i.test(
+      t,
+    )
+  ) {
+    return true;
+  }
+  // Bare type label with no creditor (e.g. just "Collection" / "Late payment")
+  if (
+    /^(collection|charge.?off|charged off|late payment|hard inquiry|inquiry|delinquent|derogatory|past due|repossession|foreclosure|bankruptcy|lien|judgment)s?$/i.test(
+      t,
+    )
+  ) {
+    return true;
+  }
+  return false;
 }
 
 const NEGATIVE_LINE_KEYWORDS =
@@ -11727,8 +18014,11 @@ function detectNegativeLines(text: string): string[] {
   const out: string[] = [];
   for (const line of lines) {
     if (!NEGATIVE_LINE_KEYWORDS.test(line)) continue;
+    if (isNonTradelineNegativeNoise(line)) continue;
+    if (!looksLikeTradelineNegativeInline(line)) continue;
     const prefixMatch = line.match(accountPrefix);
     const normalized = (prefixMatch?.[1] ?? line).trim().slice(0, 100);
+    if (isNonTradelineNegativeNoise(normalized)) continue;
     const key = normalized.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
@@ -11787,9 +18077,13 @@ export function extractNegativeAccounts(text: string): NegativeAccount[] {
     const line = lines[i];
     if (line.length < 8 || line.length > 140) continue;
     if (!NEGATIVE_LINE_KEYWORDS.test(line)) continue;
+    if (isNonTradelineNegativeNoise(line)) continue;
+    if (!looksLikeTradelineNegativeInline(line)) continue;
 
     const classified = classifyNegativeLine(line);
     const creditor = classified.creditor || line.slice(0, 40);
+    if (isNonTradelineNegativeNoise(creditor)) continue;
+    if (isNonTradelineNegativeNoise(line)) continue;
     const key = normalizeAccountKey(creditor, classified.type);
     if (seen.has(key)) continue;
     seen.add(key);
@@ -11878,8 +18172,47 @@ export function mergeRemovedWins(
 
 /** Parse common credit-report date strings to YYYY-MM-DD (US MM/DD, or DD/MM when unambiguous). */
 export function parseLooseDateToIso(raw: string): string | null {
-  const s = raw.trim();
+  const s = raw.trim().replace(/\s+/g, " ");
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+
+  const months: Record<string, number> = {
+    january: 1,
+    february: 2,
+    march: 3,
+    april: 4,
+    may: 5,
+    june: 6,
+    july: 7,
+    august: 8,
+    september: 9,
+    october: 10,
+    november: 11,
+    december: 12,
+    jan: 1,
+    feb: 2,
+    mar: 3,
+    apr: 4,
+    jun: 6,
+    jul: 7,
+    aug: 8,
+    sep: 9,
+    sept: 9,
+    oct: 10,
+    nov: 11,
+    dec: 12,
+  };
+  const named = s.match(
+    /^([A-Za-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})$/,
+  );
+  if (named) {
+    const month = months[named[1].toLowerCase()];
+    const day = Number(named[2]);
+    const year = Number(named[3]);
+    if (month && day >= 1 && day <= 31 && year >= 1990 && year <= 2100) {
+      return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    }
+  }
+
   const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
   if (!m) return null;
   let a = Number(m[1]);
@@ -11908,11 +18241,15 @@ export function parseLooseDateToIso(raw: string): string | null {
 /** Best-effort report date from PDF text (SmartCredit / bureau exports). */
 export function extractReportDate(text: string): string | null {
   const patterns = [
+    /report\s*date[:\s]+([A-Za-z]+\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})/i,
     /report\s*date[:\s]+(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i,
+    /as\s+of[:\s]+([A-Za-z]+\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})/i,
     /as\s+of[:\s]+(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i,
     /generated(?:\s+on)?[:\s]+(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i,
     /date\s+prepared[:\s]+(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i,
     /(?:report|as of|generated)[^\d]{0,24}(\d{4}-\d{2}-\d{2})/i,
+    // "Maria Ramos | June 27, 2026"
+    /\|\s*([A-Za-z]+\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})/,
   ];
   for (const re of patterns) {
     const m = text.match(re);
@@ -11921,6 +18258,28 @@ export function extractReportDate(text: string): string | null {
       if (iso) return iso;
     }
   }
+
+  // SmartCredit Ultra 3B personal-info value row: three identical report dates
+  // (TU / EX / EQ columns), often separated from the "Credit Report Date" label.
+  const tri = text.match(
+    /(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{4})\s+\1\s+\1(?:\s|$)/,
+  );
+  if (tri?.[1]) {
+    const iso = parseLooseDateToIso(tri[1]);
+    if (iso) return iso;
+  }
+
+  // Label on its own line → first 4-digit-year date in the following window.
+  const labelIdx = text.search(/credit\s*report\s*date\b/i);
+  if (labelIdx >= 0) {
+    const window = text.slice(labelIdx, labelIdx + 2500);
+    const dm = window.match(/\b(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{4})\b/);
+    if (dm?.[1]) {
+      const iso = parseLooseDateToIso(dm[1]);
+      if (iso) return iso;
+    }
+  }
+
   return null;
 }
 
@@ -12022,7 +18381,7 @@ function extractUtilization(text: string): OfGReportData["utilization"] {
       payTo10,
     });
   }
-  return results.slice(0, 12);
+  return filterRevolvingUtilizationInline(results).slice(0, 12);
 }
 
 function extractPositiveAccounts(text: string): string[] {
@@ -12046,10 +18405,49 @@ function buildConfidence(
   beforeScores: BureauScores,
   afterScores: BureauScores,
 ): Record<string, number> {
+  const confFor = (
+    before: number | null,
+    after: number | null,
+    allBefore: BureauScores,
+    allAfter: BureauScores,
+  ) => {
+    if (!before || !after) return 0.35;
+    const beforeVals = [
+      allBefore.transunion,
+      allBefore.experian,
+      allBefore.equifax,
+    ].filter((n): n is number => n != null);
+    const afterVals = [
+      allAfter.transunion,
+      allAfter.experian,
+      allAfter.equifax,
+    ].filter((n): n is number => n != null);
+    const identicalBefore =
+      beforeVals.length >= 2 && new Set(beforeVals).size === 1;
+    const identicalAfter =
+      afterVals.length >= 2 && new Set(afterVals).size === 1;
+    if (identicalBefore || identicalAfter) return 0.45;
+    return 0.9;
+  };
   return {
-    transunion: beforeScores.transunion && afterScores.transunion ? 0.9 : 0.4,
-    experian: beforeScores.experian && afterScores.experian ? 0.9 : 0.4,
-    equifax: beforeScores.equifax && afterScores.equifax ? 0.9 : 0.4,
+    transunion: confFor(
+      beforeScores.transunion,
+      afterScores.transunion,
+      beforeScores,
+      afterScores,
+    ),
+    experian: confFor(
+      beforeScores.experian,
+      afterScores.experian,
+      beforeScores,
+      afterScores,
+    ),
+    equifax: confFor(
+      beforeScores.equifax,
+      afterScores.equifax,
+      beforeScores,
+      afterScores,
+    ),
   };
 }
 
@@ -12072,12 +18470,53 @@ type PdfParseFn = (buf: Buffer) => Promise<{ text: string }>;
 let pdfParseLoader: Promise<PdfParseFn> | null = null;
 
 /**
+ * pdf-parse v2 → pdfjs-dist expects browser canvas globals (DOMMatrix, etc.).
+ * On Vercel/Node they are missing unless `pdf-parse/worker` runs first
+ * (wires @napi-rs/canvas). Without this, report-wizard extract fails with
+ * "DOMMatrix is not defined" even when both PDFs uploaded correctly.
+ */
+export async function ensurePdfParseNodeGlobals(): Promise<void> {
+  if (typeof globalThis.DOMMatrix === "undefined") {
+    try {
+      await import("pdf-parse/worker");
+    } catch (e: any) {
+      console.warn(
+        "[pdf-parse] worker import failed; installing stub DOMMatrix:",
+        e?.message ?? e,
+      );
+    }
+  }
+  if (typeof globalThis.DOMMatrix === "undefined") {
+    // Text extraction only — stub is enough if native canvas failed to load.
+    (globalThis as any).DOMMatrix = class DOMMatrix {};
+  }
+  if (typeof (globalThis as any).ImageData === "undefined") {
+    (globalThis as any).ImageData = class ImageData {
+      constructor() {}
+    };
+  }
+  if (typeof (globalThis as any).Path2D === "undefined") {
+    (globalThis as any).Path2D = class Path2D {};
+  }
+}
+
+function mapReportWizardExtractError(e: unknown): string {
+  const raw = String((e as any)?.message || e || "Extraction failed");
+  if (/DOMMatrix/i.test(raw)) {
+    return "PDF text extraction failed to start on the server. Please retry in a moment. If this continues after the next deploy, contact engineering.";
+  }
+  return raw.slice(0, 500);
+}
+
+/**
  * Lazy-load pdf-parse (v2+ exports `PDFParse` class, not a default function).
  * Keep load deferred so Vercel cold start does not fail on module init.
  */
 function loadPdfParse(): Promise<PdfParseFn> {
   if (!pdfParseLoader) {
-    pdfParseLoader = import("pdf-parse").then((mod) => {
+    pdfParseLoader = (async () => {
+      await ensurePdfParseNodeGlobals();
+      const mod = await import("pdf-parse");
       const PDFParseCtor = (
         mod as {
           PDFParse?: new (opts: { data: Buffer | Uint8Array }) => {
@@ -12114,7 +18553,7 @@ function loadPdfParse(): Promise<PdfParseFn> {
       throw new Error(
         "pdf-parse module did not export PDFParse class or a parse function",
       );
-    });
+    })();
   }
   return pdfParseLoader;
 }
@@ -12175,9 +18614,17 @@ async function extractFromCreditReportPdfs(
     spanish?: boolean;
     tradelineRec?: boolean;
     fundingNote?: boolean;
+    compareMode?: ReportCompareModeInline;
+    /** Prior-round After PDF — used for this-round incremental wins when Before is enrollment. */
+    incrementalBeforeBuffer?: Buffer | null;
+    /** Enrollment Before PDF — used for since-enrollment wins when Before is prior After (chain). */
+    enrollmentBeforeBuffer?: Buffer | null;
+    maxRounds?: number;
   } = {},
 ): Promise<{ data: OfGReportData; meta: Record<string, unknown> }> {
   const t0 = Date.now();
+  const compareMode = normalizeReportCompareModeInline(options.compareMode);
+  const maxRounds = clampMaxRounds(options.maxRounds ?? DEFAULT_MAX_ROUNDS);
   const pdfParse = await loadPdfParse();
   const [beforeParsed, afterParsed] = await Promise.all([
     pdfParse(beforeBuffer),
@@ -12191,75 +18638,125 @@ async function extractFromCreditReportPdfs(
   }
 
   const combinedText = beforeParsed.text + afterParsed.text;
-  const provider = detectProvider(combinedText);
-  const beforeScores = extractAllScores(beforeParsed.text, provider);
-  const afterScores = extractAllScores(afterParsed.text, provider);
+  // Detect provider per side — Before SmartCredit + After MFSN is common.
+  const beforeProvider = detectProvider(beforeParsed.text);
+  const afterProvider = detectProvider(afterParsed.text);
+  const provider =
+    beforeProvider === afterProvider
+      ? beforeProvider
+      : detectProvider(combinedText);
+  const beforeScores = extractAllScores(beforeParsed.text, beforeProvider);
+  const afterScores = extractAllScores(afterParsed.text, afterProvider);
   const beforeMiddle = middleScore(beforeScores);
   const afterMiddle = middleScore(afterScores);
 
-  const beforeAccounts = extractNegativeAccounts(beforeParsed.text);
-  const afterAccounts = extractNegativeAccounts(afterParsed.text);
-  const { removed, remaining } = diffNegativeAccounts(
-    beforeAccounts,
-    afterAccounts,
-  );
+  const spanish = !!options.spanish;
 
-  const beforeNeg = detectNegativeLines(beforeParsed.text);
-  const afterNeg = detectNegativeLines(afterParsed.text);
-  const lineRemoved = diffItems(beforeNeg, afterNeg);
+  const buildWinsTargets = (leftText: string, rightText: string) => {
+    const beforeAccounts = extractNegativeAccounts(leftText);
+    const afterAccounts = extractNegativeAccounts(rightText);
+    const { removed, remaining } = diffNegativeAccounts(
+      beforeAccounts,
+      afterAccounts,
+    );
+    const beforeNeg = detectNegativeLines(leftText);
+    const afterNeg = detectNegativeLines(rightText);
+    const lineRemoved = diffItems(beforeNeg, afterNeg);
+    const mergedRemoved = mergeRemovedWins(removed, lineRemoved);
+    const wins = mergedRemoved.map((item) => ({
+      itemRemoved: item.label,
+      bureaus: item.bureaus,
+      impact: spanish ? "Eliminado del informe" : "Removed from report",
+      status: spanish ? "Eliminado" : "Removed",
+      highlighted:
+        !!options.highlightWin &&
+        item.label.toLowerCase().includes(options.highlightWin.toLowerCase()),
+    }));
+    if (options.highlightWin && wins.length === 0) {
+      wins.push({
+        itemRemoved: options.highlightWin,
+        bureaus: ["TU", "EX", "EQ"] as BureauCode[],
+        impact: spanish ? "Eliminado del informe" : "Removed from report",
+        status: spanish ? "Eliminado" : "Removed",
+        highlighted: true,
+      });
+    }
+    const targetSource =
+      remaining.length > 0
+        ? remaining
+        : afterAccounts.length > 0
+          ? afterAccounts
+          : afterNeg.map((item) => ({
+              key: normalizeAccountKey(item, "Derogatory Item"),
+              label: item,
+              type: "Derogatory Item",
+              bureaus: ["TU", "EX", "EQ"] as BureauCode[],
+            }));
+    const targets = targetSource.slice(0, 8).map((acct, i) => ({
+      item: "label" in acct ? acct.label : String(acct),
+      bureaus: ("bureaus" in acct
+        ? acct.bureaus
+        : ["TU", "EX", "EQ"]) as BureauCode[],
+      detail: spanish
+        ? "Aún reportando — objetivo próxima ronda"
+        : "Still reporting — next round target",
+      priority: (i < 3 ? "high" : "medium") as "high" | "medium" | "low",
+    }));
+    return { wins, targets, removedCount: removed.length, lineRemovedCount: lineRemoved.length };
+  };
 
-  const mergedRemoved = mergeRemovedWins(removed, lineRemoved);
-  const matchingMethod =
-    removed.length > 0 &&
-    lineRemoved.length > 0 &&
-    mergedRemoved.length > removed.length
-      ? "account_fingerprint+line_diff"
-      : removed.length > 0
-        ? "account_fingerprint"
-        : "line_diff";
+  // Primary score Before/After diff (enrollment in baseline; prior After in chain).
+  const primary = buildWinsTargets(beforeParsed.text, afterParsed.text);
 
-  const wins = mergedRemoved.map((item) => ({
-    itemRemoved: item.label,
-    bureaus: item.bureaus,
-    impact: options.spanish ? "Eliminado del informe" : "Removed from report",
-    status: options.spanish ? "Eliminado" : "Removed",
-    highlighted:
-      !!options.highlightWin &&
-      item.label.toLowerCase().includes(options.highlightWin.toLowerCase()),
-  }));
+  // Dual tables: this round vs since enrollment.
+  let winsThisRound = primary.wins;
+  let targetsThisRound = primary.targets;
+  let winsSinceEnrollment = primary.wins;
+  let targetsSinceEnrollment = primary.targets;
 
-  if (options.highlightWin && wins.length === 0) {
-    wins.push({
-      itemRemoved: options.highlightWin,
-      bureaus: ["TU", "EX", "EQ"],
-      impact: options.spanish ? "Eliminado del informe" : "Removed from report",
-      status: options.spanish ? "Eliminado" : "Removed",
-      highlighted: true,
-    });
+  if (compareMode === "baseline" && options.incrementalBeforeBuffer?.length) {
+    try {
+      const incParsed = await pdfParse(options.incrementalBeforeBuffer);
+      if (incParsed.text?.trim()) {
+        const inc = buildWinsTargets(incParsed.text, afterParsed.text);
+        winsThisRound = inc.wins;
+        targetsThisRound = inc.targets;
+      }
+    } catch {
+      /* keep primary as this-round fallback */
+    }
+    winsSinceEnrollment = primary.wins;
+    targetsSinceEnrollment = primary.targets;
+  } else if (compareMode === "chain") {
+    winsThisRound = primary.wins;
+    targetsThisRound = primary.targets;
+    if (options.enrollmentBeforeBuffer?.length) {
+      try {
+        const enrParsed = await pdfParse(options.enrollmentBeforeBuffer);
+        if (enrParsed.text?.trim()) {
+          const enr = buildWinsTargets(enrParsed.text, afterParsed.text);
+          winsSinceEnrollment = enr.wins;
+          targetsSinceEnrollment = enr.targets;
+        }
+      } catch {
+        /* keep this-round as since-enrollment fallback */
+      }
+    }
   }
 
-  const targetSource =
-    remaining.length > 0
-      ? remaining
-      : afterAccounts.length > 0
-        ? afterAccounts
-        : afterNeg.map((item) => ({
-            key: normalizeAccountKey(item, "Derogatory Item"),
-            label: item,
-            type: "Derogatory Item",
-            bureaus: ["TU", "EX", "EQ"] as BureauCode[],
-          }));
+  const wins =
+    compareMode === "chain" ? winsThisRound : winsSinceEnrollment;
+  const targets =
+    compareMode === "chain" ? targetsThisRound : targetsSinceEnrollment;
 
-  const targets = targetSource.slice(0, 8).map((acct, i) => ({
-    item: "label" in acct ? acct.label : String(acct),
-    bureaus: ("bureaus" in acct
-      ? acct.bureaus
-      : ["TU", "EX", "EQ"]) as BureauCode[],
-    detail: options.spanish
-      ? "Aún reportando — objetivo próxima ronda"
-      : "Still reporting — next round target",
-    priority: (i < 3 ? "high" : "medium") as "high" | "medium" | "low",
-  }));
+  const matchingMethod =
+    primary.removedCount > 0 &&
+    primary.lineRemovedCount > 0 &&
+    primary.wins.length > primary.removedCount
+      ? "account_fingerprint+line_diff"
+      : primary.removedCount > 0
+        ? "account_fingerprint"
+        : "line_diff";
 
   const utilization = extractUtilization(afterParsed.text);
   const positiveAccounts = extractPositiveAccounts(afterParsed.text);
@@ -12274,12 +18771,12 @@ async function extractFromCreditReportPdfs(
   const gapRemaining =
     afterMiddle != null ? Math.max(0, scoreGoal - afterMiddle) : 0;
 
-  const spanish = !!options.spanish;
-  const todayIso = new Date().toISOString().slice(0, 10);
   const beforeDateFromPdf = extractReportDate(beforeParsed.text);
   const afterDateFromPdf = extractReportDate(afterParsed.text);
-  const beforeReportDate = beforeDateFromPdf || todayIso;
-  const afterReportDate = afterDateFromPdf || todayIso;
+  // Prefer PDF dates only — do not invent today's date (forces staff review when blank).
+  const beforeReportDate = beforeDateFromPdf || "";
+  const afterReportDate = afterDateFromPdf || "";
+  const nextRoundHint = Math.min(maxRounds, roundNumber + 1);
 
   const data: OfGReportData = {
     client: { firstName: clientFirstName },
@@ -12307,23 +18804,28 @@ async function extractFromCreditReportPdfs(
     },
     wins,
     targets,
+    winsThisRound,
+    winsSinceEnrollment,
+    targetsThisRound,
+    targetsSinceEnrollment,
+    compareMode,
     utilization,
     positiveAccounts,
     actionNeeded,
     roadmap: {
       currentRound: roundNumber,
-      nextRound: Math.min(5, roundNumber + 1),
+      nextRound: nextRoundHint,
       scoreGoal,
       gapRemaining,
       milestones: spanish
         ? [
             `Ronda ${roundNumber} documentada`,
-            `Ronda ${Math.min(5, roundNumber + 1)} en progreso`,
+            `Ronda ${nextRoundHint} en progreso`,
             "Meta de puntaje en camino",
           ]
         : [
             `Round ${roundNumber} progress documented`,
-            `Round ${Math.min(5, roundNumber + 1)} disputes in progress`,
+            `Round ${nextRoundHint} disputes in progress`,
             "Score goal on track",
           ],
     },
@@ -12351,14 +18853,45 @@ async function extractFromCreditReportPdfs(
   };
 
   const confidence = buildConfidence(beforeScores, afterScores);
+  const extractionWarnings: string[] = [];
+  if (!beforeDateFromPdf) {
+    extractionWarnings.push("before_date_not_found_in_pdf");
+  }
+  if (!afterDateFromPdf) {
+    extractionWarnings.push("after_date_not_found_in_pdf");
+  }
+  if (
+    beforeScores.transunion != null &&
+    beforeScores.transunion === beforeScores.experian &&
+    beforeScores.equifax != null &&
+    beforeScores.equifax !== beforeScores.transunion
+  ) {
+    extractionWarnings.push("before_tu_ex_identical_review");
+  }
+  if (
+    afterScores.transunion != null &&
+    afterScores.transunion === afterScores.experian &&
+    afterScores.equifax != null &&
+    afterScores.equifax !== afterScores.transunion
+  ) {
+    extractionWarnings.push("after_tu_ex_identical_review");
+  }
+  if (beforeProvider !== afterProvider) {
+    extractionWarnings.push(
+      `mixed_providers:${beforeProvider}+${afterProvider}`,
+    );
+  }
 
   return {
     data,
     meta: {
       duration_ms: Date.now() - t0,
       provider,
+      before_provider: beforeProvider,
+      after_provider: afterProvider,
       extraction_method: "heuristic_structured",
       matching_method: matchingMethod,
+      compare_mode: compareMode,
       before_text_length: beforeParsed.text.length,
       after_text_length: afterParsed.text.length,
       before_report_date: beforeReportDate,
@@ -12366,11 +18899,12 @@ async function extractFromCreditReportPdfs(
       before_date_from_pdf: !!beforeDateFromPdf,
       after_date_from_pdf: !!afterDateFromPdf,
       confidence,
+      extraction_warnings: extractionWarnings,
       wins_detected: data.wins.length,
+      wins_this_round: winsThisRound.length,
+      wins_since_enrollment: winsSinceEnrollment.length,
       targets_detected: data.targets.length,
       utilization_detected: data.utilization.length,
-      before_accounts: beforeAccounts.length,
-      after_accounts: afterAccounts.length,
     },
   };
 }
@@ -12405,6 +18939,900 @@ export function resolveExtractionStatus(
   return "ok";
 }
 
+function parseCreditAnalysisJson<T>(raw: unknown): T | null {
+  if (raw == null) return null;
+  if (typeof raw === "object") return raw as T;
+  if (typeof raw === "string") {
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function creditAnalysisRowToResult(row: RowDataPacket): CreditAnalysisResult {
+  const scores = parseCreditAnalysisJson<BureauScores>(row.scores_json);
+  const negatives =
+    parseCreditAnalysisJson<CreditAnalysisNegativeItem[]>(
+      row.negatives_json,
+    ) ?? [];
+  const suggestedLabels =
+    parseCreditAnalysisJson<string[]>(row.labels_suggested_json) ?? [];
+  const analystRaw = parseCreditAnalysisJson<
+    Record<string, string | number | null | boolean> & {
+      _claude_enhanced?: number | boolean;
+    }
+  >(row.analyst_json);
+  const claudeEnhanced =
+    analystRaw?._claude_enhanced === 1 || analystRaw?._claude_enhanced === true;
+  let analyst: SharedCreditAnalysisAnalystFlat | null = null;
+  if (analystRaw) {
+    const { _claude_enhanced: _dropped, ...rest } = analystRaw;
+    analyst = rest as SharedCreditAnalysisAnalystFlat;
+  }
+  const hasScores = !!(
+    scores?.transunion ||
+    scores?.experian ||
+    scores?.equifax
+  );
+  const mime = row.report_mime_type ? String(row.report_mime_type) : null;
+  const storedStatus = row.extraction_status
+    ? String(row.extraction_status)
+    : "";
+  const validStatuses: CreditAnalysisExtractionStatus[] = [
+    "ok",
+    "empty",
+    "parse_failed",
+    "unsupported_type",
+  ];
+  let extraction_status: CreditAnalysisExtractionStatus;
+  if (validStatuses.includes(storedStatus as CreditAnalysisExtractionStatus)) {
+    extraction_status = storedStatus as CreditAnalysisExtractionStatus;
+  } else if (mime !== "application/pdf") {
+    extraction_status = "unsupported_type";
+  } else if (hasScores || analyst?.middle_score != null) {
+    extraction_status = "ok";
+  } else {
+    extraction_status = "empty";
+  }
+  const charsExtracted =
+    row.chars_extracted != null ? Number(row.chars_extracted) : 0;
+  const generatedAt = row.generated_at
+    ? new Date(row.generated_at as string | Date)
+    : new Date();
+  return {
+    id: Number(row.id),
+    client_id: Number(row.client_id),
+    mode: (row.mode as CreditAnalysisMode) || "client",
+    scores: hasScores ? scores : null,
+    negatives,
+    suggested_labels: suggestedLabels,
+    analysis_html: row.analysis_html ? String(row.analysis_html) : "",
+    analysis_text: row.analysis_text ? String(row.analysis_text) : null,
+    email_sent: row.email_sent_at != null,
+    generated_at: generatedAt.toISOString(),
+    extraction_status,
+    chars_extracted: charsExtracted,
+    analyst,
+    text_language:
+      row.text_language === "es" || row.text_language === "en"
+        ? row.text_language
+        : analyst?.text_language === "Spanish"
+          ? "es"
+          : "en",
+    claude_enhanced: claudeEnhanced,
+  };
+}
+
+const CREDIT_ANALYSIS_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+export function isProspectClientRow(
+  row: RowDataPacket | null | undefined,
+): boolean {
+  if (!row) return false;
+  if (row.status === "cancelled" || row.status === "funding") return false;
+  return row.status === "prospect" || row.pipeline_stage === "prospect";
+}
+
+// ── Credit analysis Claude enhance (INLINED — keep in sync with creditAnalysisClaudeEnhance.ts) ──
+
+type CreditAnalysisClaudeDraft = {
+  fha_status?: string;
+  goal_description?: string;
+  utilization_critical_note?: string;
+  paydown_30_instruction?: string;
+  paydown_10_instruction?: string;
+  target_timeframe?: string;
+  round_1_actions?: string;
+  round_2_actions?: string;
+  round_3_actions?: string;
+  positive_accounts_protect?: string;
+  tradeline_recommendation?: string;
+  client_text_message?: string;
+  action_plan?: Array<{ time?: string; action?: string; reason?: string }>;
+  neg_dispute_basis?: Array<{ account?: string; dispute_basis?: string }>;
+  fs_notes?: {
+    open_revolving?: string;
+    installment_mix?: string;
+    mortgage?: string;
+    account_age?: string;
+    post_repair?: string;
+  };
+};
+
+const CREDIT_ANALYSIS_CLAUDE_SYSTEM = `You are the OFG pre-sale Credit Analysis narrative writer for Optimum Financial Group (Newport Beach, CA).
+You receive a rules-engine extraction (scores, negatives, utilization, draft plan). Improve the narrative only.
+
+Compliance (non-negotiable):
+- Do NOT invent bureau scores, accounts, balances, or utilization numbers
+- Do NOT invent negative accounts that are not in the input
+- Do NOT change numeric score fields or priority labels (CRITICAL/HIGH/MEDIUM/LOWER)
+- NO score guarantees — use "projected" or "estimated"
+- Tradeline identities: never invent cardholder names; codes like IH-1 only if already present
+- Dispute stages: label "Round 1"–"Round 4" ONLY — no "Week 1", "Month 2", "in 30 days" timing language
+- Include legal citations where relevant: FCRA §604, §611, §623; FDCPA §809
+- Match language: English or Spanish from input text_language (Spanish | English) — no Spanglish
+- CROA disclosure is added separately — do not rewrite it
+
+Return ONLY a JSON object (no markdown) with optional keys:
+{
+  "fha_status": "...",
+  "goal_description": "...",
+  "utilization_critical_note": "...",
+  "paydown_30_instruction": "...",
+  "paydown_10_instruction": "...",
+  "target_timeframe": "...",
+  "round_1_actions": "★ first action\\n★ second action (JSON newlines OK; never leave backslash-n as visible text)",
+  "round_2_actions": "★ ...",
+  "round_3_actions": "★ ...",
+  "positive_accounts_protect": "...",
+  "tradeline_recommendation": "...",
+  "client_text_message": "SMS-ready, under 320 chars, include optimum-financial-group.com if present in input",
+  "action_plan": [
+    { "time": "Round 1", "action": "...", "reason": "..." }
+  ],
+  "neg_dispute_basis": [
+    { "account": "<exact match to existing>", "dispute_basis": "..." }
+  ],
+  "fs_notes": {
+    "open_revolving": "full fs_open_revolving string or justification after —",
+    "installment_mix": "...",
+    "mortgage": "...",
+    "account_age": "...",
+    "post_repair": "..."
+  }
+}
+
+Round assignment guidance (OFG engine):
+- Round 1: duplicate/unverifiable inquiries
+- Round 2: collection / third-party debt
+- Round 3: bureau inconsistencies
+- Round 4: charge-offs / complex 90+ late consistently reported
+Keep action_plan to 4–6 steps. Prefer Round labels over calendar timing.`;
+
+function clipClaudeStr(s: unknown, max: number): string | null {
+  return clipDecodedStr(s, max);
+}
+
+function applyCreditFsNote(
+  current: string,
+  note: string | null | undefined,
+): string {
+  const n = clipClaudeStr(note, 220);
+  if (!n) return current;
+  if (/^\d+\/\d+/.test(n) || n.includes("—") || n.includes("-")) return n;
+  const m = current.match(/^(\d+\/\d+)\s*[—\-]\s*/);
+  if (m) return `${m[1]} — ${n}`;
+  return n;
+}
+
+function parseCreditAnalysisClaudeJson(
+  text: string,
+): CreditAnalysisClaudeDraft | null {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  try {
+    const objMatch = raw.match(/\{[\s\S]*\}/);
+    if (!objMatch) return null;
+    return JSON.parse(objMatch[0]) as CreditAnalysisClaudeDraft;
+  } catch {
+    return null;
+  }
+}
+
+/** Merge Claude draft — never mutates scores / util numbers / account identities. */
+function mergeCreditAnalysisClaudeEnhancement(
+  base: CreditAnalysisAnalystFlat,
+  draft: CreditAnalysisClaudeDraft | null | undefined,
+): CreditAnalysisAnalystFlat {
+  if (!draft || typeof draft !== "object") return base;
+  const out: CreditAnalysisAnalystFlat = { ...base };
+
+  const strFields: Array<
+    [keyof CreditAnalysisAnalystFlat, keyof CreditAnalysisClaudeDraft, number]
+  > = [
+    ["fha_status", "fha_status", 240],
+    ["goal_description", "goal_description", 280],
+    ["utilization_critical_note", "utilization_critical_note", 280],
+    ["paydown_30_instruction", "paydown_30_instruction", 280],
+    ["paydown_10_instruction", "paydown_10_instruction", 280],
+    ["target_timeframe", "target_timeframe", 160],
+    ["round_1_actions", "round_1_actions", 800],
+    ["round_2_actions", "round_2_actions", 800],
+    ["round_3_actions", "round_3_actions", 800],
+    ["positive_accounts_protect", "positive_accounts_protect", 400],
+    ["tradeline_recommendation", "tradeline_recommendation", 400],
+    ["client_text_message", "client_text_message", 480],
+  ];
+  for (const [dest, src, max] of strFields) {
+    const v = clipClaudeStr(draft[src], max);
+    if (v) (out as any)[dest] = v;
+  }
+
+  if (Array.isArray(draft.action_plan) && draft.action_plan.length > 0) {
+    const steps = draft.action_plan.slice(0, 6);
+    const langHint: AnalystLang = /ronda|spanish|español/i.test(
+      String(base.round_1_actions || base.client_text_message || ""),
+    )
+      ? "Spanish"
+      : "English";
+    for (let i = 0; i < 6; i++) {
+      const step = steps[i];
+      const n = i + 1;
+      if (!step) continue;
+      const timeRaw = clipClaudeStr(step.time, 40);
+      const action = clipClaudeStr(step.action, 220);
+      const reason = clipClaudeStr(step.reason, 220);
+      if (timeRaw)
+        (out as any)[`action_${n}_time`] = sanitizeCreditAnalysisActionTime(
+          timeRaw,
+          langHint,
+        );
+      if (action) (out as any)[`action_${n}_action`] = action;
+      if (reason) (out as any)[`action_${n}_reason`] = reason;
+    }
+  }
+
+  if (Array.isArray(draft.neg_dispute_basis)) {
+    for (const row of draft.neg_dispute_basis) {
+      const account = clipClaudeStr(row.account, 80);
+      const basis = clipClaudeStr(row.dispute_basis, 280);
+      if (!account || !basis) continue;
+      const key = account.toLowerCase();
+      for (let i = 1; i <= 5; i++) {
+        const acc = String((out as any)[`neg_${i}_account`] || "");
+        if (acc && acc.toLowerCase() === key) {
+          (out as any)[`neg_${i}_dispute_basis`] = basis;
+          break;
+        }
+      }
+    }
+  }
+
+  if (draft.fs_notes && typeof draft.fs_notes === "object") {
+    out.fs_open_revolving = applyCreditFsNote(
+      out.fs_open_revolving,
+      draft.fs_notes.open_revolving,
+    );
+    out.fs_installment_mix = applyCreditFsNote(
+      out.fs_installment_mix,
+      draft.fs_notes.installment_mix,
+    );
+    out.fs_mortgage = applyCreditFsNote(
+      out.fs_mortgage,
+      draft.fs_notes.mortgage,
+    );
+    out.fs_account_age = applyCreditFsNote(
+      out.fs_account_age,
+      draft.fs_notes.account_age,
+    );
+    out.fs_post_repair = applyCreditFsNote(
+      out.fs_post_repair,
+      draft.fs_notes.post_repair,
+    );
+  }
+
+  return out;
+}
+
+/** Rebuild action_plan_html rows from flat action_* fields (keep in sync with creditAnalysisClaudeEnhance.ts). */
+function actionPlanRowsFromAnalyst(
+  a: CreditAnalysisAnalystFlat,
+): Array<{ time: string; action: string; reason: string }> {
+  const rows: Array<{ time: string; action: string; reason: string }> = [];
+  for (let i = 1; i <= 6; i++) {
+    const time = String((a as any)[`action_${i}_time`] || "").trim();
+    const action = String((a as any)[`action_${i}_action`] || "").trim();
+    const reason = String((a as any)[`action_${i}_reason`] || "").trim();
+    if (!time && !action) continue;
+    rows.push({ time, action, reason });
+  }
+  return rows;
+}
+
+function rebuildCreditAnalysisHtmlTables(
+  a: CreditAnalysisAnalystFlat,
+): CreditAnalysisAnalystFlat {
+  const negs: RankedNeg[] = [];
+  for (let i = 1; i <= 5; i++) {
+    const account = String((a as any)[`neg_${i}_account`] || "").trim();
+    if (!account) continue;
+    const priorityRaw = String((a as any)[`neg_${i}_priority`] || "MEDIUM");
+    const priority = (
+      ["CRITICAL", "HIGH", "MEDIUM", "LOWER"].includes(priorityRaw)
+        ? priorityRaw
+        : "MEDIUM"
+    ) as DisputePriority;
+    const roundRaw = Number((a as any)[`neg_${i}_round`] || 3);
+    const dispute_round = (
+      [1, 2, 3, 4].includes(roundRaw) ? roundRaw : 3
+    ) as 1 | 2 | 3 | 4;
+    negs.push({
+      account,
+      type: String((a as any)[`neg_${i}_type`] || ""),
+      bureaus: String((a as any)[`neg_${i}_bureaus`] || ""),
+      bureau_count: 0,
+      priority,
+      dispute_basis: String((a as any)[`neg_${i}_dispute_basis`] || ""),
+      dispute_round,
+      derogatory_date: null,
+      score_lift: 0,
+    });
+  }
+  const actions = actionPlanRowsFromAnalyst(a);
+  return {
+    ...a,
+    negative_items_html: buildNegativeHtml(negs),
+    action_plan_html: buildActionPlanHtml(actions),
+  };
+}
+
+export async function runClaudeCreditAnalysisEnhance(opts: {
+  analyst: CreditAnalysisAnalystFlat;
+  reportText?: string;
+  weakExtraction?: boolean;
+}): Promise<{
+  analyst: CreditAnalysisAnalystFlat;
+  enhanced: boolean;
+  error?: string;
+}> {
+  if (process.env.VITEST === "true") {
+    const mock = String(process.env.CREDIT_ANALYSIS_CLAUDE_MOCK_JSON || "").trim();
+    if (mock) {
+      try {
+        const draft = parseCreditAnalysisClaudeJson(mock);
+        if (draft) {
+          return {
+            analyst: rebuildCreditAnalysisHtmlTables(
+              mergeCreditAnalysisClaudeEnhancement(opts.analyst, draft),
+            ),
+            enhanced: true,
+          };
+        }
+      } catch {
+        /* fall through */
+      }
+    }
+    return { analyst: opts.analyst, enhanced: false, error: "vitest_skip" };
+  }
+  const apiKey = String(process.env.ANTHROPIC_API_KEY || "").trim();
+  if (!apiKey) {
+    return {
+      analyst: opts.analyst,
+      enhanced: false,
+      error: "ANTHROPIC_API_KEY not set",
+    };
+  }
+  const model =
+    String(process.env.ANTHROPIC_MODEL || "").trim() || "claude-sonnet-4-6";
+  const a = opts.analyst;
+  const payload = {
+    text_language: a.text_language,
+    client_name: a.client_name,
+    analysis_goal: a.analysis_goal,
+    weak_extraction: !!opts.weakExtraction,
+    scores: {
+      transunion: a.score_transunion,
+      experian: a.score_experian,
+      equifax: a.score_equifax,
+      middle: a.middle_score,
+      goal: a.goal_score,
+    },
+    fha_status: a.fha_status,
+    goal_description: a.goal_description,
+    negatives: [1, 2, 3, 4, 5]
+      .map((i) => ({
+        account: (a as any)[`neg_${i}_account`],
+        type: (a as any)[`neg_${i}_type`],
+        bureaus: (a as any)[`neg_${i}_bureaus`],
+        priority: (a as any)[`neg_${i}_priority`],
+        dispute_basis: (a as any)[`neg_${i}_dispute_basis`],
+      }))
+      .filter((n) => n.account),
+    utilization: {
+      note: a.utilization_critical_note,
+      total_util: a.total_revolving_util,
+      paydown_30: a.paydown_30_instruction,
+      paydown_10: a.paydown_10_instruction,
+    },
+    rounds: {
+      round_1: a.round_1_actions,
+      round_2: a.round_2_actions,
+      round_3: a.round_3_actions,
+    },
+    action_plan: [1, 2, 3, 4, 5, 6]
+      .map((i) => ({
+        time: (a as any)[`action_${i}_time`],
+        action: (a as any)[`action_${i}_action`],
+        reason: (a as any)[`action_${i}_reason`],
+      }))
+      .filter((r) => r.time || r.action),
+    file_strength: {
+      score: a.file_strength_score,
+      rating: a.file_strength_rating,
+      open_revolving: a.fs_open_revolving,
+      installment_mix: a.fs_installment_mix,
+      mortgage: a.fs_mortgage,
+      account_age: a.fs_account_age,
+      post_repair: a.fs_post_repair,
+      tradeline_recommendation: a.tradeline_recommendation,
+    },
+    client_text_message: a.client_text_message,
+    report_excerpt: String(opts.reportText || "").slice(0, 12000),
+  };
+
+  try {
+    const resp = await axios.post(
+      "https://api.anthropic.com/v1/messages",
+      {
+        model,
+        max_tokens: 1800,
+        temperature: 0.2,
+        system: CREDIT_ANALYSIS_CLAUDE_SYSTEM,
+        messages: [
+          {
+            role: "user",
+            content:
+              "Enhance this OFG pre-sale credit analysis narrative. Keep all facts grounded in the JSON. Prefer Round 1–4 labels.\n\n" +
+              JSON.stringify(payload),
+          },
+        ],
+      },
+      {
+        headers: {
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json",
+        },
+        timeout: 22_000,
+      },
+    );
+    const text = String(resp.data?.content?.[0]?.text || "");
+    const draft = parseCreditAnalysisClaudeJson(text);
+    if (!draft) {
+      return {
+        analyst: opts.analyst,
+        enhanced: false,
+        error: "Claude returned no parseable credit-analysis JSON",
+      };
+    }
+    const merged = rebuildCreditAnalysisHtmlTables(
+      mergeCreditAnalysisClaudeEnhancement(opts.analyst, draft),
+    );
+    return { analyst: merged, enhanced: true };
+  } catch (e: any) {
+    console.error(
+      "[credit-analysis] claude enhance failed:",
+      e?.message ?? e,
+    );
+    return {
+      analyst: opts.analyst,
+      enhanced: false,
+      error: String(e?.message || e).slice(0, 200),
+    };
+  }
+}
+
+async function executeCreditAnalysisUpload(opts: {
+  mode: CreditAnalysisMode;
+  firstName: string;
+  lastName: string;
+  email: string;
+  phone: string;
+  textLanguage: "en" | "es";
+  clientGoal?: string | null;
+  notes?: string | null;
+  agentPhone?: string | null;
+  repName?: string | null;
+  emailOptIn: boolean;
+  file: { buffer: Buffer; originalname: string; mimetype: string };
+  affiliateCode?: string | null;
+  leadSource?: string | null;
+  fixedClientId?: number;
+  sourceLabel?: string;
+  /** Default true when ANTHROPIC_API_KEY is set. */
+  enhanceWithClaude?: boolean;
+}): Promise<CreditAnalysisResult> {
+  const {
+    mode,
+    firstName,
+    lastName,
+    email,
+    phone,
+    textLanguage,
+    clientGoal,
+    notes,
+    agentPhone,
+    repName,
+    emailOptIn,
+    file,
+    affiliateCode,
+    leadSource,
+    fixedClientId,
+    sourceLabel,
+  } = opts;
+
+  let reportText = "";
+  let pdfParseFailed = false;
+  if (file.mimetype === "application/pdf") {
+    try {
+      const pdfParse = await loadPdfParse();
+      const parsed = await pdfParse(file.buffer);
+      reportText = parsed.text || "";
+    } catch (e: any) {
+      pdfParseFailed = true;
+      console.error("[credit-analysis] pdf parse failed:", e?.message);
+    }
+  }
+  const extractionStatus = resolveExtractionStatus(
+    file.mimetype,
+    reportText,
+    pdfParseFailed,
+  );
+  const charsExtracted = reportText.trim().length;
+  const weakExtraction = extractionStatus !== "ok";
+
+  const provider = reportText ? detectProvider(reportText) : "generic";
+  const scores: BureauScores = reportText
+    ? extractAllScores(reportText, provider)
+    : { transunion: null, experian: null, equifax: null };
+  const hasScores = !!(
+    scores.transunion ||
+    scores.experian ||
+    scores.equifax
+  );
+  const negativeLines = reportText ? detectNegativeLines(reportText) : [];
+  const structuredAccounts = reportText
+    ? extractNegativeAccounts(reportText)
+    : [];
+  const negatives: CreditAnalysisNegativeItem[] =
+    structuredAccounts.length > 0
+      ? structuredAccounts.map((a) => {
+          const creditor = a.label.includes(" — ")
+            ? a.label.split(" — ")[0].trim()
+            : a.label;
+          return {
+            type: a.type,
+            creditor: isNonTradelineNegativeNoise(creditor)
+              ? undefined
+              : creditor,
+            bureaus: a.bureaus,
+            detail: a.label,
+          };
+        })
+      : buildNegativeItems(negativeLines);
+  const suggestedLabels = inferAnalysisLabelSlugs(negativeLines, reportText);
+
+  const affiliateId = await resolveAffiliateIdBySlugOrCode(affiliateCode);
+
+  let clientId: number;
+  let isProspectFlow = true;
+  const isPublicWebLead = fixedClientId == null && mode === "client";
+
+  if (isPublicWebLead) {
+    if (isPlaceholderPhone(phone)) {
+      throw Object.assign(new Error("placeholder_phone"), {
+        statusCode: 400,
+        code: "placeholder_phone",
+      });
+    }
+    if (
+      looksLikeSpamPersonName(firstName, lastName) &&
+      looksLikeSpamEmail(email)
+    ) {
+      throw Object.assign(new Error("spam_rejected"), {
+        statusCode: 400,
+        code: "spam_rejected",
+      });
+    }
+  }
+
+  if (fixedClientId != null && fixedClientId > 0) {
+    const [fixedRows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, status FROM clients WHERE id = ? LIMIT 1`,
+      [fixedClientId],
+    );
+    if (fixedRows.length === 0) {
+      throw Object.assign(new Error("Client not found"), { statusCode: 404 });
+    }
+    clientId = fixedClientId;
+    isProspectFlow = fixedRows[0].status === "prospect";
+    if (affiliateId) {
+      await pool.query<ResultSetHeader>(
+        `UPDATE clients SET affiliate_id = COALESCE(affiliate_id, ?) WHERE id = ?`,
+        [affiliateId, clientId],
+      );
+    }
+  } else {
+    const [existingRows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, status, phone FROM clients WHERE email = ? LIMIT 1`,
+      [email],
+    );
+
+    if (existingRows.length > 0) {
+      clientId = existingRows[0].id as number;
+      isProspectFlow = existingRows[0].status === "prospect";
+      if (isProspectFlow && phone) {
+        await pool.query<ResultSetHeader>(
+          `UPDATE clients SET phone = COALESCE(NULLIF(TRIM(phone), ''), ?) WHERE id = ?`,
+          [phone, clientId],
+        );
+      }
+      if (affiliateId) {
+        await pool.query<ResultSetHeader>(
+          `UPDATE clients SET affiliate_id = COALESCE(affiliate_id, ?) WHERE id = ?`,
+          [affiliateId, clientId],
+        );
+      }
+    } else {
+      const phoneMatchId = phone ? await findClientIdByPhone(phone) : null;
+      if (phoneMatchId) {
+        clientId = phoneMatchId;
+        const [phoneRows] = await pool.query<RowDataPacket[]>(
+          `SELECT id, status FROM clients WHERE id = ? LIMIT 1`,
+          [clientId],
+        );
+        isProspectFlow = phoneRows[0]?.status === "prospect";
+        if (isProspectFlow) {
+          await pool.query<ResultSetHeader>(
+            `UPDATE clients
+             SET email = COALESCE(NULLIF(TRIM(email), ''), ?),
+                 first_name = ?, last_name = ?,
+                 phone = COALESCE(NULLIF(TRIM(phone), ''), ?),
+                 preferred_language = ?
+             WHERE id = ?`,
+            [email, firstName, lastName, phone || null, textLanguage, clientId],
+          );
+        }
+        if (affiliateId) {
+          await pool.query<ResultSetHeader>(
+            `UPDATE clients SET affiliate_id = COALESCE(affiliate_id, ?) WHERE id = ?`,
+            [affiliateId, clientId],
+          );
+        }
+      } else {
+        const ownerId = await resolveLanguageOwnerAdminId(
+          textLanguage === "es" ? "es" : "en",
+        );
+        const [ins] = await pool.query<ResultSetHeader>(
+          `INSERT INTO clients (email, first_name, last_name, phone, preferred_language, assigned_admin_id, status, pipeline_stage, affiliate_id)
+           VALUES (?, ?, ?, ?, ?, ?, 'prospect', 'prospect', ?)`,
+          [
+            email,
+            firstName,
+            lastName,
+            phone || null,
+            textLanguage,
+            ownerId,
+            affiliateId,
+          ],
+        );
+        clientId = ins.insertId;
+      }
+    }
+  }
+
+  if (isProspectFlow) {
+    const labelSource =
+      sourceLabel ||
+      (mode === "agent" ? "agent_submission" : "web_analysis");
+    const labelSlugs = [labelSource, ...suggestedLabels];
+    if (leadSource === "get_started") labelSlugs.push("get_started_wizard");
+    if (affiliateId) labelSlugs.push("affiliate_referral");
+    // Affiliate-attributed public leads stay on Prospect (not Web leads review).
+    if (
+      !affiliateId &&
+      (isPublicWebLead || labelSource === "web_analysis")
+    ) {
+      labelSlugs.push(WEB_LEAD_REVIEW_LABEL);
+    }
+    attachLabelsBySlug(clientId, labelSlugs).catch((e) =>
+      console.error("[credit-analysis] attachLabels failed:", e?.message),
+    );
+  }
+
+  let storageKey: string | null = null;
+  try {
+    storageKey = await uploadToCDN(
+      file.buffer,
+      file.originalname,
+      file.mimetype,
+      `analysis-${clientId}`,
+    );
+  } catch (e: any) {
+    console.error("[credit-analysis] CDN upload failed:", e?.message);
+  }
+
+  const utilization = reportText
+    ? extractUtilization(reportText).map((u) => ({
+        account: u.account,
+        limit: u.limit,
+        balance: u.balance,
+        pctUsed: u.pctUsed,
+        payTo30: u.payTo30,
+        payTo10: u.payTo10,
+      }))
+    : [];
+  const positives = reportText
+    ? extractPositiveAccounts(reportText)
+    : [];
+
+  const triBureauReport = isTriBureauReport(reportText);
+  const negativesWithRounds: CreditAnalysisNegativeItem[] = negatives.map(
+    (n) => ({
+      ...n,
+      dispute_round: rankNegativeItem(n, { triBureau: triBureauReport })
+        .dispute_round,
+    }),
+  );
+
+  const analystBase: CreditAnalysisAnalystFlat = runCreditAnalysisAlgorithm({
+    clientName: `${firstName} ${lastName}`.trim(),
+    firstName,
+    lastName,
+    repName,
+    clientGoal,
+    language: textLanguage,
+    scores,
+    negatives: negativesWithRounds,
+    reportText,
+    utilization,
+    positiveAccounts: positives,
+    weakExtraction,
+  });
+
+  // Default on when Anthropic key is present (same as progress-report wizard).
+  // Skip on weak extraction — short honesty message only; saves latency/tokens.
+  const wantClaude =
+    opts.enhanceWithClaude !== false &&
+    !!process.env.ANTHROPIC_API_KEY &&
+    !weakExtraction;
+  let analyst = analystBase;
+  let claudeEnhanced = false;
+  if (wantClaude) {
+    const claudeOut = await runClaudeCreditAnalysisEnhance({
+      analyst: analystBase,
+      reportText,
+      weakExtraction,
+    });
+    analyst = claudeOut.analyst;
+    claudeEnhanced = claudeOut.enhanced;
+    if (!claudeOut.enhanced && claudeOut.error) {
+      console.warn(
+        "[credit-analysis] claude enhance skipped:",
+        claudeOut.error,
+      );
+    }
+  }
+
+  const croa =
+    analyst.text_language === "Spanish"
+      ? CROA_DISCLOSURE_ES
+      : CROA_DISCLOSURE_EN;
+  const { html, text } = buildAnalystAnalysisHtml({
+    firstName,
+    analyst,
+    weakExtraction,
+    croaDisclosure: croa,
+  });
+
+  const emailLang: "en" | "es" =
+    analyst.text_language === "Spanish" ? "es" : "en";
+
+  let emailSent = false;
+  let emailSkippedNoAddress = false;
+  if (emailOptIn) {
+    const normalizedEmail = String(email || "")
+      .trim()
+      .toLowerCase();
+    if (!normalizedEmail || !CREDIT_ANALYSIS_EMAIL_RE.test(normalizedEmail)) {
+      emailSkippedNoAddress = true;
+    } else {
+      try {
+        await sendEmail({
+          to: normalizedEmail,
+        subject:
+          emailLang === "es"
+            ? "Tu análisis de crédito — Optimum Credit"
+            : "Your Credit Analysis — Optimum Credit",
+        html: emailLayout({
+          title:
+            emailLang === "es"
+              ? "Tu análisis de crédito"
+              : "Your Credit Analysis",
+          bodyHtml: html,
+          lang: emailLang,
+        }),
+        text,
+      });
+        emailSent = true;
+      } catch (e: any) {
+        console.error("[credit-analysis] email send failed:", e?.message);
+      }
+    }
+  }
+
+  const generatedAt = new Date();
+  const [insAnalysis] = await pool.query<ResultSetHeader>(
+    `INSERT INTO credit_analyses
+       (client_id, mode, submitter_first_name, submitter_last_name, agent_phone, rep_name,
+        client_goal, text_language, notes, report_file_name, report_mime_type, report_storage_key,
+        provider_detected, extraction_status, chars_extracted, scores_json, negatives_json,
+        labels_suggested_json, analyst_json, analysis_html, analysis_text, email_opt_in,
+        email_sent_at, generated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      clientId,
+      mode,
+      firstName,
+      lastName,
+      agentPhone,
+      repName,
+      clientGoal,
+      textLanguage,
+      notes,
+      file.originalname || null,
+      file.mimetype || null,
+      storageKey,
+      provider,
+      extractionStatus,
+      charsExtracted,
+      JSON.stringify(scores),
+      JSON.stringify(negativesWithRounds),
+      JSON.stringify(suggestedLabels),
+      JSON.stringify({
+        ...analyst,
+        _claude_enhanced: claudeEnhanced ? 1 : 0,
+      }),
+      html,
+      text,
+      emailOptIn ? 1 : 0,
+      emailSent ? generatedAt : null,
+      generatedAt,
+    ],
+  );
+
+  return {
+    id: insAnalysis.insertId,
+    client_id: clientId,
+    mode,
+    scores: hasScores ? scores : null,
+    negatives: negativesWithRounds,
+    suggested_labels: suggestedLabels,
+    analysis_html: html,
+    analysis_text: text,
+    email_sent: emailSent,
+    generated_at: generatedAt.toISOString(),
+    extraction_status: extractionStatus,
+    chars_extracted: charsExtracted,
+    analyst,
+    text_language: textLanguage,
+    claude_enhanced: claudeEnhanced,
+    ...(emailSkippedNoAddress ? { email_skipped_no_address: true } : {}),
+  };
+}
 /**
  * Reminder-flow audience gate: returns required slugs the client is missing.
  * Empty array ⇒ client passes the filter (or no requirements).
@@ -12537,7 +19965,10 @@ function validateReportCompliance(data: OfGReportData): ReportComplianceResult {
     errors.push("Client first name is required");
   }
 
-  if (data.roadmap.currentRound < 1 || data.roadmap.currentRound > 5) {
+  if (
+    data.roadmap.currentRound < 1 ||
+    data.roadmap.currentRound > ABSOLUTE_MAX_ROUNDS
+  ) {
     errors.push("Invalid round number in report data");
   }
 
@@ -12626,81 +20057,153 @@ function validateReportCompliance(data: OfGReportData): ReportComplianceResult {
 // ============================================================================
 // OFG PROGRESS REPORT PDF (inline)
 // ============================================================================
+// Keep in sync with api/ofgProgressReportPdf.ts (unit tests / sample scripts).
 
 const NAVY = rgb(0.051, 0.122, 0.235);
 const GOLD = rgb(0.788, 0.659, 0.298);
 const GRAY = rgb(0.35, 0.35, 0.38);
+const MUTED = rgb(0.45, 0.47, 0.52);
+const LIGHT = rgb(0.973, 0.976, 0.98);
+const BORDER = rgb(0.886, 0.91, 0.941);
+const WHITE = rgb(1, 1, 1);
+const GREEN = rgb(0.09, 0.64, 0.29);
+const RED = rgb(0.86, 0.15, 0.15);
+const AMBER = rgb(0.85, 0.55, 0.13);
+
+const LOGO_CDN =
+  "https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white.png";
 
 type PdfLabels = {
   progressReport: (name: string) => string;
-  scoreOverview: (name: string) => string;
-  middleScore: (before: number, after: number) => string;
+  scoreOverview: string;
+  middleScore: string;
+  before: string;
+  after: string;
+  pts: string;
+  goalProgress: string;
   winsTitle: string;
   noWins: string;
+  winsThisRoundTitle: string;
+  winsSinceEnrollmentTitle: string;
   targetsTitle: string;
+  targetsThisRoundTitle: string;
+  targetsSinceEnrollmentTitle: string;
   noTargets: string;
   utilTitle: string;
   utilEmpty: string;
-  utilLine: (account: string, pct: number, pay: number) => string;
+  utilPayTo30: string;
+  utilPayTo10: string;
   positiveTitle: string;
   positiveDefault: string;
   roadmapTitle: (round: number) => string;
-  scoreGoal: (goal: number, gap: number) => string;
-  fileStrength: (score: number) => string;
+  scoreGoal: string;
+  gapRemaining: string;
+  fileStrength: string;
   actionPlanTitle: string;
+  ownerOfg: string;
+  ownerClient: string;
   croaTitle: string;
   footer: string;
   page2Header: string;
   page3Header: string;
+  reportDates: (before: string, after: string) => string;
+  bureauTu: string;
+  bureauEx: string;
+  bureauEq: string;
+  change: string;
+  milestones: string;
+  tradeline: string;
+  funding: string;
+  pageOf: (n: number, total: number) => string;
 };
 
 const LABELS: Record<"en" | "es", PdfLabels> = {
   en: {
-    progressReport: (name) => `Progress Report - ${name}`,
-    scoreOverview: (name) => `${name} - Score Overview`,
-    middleScore: (b, a) => `Middle Score: ${b} -> ${a}`,
+    progressReport: (name) => `Progress Report — ${name}`,
+    scoreOverview: "Score progress at a glance",
+    middleScore: "Middle score",
+    before: "Before",
+    after: "After",
+    pts: "pts",
+    goalProgress: "Progress toward goal",
     winsTitle: "What came off your report (Wins)",
-    noWins: "No wins detected - verify against source PDFs.",
+    noWins: "No wins detected — verify against source PDFs.",
+    winsThisRoundTitle: "This round (vs prior report)",
+    winsSinceEnrollmentTitle: "Since you started (vs enrollment)",
     targetsTitle: "Still on report (Round targets)",
+    targetsThisRoundTitle: "Still on report — this round focus",
+    targetsSinceEnrollmentTitle: "Still on report — since enrollment",
     noTargets: "None detected",
-    utilTitle: "Credit Utilization",
-    utilEmpty: "Utilization details to be added as account data is available.",
-    utilLine: (account, pct, pay) =>
-      `${account}: ${pct}% used - pay to 30%: $${pay}`,
+    utilTitle: "Credit utilization",
+    utilEmpty: "Utilization details will appear when account data is available.",
+    utilPayTo30: "Pay to 30%",
+    utilPayTo10: "Pay to 10%",
     positiveTitle: "Positive accounts working in your favor",
     positiveDefault: "On-time payment history on open accounts",
-    roadmapTitle: (round) => `Round ${round} Milestone`,
-    scoreGoal: (goal, gap) => `Score goal: ${goal} (gap: ${gap} pts)`,
-    fileStrength: (score) => `File Strength Score: ${score}/100`,
+    roadmapTitle: (round) => `Round ${round} roadmap`,
+    scoreGoal: "Score goal",
+    gapRemaining: "Gap remaining",
+    fileStrength: "File strength",
     actionPlanTitle: "Your action plan",
-    croaTitle: "CROA Disclosure",
-    footer: "optimum-financial-group.com | (949) 736-5644",
-    page2Header: "Utilization & What's Working",
-    page3Header: "Roadmap & Action Plan",
+    ownerOfg: "OFG",
+    ownerClient: "You",
+    croaTitle: "CROA disclosure",
+    footer: "optimum-financial-group.com  |  (949) 736-5644",
+    page2Header: "Utilization & what's working",
+    page3Header: "Roadmap & action plan",
+    reportDates: (b, a) => `Report dates: ${b}  →  ${a}`,
+    bureauTu: "TransUnion",
+    bureauEx: "Experian",
+    bureauEq: "Equifax",
+    change: "Change",
+    milestones: "Milestones",
+    tradeline: "Tradeline recommendation",
+    funding: "Funding readiness",
+    pageOf: (n, total) => `${n} / ${total}`,
   },
   es: {
-    progressReport: (name) => `Informe de Progreso - ${name}`,
-    scoreOverview: (name) => `${name} - Resumen de Puntajes`,
-    middleScore: (b, a) => `Puntaje Medio: ${b} -> ${a}`,
+    progressReport: (name) => `Informe de Progreso — ${name}`,
+    scoreOverview: "Progreso de puntajes de un vistazo",
+    middleScore: "Puntaje medio",
+    before: "Antes",
+    after: "Despues",
+    pts: "pts",
+    goalProgress: "Progreso hacia la meta",
     winsTitle: "Lo que salio de su reporte (Victorias)",
-    noWins: "No se detectaron victorias - verifique los PDFs fuente.",
+    noWins: "No se detectaron victorias — verifique los PDFs fuente.",
+    winsThisRoundTitle: "Esta ronda (vs reporte anterior)",
+    winsSinceEnrollmentTitle: "Desde que empezo (vs inscripcion)",
     targetsTitle: "Aun en el reporte (Objetivos de la ronda)",
+    targetsThisRoundTitle: "Aun en el reporte — enfoque de esta ronda",
+    targetsSinceEnrollmentTitle: "Aun en el reporte — desde la inscripcion",
     noTargets: "Ninguno detectado",
-    utilTitle: "Utilizacion de Credito",
+    utilTitle: "Utilizacion de credito",
     utilEmpty:
-      "Los detalles de utilizacion se agregaran cuando haya datos de cuentas.",
-    utilLine: (account, pct, pay) =>
-      `${account}: ${pct}% usado - pagar al 30%: $${pay}`,
+      "Los detalles de utilizacion apareceran cuando haya datos de cuentas.",
+    utilPayTo30: "Pagar al 30%",
+    utilPayTo10: "Pagar al 10%",
     positiveTitle: "Cuentas positivas a su favor",
     positiveDefault: "Historial de pagos puntuales en cuentas abiertas",
-    roadmapTitle: (round) => `Hito de la Ronda ${round}`,
-    scoreGoal: (goal, gap) => `Meta de puntaje: ${goal} (brecha: ${gap} pts)`,
-    fileStrength: (score) => `Puntaje de Fortaleza: ${score}/100`,
+    roadmapTitle: (round) => `Hoja de ruta — Ronda ${round}`,
+    scoreGoal: "Meta de puntaje",
+    gapRemaining: "Brecha restante",
+    fileStrength: "Fortaleza del archivo",
     actionPlanTitle: "Su plan de accion",
+    ownerOfg: "OFG",
+    ownerClient: "Usted",
     croaTitle: "Divulgacion CROA",
-    footer: "optimum-financial-group.com | (949) 736-5644",
-    page2Header: "Utilizacion y Lo Que Funciona",
-    page3Header: "Hoja de Ruta y Plan de Accion",
+    footer: "optimum-financial-group.com  |  (949) 736-5644",
+    page2Header: "Utilizacion y lo que funciona",
+    page3Header: "Hoja de ruta y plan de accion",
+    reportDates: (b, a) => `Fechas del informe: ${b}  ->  ${a}`,
+    bureauTu: "TransUnion",
+    bureauEx: "Experian",
+    bureauEq: "Equifax",
+    change: "Cambio",
+    milestones: "Hitos",
+    tradeline: "Recomendacion de tradeline",
+    funding: "Preparacion para fondeo",
+    pageOf: (n, total) => `${n} / ${total}`,
   },
 };
 
@@ -12708,31 +20211,116 @@ function resolveLocale(data: OfGReportData): "en" | "es" {
   return data.locale === "es" ? "es" : "en";
 }
 
-/**
- * StandardFonts (Helvetica) use WinAnsi — Unicode arrows/dashes/bullets crash drawText.
- * Normalize common glyphs + strip any remaining non-WinAnsi code points.
- */
+/** StandardFonts (Helvetica) use WinAnsi — normalize unsafe glyphs. */
 function toPdfSafeText(input: string): string {
   return String(input ?? "")
-    .replace(/\u2192|\u21D2|\u2794|\u27A1/g, "->") // → ⇒ ➔ ➡
-    .replace(/\u2190|\u21D0/g, "<-") // ← ⇐
-    .replace(/[\u2013\u2014\u2015]/g, "-") // – — ―
-    .replace(/\u2022|\u00B7|\u25CF|\u25E6/g, "*") // • · ● ○
-    .replace(/\u2026/g, "...") // …
-    .replace(/[\u2018\u2019\u2032]/g, "'") // ‘ ’ ′
-    .replace(/[\u201C\u201D\u2033]/g, '"') // “ ” ″
-    .replace(/\u00A0/g, " ") // nbsp
-    .replace(/[^\x09\x0A\x0D\x20-\x7E\xA0-\xFF]/g, "?"); // remaining non-WinAnsi
+    .replace(/\u2192|\u21D2|\u2794|\u27A1/g, "->")
+    .replace(/\u2190|\u21D0/g, "<-")
+    .replace(/[\u2013\u2014\u2015]/g, "-")
+    .replace(/\u2022|\u00B7|\u25CF|\u25E6/g, "*")
+    .replace(/\u2026/g, "...")
+    .replace(/[\u2018\u2019\u2032]/g, "'")
+    .replace(/[\u201C\u201D\u2033]/g, '"')
+    .replace(/\u00A0/g, " ")
+    .replace(/—/g, "-")
+    // Tabs/newlines are not WinAnsi-encodable (pdf-lib throws 0x0009 / 542004).
+    .replace(/[\t\r\n\f\v]+/g, " ")
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")
+    .replace(/[^\x20-\x7E\xA0-\xFF]/g, "?")
+    .replace(/ {2,}/g, " ")
+    .trim();
 }
 
-function scoreBar(before: number, after: number, width = 28): string {
-  const max = 850;
-  const min = 300;
-  const pct = Math.min(1, Math.max(0, (after - min) / (max - min)));
-  const filled = Math.round(pct * width);
+/** Official white OFG wordmark (logo_with_title_white.png) — inlined for Vercel. */
+const OFG_LOGO_HEADER_PNG_B64 =
+  "iVBORw0KGgoAAAANSUhEUgAABG8AAAIdCAQAAAApYJiKAAAAIGNIUk0AAHomAACAhAAA+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6UTwAAAACYktHRAD/h4/MvwAAAAlwSFlzAAAXEQAAFxEByibzPwAAAAd0SU1FB+oFGgE5MkveHMIAAAABb3JOVAHPoneaAAA/UUlEQVR42u3d7XXbRreG4SdZ+S+cCoRUIKQCwRUIqUBwBaYrMFyB6QoMVWC6AkMVBKogYAUvWUHOD0oyKFESPwDsjcF9vWudQzsWZw9Fgg8GM4Pf/hMAAEBIfrcuAAAAoFvEGwAAEBjiDQAACAzxBgAABIZ4AwAAAvOHdQHBihVLipTc/zl949+vVN8/qrWS1Kix7gIAAOP0GwvDOxErVqJIsWJFuujsee+0UtP6HwAAeBPx5nipYsVKO40zb7nTSpUaNaqsuw8AgFfEm8NESpQqUaJz61K0VK1a1f3FLABAvzaTDp4/bmuPs/+adIDBEW/2k7oJNbss72NOZV0IAAQhlZQoup8/eeoY/VKNHsJOrRWxZwjEm9elSpXq0rqMvd2qUkXMAYCDREoe51AOc8Rfq9ZKtRo1jMH3gXizW6JsVLHmqVtVWnB+AACvSJUoVqJEZ8aVrFWrVqOaqNMV4s22SJlSZeZv9W6stVClBR8WAHi0mWqQDLgo5DDMq+wE8eZBrEy527f7aW610IJl5aMzf9w1CVNQa2ZdQtCi+zmUYxqVv7uPObV1IWNEvAk72LTdqSTkjEo1qgMxTnX75uafOEZ0P4dyzMf49f2sytq6kDGZdryZSrBpI+SMB/FmWog3XUuUKQvqCL9UxYSDfU013kTKlE/4y+OHFnxE3CPeTAvxpiuRUmXBzKHc5U4lYzlvmWK8STQL+o2/r7UWmvMBcYx4My3Em9NFypTpyrqMgSy1UMkx/CXTijeRcs2cbs1n5U5zxnGcIt5MC/HmFNMKNm2EnBdMJ94wZvOytRYqmI/jDvFmWog3x8qU6dq6CGOEnGemEW8yzfiieNOt5lpYF4EW4s20EG8OF2umnNPWR3cqVTIav/G7dQE9i5Sr0Xe+JvZwqe9qlFuXAQBvipSr1r/6QLhpudAX/U8lQVkKO95EKtToG3NtDnCub1qpUGRdCAC8INZcjb4FteS7S9f6qUazqR/Hw403hRp9Itcf4Uyf1BBxADiUqmLMZg/n9+M4iXUhdsKNN0SbUxBxAHiTq9FPphoc4Fr/qJrqpapw4w1ORcQB4EOkQiumGhzlUj+nOasy1HiTWhcQCCIOAFsRUw1Odq5vapRP60gearxBd870SfUUsz8AY7FK/Y9o04lNxJnQySrxBvvYfDBS6zIATEakuf6d/HZ93XoYj58E4g32da6fqhRblwEgeJsLUh+sywjSJuLk1mX0j3iDQ1zqX82nM7gJwABzbfq2GY/PrMvoF/EGh/owjeQPwEBOtBnIub6HvWiceIPDnekbl6kAdCxVxeLvQV3qp8pQj+XEGxznUv9OZYIagN7FKtmyz8S16jCP5aHGm8i6gEn4pDrkoU0AAylUs0bKzGaycWpdRtdCjTeJdQETcaGfTDUGcIKU2TYOnOunFmFdpgo13mA4HxjDAXCUSKV+MtvGiSvVmlkX0R3iDU53rp9hXrsF0KNcDZekXDnTF1WhXP0g3qAbn1SH8qEA0LtYlb5xScqhS/0Txukq8QZduVAV0sAmgN7MVLNKyrEgTleJN+jOmb5owURjAK+IVOkL4zbOBXC6SrxBt65CSP0AepKpYdxmFDbzcCLrMo5HvEHXzvXP2FM/gB5EKvWdcZsRuRzznalCjTexdQETx0UqANsSVayTGp0zfdfcuojjEG/Qj6twlhcCONlM/+jCuggc5YPqMX6nhhpvYO9CFXcWB6BIC32xLgInuBjj5q3EG/TnTN/C2D8BwNESVbqyLgInOtPPsc2p9BVvIuZrBOcTs3CACctVcVEqEF9Ujulo7inexMzWCNLVuBcXAjjanJ2Jg3KtajyzcPzEm0S1LtRYl4EeXKghuAITE6nSB+si0LGL8exs5iXe5Kp0JhFvAnWmary7JwA4WKKK7fuCdDaWRSM+4k3OAGbwzvR9HB8JACdLmHETsDN9G8PR3EO8metb58+ZWHcKO7COCpiCXP9wwhq4byqtS3iLfbwpe7k6y0fLp0/+PxIATjLr4YQV/lx7P5pbx5uSTbonxv1HAsAJSjbwm4xr39t+WMabSDXhZoKux7V3AoC9ccI6La63/bCLNxFTzybr2vNHAsBROGGdogu/R3OreEO4mTbHHwkAR+CYPlVuj+Y28ealD8JdZy281w+TnmFfbj8SAA5GuJkyp0dzi3jz8gdh1VkbpTL9HyHHNacfCQAHItxMncuj+R+DtzjcB2GlUqUi5cr56Ll0oUpph6EWp1urti5hsmrrAo5EuIHLo/lv/w3b3usfhFulPbUbKyPkuHTn7SPhiMWm9v19BhGm6Yab5Qs3EUomu++as6P5sPHmrQ9C34fWWJlmOh+wx5sPQK2VpNUrZ2fp/euTSIoHrdDezRi29zZBvIF3Uwg3d1qpUSOpkh7/79s2x/PN/02lSdyBy9XRfNh489aeCMMcWhPlynqLELdaqVat1X2oOU6kRJESxYon8KFw9ZFwhHgD30INN2vVqtWovo813UkVK1Ya8Emso6P5kPHm7Q2fhjy0dhly1qpV3X8g+hArUaI04EFPRx8JR4g38Cy0cNP3cXxbdH9MT4M7qn/VzLqEjeHizT67WQ5/aM2UKTv67XWnSrWqQT4MG/H9ByKkg8rGZ263+QzxBp4tdGVdQieWqu5jjY1YqdITvof8ee/j1jtDxZt8r5usWR1aDw05m4/DwnASVaRUmdKgBjidfCQcId7ArxBuv/DjPtj4kCgNZgHM31pYlzBUvNkv3FifwWfK3zwbuVPp6OMQ1gfCyUfCEeINvBp3uFlroYUqT6t8HkXKlI1+XGyt1P57coh4k+ifPf+l/QWKl99aP7QY9DJUN1WPi4uPhCPEG/i07wmrP5tgs7Au402RMuWjXlayVGIdH/uPN4mqvS/72Mebje231p1Klda/qD2rno18JGetxGmEtEC8gUeZvluXcJQfWozsAnisXPlopyDcKbEtoO94c9jcei/xZiNWpkjlyL5uY816XPbeP2cbQ5ki3sCfQ05YvViqHN2R/JdMs5GO4xiviO37nlOLEY8mNJqrGN1HotFMsf4e7d22LkZ2fgVMSTS6cHOrvxWP8Ej+y0Kp/tSNdRlHuA453pQjzZzjt1CmP/VVa+tCjnCluXUJAHYYW7i50Z9KRzDT5m2Ncv2fPo/uiP7N8gJVn/EmH/Xc+vHbjON81NK6kIN9YJM/wKH5aEbj1/qs/1M+4jGb51YqFI8u4izs7iTeX7xJRju3PiQrzRXr/egiztx6UhqAJ2YjOWFd67NiFUHO4XuIOONxbjfdoK94E+1927G2ldXLELhydBHnzDLzA3gm1RfrEvYSbrR5sFIxqrk4V1Y3aegr3iyOukJb27wIkzC2iGOY+QE8EY9iBsuN/gw82jxolOud7qzL2NMXm9H4fuJNwZRil0rF+jiaK7dXrrYJAKbsuBPWId3qr8Dm2rylUjKa47nJaHwf8SbTp+E7gj3NR3Tl9hN7sAAOeJ9SvNTfE93xfK54FJuAnFush+0+3sRcVHBuc+V2DB8J01n3ACRJmT5Yl/Cqr0pGcemsHytl+nsEYzjXyoZusvt4U7ofxITUKNO7EczEOZvwYQvwwPcJ653+0mwSs21es1CsW+si3lQOfbLadbxh1s14VEpGcJnq0mrWPQD5nnXzWckkL0k9t1Kqj9ZFvOFs6KDcbbxJmHUzKisV+sv97HujWfcAVLiddXOnv1h8sGWuv5yPyF8Ne4Gqy3gTnXwhIWWmxeDqEYzhDD6oCUBS6vaE9SvjNjvUSpzPqhz0WN5lvClOvk/1JzUqh5+ANHnex3AuOEsDBhc5nXWz1jsuWb9gpUxfrYt4xdmQK6i6izfdzK4/07W+a0XIGZj3MZwPLBEHBnb6CWsfbhUftSf+dMz03rqEV1wPdyz/7b9unidS0/kEtLVKlQxADih1PI1wqWRy6yMqg4n6twRJSJJS/bQuYYevjNvsJXF8b/el4mEa6mr0po/l4Gf6oH/UcHvFwVSOlxeec4EKGIzHC1NrvSfc7KlW6nYvnMGO5d3Em1RXPb4UDyEnHuYlmbSVUrcXqbhABQzF34WptVKHkcuvWonbGZWzYb7Nu4g3Q+T8c33Qv6qHelkmrXC7ByYrqIAhpO72Kb5TzESFAzVKnQacgSYYdxFvhsv5F/pCyBnAwunH4pyhaaB3/i5M/VA6uZl3XVg5PZJLV0OMxZ8eb4bP+ZuQs1DOuXxvaqUu90/4xDwsoGczZxembpQRbo7kN+CU/TdxeryZ91/kTlf6pv8RcnqzUqYb6yJ2mFsXAAQtdraV341y6xJGzWvAOe//93pqvJkZb9n9EHIy0ypClTvcP+GSgx3Qo9K6gC2f+byfbKXc5WzKed9DE6fFm8jJYt0rtgLsSan37j4YvX8ogMnKXd0U+b2Tb5ix87lM/KzvuZSnxZu5o42DznStkpkZnSvdfTDOOOQBvYhcXfx972wkacxql6Ngs35PVU+JN6muh30t3rBWytLBHvhL/h+IsUAPZo5OWD8Tbjq1cDjVoOcF4qfEm2LQF+Itd4Sb3vgLOHPrAoDgeJpUfOPs+yUEpcPFItd9bvJyfLzxdY2WcNMvbwHnknlWQMfm1gU8YrVUP3KHa6iK/p762HjjZVLxxh2bPvXOW8CZWxcABKXPW+sc5gfhpje+juJSr+M3x8YbTxs/EW6G4SvgsIMx0KXCuoB7d4SbHq0cjnsXfT3xcfEmcvTVslZOuBmIr4BTsEAc6IiXyQZLTlZ7Vrm7aXJv4zfHxZvCzfx6VksNy1PA6X3XBGAyCusCJElrbr8wgEK31iU8q6gXx8Sb2M3dZAk3w/MUcHreNQGYiNzJZIOc4/kgvO1ifN3PkfyYeFOYvhBtGR8GA7WbURM2+AO6UFgXIEn6rIV1CRPROPmN/zLr40kPjzexm8383quyLmGiSjcbRH3oc9cEYBIKF2M3t+6+ckM2d3aBqpeR+MPjTWH9OtxjT0tLpb5al3CvsC4AGDUfC0WWDlf0hM3XBaqzPtbLHRpvvIzdsKeltZl+WJcgqeddL4Hg5S4WijCleGjeLlDNun/KQ+NNYf0aSJLuXJxvTJ2XHTAL6wKAEZtZFyDpM7MoDcydHME3zrsfvzss3vgYu1mzM4ILK2Uuhjcz1k8BR/KwZopZN1Zm1gX0W81h8aaw7r8kEW7caFxcL2f/G+BYhXUBWrNLsZnK1U02L7ueaHBIvIlcfJl9ZBjTER87YLL/DXAMD2M3hRrrEiZs5mIE/kHR7dMdEm9mDqag/eBWis4UDqYY9zLrHghebl2Abjmim1q5ev07nmhwWLyxtnTwccRTuZbWJTh4bwJjk5rfZ4oLU/bmjsZvzrq9QrR/vPGwfJDFgx6tHByizh3UAIxLbl0AF6YcWLk6Oey0lj/2/peFdb+ZdeNWpc/6ZFxDzjaPwAHs18FyYcqHMtSQuW+8Sc2noPFR8KxQpgvTCi6VcpMOYG+5dQGuRg2mrbIuoB/7XpyaGdfJNVrv7PfAya1fAmBEZsbtf2U0Hv3aL97EujKuk2u03tlv8X3N8nBgT9ZzKdfmxwsEb794kxtXyYWpMbC/B21u/RIAI5Ebt1+wTAR9G0O84cLUWOTG7c+sXwBgFGLjJeFLTljRv33iTWY8rZgLU2PRGO9hfK7U+iUARmBm3H5u/QJgCvaJN7lphXfk/BEpjLf4y61fAGAEMtPWb0NdqQNf3o431tOKZ6at41C5aetMLwbeYj8eDwzg7XiTmdZ3Q84fmcr4HlSZ9QsAOJeZts7YDQbydryZGVa3ZuxmhGzvQTuz7j7gWmS8W3Fh/QJgKt6KN4npMCaLB8eoMZ0tdaHY+gUAHMtMW2fsBoN5K97khrWxeHCs5qYTjHPr7gOOZaatF9bdx3S8FW8yw9oKw7ZxipXp7y637j7gVmS6VISxGwzo9XhjeSPNW+4APWKl4fjNuRLr7gNOZaatz627jyl5Pd7khpUVhm3jdIVh27l15wGnMsO2l1pYdx9T8nq8yczqYhBz7ErDO1Bl1p0HXLK9NDW37j6m5bV4kxjeU7YwaxldKcxa5vIUsEtq2Paa6QYY1mvxJjerirGbEFSG828y684DDmWGbS/Y5gPDei3eZGZVFWYto0uFWcuZddcBhzLDtufWncfUvBxv7Db0u2PsJhB266fY3A94ynK6wZ1q6+5jal6ON6lZTXOzltG1wqzlzLrrgDOZYdtz685jel6ON5lRRUsmoAWkNLv/VGrddcCZzLDthXXnMT0vxZtIl0YVzY3aRT/mRu1aLoAF/Il0Ydb2DdOKMbyX4k1qVA+LB0NTmrWcWXcdcCQ1bHth3XlM0UvxJjOqh8WDoWl0Y9Ryat11wJHUrOU18QYWvI3ezI3aRX9Ko3ZT644DjqRmLS+su45p2h1vYqNF4SweDJHV9n4Xiqy7DjhhOfNmYd15TNPueJMaVTO3ehnQq7lRu6l1xwEnUrOWuTQFI77izcLqZUCvFkbtptYdB5xIzVpeWHcdU+Up3rB4MFSNfpi0m1p3HHAiNWu5su46pmpXvLGaebMwfSXQp4VJq8y+ATaYeYPJ2RVvUpNKuEIbsoVRu6l1xwEHUrOW7xiTh5Vd8SYxqWRh+TKgZyuj3W8S644DDiRmLS+su47p8jN6s7B8GdC7yqTV1LrbgAOpWcuVddcxXbvijcVVWi5NhW5h0mpi3W3Agdio3TXxBnaex5vUpI6F7cuA3q1MVk+dEXAAs4nFlXXHMWXP401iUkdl+zJgAAuTVhPrbgPGUrOWa+uuY8q8xJuF7cuAAVQmrSbW3QaMJWYtV9Zdx5Q9jzexQRW3LB6cgEZ3Bq0m1t0GjMVmLVfWXceUPY83lwZVVNYvAwZRGbSZWHcaMJYYtXtr3XFM29N4k5hUsbB+GTCIhUGbZ4bnroAHiVG7tXXHMW1P401sUMOaj8FEVCatxtbdBgxFOjNqubbuOqbNw+hNZf0iYDAWw9WpdacBQ4lZy7V11zFtxBsMqTJoM7buNGAoMWu5tu46ps3Dxana+kXAYCqDNmPrTgOGIqN2mVgMY0/jjcXulpX1i4DB1AZtJtadBgylRu021h3H1G3Hm9igAjL+lKwM9r6xmlgJTFljXQCmzj7e1NYvAQZVG7SZWncaMGOxk5nEqDzMbcebxKCC2volwKBqgzYj604Dk9NYF4Cp+2PrT5FBBbX1S4BB1QZtJmwcubdL/WddwkjduhwltKupse46po7RGwyrNmgzsu40MDEW95cDtmzHm2jw9vkQTM1Ky8HbTKw7DRhJjNpdWXccsJ5a3Fi/ABhcY10AMBmRUbu1dceB7XhzPnj7tfULgMHVg7dotXYEsBYZtbuy7jjw++lPcZLG+gXA4BrrAoDJSIzara07DrTjTWrQfmP9AmBwtUGbsXWngUlZWRcAWI/e1NYvAAa3Mmgztu40YCIyarex7jjQ3vcmMmh/Zf0CYHC1dQHAZFjcRVAKJ94U+mRdAo7dU6o9epMMXjTLwqdpPXiLsXWXAQBDsr04tbLuPkzUg7cYW3cZmBBOXOEA8QYAwpQYtbuy7jiwHW/iwVuvrbsPE7V1AcAkRNYFAHZs4w2maTV4i7F1lwEAQ+LiFKYgti4AmJDKugDAOt7U1t2Hica6AABA2Ky39cMUNdYFAJMQWxcA2CHeAECYYusCADu22/oBAAB0rh1vzgZvvbHuPgCgYyvrAgDri1ONdfcxEZF1AcCE1NYFANbxBtPUDN6i1Y0FAQAmiDcYXmNdAAAgbMQbAAAQGOINAAAIDPEGw4usCwAAhI14g+Elg7e4tO4yAGBItvEmsu4+JqKxLgAAMCTbeJNYdx8AAISnHW9urYsBAIxeal0AYD16AwAA0DniDYYXWRcAAAibbbyJrbsPE4l1AcAkNNYFAHaIN5iClXUBgIHGugDATjverKyLAXpSWxcAABhSO97Ug7ceW3cfJlLrAgD0KLUuAODiFAAACA4rpzC8ePAWV9ZdBgw01gUAdtrxphm89Uvr7sPE+eAt1tZdBgw0Ru3G1h0HrOMNpii2LgBAr4Y/gQGesb44lVq/ABhcbNDmyrrTAIAh2a6cYv/aKYoN2qytOw2YuDNqN7HuOGC9701i/QJgcLF1AcBkrIzajaw7DmxfnFoP3n5s/QJgcOngLVqdwQJTFVkXAGzHm3rw9mPrFwCDiwZvcWXdZcBIZdRuYt1xwHpqMUvDp+di8BYb6y4DExNZFwBsx5vKoILY+iXAoFKDNhvrTgNGGqN2E+uOA39YF6CEL59JiQ3abKw7PSJLldYljFRjXYCrqiLrjgPb8abSp8ErSLSwfhEwoMSgzca60yPSqLAuAR1aGbU7/CVo4Inti1MrgwpS65cAg0oM2qytOw0Yqc1aTqy7jqmzXjnFh2BqLCaTr6w7DUxOZF0Apu7pyqnl4BWcEXAmJDVo89a604Ahq/d/at1xTN3TeNMY1JBavwgYTGLQ5sq604ChlVG7sXXHMXVP401lUENi/SJgMKlBm7V1pwFDtVG7sXXHMXVPF4Y3BjWk1i8CBpMatFlbdxow1Bi1G8aWrZV1AW7kOjdruzruxzzEm3PFLN2dhERnBq021t0GDDVmLScBnFpUBJx7uWHbq+N+zMPFKSkzaRVDS01ara27DRiqzVpOrLuODtmN3Rz9Hn5+zymLuyunBm1ieJlBm6ybwrSttDZqObHuOjqTmrZeH/djz+NNY1B8atAmhhaZXI1vrLsNGKuN2k2tO47OxKatr477sefxpjYo/ozLUxOQmrRaW3cbMFYbtcuNGcIRG7Z99Aj883hTmXQgNWkVQ8pMWq2tuw0Yq81aTq27jo6khm3Xx/6gj9EbJhdPQWbSamXdbcBYY9Zyat11dCQxbLs59gefx5uVyeTic6ahBS4zWRTOxGKgMms5te46OhGbHL0f1Mf+4O87/u7oJztJbtIqhpKZtFpbdxtwwOKUVQplaz8kpq1Xx/6gn3iTmbSKoWQmrdbW3QYcqM1aTq27jg4khm2fcJvvXfGmMukEl6dCZnNpipk3gES8wWlSw7br43909+iNzTZQuUmrGEJm0uqSXW8AWcabzLrr6IDlRcbq+B/9feffnvCEJ8hNWkX/IlZNAYYqs5YvFFl3HidKTFuvj/9RT/GGzf1CxaUpwJbdGsLMuus4UWraenX8j3qKN4zfhCo3arey7jjgRGXWcmrddZwoNWz7pFi+O95Yzb65Mr6zBfoQG125ZeYN8KA2azmz7jpOlBq2XZ/yw7+/8PeVUWdyo3bRn5lRu5V1xwE3KrOWmXQwbonpln7VKT/8UrxZGHUmN2oXfYnMfqcL664DbtjsRr+RWXceJ0hNW69O+WFvozfnBJzAWE0rZvQGaKvMWs6su44TZIZt32l1yo+/FG8as6yfG7WLfhRG7Z74wQACU5m1zOWp8YrGuueN9HK8sfswXDLTPiCpzo1aXlh3HXClMmw7s+48jpSZtl6d9uMvx5uFWZdmZi2ja4VZywvrrgOurAz3vrlmc7+RSk1br0778ddGb2wWh7M8PByp2cDmkptpAk8sDNvOrDuPo2SGbd+eOsHg91f+28KsW4VZy+hSYdbywrrrgDuVYdsz687jCHYLQ6QOjuI+48014zcBSAwnpVXWnQfcqbU0a/uCY/oIZaatV6c+wevxxuryFOM3IZibtbxm9AbYoTJse2bdeRwsM2y7gwkGv7/6XyuzrjF+M3Z28264NAXstjBsO2d68ciM/NLUW/GmNOxcYdg2TlcYtr2w7jzgkuWIPLvfjE1m2np1+lO8Hm8sPwzX7H8zYpZjN1yaAl6yMGy7sO48DhDp2rD1To7iv7/x3zto4miFYds4zdyw7YV15wG3KsO2zzllHZHMtPVFF0/iOd5cMpg5UrkuDFufW3cfcGth2nph3X3sbWba+qKLJ3k73thdnuKLapwi04MYG/oBL1vph2Hr3HJnLBLTU9SOJhi8FW9spxefk/ZHaGZ2nynJ9v0K+Featp5bdx97mZm2vujmaX77761/kegfw26ulagxbB+HivWvaft/BvR+qQwmaN9yfh28lemC35A+oaGK9D/T9v8eavSm1p1hN8+4QDUypWnrtxw6gTcsTFsvrLuPN81MW+9s7evb8cZ6BswVZ5MjkhkuCJeswxUwBqVp62zZ6l9u2nrZ1RPtE29spxdLJbtdjkRkfOBcE2+AN1WG956SrOMV3pKbzp4cON6sjAczmWA8FnPTa/ocNoH9lKats37Kt8K09bvu1r7uE2+sL09JH/g4jEBqusulZP8+BcahNG6/sH4B8KJgxm72jTe204s3XY6MK8DrrC9MMa0Y2FdjuvsNW7Z6Vhi3X3b3VPvFG/vzYi5QeVcaZ3779ygwHqVx+3PrFwA7WY/d3GjV3ZPtG29K4+nF0gfyvmOZrowrWHKvKWBvC+PpxZyw+lQYt192+WT7xhsPaZsLVF7F5ueCHt6fwJiUxu3PWCDujvXYzV23t3wdU7w54/zcqYXxiimWhAOHmhu3z5at/hTG7c+7fbr9481KN8Zdly7NX348Nze9+dpG2eUVW2AC7I/obNnqS2E8dtPZbsUP9o839slOkj7xgXAm0wfrEmR/JgqMz9y6ACYcOBIZ34pBmnd9knpIvLFeTLix4APhiIdZN9INS8KBg9W6Na6ACcZ+WG/K2sNssEPijYe0L511O/kIJ4gczLqRfIwrAuNTWBfAlq1O2G/K2sNJ6mHxpjJP+5J04WLEAD5m3TB2AxyrMt+wlQtUPsytC+gjah8WbzykfUm6Nr9KCKkwz/sbpXUBwGjNrQvgApUDhfmJai97zh8ab3yM30hf2OTPWK5P1iVIkm65WAkcrTTe3k9iy1ZrsYPhgqKPJz003ngZv5FKJdYlTFiib9Yl3CusCwBGrbAuQFygslWaz6Ds6ST18HjjZfzmTBW7XhpJ3IyY/HBTCTBOHsZv2LLVzkyX1iX0FbEPjzc+0r60+UhE1kVMUKTKPO0/mFkXAIxeYV2A2LLVSqIv1iX0N8HgmHjjZfxGulBFwBmYp3DDmingdB7Gb6RPzMAZXORiYUbR1xMfE2+k3OhleI6AM6xIlfkc+18K6wKAIBTWBUiSSqYbDMx+xVSvi0OOizeN+d1Kfrngqu1gfIWbr4zdAJ0oHex/w3SDofm4oU7R31MfF2+kQmuLV2KnSxcDbOHzFW7WTs44gRDMrAuQxJatQ0pcvNa9buxxbLxpHGwH9cu1i19U2HyFmx5uvwZMmJcZlVccywcROVgOLvU80eXYeCPNXUxHe3DNsGavvIWbJWM3QKdm1gXcu3Y0tzNcpYvjec+LQ46PNytnXzBXTDLujbdw4+dQDISidjOj8hsBp2dzXVmXoAEmGBwfb6TSyXDmA1ZR9cNfuLllOjnQOT8zKr+xJ32PchdTiqV534tDTok3/s6hL9jJuHOJamfhxtPGBEA4PM2orAg4PUmd3FBn2f+77bR4U+vrUK/Fni5U87HoUKJK59ZFPPGZBeFALwo3MyrPCDi9SNyMfM/6XxxyWrzxNJz54EwVu192JHe0Q/GDATI/MFm5dQGPCDjdS9wc0QeZYHBqvFm5u0Alnem7ow/peBX65uSj0DZA5gcmq9IP6xIeEXC6FbsJNwNNbDk13vibYLzxjd0TThKp1CfrInb44WZoFQjTzNGIPAGnO5EWbsLNV9VDNHN6vJFyRx+HX65Vs47qSLEqXVsXscOaUTmgZ42rLT+YbNANT+tfB9u1rIt44+vj8MuFGpL/EVKHa6U2Ci5MAb2bu7gD1QMmG5wudhRuBpxg0EW88fZx+OVM/zicG+RboZ9uhjC33TKpGBhEbl3AE9+cnkKPg6/NPQacYNBNvPH3cfjlC7dr2FukyuWMG4kLU8Bwan22LuGJT8ymPJKf1VLSwMfxruKNv4/DL1dqlFoXMQKZGl1aF/Gigt1ugMEU7kbkmU15jMxVuBl4gkFX8UYqXK6g2jjTT835aLwi0lzfXX0MtnFhChhWbl3AM2zaeqjc2VF94ON4d/HG6wqqBx9YYviiVLWTu5DstmbtBDAwjyPy5/rHYezyau7k9gsPBp9g0GW8aZxP473QPyoYw3ki0lw/3d14YVvOiilgcP4uUEmbPc0i6yLci1S5O2XNh55g0GW8kUpHO17u9kk183BavI/bSNINW/kBJnLrAna6ZiT+DYlqd/MoDbZk7TbeSLmbW7K95Fw/Sf+SpFgL9+M20p3zMUEgXLU+Wpew0wVbfrwid3gjZJOVr13Hm9UoZklcu7+Q1r9Cta6si9gDF6YAO3O3S0a+qFJsXYQ7kUqX9wrMLI7jXccbnxPSnjvTlwkvF0/V6JPDj8BzH4e5NwmAF2Rul4xcqp78aeq2VLXL2+l8VWXRbPfxRircz8DZONfPCeb/VNUILklt/GA5OGDM84j8mb4wD+eR10UiZhMM+og3Y5iB8+BS/6qcTMSJVeqnuylnL7lzOrERmJbK9Yj8JStitRmR97lIxHBbj37ijee8/9z1JCJOrFL/uhy43G3NrBvACc+btkqbFbG5dRFmfG/uMfhy8F/6iTdSrfdWXTpK2BFnbNFGkmbMugHc8DsDZ+Nc31RNcjZl7nbcRpK+Wm7r0Ve8kUrd2HXrKJuIk1iX0bF0hNFG+soN9ABHViOIDpf6qUWwJ6m7pKpdrpN6YLytR3/xRspd7nn5umv9o2pUl9Zek6vSz9FFG+kH6yEAZ8YxIn8V9Dh8W6xKP3VhXcYr1taRuM94I6WjmWLcdqnvajQb9WS1SIUafRvNNOI2phQDHo1lRD7sqQbSw3QD70f31Hr2ZL/xZuX+iu1LzvVF/1NpnT6Pkmmh/+mT26lmr2NKMeBV7nyK8S+biJNal9GDscykfG8/e7LfeKORz2e/1k81mo/mPCDRXI2+j2I34pek9h8KAC/IRjTl4Fo/VY36G+ipVNUooo1042H25G//9d9G7uy27Me4U6mF3QK3N8XKlLu+Druf9x4+FG5UBsPPt0Ge8aI7iSrHk1l3WapU6fjovY9ImYrRjMj/8DF/dYh4I5WjyJtvu9NCC2ejC4lyZaN527/uswrrElwh3sCjRP9Yl3CEHyotFymfINFM2Ygi5Z39rJuNYeJNOAFHktZaqNLC+BcYK1U6qjf9W26CGkbuAvEGPo11RH6tUqWzE9TXjHFUfq3Ey0jZUPFGqkf2S3rbnSpVqgf+VcZKlSgN7tV0MpzpCvEGXs30xbqEoy21cB9yxhhspM1i8Nq6iAfDxZtI1Qh/WftYqlatSnWP4zmREqVKlARyGeopN8OZrhBv4NfYR+TXWmihyt1xJ1GmbLTfle9s7g2+23DxJuSA82CpRpVWqtV0MKYTK1aiWImSgC5B7UK42Y14A8/GHnA2blWpcvClHMJ0A2dLQ4aMN1KsetS/vMPcaXUfcx7GdV4a34nubwURK5aUKFIc6CjNLoSblxBv4Nti1JtQbLu9H4NvBm43vR+ZH/8R31m4GTrejHFRIfq1Vky4eQHxBr6FOCK/Vq1Kjeoe55DEipUqVhLQq/dRc+sSnvpj4PZqpQQcPFozcgOM1kppcAHnTJePpxVLNaq1Uv04En+czfh8KilVFNjrtXHjL9wMH28IOPjF1Sx7AAcLMeD8cq7zJyOom5tSbEedhz8lW/cpjO93u/d+Z6guON3UY/h4Q8DBBuEGGL+wA85Tl63/iw2n4ab/e07tVisd6a020RXCDRCGldIR3YkK3XIbbqziDQFn6gg3QDgIOFPlONzYxRsCzpTdKSHcAAEh4EyR63BjGW+kWgkfiAm6U+rlniQAOrJSqhvrIjCgr77DjW28kRoS/+SwiR8QppVyAs5kvNfMuoS32MYbhjSn5gfhBggYAWca3O1QvIt1vJFWSvhATMSNMsINELRc761LQK/W+nsM4cZm35vncimIm7PhNV/9D2YCOFkpac7OZoEa0apX+9GbDRJ/6EZwpRZAJ0rWxQbqbjzhxk+8kUr9zQciUGu9G8dgJoBOsC42RKMKN57ijbRQqqV1EejcnVJV1kUAGFSjVD+si0CHbpSMa+6kp3hD4g/R7bjyPoCOrJTpq3UR6MhH77vcPOcr3rCOKjRfWQgOTNhM75l0MHprvdPcuojDeYs3EtOMQ7FmOjEweSV7m43cnZJxTi/wGG+kUn+R+EduqZTpxABUMwtnxG7GexMdn/FGqhXr1roIHO0HN80EcG+lTB+ti8DB1nqvfLzTC7zGm83tGj5bF4GjfGR3YgBb5vqLi1Sjcjf2EXi/8UaSCr3jItXILPXXGCehAehZzT3FR+Rm/GtefccbqVLMVdsR4aIUgJeslLN96wiM/KLUA+/x5uGqLR8I/9Z6z0UpAK9aMK/SuVsl474o9cB/vJGkOdv9uRfMRwJAr1ZKOWV16/N4V0o9NY54IzVKmGjs2MdwPhIAejdXwhiOO3f6S4V1Ed0ZS7yRpIKZ9y7dMZkYwIEapexo7Mrn0GZOjinebO5JxRiOJ2t9DO0jAWAgJUtHnLgNa9xmY1zxRpIK/cmgphO3Shi3AXC0lTK909K6jElb6+P4F4HvMr54sxnUZGKatbXeM98GwMkqxfrMEd3Ij3BPUscYbyRprpgNogx9Vcw6KQAdKZRwmWpwS71TFu5J6ljjzWaDqHdMNTZwq780Y38bAB1qlHFEH9BanxWP807g+xpvvJGkSglz7we1uSRVW5cBIECbIzozcfp3oyS8qcRPjTveSJu596ymGsIm7ZfWZQAIWKmEmTi9utU75eFekvpl/PFGWqnQn8zE6dkm7a+sywAQuJUKxfpqXUaQlvpbadiXpH4JId5IUqNc71gw3pNb/TmNtA/AhZVmnLR2bKn3irWwLmM4ocQbSaqUEnE6d6t3LAAHMLhGORGnI2t9nt5dAUOKNxIRp1ubaFNZlwFgoog4p9vMmpzg1ILQ4o1ExOkG0QaAB41y/R/TjY+ynGq0kcKMNxIR5zREGwCebKYbf2TR+AE2c20mGm2kcOON9BBxGNY8zI3+JNoAcGeluWL9zWnrHm71N9t4hBxvJKlSrj/1lWHNPaz1mRVSAFxbKNWfuuGY/qIb/aV0SiukXhJ6vJGkRjPF7IX5qodhzMa6EAB4Q6Ncsd5zC4cnlvqo/1POvvIbU4g3krRSqZhLVTvd6J1ildO9QgtgdFYqlegvxubvbY7jc47jv/z2n3UFQ4uUa6Zz6zJcWGpOrHGs0uXgbd4qte42cKBMma6tizBzp7kWHMefm1682UiVK9OZdRlm1lpozhCmc8QbYF+RMmW6si5jUEuVKplS8JKpxpuNfHIfB0n6oZJpZ6NAvAEOM5WQs9RCJSeor5t2vJGm83GQpB9aMIg5IsQb4DiZMqVBTkK4U6mKYLMP4s1G2CFnrYpgM0LEG+AUiVJlBp+iPnAUPxjxZltomX95/5HAGBFvgC5kSpXqwrqMI92q0oLxmsMRb3YJIfP/UMUQ5sgRb4DuREqUKh3JkX2tWpUqdpA/HvHmNemIPgwPbvlIBIN4A/Qhuf+fx2P7rer7/+FExJt9pEqVKHW8kHx9P1ZTWReCDiWKBm9zxWEVE5IoVqJUkemlq6UaVWoINd0i3hwiVqJEqRInQWczfFmrZucDADhJokipIiUDhJ2lGjVqVGvFSWlfiDfHiRUrVax48OHNtWo1alSpZg49APQiUqKHEdRUko4+rb3TSlKjRlKt1f0j9I54c7pIieLH/3W/6uoh5z9kfQCAlU3weQuXec0Rb/qQajO+8/BY0pvBZ/mY6CtJug8ylXVXAAAYH+INAAAIzO/WBQAAAHSLeAMAAAJDvAEAAIEh3gAAgMAQbwAAQGCINwAAIDDEGwAAEBjiDQAACAzxBgAABIZ4AwAAAkO8AQAAgSHeAACAwBBvAABAYIg3AAAgMMQbAAAQGOINAAAIDPEGAAAEhngDAAACQ7wBAACBId4AAIDAEG8AAEBgiDcAACAwxBsAABAY4g0AAAgM8QYAAASGeAMAAAJDvAEAAIEh3gAAgMAQbwAAQGCINwAAIDDEGwAAEBjiDQAACAzxBgAABIZ4AwAAAkO8AQAAgSHeAACAwBBvAABAYIg3AAAgMMQbAAAQGOINAAAIDPEGAAAEhngDAAACQ7wBAACBId4AAIDAEG8AAEBgiDcAACAwxBsAABAY4g0AAAgM8QYAAASGeAMAAAJDvAEAAIEh3gAAgMAQbwAAQGCINwAAIDDEGwAAEBjiDQAACAzxBgAABIZ4AwAAAkO8AQAAgSHeAACAwBBvAABAYIg3AAAgMMQbAAAQGOINAAAIDPEGAAAEhngDAAACQ7wBAACBId4AAIDAEG8AAEBgiDcAACAwxBsAABAY4g0AAAgM8QYAAASGeAMAAAJDvAEAAIEh3gAAgMAQbwAAQGCINwAAIDDEGwAAEBjiDQAACAzxBgAABIZ4AwAAAkO8AQAAgSHeAACAwBBvAABAYIg3AAAgMMQbAAAQGOINAAAIDPEGAAAEhngDAAACQ7wBAACBId4AAIDAEG8AAEBgiDcAACAwxBsAABAY4g0AAAgM8QYAAASGeAMAAAJDvAEAAIEh3gAAgMAQbwAAQGCINwAAIDDEGwAAEBjiDQAACAzxBgAABOaPk58hUaT0yd/ValRbd22rwn1V1sW+KFbcyfOsTH4zkZKD/n2tlUGVp/SqUTNYu4e8o/dl876wku79Lz2/Ll29D2z6eMgRbRzHgzarY8PxVVq+03t6L/z23/EFZcp0+cq/uFWlhYODQ/Vqlc+tVatRpcrVm7LQp06e5/aAQ3t3Uv084qfu1KhW5TZ0tnv1WcVg7R76jt6HzfvCyqGHvbVq1aqdHRO6eh/Y/O4PP6J5Px60lbp+fPxDmXU5L2gfwSyPAIe/F261UqXq9XxxzOhNpEwzXbz57y51qU9aqtR8VNn7TJe61LWkpUqVrg5o03KhC13pk6QfWmgxqncRQrI5JkjSnUqVvBNNPBwP1lqodB1y4la4ka4U8y3SsUtJV5LWWmj+Usg5dO5NpEKNvu0Rbh6c65MaFT0Mp/fvXJ/0r8qOLgvheFf6pobfBMxd6Mtoj2ehONO1fqpyPN6YP/lzYV1QsM50rX9eei8cFm8y1fqksyNK+KTG7QDdW65Va2ZdBHSma/2rki8WGBv38SwUl/qphcujQfTs++KaE7NeXeqn5s/fC/vHm0gLfdf5zv+21K1u9VmfdaNb3e78N2f6PtqvpjN9UTXS2kNzrYawCXOb4xlsXak5cNHCEGY7hgBy66KC90H10/fCvnNvEi12RJulFlrsnMmcKFGmqyd/e61Eqel169/e/BeREiVKlT55i16qMq79l3eurzu/Zb9JuJESxUqVPnvfnemLUuVOfhcW0j3+TXuy3pDTnsfn7WNCfP9OfDqR91p+vrbGfUzYp/p05/HgTJVSBwtY2vIdfzcb2QxUO8e/F86fvhf2G71JVT37krnRO8Waqdr5S6tVKtP/6aOWW39/4X4UZKVKc2WK9H50tYdkpUqlcsX6U1+f/CakK1UOz9oQpkaVCqU7jmfXjOAM5uF48O7J9YEzZ8eCvPVd+avSMzdBOAR7vhf2iTeZfj4ZybjVn8r3yFgrzZXo89bfdbV/S/9KxfqodetvLjS3LmqCGs0U7wybiXVpmJRdx7NrLpUOrFKqd1tHgzNXc3CKx0dLpa06Z9aFBWjXe6E1BebteJM8OT9Z62+lByxzW6nQX7p7/GlvA4mvmyvdCjjXjmfrh6189sXi7awNU7BSoXdbx4QvozlhC0elZOu8/dzN5df2BZNC7bBzzvhNLyolj/lCki5+Bcm34k2kamvk5k6JFgcXUCvVD40v3DzU3j6YldYFTdbzL5az0U5Wx5g9XYZaWBc0QSulW19qH5yEzOLx0VoLSYvWEWtmXVygnr4XPj28F96KN4sn4eaQcZvtAjJ9HWG4kaR6awnoOQtCDVWKnyT10rokTFCtj60/sezXxvaJZ2FdjqSkNf18M5V41ZrQcMHYf09WT94Ls83/ez3ezLbWCtyduHJoNspwI0mVblp/yq3LmbSnSf2KcyIYmG9d8Z9ZlzNJq63XPbMuR9vvg/LJ/5d8RLAwbb8X8s3/ey3eRFu/jKWbZdEWitbjq2OfBJ1YbU3YEzvIwkTRepxaFzNRZetIcGb+W2jfiuHm8TpH0zo5vmS2YG/K1vjN/XvhtXgz37owlU043EjN1ohBal3OxK22ztTOOCeCgfbh9IKIbWTRepwa11K0Hs9feDwzrjFkZetxKr0Wb7ZvCvZ5tBeWurJoPU6si5m8emsVlZdphZiWqvU4sS5mohatx6lpJVHrpOt26/uybq3yYp5Wf6rW40R6Ld7krcdL9nvZertG1sVAxdYFqty6HExQ3XocWxczUZV1AY/at2KYP/lv861/h35UrceRtG+8KSZ9YWqj/QpE1sVA20PBuXUxmKBV63FsXQyMR9Bmj4+WzzZPWbROxnK+P3qyaj2OpJfjTdbanGjN4tsnEusCoO1phef8TjC42roASFuTi+3krdaLHf/919+dMX4zgAvp5XiTth6X1pUCO5Wtx7l1MQAMRNYFSNrezq/c8d/bE9Fz62KngnhzjNq6AEhiujdsJdYFQO0xm/UJz3Ka9tWO+Qv/5tffc3uG/t1KL8ebi8dHS77MJW1fW19ZFwNJUt0amL484XmAY0Stx7V1MRMVtR7XZlXMWo/nL/yb9t8XZpWGLH76F7vjTdp6XFvX7ETSetxYF4N7detxYl0MJiZtPV5ZFzNRaevxyqyGXydXNy9WsWpt78etffqQtB430kvxJmo9rq1rdiJrPa6ti8G9uvU4si4GkxJtjRhW1uVMVNp6XBvVMGs9Ll75d8ULP4NuZK3HtST9sfOfJa3HlXXNLqRbK8lq42rmR52nlAHOompajxPeqxhQ1np8e+yTdOa4Y8J47wO4EW3NYlmY1BC3btNz++rIfqPbx0h8qZTjVaeirU9kJb0Ub/BU0Xq8sC6mNTPqEJV12T1oWo8j62IwKUXr8cK6mCOPCZF12Sdqb6VnNUu0eOHx7n/78/FxHuQR2c6O98Lvxz7XpORbw9CldTkAjM1b47kcE2wkO+/QPayodfOi5ZuBpWothuD2DF1Kdk3vJt68Ldma835L5gYmLteH1p++MrHYQKRya1H43KSKWetxsce/Lw7899jH0/dCuXlAvHlLqmprN8yZdUEATOX61vrTmq8pA4mqrQtyNjcOirZuxVDu8RPtvdaz0V8c9CF+6b3A3JvXRCq2ztK83Dn941FVNNZlA6MXa96aSipJuYuxm+OOCcf8jAczFVsnnbdGYzdZq4pyz58p9en+0ZlmROOTvfJe2B1vVq3HU12PEivfmqwkSTdO3oz1RH8nz6Wtx7V1MQhcollrpsXGZwfTiqXpHBNiZZptzXuS7sx2kSkeH+1/cWze+l6ZHbniDdJmrVTx2nthd7ypW49j6z4MKlGkWInSHSsRbthK25249XhlXQyClEpKlGxtDvHAywlP2BJFkhLFO4/Ld0qNPvt56x2x2LuGlRaPIflMGdPSDxQrVqRkazPFB0/eC7vjTdN6nFj3plP/Hf2TX5l141DSelxbF4NROv6Y8J6vpo78PPonb5WZndjMWo+LA36uaI0BFryHnujwvbB7anHTujnZJdOftNQ7wo1D0da90VbW5WBCbvUXX0zG1vpsNnKjrZGkHwfNbGz04/Ext9fsxlofn78XXppaXLWmz017+GxJvnYraz2urIvBZNxpzjHB3I0K0+USRetxvTUL8G116/s15710orXmu+cwvRRvFrz8ktbKnUwcxC5563FlXQwmYamMy6DG7lSqNB6tjbdmfnx6XA11OG7PcJqPL78XXtr3ZtF6fBnY/JvXLHXbujB3NqGej8/2AWZhXQ4Cdbd1TDif2GILL9a61Q991t/6PyUO1hsVHT7XzLgv47LWbWvvIL029+ql0ZuVfrTGb+YHDr359dse/yZtTW76pAXnak4Vrcc/zA93GKt9jgkzfXl8XCrm3daxdyMbv4ifbRBwiivF7Er2aJ/3QqTmcXH9pWYvLcp/edfi9g9cBhNv9lHpa+tPC6ZWu5RuHWDm1uUgaPPWPcHPGCmcvLzj5yusOzQyq63fQPHSVZaXdy2uWjdvl0olEzpjmbVmxZ9rztx2d6Kt+WDcBwx9y/Y7X8QEtG/FcMq9rn5t73dtPE16fBb6+nhHgTOVuwPOazdlaN+8fWpf8nnrTlPXWnC+5sz2/ZoL63IQvJVyfX/80xdVXLSerNnWrRiKo58nat3yJ+codqCiNQhxofmuGUyv3VKzag3ISteTmgBVb73ZSi5QubK9Nf4Pxm4wgMXWRWuOCdOVtx7PT3ie9s/OeD8daPsC1YddE2hev2N43loxIH05cfxmXPdH5Wq7V3lrmudm8T4whEJ3j48vONueqPatGG5OuqTU6Obx8RnHsYPV+tz6045Zsq/Hm+bJiM23E0Zwcn1XNaqAk23t3Xx8z9GlUt+2/my3JTum5un5YmZdEAwUrcflic/V/vmZdcdGqNgahCif/uff3/jxcmtAVvpy5KBsoW+SLkYVcLYPZl/YA8dcrPrJgsz3XJjCgLbPF7lANT3tG6uevqShPQGE2zMco32F6eppRHwr3kiz1gCaJF0fvAF1rOpxT8dxBRyutvsRqVD95H7BN5PdTxtWCi5aT1rRejzv4PnKF54b+2leWyL+dryR8icB51w/Ve0ZcSIV+ndrd9mLUe2hw9V2D2IVavSptV5Bkj5ztgMDORetJytpfZctOwm3ZWsH3vNRfTd6sdiawVS2/9M+8eZ5wJEu9VO1Zq9uUJ6p1P+e3Yvj/ajOeLjabivRTAv9+yzarPWesAkTzX5biiFAs9bjoqPnLF54jH3NWhHxoj2m9seeT5Cr3lqvsnmiL/qiO9Vqtq5BxoqVbo3YPFgrHd1uEbU+utuQPT8x5Rem1ad7tZ8o2vkekqQ75aN7HyEcC908zgF7cUuxgZ12TGi4zLuH9q0Y1p2dpi80b20YmXBkO9hKeWuPvg9aPOSRfeONNFel8sncB0m60IW01/1Sb0e6ymWu7PGL9kwLBwOIp97vpDCt/vLF2LKPteac48DYrDXF9IUtxQZ22jHhlnizh6L1uLubeq40b31/zrjkfoRKn1uv4eJhEGK/i1MbtRJ93NoJZ39LvVc6ynAjcbXdi7VuFBNuYG6PLcUQmGhrakLZ4TO3n+uaO9IfpT1L9nEGziHxRpLmivVx63bkb1vqvZJRnx00LBE3t9RHxcpHG5ERluqtLcUQmPatGE7bzu+pZmtu68y6oyOVPV8ifmi82QylxfpbN3uM46x1o78Vqxz9l9Ji6w3IEvHhrPVDH/Wn4g6Hg4HT7TxfRLBmrcfzjp+7/Xw53y5HaZ5M/E4OmXuzbXOTyUSpYiWKt25wuFRzP924tu6xJKnsZOu32VZejwfvWxd9sNNsnevu+zOb//nV7lVlXcwT1QuPIemId+Mu2daobjz4e7WbI5skk09Zu3aL9g8TtyLIqvOjf62PrVAz3LdL+wjWDNTmLtVWTccqFW2/ir/9Z9gnAACA7h1+cQoAAMA14g0AAAgM8QYAAASGeAMAAAJDvAEAAIEh3gAAgMAQbwAAQGD+H0RJxliLtna1AAAAJXRFWHRkYXRlOmNyZWF0ZQAyMDI2LTA1LTI2VDAxOjU3OjMwKzAwOjAwB9ghtgAAACV0RVh0ZGF0ZTptb2RpZnkAMjAyNi0wNS0yNlQwMTo1NzozMCswMDowMHaFmQoAAAAodEVYdGRhdGU6dGltZXN0YW1wADIwMjYtMDUtMjZUMDE6NTc6NTArMDA6MDDn/7FSAAAAAElFTkSuQmCC";
+
+let cachedLogoBytes: Uint8Array | null | undefined;
+
+async function loadOfgLogoBytes(): Promise<Uint8Array | null> {
+  if (cachedLogoBytes !== undefined) return cachedLogoBytes;
+
+  try {
+    cachedLogoBytes = Uint8Array.from(
+      Buffer.from(OFG_LOGO_HEADER_PNG_B64, "base64"),
+    );
+    return cachedLogoBytes;
+  } catch {
+    /* fall through to disk / CDN */
+  }
+
+  const candidates = [
+    path.join(process.cwd(), "docs", "assets", "ofg-logo-header.png"),
+  ];
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p)) {
+        cachedLogoBytes = new Uint8Array(fs.readFileSync(p));
+        return cachedLogoBytes;
+      }
+    } catch {
+      /* try next */
+    }
+  }
+  try {
+    const res = await fetch(LOGO_CDN);
+    if (res.ok) {
+      cachedLogoBytes = new Uint8Array(await res.arrayBuffer());
+      return cachedLogoBytes;
+    }
+  } catch {
+    /* fall through */
+  }
+  // Do not cache hard failure — next request can retry CDN/disk.
+  return null;
+}
+
+function scoreTone(after: number, before: number) {
   const delta = after - before;
-  const sign = delta >= 0 ? "+" : "";
-  return `[${"=".repeat(filled)}${" ".repeat(Math.max(0, width - filled))}] ${before} -> ${after} (${sign}${delta} pts)`;
+  if (delta > 0) return GREEN;
+  if (delta < 0) return RED;
+  return MUTED;
+}
+
+function utilTone(pct: number) {
+  if (pct <= 30) return GREEN;
+  if (pct <= 50) return AMBER;
+  return RED;
+}
+
+function clamp01(n: number) {
+  return Math.min(1, Math.max(0, n));
+}
+
+function scorePct(score: number) {
+  return clamp01((score - 300) / 550);
+}
+
+function fmtMoney(n: number) {
+  return `$${Math.round(n).toLocaleString("en-US")}`;
+}
+
+function wrapText(
+  text: string,
+  font: PDFFont,
+  size: number,
+  maxWidth: number,
+): string[] {
+  const safe = toPdfSafeText(text);
+  const words = safe.split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let cur = "";
+  for (const w of words) {
+    const trial = cur ? `${cur} ${w}` : w;
+    if (font.widthOfTextAtSize(trial, size) > maxWidth && cur) {
+      lines.push(cur);
+      cur = w;
+    } else {
+      cur = trial;
+    }
+  }
+  if (cur) lines.push(cur);
+  return lines.length ? lines : [""];
 }
 
 async function generateOfgProgressReportPdf(
@@ -12745,6 +20333,20 @@ async function generateOfgProgressReportPdf(
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const fontBold = await pdf.embedFont(StandardFonts.HelveticaBold);
 
+  let logo: PDFImage | null = null;
+  const logoBytes = await loadOfgLogoBytes();
+  if (logoBytes) {
+    try {
+      logo = await pdf.embedPng(logoBytes);
+    } catch {
+      try {
+        logo = await pdf.embedJpg(logoBytes);
+      } catch {
+        logo = null;
+      }
+    }
+  }
+
   const dateLocale = locale === "es" ? "es-US" : "en-US";
   const monthYear = new Date()
     .toLocaleDateString(dateLocale, { month: "short", year: "numeric" })
@@ -12753,254 +20355,809 @@ async function generateOfgProgressReportPdf(
     fileNameHint ||
     `${data.client.firstName}_OFG_Progress_Report_${monthYear}.pdf`;
 
-  const drawHeader = (
-    page: ReturnType<PDFDocument["addPage"]>,
-    title: string,
-  ) => {
-    const { width, height } = page.getSize();
-    page.drawRectangle({
-      x: 0,
-      y: height - 56,
-      width,
-      height: 56,
-      color: NAVY,
-    });
-    page.drawText("Optimum Financial Group", {
-      x: 40,
-      y: height - 32,
-      size: 14,
-      font: fontBold,
-      color: GOLD,
-    });
-    page.drawText(toPdfSafeText(title), {
-      x: 40,
-      y: height - 48,
-      size: 9,
-      font,
-      color: rgb(1, 1, 1),
-    });
-  };
+  const W = 612;
+  const H = 792;
+  const M = 36;
+  const CONTENT_W = W - M * 2;
+  const HEADER_H = 80;
+  const TOTAL_PAGES = 3;
 
-  const writeLines = (
-    page: ReturnType<PDFDocument["addPage"]>,
-    lines: string[],
-    startY: number,
-    size = 10,
-  ) => {
-    let y = startY;
-    for (const line of lines) {
-      if (y < 60) break;
-      page.drawText(toPdfSafeText(line).slice(0, 95), {
-        x: 40,
-        y,
-        size,
-        font,
-        color: GRAY,
-      });
-      y -= size + 6;
-    }
-    return y;
-  };
-
-  const drawSafe = (
-    page: ReturnType<PDFDocument["addPage"]>,
+  const drawText = (
+    page: PDFPage,
     text: string,
     opts: {
       x: number;
       y: number;
       size: number;
-      font: typeof font;
-      color: ReturnType<typeof rgb>;
+      font?: PDFFont;
+      color?: ReturnType<typeof rgb>;
+      maxWidth?: number;
     },
   ) => {
-    page.drawText(toPdfSafeText(text), opts);
+    const f = opts.font ?? font;
+    const safe = toPdfSafeText(text);
+    const clipped =
+      opts.maxWidth != null
+        ? (() => {
+            let s = safe;
+            while (
+              s.length > 0 &&
+              f.widthOfTextAtSize(s, opts.size) > opts.maxWidth!
+            ) {
+              s = s.slice(0, -1);
+            }
+            return s;
+          })()
+        : safe;
+    page.drawText(clipped, {
+      x: opts.x,
+      y: opts.y,
+      size: opts.size,
+      font: f,
+      color: opts.color ?? GRAY,
+    });
   };
 
-  const p1 = pdf.addPage([612, 792]);
-  drawHeader(p1, L.progressReport(data.client.firstName));
-  let y = 700;
-  drawSafe(p1, L.scoreOverview(data.client.firstName), {
-    x: 40,
-    y,
-    size: 16,
-    font: fontBold,
-    color: NAVY,
-  });
-  y -= 28;
+  const drawHeader = (page: PDFPage, title: string) => {
+    page.drawRectangle({
+      x: 0,
+      y: H - HEADER_H,
+      width: W,
+      height: HEADER_H,
+      color: NAVY,
+    });
+    page.drawRectangle({
+      x: 0,
+      y: H - HEADER_H - 3,
+      width: W,
+      height: 3,
+      color: GOLD,
+    });
+    let titleX = M;
+    if (logo) {
+      const logoH = 44;
+      const logoW = (logo.width / logo.height) * logoH;
+      const logoY = H - HEADER_H + (HEADER_H - logoH) / 2 + 2;
+      page.drawImage(logo, {
+        x: M,
+        y: logoY,
+        width: logoW,
+        height: logoH,
+      });
+      titleX = M + logoW + 16;
+    } else {
+      drawText(page, "Optimum Financial Group", {
+        x: M,
+        y: H - HEADER_H + 28,
+        size: 13,
+        font: fontBold,
+        color: GOLD,
+      });
+      titleX = M;
+    }
+    drawText(page, title, {
+      x: titleX,
+      y: H - HEADER_H + (logo ? 30 : 14),
+      size: 9,
+      color: WHITE,
+      maxWidth: W - titleX - M,
+    });
+  };
+
+  const drawFooter = (page: PDFPage, pageNum: number) => {
+    page.drawRectangle({
+      x: 0,
+      y: 0,
+      width: W,
+      height: 36,
+      color: LIGHT,
+    });
+    page.drawRectangle({
+      x: 0,
+      y: 36,
+      width: W,
+      height: 1,
+      color: BORDER,
+    });
+    drawText(page, L.footer, {
+      x: M,
+      y: 14,
+      size: 8,
+      color: MUTED,
+    });
+    const pageLabel = L.pageOf(pageNum, TOTAL_PAGES);
+    const pw = font.widthOfTextAtSize(pageLabel, 8);
+    drawText(page, pageLabel, {
+      x: W - M - pw,
+      y: 14,
+      size: 8,
+      color: MUTED,
+    });
+  };
+
+  const drawCard = (
+    page: PDFPage,
+    x: number,
+    yBottom: number,
+    w: number,
+    h: number,
+  ) => {
+    page.drawRectangle({
+      x,
+      y: yBottom,
+      width: w,
+      height: h,
+      color: WHITE,
+      borderColor: BORDER,
+      borderWidth: 1,
+    });
+  };
+
+  const drawBar = (
+    page: PDFPage,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    pct: number,
+    fill: ReturnType<typeof rgb>,
+  ) => {
+    page.drawRectangle({
+      x,
+      y,
+      width: w,
+      height: h,
+      color: rgb(0.93, 0.94, 0.96),
+    });
+    const filled = Math.max(2, w * clamp01(pct));
+    page.drawRectangle({
+      x,
+      y,
+      width: filled,
+      height: h,
+      color: fill,
+    });
+  };
+
   const todayIso = new Date().toISOString().slice(0, 10);
   const beforeDate = data.reportDate?.before || todayIso;
   const afterDate = data.reportDate?.after || todayIso;
-  const dateLabel =
-    locale === "es"
-      ? `Fechas del informe: ${beforeDate} -> ${afterDate}`
-      : `Report dates: ${beforeDate} -> ${afterDate}`;
-  drawSafe(p1, dateLabel, {
-    x: 40,
-    y,
-    size: 9,
-    font,
-    color: GRAY,
-  });
-  y -= 18;
-  drawSafe(p1, L.middleScore(data.middleScore.before, data.middleScore.after), {
-    x: 40,
-    y,
-    size: 11,
-    font: fontBold,
-    color: NAVY,
-  });
-  y -= 22;
-  const bars = [
-    `TransUnion: ${scoreBar(data.bureauScores.transunion.before, data.bureauScores.transunion.after)}`,
-    `Experian:   ${scoreBar(data.bureauScores.experian.before, data.bureauScores.experian.after)}`,
-    `Equifax:    ${scoreBar(data.bureauScores.equifax.before, data.bureauScores.equifax.after)}`,
+  const midBefore = data.middleScore.before;
+  const midAfter = data.middleScore.after;
+  const midDelta = midAfter - midBefore;
+  const midSign = midDelta >= 0 ? "+" : "";
+  const goal = data.roadmap.scoreGoal || 720;
+  const goalPct = clamp01((midAfter - 300) / Math.max(1, goal - 300));
+
+  const bureaus: Array<{
+    label: string;
+    before: number;
+    after: number;
+  }> = [
+    {
+      label: L.bureauTu,
+      before: data.bureauScores.transunion.before,
+      after: data.bureauScores.transunion.after,
+    },
+    {
+      label: L.bureauEx,
+      before: data.bureauScores.experian.before,
+      after: data.bureauScores.experian.after,
+    },
+    {
+      label: L.bureauEq,
+      before: data.bureauScores.equifax.before,
+      after: data.bureauScores.equifax.after,
+    },
   ];
-  y = writeLines(p1, bars, y, 9);
-  y -= 10;
-  drawSafe(p1, L.winsTitle, {
-    x: 40,
-    y,
-    size: 12,
-    font: fontBold,
-    color: NAVY,
-  });
-  y -= 18;
-  if (data.wins.length === 0) {
-    y = writeLines(p1, [L.noWins], y);
-  } else {
-    y = writeLines(
-      p1,
-      data.wins.map(
-        (w, i) =>
-          `${i + 1}. ${w.itemRemoved} - ${w.bureaus.join("/")} - ${w.status}`,
-      ),
-      y,
-      9,
-    );
-  }
-  y -= 8;
-  drawSafe(p1, L.targetsTitle, {
-    x: 40,
-    y,
-    size: 12,
-    font: fontBold,
-    color: NAVY,
-  });
-  y -= 18;
-  y = writeLines(
-    p1,
-    data.targets.length
-      ? data.targets.map((t, i) => `${i + 1}. ${t.item}`)
-      : [L.noTargets],
-    y,
-    9,
-  );
 
-  const p2 = pdf.addPage([612, 792]);
-  drawHeader(p2, L.page2Header);
-  y = 700;
-  drawSafe(p2, L.utilTitle, {
-    x: 40,
-    y,
-    size: 14,
-    font: fontBold,
-    color: NAVY,
-  });
-  y -= 22;
-  y = writeLines(
-    p2,
-    data.utilization.length
-      ? data.utilization.map((u) => L.utilLine(u.account, u.pctUsed, u.payTo30))
-      : [L.utilEmpty],
-    y,
-    9,
-  );
-  y -= 12;
-  drawSafe(p2, L.positiveTitle, {
-    x: 40,
-    y,
-    size: 12,
-    font: fontBold,
-    color: NAVY,
-  });
-  y -= 18;
-  y = writeLines(
-    p2,
-    data.positiveAccounts.length ? data.positiveAccounts : [L.positiveDefault],
-    y,
-    9,
-  );
+  // ── Page 1: scores + wins + targets ─────────────────────────────────────
+  {
+    const page = pdf.addPage([W, H]);
+    drawHeader(page, L.progressReport(data.client.firstName));
+    drawFooter(page, 1);
+    let y = H - HEADER_H - 28;
 
-  const p3 = pdf.addPage([612, 792]);
-  drawHeader(p3, L.page3Header);
-  y = 700;
-  drawSafe(p3, L.roadmapTitle(data.roadmap.currentRound), {
-    x: 40,
-    y,
-    size: 14,
-    font: fontBold,
-    color: NAVY,
-  });
-  y -= 22;
-  y = writeLines(
-    p3,
-    [
-      L.scoreGoal(data.roadmap.scoreGoal, data.roadmap.gapRemaining),
-      L.fileStrength(data.fileStrengthScore),
-      ...data.roadmap.milestones.map((m) => `* ${m}`),
-    ],
-    y,
-    10,
-  );
-  y -= 10;
-  drawSafe(p3, L.actionPlanTitle, {
-    x: 40,
-    y,
-    size: 12,
-    font: fontBold,
-    color: NAVY,
-  });
-  y -= 18;
-  y = writeLines(
-    p3,
-    data.actionPlan.map(
-      (a) => `${a.step}. [${a.owner.toUpperCase()}] ${a.description}`,
-    ),
-    y,
-    9,
-  );
-  if (data.tradelineRecommendation) {
-    y -= 8;
-    y = writeLines(
-      p3,
-      [
-        `Tradeline (${data.tradelineRecommendation.code}): ${data.tradelineRecommendation.projectedImpact}`,
-      ],
+    drawText(page, L.scoreOverview, {
+      x: M,
       y,
-      9,
-    );
+      size: 14,
+      font: fontBold,
+      color: NAVY,
+    });
+    y -= 16;
+    drawText(page, L.reportDates(beforeDate, afterDate), {
+      x: M,
+      y,
+      size: 9,
+      color: MUTED,
+    });
+    y -= 18;
+
+    // Middle score hero card
+    const heroH = 88;
+    drawCard(page, M, y - heroH, CONTENT_W, heroH);
+    page.drawRectangle({
+      x: M,
+      y: y - heroH,
+      width: 5,
+      height: heroH,
+      color: GOLD,
+    });
+    drawText(page, L.middleScore, {
+      x: M + 18,
+      y: y - 22,
+      size: 9,
+      font: fontBold,
+      color: MUTED,
+    });
+    drawText(page, `${midBefore}`, {
+      x: M + 18,
+      y: y - 48,
+      size: 22,
+      font: fontBold,
+      color: MUTED,
+    });
+    drawText(page, L.before, {
+      x: M + 18,
+      y: y - 64,
+      size: 8,
+      color: MUTED,
+    });
+    drawText(page, "->", {
+      x: M + 90,
+      y: y - 44,
+      size: 16,
+      font: fontBold,
+      color: GOLD,
+    });
+    drawText(page, `${midAfter}`, {
+      x: M + 120,
+      y: y - 48,
+      size: 28,
+      font: fontBold,
+      color: NAVY,
+    });
+    drawText(page, L.after, {
+      x: M + 120,
+      y: y - 64,
+      size: 8,
+      color: MUTED,
+    });
+
+    const deltaLabel = `${midSign}${midDelta} ${L.pts}`;
+    const deltaW = Math.max(72, fontBold.widthOfTextAtSize(deltaLabel, 12) + 20);
+    const deltaX = W - M - 18 - deltaW;
+    page.drawRectangle({
+      x: deltaX,
+      y: y - 52,
+      width: deltaW,
+      height: 28,
+      color: midDelta >= 0 ? rgb(0.9, 0.98, 0.93) : rgb(0.99, 0.92, 0.92),
+      borderColor: midDelta >= 0 ? GREEN : RED,
+      borderWidth: 1,
+    });
+    drawText(page, deltaLabel, {
+      x: deltaX + 10,
+      y: y - 42,
+      size: 12,
+      font: fontBold,
+      color: midDelta >= 0 ? GREEN : RED,
+    });
+
+    drawText(page, L.goalProgress, {
+      x: M + 250,
+      y: y - 22,
+      size: 8,
+      color: MUTED,
+    });
+    drawBar(page, M + 250, y - 72, 140, 8, goalPct, GOLD);
+    drawText(page, `${midAfter} / ${goal}`, {
+      x: M + 250,
+      y: y - 58,
+      size: 9,
+      font: fontBold,
+      color: NAVY,
+    });
+    y -= heroH + 16;
+
+    // Bureau score cards
+    const cardGap = 10;
+    const cardW = (CONTENT_W - cardGap * 2) / 3;
+    const cardH = 118;
+    bureaus.forEach((b, i) => {
+      const x = M + i * (cardW + cardGap);
+      const bottom = y - cardH;
+      drawCard(page, x, bottom, cardW, cardH);
+      const delta = b.after - b.before;
+      const sign = delta >= 0 ? "+" : "";
+      const tone = scoreTone(b.after, b.before);
+      drawText(page, b.label, {
+        x: x + 12,
+        y: y - 18,
+        size: 9,
+        font: fontBold,
+        color: MUTED,
+      });
+      drawText(page, `${b.after}`, {
+        x: x + 12,
+        y: y - 44,
+        size: 22,
+        font: fontBold,
+        color: NAVY,
+      });
+      drawText(page, `${L.before} ${b.before}`, {
+        x: x + 12,
+        y: y - 60,
+        size: 8,
+        color: MUTED,
+      });
+      drawText(page, `${sign}${delta} ${L.pts}`, {
+        x: x + 12,
+        y: y - 76,
+        size: 11,
+        font: fontBold,
+        color: tone,
+      });
+      drawBar(
+        page,
+        x + 12,
+        bottom + 14,
+        cardW - 24,
+        7,
+        scorePct(b.after),
+        tone,
+      );
+    });
+    y -= cardH + 18;
+
+    // Wins — dual tables when this-round vs since-enrollment differ
+    const winsThis = data.winsThisRound ?? data.wins;
+    const winsSince = data.winsSinceEnrollment ?? data.wins;
+    const showDualWins =
+      JSON.stringify(winsThis.map((w) => w.itemRemoved)) !==
+      JSON.stringify(winsSince.map((w) => w.itemRemoved));
+
+    const drawWinsBlock = (
+      title: string,
+      rows: typeof data.wins,
+      maxRows: number,
+    ) => {
+      drawText(page, title, {
+        x: M,
+        y,
+        size: 11,
+        font: fontBold,
+        color: NAVY,
+      });
+      y -= 12;
+      if (!rows.length) {
+        drawText(page, L.noWins, { x: M, y: y - 4, size: 8, color: MUTED });
+        y -= 16;
+        return;
+      }
+      for (let i = 0; i < Math.min(rows.length, maxRows); i++) {
+        const w = rows[i];
+        const rowH = 24;
+        if (y - rowH < 50) break;
+        drawCard(page, M, y - rowH, CONTENT_W, rowH);
+        page.drawEllipse({
+          x: M + 14,
+          y: y - rowH / 2,
+          xScale: 4,
+          yScale: 4,
+          color: GREEN,
+        });
+        const line = `${w.itemRemoved}  ·  ${w.bureaus.join("/")}  ·  ${w.status}`;
+        drawText(page, line, {
+          x: M + 28,
+          y: y - 15,
+          size: 8,
+          color: GRAY,
+          maxWidth: CONTENT_W - 40,
+        });
+        y -= rowH + 4;
+      }
+      y -= 6;
+    };
+
+    if (showDualWins) {
+      drawWinsBlock(L.winsThisRoundTitle, winsThis, 4);
+      drawWinsBlock(L.winsSinceEnrollmentTitle, winsSince, 4);
+    } else {
+      drawWinsBlock(L.winsTitle, data.wins, 6);
+    }
+
+    const targetsThis = data.targetsThisRound ?? data.targets;
+    const targetsSince = data.targetsSinceEnrollment ?? data.targets;
+    const showDualTargets =
+      JSON.stringify(targetsThis.map((t) => t.item)) !==
+      JSON.stringify(targetsSince.map((t) => t.item));
+
+    drawText(page, showDualTargets ? L.targetsSinceEnrollmentTitle : L.targetsTitle, {
+      x: M,
+      y,
+      size: 11,
+      font: fontBold,
+      color: NAVY,
+    });
+    y -= 14;
+    const targetLines = (showDualTargets ? targetsSince : data.targets).length
+      ? (showDualTargets ? targetsSince : data.targets).slice(0, 5).map((t, i) => {
+          const pri = t.priority ? ` [${t.priority}]` : "";
+          return `${i + 1}. ${t.item}${pri}`;
+        })
+      : [L.noTargets];
+    for (const line of targetLines) {
+      if (y < 50) break;
+      drawText(page, line, {
+        x: M,
+        y,
+        size: 9,
+        color: GRAY,
+        maxWidth: CONTENT_W,
+      });
+      y -= 14;
+    }
+    if (showDualTargets && targetsThis.length) {
+      y -= 4;
+      drawText(page, L.targetsThisRoundTitle, {
+        x: M,
+        y,
+        size: 10,
+        font: fontBold,
+        color: NAVY,
+      });
+      y -= 12;
+      for (const [i, t] of targetsThis.slice(0, 3).entries()) {
+        if (y < 50) break;
+        const pri = t.priority ? ` [${t.priority}]` : "";
+        drawText(page, `${i + 1}. ${t.item}${pri}`, {
+          x: M,
+          y,
+          size: 8,
+          color: GRAY,
+          maxWidth: CONTENT_W,
+        });
+        y -= 12;
+      }
+    }
   }
-  if (data.fundingReadinessNote) {
+
+  // ── Page 2: utilization + positive ──────────────────────────────────────
+  {
+    const page = pdf.addPage([W, H]);
+    drawHeader(page, L.page2Header);
+    drawFooter(page, 2);
+    let y = H - HEADER_H - 28;
+
+    drawText(page, L.utilTitle, {
+      x: M,
+      y,
+      size: 14,
+      font: fontBold,
+      color: NAVY,
+    });
+    y -= 16;
+
+    if (!data.utilization.length) {
+      drawText(page, L.utilEmpty, { x: M, y, size: 9, color: MUTED });
+      y -= 24;
+    } else {
+      for (const u of data.utilization.slice(0, 8)) {
+        const rowH = 56;
+        if (y - rowH < 80) break;
+        drawCard(page, M, y - rowH, CONTENT_W, rowH);
+        drawText(page, u.account, {
+          x: M + 12,
+          y: y - 16,
+          size: 10,
+          font: fontBold,
+          color: NAVY,
+          maxWidth: CONTENT_W * 0.55,
+        });
+        drawText(
+          page,
+          `${fmtMoney(u.balance)} / ${fmtMoney(u.limit)}  ·  ${u.pctUsed}%`,
+          {
+            x: M + CONTENT_W * 0.55,
+            y: y - 16,
+            size: 9,
+            font: fontBold,
+            color: utilTone(u.pctUsed),
+          },
+        );
+        drawBar(
+          page,
+          M + 12,
+          y - 34,
+          CONTENT_W - 24,
+          8,
+          u.pctUsed / 100,
+          utilTone(u.pctUsed),
+        );
+        drawText(
+          page,
+          `${L.utilPayTo30}: ${fmtMoney(u.payTo30)}   ${L.utilPayTo10}: ${fmtMoney(u.payTo10)}`,
+          {
+            x: M + 12,
+            y: y - 48,
+            size: 8,
+            color: MUTED,
+          },
+        );
+        y -= rowH + 8;
+      }
+    }
+
     y -= 8;
-    y = writeLines(p3, [data.fundingReadinessNote], y, 9);
+    drawText(page, L.positiveTitle, {
+      x: M,
+      y,
+      size: 12,
+      font: fontBold,
+      color: NAVY,
+    });
+    y -= 14;
+    const positives = data.positiveAccounts.length
+      ? data.positiveAccounts
+      : [L.positiveDefault];
+    for (const p of positives.slice(0, 10)) {
+      if (y < 50) break;
+      const lines = wrapText(`* ${p}`, font, 9, CONTENT_W);
+      for (const line of lines) {
+        if (y < 50) break;
+        drawText(page, line, { x: M, y, size: 9, color: GRAY });
+        y -= 13;
+      }
+      y -= 2;
+    }
+
+    // Mini comparison chart (before vs after bars for middle + bureaus)
+    if (y > 160) {
+      y -= 10;
+      drawText(page, L.change, {
+        x: M,
+        y,
+        size: 12,
+        font: fontBold,
+        color: NAVY,
+      });
+      y -= 10;
+      const chartH = 110;
+      drawCard(page, M, y - chartH, CONTENT_W, chartH);
+      const series = [
+        { label: "Mid", before: midBefore, after: midAfter },
+        ...bureaus.map((b) => ({
+          label: b.label.slice(0, 3),
+          before: b.before,
+          after: b.after,
+        })),
+      ];
+      const groupW = CONTENT_W / series.length;
+      series.forEach((s, i) => {
+        const gx = M + i * groupW + 16;
+        const maxBar = 70;
+        const bb = scorePct(s.before) * maxBar;
+        const ba = scorePct(s.after) * maxBar;
+        const base = y - chartH + 28;
+        page.drawRectangle({
+          x: gx,
+          y: base,
+          width: 12,
+          height: bb,
+          color: rgb(0.75, 0.78, 0.84),
+        });
+        page.drawRectangle({
+          x: gx + 16,
+          y: base,
+          width: 12,
+          height: ba,
+          color: scoreTone(s.after, s.before),
+        });
+        drawText(page, s.label, {
+          x: gx,
+          y: base - 14,
+          size: 8,
+          color: MUTED,
+        });
+      });
+    }
   }
-  y -= 16;
-  drawSafe(p3, L.croaTitle, {
-    x: 40,
-    y,
-    size: 10,
-    font: fontBold,
-    color: NAVY,
-  });
-  y -= 14;
-  writeLines(p3, [data.croaDisclosure], y, 8);
-  drawSafe(p3, L.footer, {
-    x: 40,
-    y: 40,
-    size: 8,
-    font,
-    color: GRAY,
-  });
+
+  // ── Page 3: roadmap + action + CROA ─────────────────────────────────────
+  {
+    const page = pdf.addPage([W, H]);
+    drawHeader(page, L.page3Header);
+    drawFooter(page, 3);
+    let y = H - HEADER_H - 28;
+
+    drawText(page, L.roadmapTitle(data.roadmap.currentRound), {
+      x: M,
+      y,
+      size: 14,
+      font: fontBold,
+      color: NAVY,
+    });
+    y -= 16;
+
+    const roadH = 78;
+    drawCard(page, M, y - roadH, CONTENT_W, roadH);
+    drawText(page, L.scoreGoal, {
+      x: M + 14,
+      y: y - 20,
+      size: 9,
+      color: MUTED,
+    });
+    drawText(page, `${goal}`, {
+      x: M + 14,
+      y: y - 42,
+      size: 22,
+      font: fontBold,
+      color: NAVY,
+    });
+    drawText(page, L.gapRemaining, {
+      x: M + 120,
+      y: y - 20,
+      size: 9,
+      color: MUTED,
+    });
+    drawText(page, `${data.roadmap.gapRemaining} ${L.pts}`, {
+      x: M + 120,
+      y: y - 42,
+      size: 18,
+      font: fontBold,
+      color: GOLD,
+    });
+    drawBar(page, M + 14, y - 66, CONTENT_W - 28, 10, goalPct, GOLD);
+    y -= roadH + 14;
+
+    // File strength
+    const fsH = 64;
+    drawCard(page, M, y - fsH, CONTENT_W, fsH);
+    const strength = Math.min(100, Math.max(0, data.fileStrengthScore || 0));
+    drawText(page, L.fileStrength, {
+      x: M + 14,
+      y: y - 22,
+      size: 10,
+      font: fontBold,
+      color: MUTED,
+    });
+    drawText(page, `${strength} / 100`, {
+      x: M + 14,
+      y: y - 44,
+      size: 18,
+      font: fontBold,
+      color: NAVY,
+    });
+    const strengthTone =
+      strength >= 70 ? GREEN : strength >= 45 ? AMBER : RED;
+    drawBar(
+      page,
+      M + 140,
+      y - 40,
+      CONTENT_W - 168,
+      12,
+      strength / 100,
+      strengthTone,
+    );
+    y -= fsH + 14;
+
+    if (data.roadmap.milestones?.length) {
+      drawText(page, L.milestones, {
+        x: M,
+        y,
+        size: 11,
+        font: fontBold,
+        color: NAVY,
+      });
+      y -= 14;
+      for (const m of data.roadmap.milestones.slice(0, 5)) {
+        if (y < 120) break;
+        const lines = wrapText(`* ${m}`, font, 9, CONTENT_W);
+        for (const line of lines) {
+          drawText(page, line, { x: M, y, size: 9, color: GRAY });
+          y -= 12;
+        }
+      }
+      y -= 6;
+    }
+
+    drawText(page, L.actionPlanTitle, {
+      x: M,
+      y,
+      size: 12,
+      font: fontBold,
+      color: NAVY,
+    });
+    y -= 12;
+    for (const a of data.actionPlan.slice(0, 6)) {
+      if (y < 110) break;
+      const owner =
+        a.owner === "ofg" ? L.ownerOfg : L.ownerClient;
+      const rowH = 26;
+      drawCard(page, M, y - rowH, CONTENT_W, rowH);
+      page.drawRectangle({
+        x: M + 8,
+        y: y - rowH + 6,
+        width: 36,
+        height: 14,
+        color: a.owner === "ofg" ? NAVY : GOLD,
+      });
+      drawText(page, owner, {
+        x: M + 12,
+        y: y - 16,
+        size: 7,
+        font: fontBold,
+        color: WHITE,
+      });
+      drawText(page, `${a.step}. ${a.description}`, {
+        x: M + 52,
+        y: y - 16,
+        size: 9,
+        color: GRAY,
+        maxWidth: CONTENT_W - 64,
+      });
+      y -= rowH + 6;
+    }
+
+    if (data.tradelineRecommendation) {
+      y -= 4;
+      drawText(page, L.tradeline, {
+        x: M,
+        y,
+        size: 10,
+        font: fontBold,
+        color: NAVY,
+      });
+      y -= 12;
+      const tLines = wrapText(
+        `${data.tradelineRecommendation.code}: ${data.tradelineRecommendation.projectedImpact}`,
+        font,
+        9,
+        CONTENT_W,
+      );
+      for (const line of tLines) {
+        drawText(page, line, { x: M, y, size: 9, color: GRAY });
+        y -= 12;
+      }
+    }
+    if (data.fundingReadinessNote) {
+      y -= 4;
+      drawText(page, L.funding, {
+        x: M,
+        y,
+        size: 10,
+        font: fontBold,
+        color: NAVY,
+      });
+      y -= 12;
+      for (const line of wrapText(
+        data.fundingReadinessNote,
+        font,
+        9,
+        CONTENT_W,
+      )) {
+        drawText(page, line, { x: M, y, size: 9, color: GRAY });
+        y -= 12;
+      }
+    }
+
+    y = Math.min(y - 8, 130);
+    drawText(page, L.croaTitle, {
+      x: M,
+      y,
+      size: 10,
+      font: fontBold,
+      color: NAVY,
+    });
+    y -= 12;
+    for (const line of wrapText(data.croaDisclosure || "", font, 7.5, CONTENT_W)) {
+      if (y < 48) break;
+      drawText(page, line, { x: M, y, size: 7.5, color: MUTED });
+      y -= 10;
+    }
+  }
 
   const bytes = await pdf.save();
   return { buffer: Buffer.from(bytes), fileName };
@@ -13010,6 +21167,13 @@ function reportDataToSummaryMd(data: OfGReportData): string {
   const todayIso = new Date().toISOString().slice(0, 10);
   const beforeDate = data.reportDate?.before || todayIso;
   const afterDate = data.reportDate?.after || todayIso;
+  const winsThis = data.winsThisRound ?? data.wins;
+  const winsSince = data.winsSinceEnrollment ?? data.wins;
+  const showDualWins =
+    JSON.stringify(winsThis.map((w) => w.itemRemoved)) !==
+    JSON.stringify(winsSince.map((w) => w.itemRemoved));
+  const winLine = (w: OfGReportData["wins"][number]) =>
+    `- ${w.itemRemoved}${w.bureaus?.length ? ` (${w.bureaus.join("/")})` : ""}`;
   const lines = [
     `## Round ${data.roadmap.currentRound} Progress`,
     "",
@@ -13017,11 +21181,18 @@ function reportDataToSummaryMd(data: OfGReportData): string {
     "",
     `Middle score: **${data.middleScore.before}** → **${data.middleScore.after}**`,
     "",
-    "### Wins",
-    ...data.wins.map(
-      (w) =>
-        `- ${w.itemRemoved}${w.bureaus?.length ? ` (${w.bureaus.join("/")})` : ""}`,
-    ),
+    ...(data.compareMode
+      ? [`Compare mode: **${data.compareMode}**`, ""]
+      : []),
+    ...(showDualWins
+      ? [
+          "### Wins this round",
+          ...winsThis.map(winLine),
+          "",
+          "### Wins since enrollment",
+          ...winsSince.map(winLine),
+        ]
+      : ["### Wins", ...data.wins.map(winLine)]),
     "",
     "### Next targets",
     ...data.targets.map(
@@ -13316,7 +21487,7 @@ async function replaceClientReferrers(
         link.referrer_id,
         role,
         i,
-        link.notify_on_round === false ? 0 : 1,
+        1, // Always notify — no staff toggle (César Sep 2026)
       ],
     );
   }
@@ -13534,7 +21705,9 @@ async function uploadToCDN(
 
   // CI/integration: never depend on HostGator reachability (same pattern as Twilio dry-run).
   if (process.env.VITEST === "true") {
-    return `vitest://cdn/${CDN_MAIN_FOLDER}/${folderId}/${encodeURIComponent(originalname)}`;
+    const url = `vitest://cdn/${CDN_MAIN_FOLDER}/${folderId}/${encodeURIComponent(originalname)}`;
+    vitestCdnPlaintextByUrl.set(url, Buffer.from(buffer));
+    return url;
   }
 
   let lastErr: Error | null = null;
@@ -13684,9 +21857,311 @@ async function consumeOnboardingToken(
   return rows[0].client_id as number;
 }
 
+/** Short-lived Round PDF download token (multi-use until expiry for email + SMS). */
+const ROUND_PDF_DOWNLOAD_TTL_HOURS = 72;
+
+async function createRoundReportDownloadToken(
+  pdfId: number,
+  clientId: number,
+  ttlHours: number = ROUND_PDF_DOWNLOAD_TTL_HOURS,
+): Promise<string> {
+  const rawToken = crypto.randomBytes(32).toString("hex");
+  const tokenHash = sha256(rawToken);
+  const expiresAt = new Date(Date.now() + ttlHours * 60 * 60 * 1000);
+  await pool.query<ResultSetHeader>(
+    `INSERT INTO round_report_download_tokens
+       (token_hash, pdf_id, client_id, expires_at)
+     VALUES (?, ?, ?, ?)`,
+    [tokenHash, pdfId, clientId, expiresAt],
+  );
+  return rawToken;
+}
+
+/** Latest branded Round PDF row for a client report (wizard publish path). */
+async function findRoundReportPdfRow(opts: {
+  clientId: number;
+  pdfId?: number | null;
+  roundReportId?: number | null;
+  roundNumber?: number | null;
+}): Promise<RowDataPacket | null> {
+  if (opts.pdfId != null && Number(opts.pdfId) > 0) {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, client_id, round_number, round_report_id, file_name,
+              storage_key, storage_provider, encrypted, enc_iv, enc_tag
+       FROM round_report_pdfs WHERE id = ? LIMIT 1`,
+      [Number(opts.pdfId)],
+    );
+    const row = rows[0] || null;
+    if (!row || Number(row.client_id) !== opts.clientId) return null;
+    return row;
+  }
+  if (opts.roundReportId != null && Number(opts.roundReportId) > 0) {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, client_id, round_number, round_report_id, file_name,
+              storage_key, storage_provider, encrypted, enc_iv, enc_tag
+       FROM round_report_pdfs
+       WHERE client_id = ? AND round_report_id = ?
+       ORDER BY id DESC LIMIT 1`,
+      [opts.clientId, Number(opts.roundReportId)],
+    );
+    if (rows[0]) return rows[0];
+  }
+  if (opts.roundNumber != null && Number(opts.roundNumber) > 0) {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, client_id, round_number, round_report_id, file_name,
+              storage_key, storage_provider, encrypted, enc_iv, enc_tag
+       FROM round_report_pdfs
+       WHERE client_id = ? AND round_number = ?
+       ORDER BY id DESC LIMIT 1`,
+      [opts.clientId, Number(opts.roundNumber)],
+    );
+    if (rows[0]) return rows[0];
+  }
+  return null;
+}
+
+/** Load branded Round PDF bytes from `round_report_pdfs` (CDN / local / vitest stub). */
+async function loadRoundReportPdfBytes(
+  pdfRow: RowDataPacket,
+): Promise<Buffer | null> {
+  if (!pdfRow?.storage_key) return null;
+  try {
+    let raw: Buffer;
+    if (String(pdfRow.storage_provider) === "cdn") {
+      const cdnRes = await fetch(String(pdfRow.storage_key));
+      if (!cdnRes.ok) return null;
+      raw = Buffer.from(await cdnRes.arrayBuffer());
+    } else if (String(pdfRow.storage_key).startsWith("vitest://")) {
+      raw = Buffer.from("%PDF-1.4 vitest-round-report");
+    } else {
+      raw = await fs.promises.readFile(
+        path.join(UPLOADS_DIR, String(pdfRow.storage_key)),
+      );
+    }
+    if (raw.length === 0) return null;
+    if (pdfRow.encrypted && pdfRow.enc_iv && pdfRow.enc_tag) {
+      return decryptFile(
+        raw,
+        String(pdfRow.enc_iv),
+        String(pdfRow.enc_tag),
+      );
+    }
+    return raw;
+  } catch {
+    return null;
+  }
+}
+
+async function loadRoundReportPdfByDownloadToken(
+  rawToken: string,
+): Promise<RowDataPacket | null> {
+  const tokenHash = sha256(rawToken);
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT t.id AS token_id, p.file_name, p.storage_key, p.storage_provider,
+            p.encrypted, p.enc_iv, p.enc_tag, p.client_id, p.id AS pdf_id
+     FROM round_report_download_tokens t
+     INNER JOIN round_report_pdfs p ON p.id = t.pdf_id AND p.client_id = t.client_id
+     WHERE t.token_hash = ? AND t.expires_at > NOW()
+     LIMIT 1`,
+    [tokenHash],
+  );
+  if (!rows[0]) return null;
+  await pool.query<ResultSetHeader>(
+    `UPDATE round_report_download_tokens
+     SET last_used_at = NOW(), use_count = use_count + 1
+     WHERE id = ?`,
+    [Number(rows[0].token_id)],
+  );
+  return rows[0];
+}
+
+/** Allowlisted portal paths for onboarding magic-link ?next= redirects. */
+function sanitizePortalNextPath(raw: unknown): string | null {
+  const s = String(raw || "").trim();
+  if (!s.startsWith("/portal/")) return null;
+  if (s.includes("://") || s.includes("//") || s.includes("..")) return null;
+  const allowed = [
+    "/portal/reports",
+    "/portal/documents",
+    "/portal/dashboard",
+    "/portal/home",
+  ];
+  const pathOnly = s.split("?")[0].split("#")[0];
+  if (!allowed.includes(pathOnly)) return null;
+  return s.length > 200 ? pathOnly : s;
+}
+
 function sha256(input: string): string {
   return crypto.createHash("sha256").update(input).digest("hex");
 }
+
+// ============================================================================
+// PREPAID ONBOARD INVITES (already-paid unknown → New Client)
+// ============================================================================
+
+const PREPAID_ONBOARD_PAYMENT_METHODS = [
+  "cash",
+  "zelle",
+  "venmo",
+  "card_offline",
+  "other",
+] as const;
+
+type PrepaidOnboardPaymentMethod =
+  (typeof PREPAID_ONBOARD_PAYMENT_METHODS)[number];
+
+type PrepaidRemainingSplitDef = {
+  label: string;
+  amount_cents: number;
+  due_date: string;
+  send_payment_link?: boolean;
+};
+
+function parsePrepaidRemainingSplits(raw: unknown): {
+  ok: true;
+  splits: PrepaidRemainingSplitDef[];
+} | { ok: false; error: string } {
+  if (raw == null) return { ok: true, splits: [] };
+  if (!Array.isArray(raw)) {
+    return { ok: false, error: "remaining_splits must be an array" };
+  }
+  const splits: PrepaidRemainingSplitDef[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") {
+      return { ok: false, error: "Invalid remaining split row" };
+    }
+    const row = item as Record<string, unknown>;
+    const label = String(row.label || "").trim();
+    const amount = Number(row.amount_cents);
+    const due = String(row.due_date || "").trim();
+    if (!label || !Number.isFinite(amount) || amount <= 0) {
+      return {
+        ok: false,
+        error: "Each remaining split needs label and amount_cents > 0",
+      };
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(due)) {
+      return {
+        ok: false,
+        error: "Each remaining split due_date must be YYYY-MM-DD",
+      };
+    }
+    splits.push({
+      label: label.slice(0, 200),
+      amount_cents: Math.round(amount),
+      due_date: due,
+      send_payment_link: !!row.send_payment_link,
+    });
+  }
+  return { ok: true, splits };
+}
+
+function prepaidInviteIsOpen(row: RowDataPacket): boolean {
+  if (row.revoked_at || row.redeemed_at) return false;
+  const exp = row.expires_at ? new Date(row.expires_at).getTime() : 0;
+  return exp > Date.now();
+}
+
+function serializePrepaidOnboardInvite(
+  row: RowDataPacket,
+  extras?: { url?: string; token?: string },
+) {
+  let remaining: PrepaidRemainingSplitDef[] = [];
+  try {
+    const raw = row.remaining_splits_json;
+    if (raw != null) {
+      const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+      const check = parsePrepaidRemainingSplits(parsed);
+      if (check.ok) remaining = check.splits;
+    }
+  } catch {
+    remaining = [];
+  }
+  return {
+    id: Number(row.id),
+    package_id: Number(row.package_id),
+    package_name: (row.package_name as string) || null,
+    paid_amount_cents: Number(row.paid_amount_cents),
+    paid_label: String(row.paid_label || "Enrollment (prepaid)"),
+    payment_method: String(row.payment_method || "other"),
+    payment_note: (row.payment_note as string) || null,
+    remaining_splits: remaining,
+    preferred_language: (row.preferred_language as string) || null,
+    referral_category: (row.referral_category as string) || null,
+    referrer_id:
+      row.referrer_id != null ? Number(row.referrer_id) : null,
+    staff_notes: (row.staff_notes as string) || null,
+    created_by_admin_id: Number(row.created_by_admin_id),
+    expires_at: row.expires_at,
+    revoked_at: row.revoked_at || null,
+    redeemed_at: row.redeemed_at || null,
+    redeemed_client_id:
+      row.redeemed_client_id != null ? Number(row.redeemed_client_id) : null,
+    redeemed_case_id:
+      row.redeemed_case_id != null ? Number(row.redeemed_case_id) : null,
+    created_at: row.created_at,
+    is_open: prepaidInviteIsOpen(row),
+    ...(extras?.url ? { url: extras.url } : {}),
+    ...(extras?.token ? { token: extras.token } : {}),
+  };
+}
+
+async function findClientMatchForPrepaidOnboard(
+  opts: {
+    email: string | null;
+    phone: string | null;
+  },
+  executor: {
+    query: typeof pool.query;
+  } = pool,
+): Promise<RowDataPacket | null> {
+  if (opts.email) {
+    const [byEmail] = await executor.query<RowDataPacket[]>(
+      `SELECT id, email, phone, status, pipeline_stage, first_name, last_name,
+              preferred_language, assigned_admin_id, package_id
+       FROM clients WHERE email = ? LIMIT 1 FOR UPDATE`,
+      [opts.email],
+    );
+    if (byEmail[0]) return byEmail[0];
+  }
+  const phoneLast10 = opts.phone ? normalizePhoneLast10(opts.phone) : null;
+  if (!phoneLast10) return null;
+  const [candidates] = await executor.query<RowDataPacket[]>(
+    `SELECT id, email, phone, status, pipeline_stage, first_name, last_name,
+            preferred_language, assigned_admin_id, package_id
+     FROM clients
+     WHERE phone IS NOT NULL AND phone <> ''
+     ORDER BY id DESC LIMIT 80`,
+  );
+  const match = candidates.find(
+    (r) => normalizePhoneLast10(String(r.phone || "")) === phoneLast10,
+  );
+  if (!match) return null;
+  const [locked] = await executor.query<RowDataPacket[]>(
+    `SELECT id, email, phone, status, pipeline_stage, first_name, last_name,
+            preferred_language, assigned_admin_id, package_id
+     FROM clients WHERE id = ? LIMIT 1 FOR UPDATE`,
+    [Number(match.id)],
+  );
+  return locked[0] || null;
+}
+
+async function clientHasEnrolledActiveCase(
+  clientId: number,
+  executor: {
+    query: typeof pool.query;
+  } = pool,
+): Promise<boolean> {
+  const [rows] = await executor.query<RowDataPacket[]>(
+    `SELECT id FROM credit_repair_cases
+     WHERE client_id = ? AND status = 'active'
+       AND pipeline_stage NOT IN ('prospect', 'cancelled')
+     LIMIT 1`,
+    [clientId],
+  );
+  return rows.length > 0;
+}
+
 
 /**
  * Constant-time secret comparison. Pads both buffers to the same (max)
@@ -13702,6 +22177,47 @@ function timingSafeStringEqual(a: string, b: string): boolean {
   bufA.write(a);
   bufB.write(b);
   return crypto.timingSafeEqual(bufA, bufB) && a.length === b.length;
+}
+
+function isTransientDbError(err: unknown): boolean {
+  const e = err as { code?: string; errno?: number; message?: string };
+  const code = String(e?.code || "");
+  const msg = String(e?.message || "").toLowerCase();
+  return (
+    code === "ER_LOCK_DEADLOCK" ||
+    code === "ER_LOCK_WAIT_TIMEOUT" ||
+    code === "ECONNRESET" ||
+    code === "PROTOCOL_CONNECTION_LOST" ||
+    code === "ETIMEDOUT" ||
+    e?.errno === 1213 ||
+    e?.errno === 1205 ||
+    msg.includes("deadlock") ||
+    msg.includes("lock wait timeout") ||
+    msg.includes("try restarting transaction")
+  );
+}
+
+async function withTransientDbRetry<T>(
+  label: string,
+  fn: () => Promise<T>,
+  attempts = 3,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientDbError(err) || i === attempts - 1) throw err;
+      const delayMs = 150 * (i + 1) + Math.floor(Math.random() * 100);
+      console.warn(
+        `[${label}] transient db error (attempt ${i + 1}/${attempts}), retry in ${delayMs}ms:`,
+        (err as Error)?.message ?? err,
+      );
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  throw lastErr;
 }
 
 // ============================================================================
@@ -14065,6 +22581,8 @@ type EmailDryRunRecord = {
   attachmentBytes: number[];
   /** First SEQUENCE value found in an attached .ics (if any). */
   icsSequence: number | null;
+  /** True when HTML includes Optimum emailLayout logo chrome. */
+  brandedChrome: boolean;
 };
 let emailDryRuns: EmailDryRunRecord[] = [];
 
@@ -14119,6 +22637,9 @@ async function sendEmail(opts: SendEmailOptions) {
             : Buffer.byteLength(String(a.content), "utf8"),
         ),
         icsSequence,
+        brandedChrome: /logo_with_title_white\.png/i.test(
+          String(opts.html || ""),
+        ),
       });
     }
     console.log(
@@ -14308,7 +22829,7 @@ function nextDayYmd(ymd: string): string {
   return formatDateYmd(d);
 }
 
-/** Build a single METHOD:PUBLISH calendar with 5 all-day round VEVENTs (stable UIDs). */
+/** Build a METHOD:PUBLISH calendar with round VEVENTs (R1–5 + optional extended). */
 export function buildRoundScheduleIcs(opts: {
   caseNumber: string;
   clientName: string;
@@ -14323,6 +22844,10 @@ export function buildRoundScheduleIcs(opts: {
   lang?: string;
   /** ICS SEQUENCE — bump on resend so clients can replace prior events. */
   sequence?: number;
+  /** When >5, append projected/override dates for rounds 6..maxRounds. */
+  maxRounds?: number;
+  intervalDays?: number;
+  extendedDates?: Record<string, string> | null;
 }): string {
   const isEs = opts.lang === "es";
   const stamp = new Date()
@@ -14337,13 +22862,20 @@ export function buildRoundScheduleIcs(opts: {
     "CALSCALE:GREGORIAN",
     "METHOD:PUBLISH",
   ];
-  const rounds = [
+  const rounds: Array<{ n: number; date: string }> = [
     { n: 1, date: opts.dates.round_1_date },
     { n: 2, date: opts.dates.round_2_date },
     { n: 3, date: opts.dates.round_3_date },
     { n: 4, date: opts.dates.round_4_date },
     { n: 5, date: opts.dates.round_5_date },
   ];
+  const extended = projectExtendedRoundDatesInline({
+    round5Date: opts.dates.round_5_date,
+    intervalDays: opts.intervalDays ?? 35,
+    maxRounds: opts.maxRounds ?? DEFAULT_MAX_ROUNDS,
+    overrides: opts.extendedDates ?? null,
+  });
+  for (const e of extended) rounds.push({ n: e.round, date: e.date });
   for (const r of rounds) {
     const summary = isEs
       ? `Optimum Credit — Meta Ronda ${r.n} (${opts.caseNumber})`
@@ -14554,29 +23086,15 @@ async function resolveRoundCalendarRecipients(clientId: number): Promise<
     `SELECT r.first_name AS ref_first, r.email AS ref_email, r.preferred_language AS ref_lang
      FROM client_referrers cr
      INNER JOIN referrers r ON r.id = cr.referrer_id AND r.status = 'active'
-     WHERE cr.client_id = ? AND cr.notify_on_round = 1
+     WHERE cr.client_id = ?
      ORDER BY cr.sort_order ASC`,
     [clientId],
   );
-  if (refRows.length) {
-    for (const r of refRows) {
-      push(r.ref_email, r.ref_first, "referrer", r.ref_lang || row.client_lang);
-    }
-  } else if (row.referrer_id) {
-    const [legacy] = await pool.query<RowDataPacket[]>(
-      `SELECT first_name AS ref_first, email AS ref_email, preferred_language AS ref_lang
-       FROM referrers WHERE id = ? AND status = 'active' LIMIT 1`,
-      [row.referrer_id],
-    );
-    if (legacy[0]) {
-      push(
-        legacy[0].ref_email,
-        legacy[0].ref_first,
-        "referrer",
-        legacy[0].ref_lang || row.client_lang,
-      );
-    }
+  for (const r of refRows) {
+    push(r.ref_email, r.ref_first, "referrer", r.ref_lang || row.client_lang);
   }
+  // 3A: no legacy clients.referrer_id fallback — partners must be in client_referrers.
+  // notify_on_round is always ON at write time; do not filter it here.
 
   if (row.admin_id) {
     const prefs = parseAdminNotificationPrefs(row.admin_prefs);
@@ -14609,11 +23127,30 @@ async function sendCaseRoundCalendarInvites(opts: {
   isUpdate?: boolean;
 }): Promise<{ sent_to: string[]; errors: string[]; sequence: number }> {
   const [schedRows] = await pool.query<RowDataPacket[]>(
-    `SELECT calendar_send_count FROM case_round_schedules WHERE case_id = ? LIMIT 1`,
+    `SELECT s.calendar_send_count, s.interval_days, s.extended_dates_json,
+            cr.max_rounds
+     FROM case_round_schedules s
+     JOIN credit_repair_cases cr ON cr.id = s.case_id
+     WHERE s.case_id = ? LIMIT 1`,
     [opts.caseId],
   );
   const priorCount = Number(schedRows[0]?.calendar_send_count ?? 0);
   const sequence = priorCount; // 0 first send, then 1, 2, …
+  const maxRounds = clampMaxRounds(schedRows[0]?.max_rounds);
+  const intervalDays = Math.max(
+    1,
+    Number(schedRows[0]?.interval_days) || 35,
+  );
+  let extendedDates: Record<string, string> | null = null;
+  try {
+    const raw = schedRows[0]?.extended_dates_json;
+    if (raw) {
+      extendedDates =
+        typeof raw === "string" ? JSON.parse(raw) : (raw as Record<string, string>);
+    }
+  } catch {
+    extendedDates = null;
+  }
   const recipients = await resolveRoundCalendarRecipients(opts.clientId);
   const sent_to: string[] = [];
   const errors: string[] = [];
@@ -14662,6 +23199,9 @@ async function sendCaseRoundCalendarInvites(opts: {
         dates: opts.dates,
         lang: r.lang,
         sequence,
+        maxRounds,
+        intervalDays,
+        extendedDates,
       });
       const tpl = tplRoundCalendarInvite({
         firstName: r.firstName,
@@ -14842,12 +23382,14 @@ function emailLayout(opts: {
   lang?: string;
 }) {
   const isEs = opts.lang === "es";
+  const year = new Date().getFullYear();
   const tagline = isEs
     ? "Reparación de Crédito, Bien Hecha"
     : "Credit Repair, Done Right";
+  // Legal / public brand is Optimum Financial Group (product mark on logo: OFG).
   const footer = isEs
-    ? `Recibes este correo porque tienes una cuenta con Optimum Credit Repair.<br/>© ${new Date().getFullYear()} Optimum Credit Repair. Todos los derechos reservados.`
-    : `You're receiving this email because you have an account with Optimum Credit Repair.<br/>© ${new Date().getFullYear()} Optimum Credit Repair. All rights reserved.`;
+    ? `Recibes este correo porque tienes una cuenta con Optimum Financial Group.<br/>© ${year} Optimum Financial Group. Todos los derechos reservados.`
+    : `You're receiving this email because you have an account with Optimum Financial Group.<br/>© ${year} Optimum Financial Group. All rights reserved.`;
   return `<!doctype html>
 <html lang="${isEs ? "es" : "en"}"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" /><title>${escapeHtml(opts.title)}</title></head>
 <body style="margin:0;padding:0;background:#f4f5f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0f172a;">
@@ -14855,16 +23397,17 @@ ${opts.preheader ? `<div style="display:none;max-height:0;overflow:hidden;">${es
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4f5f9;padding:40px 16px;">
   <tr><td align="center">
     <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 8px 24px rgba(15,23,42,0.06);">
-      <tr><td style="background:#121829;padding:24px 32px;">
-        <table width="100%"><tr>
-          <td>
-            <img src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white.png" alt="Optimum Credit" height="40" style="display:block;height:40px;width:auto;border:0;" />
+      <tr><td style="background:#121829;padding:24px 32px 20px;">
+        <table width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+          <td style="vertical-align:middle;">
+            <img src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white.png" alt="Optimum Financial Group" height="40" style="display:block;height:40px;width:auto;border:0;" />
           </td>
-          <td align="right" style="font-size:12px;color:#C0A06A;font-weight:600;letter-spacing:0.03em;">${tagline}</td>
+          <td align="right" style="vertical-align:middle;font-size:12px;color:#C0A06A;font-weight:600;letter-spacing:0.03em;padding-left:12px;">${tagline}</td>
         </tr></table>
       </td></tr>
+      <tr><td style="height:3px;line-height:3px;font-size:0;background:#C0A06A;">&nbsp;</td></tr>
       <tr><td style="padding:32px;">${opts.bodyHtml}</td></tr>
-      <tr><td style="padding:24px 32px;background:#f8fafc;border-top:1px solid #e2e8f0;font-size:12px;color:#64748b;text-align:center;">
+      <tr><td style="padding:24px 32px;background:#f8fafc;border-top:1px solid #e2e8f0;font-size:12px;color:#64748b;text-align:center;line-height:1.6;">
         ${footer}
       </td></tr>
     </table>
@@ -14872,11 +23415,242 @@ ${opts.preheader ? `<div style="display:none;max-height:0;overflow:hidden;">${es
 </table></body></html>`;
 }
 
+/**
+ * Staff notify helpers sometimes pass body fragments (no chrome). Wrap those in
+ * emailLayout; leave full documents alone (already branded / voice builders).
+ */
+export function ensureBrandedEmailHtml(opts: {
+  title: string;
+  html: string;
+  preheader?: string;
+  lang?: string;
+}): string {
+  const html = String(opts.html || "").trim();
+  if (!html) {
+    return emailLayout({
+      title: opts.title,
+      preheader: opts.preheader,
+      bodyHtml: "",
+      lang: opts.lang,
+    });
+  }
+  if (/<!doctype\s+html/i.test(html) || /<html[\s>]/i.test(html)) {
+    return html;
+  }
+  return emailLayout({
+    title: opts.title,
+    preheader: opts.preheader ?? opts.title.slice(0, 120),
+    bodyHtml: html,
+    lang: opts.lang,
+  });
+}
+
+export function tplAdminWorkTaskAssigned(opts: {
+  adminFirstName: string;
+  title: string;
+  linkUrl: string;
+  lang?: string;
+}) {
+  const isEs = opts.lang === "es";
+  const safeName = escapeHtml(opts.adminFirstName || (isEs ? "equipo" : "there"));
+  const safeTitle = escapeHtml(opts.title);
+  const headline = isEs ? "Tarea asignada" : "Task assigned";
+  const body = isEs
+    ? `<h1 style="margin:0 0 16px;font-size:22px;font-weight:800;color:#0f172a;">${headline}</h1>
+       <p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#334155;">Hola ${safeName},</p>
+       <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">
+         Se te asignó una tarea: <strong>${safeTitle}</strong>.
+       </p>
+       ${emailButton(opts.linkUrl, "Abrir Mis Tareas")}`
+    : `<h1 style="margin:0 0 16px;font-size:22px;font-weight:800;color:#0f172a;">${headline}</h1>
+       <p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#334155;">Hi ${safeName},</p>
+       <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">
+         You were assigned a work task: <strong>${safeTitle}</strong>.
+       </p>
+       ${emailButton(opts.linkUrl, "Open My Tasks")}`;
+  return {
+    subject: isEs
+      ? `Tarea asignada: ${opts.title}`.slice(0, 200)
+      : `Task assigned: ${opts.title}`.slice(0, 200),
+    html: emailLayout({
+      title: headline,
+      preheader: opts.title.slice(0, 120),
+      bodyHtml: body,
+      lang: opts.lang,
+    }),
+  };
+}
+
+export function tplAdminWorkTaskOverdue(opts: {
+  adminFirstName: string;
+  title: string;
+  dueAt: Date | string;
+  linkUrl: string;
+  lang?: string;
+}) {
+  const isEs = opts.lang === "es";
+  const safeName = escapeHtml(opts.adminFirstName || (isEs ? "equipo" : "there"));
+  const safeTitle = escapeHtml(opts.title);
+  const dueLabel = escapeHtml(
+    new Date(opts.dueAt).toLocaleString(isEs ? "es-US" : "en-US"),
+  );
+  const headline = isEs ? "Tarea vencida" : "Overdue task";
+  const body = isEs
+    ? `<h1 style="margin:0 0 16px;font-size:22px;font-weight:800;color:#0f172a;">${headline}</h1>
+       <p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#334155;">Hola ${safeName},</p>
+       <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">
+         Esta tarea está vencida: <strong>${safeTitle}</strong>.
+       </p>
+       <p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:#64748b;">Vence: ${dueLabel}</p>
+       ${emailButton(opts.linkUrl, "Abrir Mis Tareas")}`
+    : `<h1 style="margin:0 0 16px;font-size:22px;font-weight:800;color:#0f172a;">${headline}</h1>
+       <p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#334155;">Hi ${safeName},</p>
+       <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">
+         This work task is overdue: <strong>${safeTitle}</strong>.
+       </p>
+       <p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:#64748b;">Due: ${dueLabel}</p>
+       ${emailButton(opts.linkUrl, "Open My Tasks")}`;
+  return {
+    subject: isEs
+      ? `Tarea vencida: ${opts.title}`.slice(0, 200)
+      : `Overdue task: ${opts.title}`.slice(0, 200),
+    html: emailLayout({
+      title: headline,
+      preheader: opts.title.slice(0, 120),
+      bodyHtml: body,
+      lang: opts.lang,
+    }),
+  };
+}
+
 function emailButton(url: string, label: string) {
   return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0;">
   <tr><td style="border-radius:10px;background:#C0A06A;">
     <a href="${url}" style="display:inline-block;padding:14px 28px;color:#121829;text-decoration:none;font-weight:700;font-size:15px;border-radius:10px;">${escapeHtml(label)}</a>
   </td></tr></table>`;
+}
+
+const PROGRESS_ALERT_TYPE_LABELS: Record<
+  ProgressReportAlertType,
+  { en: string; es: string }
+> = {
+  personal_info_mismatch: {
+    en: "Personal info mismatch",
+    es: "Datos personales no coinciden",
+  },
+  closed_still_reporting: {
+    en: "Closed account still reporting",
+    es: "Cuenta cerrada aún reportando",
+  },
+  hard_inquiry_open: {
+    en: "Open hard inquiry",
+    es: "Consulta dura abierta",
+  },
+  utilization_increase: {
+    en: "Utilization increase",
+    es: "Aumento de utilización",
+  },
+};
+
+/** Staff email + in-app copy for progress-report publish/MCP alerts. */
+export function tplProgressReportAlerts(opts: {
+  clientName: string;
+  round: number;
+  alerts: ProgressReportAlert[];
+  linkUrl: string;
+  lang?: string;
+  context?: "publish" | "mcp";
+}): {
+  subject: string;
+  html: string;
+  inAppTitle: string;
+  inAppBody: string;
+  linkUrl: string;
+  smsBody: string;
+} {
+  const isEs = opts.lang === "es";
+  const count = opts.alerts.length;
+  const safeName = escapeHtml(opts.clientName);
+  const alertWord = isEs
+    ? count === 1
+      ? "alerta"
+      : "alertas"
+    : count === 1
+      ? "alert"
+      : "alerts";
+  const subject = isEs
+    ? `Alertas de reporte R${opts.round} — ${opts.clientName}`
+    : `Progress report alerts R${opts.round} — ${opts.clientName}`;
+  const headline = isEs ? "Alertas de reporte" : "Progress report alerts";
+  const intro = isEs
+    ? `<strong>${count}</strong> ${alertWord} para <strong>${safeName}</strong> · Ronda ${opts.round}.`
+    : `<strong>${count}</strong> ${alertWord} for <strong>${safeName}</strong> · Round ${opts.round}.`;
+  const cards = opts.alerts
+    .slice(0, 8)
+    .map((a) => {
+      const typeLabel =
+        PROGRESS_ALERT_TYPE_LABELS[a.type]?.[isEs ? "es" : "en"] || a.type;
+      const sevLabel =
+        a.severity === "critical"
+          ? isEs
+            ? "Crítico"
+            : "Critical"
+          : isEs
+            ? "Advertencia"
+            : "Warning";
+      const border =
+        a.severity === "critical" ? "#dc2626" : "#C0A06A";
+      const badgeBg =
+        a.severity === "critical" ? "#fef2f2" : "#faf6ef";
+      const badgeFg =
+        a.severity === "critical" ? "#b91c1c" : "#8a6d3b";
+      return `<tr><td style="padding:0 0 12px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #e2e8f0;border-left:4px solid ${border};border-radius:10px;background:#f8fafc;">
+          <tr><td style="padding:14px 16px;">
+            <div style="font-size:11px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;color:${badgeFg};margin-bottom:6px;">
+              <span style="display:inline-block;padding:2px 8px;border-radius:999px;background:${badgeBg};">${escapeHtml(sevLabel)}</span>
+              <span style="margin-left:8px;color:#64748b;font-weight:600;text-transform:none;letter-spacing:0;">${escapeHtml(typeLabel)}</span>
+            </div>
+            <div style="font-size:15px;font-weight:700;color:#0f172a;margin-bottom:4px;">${escapeHtml(a.title)}</div>
+            <div style="font-size:13px;line-height:1.55;color:#475569;">${escapeHtml(a.detail)}</div>
+          </td></tr>
+        </table>
+      </td></tr>`;
+    })
+    .join("");
+  const more =
+    opts.alerts.length > 8
+      ? isEs
+        ? `<p style="margin:0 0 12px;font-size:12px;color:#64748b;">+${opts.alerts.length - 8} más en el CRM.</p>`
+        : `<p style="margin:0 0 12px;font-size:12px;color:#64748b;">+${opts.alerts.length - 8} more in the CRM.</p>`
+      : "";
+  const html = `<h1 style="margin:0 0 12px;font-size:22px;font-weight:800;color:#0f172a;">${headline}</h1>
+    <p style="margin:0 0 20px;font-size:15px;line-height:1.6;color:#334155;">${intro}</p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">${cards}</table>
+    ${more}
+    ${emailButton(opts.linkUrl, isEs ? "Abrir cliente" : "Open client")}`;
+  const plainLines = opts.alerts.slice(0, 8).map((a) => {
+    const typeLabel =
+      PROGRESS_ALERT_TYPE_LABELS[a.type]?.[isEs ? "es" : "en"] || a.type;
+    return `• ${typeLabel}: ${a.title} — ${a.detail}`;
+  });
+  const contextNote =
+    opts.context === "mcp"
+      ? isEs
+        ? " (MCP)"
+        : " (MCP)"
+      : "";
+  const inAppBody = isEs
+    ? `${count} ${alertWord} Round ${opts.round}${contextNote}:\n${plainLines.join("\n")}`
+    : `${count} ${alertWord} on Round ${opts.round}${contextNote}:\n${plainLines.join("\n")}`;
+  return {
+    subject,
+    html,
+    inAppTitle: subject,
+    inAppBody: inAppBody.slice(0, 280),
+    linkUrl: opts.linkUrl,
+    smsBody: subject.slice(0, 320),
+  };
 }
 
 function tplOtpLogin(opts: {
@@ -15192,6 +23966,7 @@ function tplRoundComplete(opts: {
   scoreAfter?: number | null;
   itemsRemoved: number;
   portalUrl: string;
+  securePdfUrl?: string | null;
   lang?: string;
 }) {
   const isEs = opts.lang === "es";
@@ -15199,6 +23974,7 @@ function tplRoundComplete(opts: {
     opts.scoreBefore != null && opts.scoreAfter != null
       ? opts.scoreAfter - opts.scoreBefore
       : null;
+  const secure = String(opts.securePdfUrl || "").trim();
   const body = `
     <h1 style="margin:0 0 12px;font-size:26px;font-weight:800;color:#0f172a;">${isEs ? `Ronda ${opts.roundNumber} completada` : `Round ${opts.roundNumber} is complete`}</h1>
     <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">${isEs ? `Hola ${escapeHtml(opts.firstName)}, aquí está tu actualización de progreso mensual.` : `Hi ${escapeHtml(opts.firstName)}, here's your monthly progress update.`}</p>
@@ -15215,7 +23991,15 @@ function tplRoundComplete(opts: {
         </td>
       </tr>
     </table>
-    ${emailButton(opts.portalUrl, isEs ? "Ver informe completo" : "View Full Report")}`;
+    ${emailButton(opts.portalUrl, isEs ? "Ver en mi portal" : "View in My Portal")}
+    ${
+      secure
+        ? emailButton(
+            secure,
+            isEs ? "Descargar informe (PDF)" : "Download report (PDF)",
+          )
+        : ""
+    }`;
   return {
     subject: isEs
       ? `Ronda ${opts.roundNumber} completada — tu informe de progreso está listo`
@@ -15355,10 +24139,67 @@ async function loadWizardSourcePdfBuffer(
   );
   if (rows.length === 0) throw new Error("Source PDF not found");
   const row = rows[0];
-  const resp = await fetch(row.storage_key as string);
-  if (!resp.ok) throw new Error("Failed to fetch source PDF from CDN");
-  const encBuf = Buffer.from(await resp.arrayBuffer());
+  const storageKey = row.storage_key as string;
+  let encBuf: Buffer;
+  if (process.env.VITEST === "true" && storageKey.startsWith("vitest://")) {
+    const cached = vitestCdnPlaintextByUrl.get(storageKey);
+    if (!cached) throw new Error("Failed to fetch source PDF from CDN");
+    encBuf = Buffer.from(cached);
+  } else {
+    const resp = await fetch(storageKey);
+    if (!resp.ok) throw new Error("Failed to fetch source PDF from CDN");
+    encBuf = Buffer.from(await resp.arrayBuffer());
+  }
   return decrypt(encBuf, row.enc_iv as string, row.enc_tag as string);
+}
+
+async function loadStagedWizardPdfBuffer(
+  pool: Pool,
+  stagedId: number,
+  caseId: number,
+  adminId: number,
+  decrypt: (encrypted: Buffer, ivHex: string, tagHex: string) => Buffer,
+): Promise<{ buffer: Buffer; fileName: string }> {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT id, case_id, file_name, storage_key, enc_iv, enc_tag, uploaded_by_admin_id,
+            consumed_at, expires_at
+     FROM report_wizard_staged_pdfs
+     WHERE id = ? LIMIT 1`,
+    [stagedId],
+  );
+  if (rows.length === 0) {
+    throw new Error("Staged Before PDF not found");
+  }
+  const row = rows[0];
+  if (Number(row.case_id) !== caseId) {
+    throw new Error("Staged Before PDF does not belong to this case");
+  }
+  if (Number(row.uploaded_by_admin_id) !== adminId) {
+    throw new Error("Staged Before PDF was uploaded by another admin");
+  }
+  if (row.consumed_at) {
+    throw new Error("Staged Before PDF was already used");
+  }
+  if (new Date(row.expires_at as string).getTime() < Date.now()) {
+    throw new Error("Staged Before PDF expired — re-upload the Before PDF");
+  }
+  const storageKey = row.storage_key as string;
+  let encBuf: Buffer;
+  if (process.env.VITEST === "true" && storageKey.startsWith("vitest://")) {
+    const cached = vitestCdnPlaintextByUrl.get(storageKey);
+    if (!cached) throw new Error("Failed to fetch staged PDF from CDN");
+    encBuf = Buffer.from(cached);
+  } else {
+    const resp = await fetch(storageKey);
+    if (!resp.ok) throw new Error("Failed to fetch staged PDF from CDN");
+    encBuf = Buffer.from(await resp.arrayBuffer());
+  }
+  const buffer = decrypt(
+    encBuf,
+    row.enc_iv as string,
+    row.enc_tag as string,
+  );
+  return { buffer, fileName: String(row.file_name || "before.pdf") };
 }
 
 function parseWizardJsonField<T>(val: unknown): T | null {
@@ -15450,6 +24291,88 @@ async function runClaudeOfgReportNarrative(opts: {
   }
 }
 
+/** Fill missing bureau scores/dates from PDF text when heuristics fail. */
+async function runClaudeBureauScoreExtract(opts: {
+  data: OfGReportData;
+  beforePdfText: string;
+  afterPdfText: string;
+  fillDates?: boolean;
+}): Promise<{
+  data: OfGReportData;
+  filled: string[];
+  used: boolean;
+  error?: string;
+}> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return {
+      data: opts.data,
+      filled: [],
+      used: false,
+      error: "ANTHROPIC_API_KEY not set",
+    };
+  }
+  const model = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
+  const payload = {
+    current_scores: opts.data.bureauScores,
+    current_dates: opts.data.reportDate,
+    before_pdf_excerpt: (opts.beforePdfText || "").slice(0, 14000),
+    after_pdf_excerpt: (opts.afterPdfText || "").slice(0, 14000),
+  };
+  try {
+    const resp = await axios.post(
+      "https://api.anthropic.com/v1/messages",
+      {
+        model,
+        max_tokens: 800,
+        temperature: 0,
+        system: OFG_CLAUDE_SCORE_EXTRACT_SYSTEM,
+        messages: [
+          {
+            role: "user",
+            content:
+              "Extract before/after bureau scores (and report dates if clear) from these PDF excerpts. Do not invent scores.\n\n" +
+              JSON.stringify(payload),
+          },
+        ],
+      },
+      {
+        headers: {
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json",
+        },
+        timeout: 45_000,
+      },
+    );
+    const text = String(resp.data?.content?.[0]?.text || "");
+    const draft = parseClaudeBureauScoresJson(text);
+    if (!draft) {
+      return {
+        data: opts.data,
+        filled: [],
+        used: false,
+        error: "Claude returned no parseable score JSON",
+      };
+    }
+    const merged = mergeClaudeBureauScores(opts.data, draft, {
+      fillDates: opts.fillDates === true,
+    });
+    return {
+      data: merged.data,
+      filled: merged.filled,
+      used: merged.filled.length > 0,
+    };
+  } catch (e: any) {
+    return {
+      data: opts.data,
+      filled: [],
+      used: false,
+      error: String(e?.message || e).slice(0, 200),
+    };
+  }
+}
+
 async function runWizardSessionExtraction(
   pool: Pool,
   session: RowDataPacket,
@@ -15470,6 +24393,22 @@ async function runWizardSessionExtraction(
   const beforeBuf = await loadWizardSourcePdfBuffer(pool, beforePdfId, decrypt);
   const afterBuf = await loadWizardSourcePdfBuffer(pool, afterPdfId, decrypt);
 
+  const caseId = Number(session.case_id);
+  let compareMode: ReportCompareModeInline = "baseline";
+  let maxRounds = DEFAULT_MAX_ROUNDS;
+  try {
+    const [modeRows] = await pool.query<RowDataPacket[]>(
+      `SELECT report_compare_mode, max_rounds FROM credit_repair_cases WHERE id = ? LIMIT 1`,
+      [caseId],
+    );
+    compareMode = normalizeReportCompareModeInline(
+      modeRows[0]?.report_compare_mode,
+    );
+    maxRounds = clampMaxRounds(modeRows[0]?.max_rounds);
+  } catch {
+    /* default baseline */
+  }
+
   const { data, meta } = await extractFromCreditReportPdfs(
     beforeBuf,
     afterBuf,
@@ -15480,6 +24419,21 @@ async function runWizardSessionExtraction(
       spanish: options.spanish,
       tradelineRec: options.tradeline_rec,
       fundingNote: options.funding_note,
+      compareMode,
+      maxRounds,
+      incrementalBeforeBuffer:
+        compareMode === "baseline" && roundNumber > 1
+          ? await loadPriorRoundAfterBuffer(
+              pool,
+              caseId,
+              roundNumber,
+              decrypt,
+            )
+          : null,
+      enrollmentBeforeBuffer:
+        compareMode === "chain" && roundNumber > 1
+          ? await loadEnrollmentBeforeBuffer(pool, caseId, decrypt)
+          : null,
     },
   );
 
@@ -15487,19 +24441,107 @@ async function runWizardSessionExtraction(
   meta.before_reused_from_session_id =
     session.before_reused_from_session_id ?? null;
 
+  // Round 2+: when Before is the published prior After PDF, prefer that
+  // session's reviewed after scores over re-parsing the same PDF (which often
+  // grabs junk like identical 500 balances).
+  if (
+    session.before_source === "prior_round" &&
+    session.before_reused_from_session_id
+  ) {
+    const priorScores = await loadPriorRoundAfterBureauScores(
+      pool,
+      Number(session.before_reused_from_session_id),
+    );
+    if (priorScores) {
+      data.bureauScores.transunion.before =
+        priorScores.transunion ?? data.bureauScores.transunion.before;
+      data.bureauScores.experian.before =
+        priorScores.experian ?? data.bureauScores.experian.before;
+      data.bureauScores.equifax.before =
+        priorScores.equifax ?? data.bureauScores.equifax.before;
+      const mid = middleScore({
+        transunion: data.bureauScores.transunion.before || null,
+        experian: data.bureauScores.experian.before || null,
+        equifax: data.bureauScores.equifax.before || null,
+      });
+      if (mid != null) data.middleScore.before = mid;
+      meta.before_scores_from_prior_session = true;
+      meta.confidence = buildConfidence(
+        {
+          transunion: data.bureauScores.transunion.before || null,
+          experian: data.bureauScores.experian.before || null,
+          equifax: data.bureauScores.equifax.before || null,
+        },
+        {
+          transunion: data.bureauScores.transunion.after || null,
+          experian: data.bureauScores.experian.after || null,
+          equifax: data.bureauScores.equifax.after || null,
+        },
+      );
+    }
+  }
+
   // Default on when key is set; pass enhanceWithClaude=false to skip
   const wantEnhance = opts?.enhanceWithClaude !== false;
-  if (wantEnhance && process.env.ANTHROPIC_API_KEY) {
-    let afterText = "";
+  let working = data;
+
+  // Parse PDF text once for score fallback + narrative context.
+  let beforeText = "";
+  let afterText = "";
+  if (process.env.ANTHROPIC_API_KEY) {
     try {
       const pdfParse = await loadPdfParse();
-      const parsed = await pdfParse(afterBuf);
-      afterText = String(parsed?.text || "");
+      const [beforeParsed, afterParsed] = await Promise.all([
+        pdfParse(beforeBuf),
+        pdfParse(afterBuf),
+      ]);
+      beforeText = String(beforeParsed?.text || "");
+      afterText = String(afterParsed?.text || "");
     } catch {
-      /* optional context */
+      /* optional */
     }
+  }
+
+  const conf = (meta.confidence || null) as Record<string, number> | null;
+  const datesNeedHelp =
+    meta.before_date_from_pdf === false || meta.after_date_from_pdf === false;
+  if (
+    process.env.ANTHROPIC_API_KEY &&
+    (needsClaudeScoreFallback(working, conf) || datesNeedHelp)
+  ) {
+    const scoreResult = await runClaudeBureauScoreExtract({
+      data: working,
+      beforePdfText: beforeText,
+      afterPdfText: afterText,
+      fillDates: datesNeedHelp,
+    });
+    working = scoreResult.data;
+    meta.claude_scores = scoreResult.used;
+    meta.claude_scores_filled = scoreResult.filled;
+    meta.claude_scores_error = scoreResult.error ?? null;
+    meta.claude_scores_at = new Date().toISOString();
+    if (scoreResult.used) {
+      meta.confidence = buildConfidence(
+        {
+          transunion: working.bureauScores.transunion.before || null,
+          experian: working.bureauScores.experian.before || null,
+          equifax: working.bureauScores.equifax.before || null,
+        },
+        {
+          transunion: working.bureauScores.transunion.after || null,
+          experian: working.bureauScores.experian.after || null,
+          equifax: working.bureauScores.equifax.after || null,
+        },
+      );
+      meta.extraction_method = "heuristic_structured+claude_scores";
+    }
+  } else {
+    meta.claude_scores = false;
+  }
+
+  if (wantEnhance && process.env.ANTHROPIC_API_KEY) {
     const narrative = await runClaudeOfgReportNarrative({
-      data,
+      data: working,
       afterPdfText: afterText,
     });
     meta.claude_narrative = narrative.enhanced;
@@ -15509,7 +24551,29 @@ async function runWizardSessionExtraction(
   }
 
   meta.claude_narrative = false;
-  return { data, meta };
+  return { data: working, meta };
+}
+
+/** Published prior-round after scores (reviewed preferred). */
+async function loadPriorRoundAfterBureauScores(
+  pool: Pool,
+  priorSessionId: number,
+): Promise<BureauScores | null> {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT reviewed_json, extracted_json FROM report_wizard_sessions
+     WHERE id = ? AND status = 'published' LIMIT 1`,
+    [priorSessionId],
+  );
+  if (!rows[0]) return null;
+  const reviewed = parseWizardJsonField<OfGReportData>(rows[0].reviewed_json);
+  const extracted = parseWizardJsonField<OfGReportData>(rows[0].extracted_json);
+  const src = reviewed ?? extracted;
+  if (!src?.bureauScores) return null;
+  return {
+    transunion: src.bureauScores.transunion?.after || null,
+    experian: src.bureauScores.experian?.after || null,
+    equifax: src.bureauScores.equifax?.after || null,
+  };
 }
 
 async function hasPublishedWizardRound(
@@ -15528,6 +24592,203 @@ async function hasPublishedWizardRound(
   sql += ` LIMIT 1`;
   const [rows] = await pool.query<RowDataPacket[]>(sql, params);
   return rows.length > 0;
+}
+
+/** Keep in sync with api/roundReportReset.ts (pure helpers; no runtime import). */
+function cascadeRoundsFromReset(
+  fromRound: number,
+  maxRounds: number = DEFAULT_MAX_ROUNDS,
+): number[] {
+  return cascadeRoundsFrom(fromRound, maxRounds);
+}
+
+function resolveResetPipelineTargetStage(opts: {
+  fromRound: number;
+  historyFromStage?: string | null;
+  maxRounds?: number;
+}): string {
+  const hist = String(opts.historyFromStage || "").trim();
+  if (hist) return hist;
+  const max = clampMaxRounds(opts.maxRounds);
+  const n = Math.floor(opts.fromRound);
+  if (!(n >= 1 && n <= max)) return "round_1";
+  if (n >= DEFAULT_MAX_ROUNDS) return "round_5";
+  return `round_${n}`;
+}
+
+const ROUND_RESET_EMAIL_WARNING_INLINE =
+  "Client and referral partners may already have received Round PDF(s) by email/SMS. Reset cannot unsend those messages.";
+
+function buildRoundResetWarningsInline(mayHaveBeenSent: boolean): string[] {
+  return mayHaveBeenSent ? [ROUND_RESET_EMAIL_WARNING_INLINE] : [];
+}
+
+type RoundResetPreview = {
+  client_id: number;
+  client_name: string;
+  case_id: number | null;
+  reset_from_round: number;
+  max_rounds: number;
+  rounds_to_clear: number[];
+  rounds_with_data: number[];
+  report_ids: number[];
+  pdf_ids: number[];
+  pdf_storage_urls: string[];
+  session_ids: number[];
+  staged_pdf_ids: number[];
+  pipeline: { from: string; to: string };
+  warnings: string[];
+};
+
+async function buildRoundReportResetPreview(
+  clientId: number,
+  fromRound: number,
+): Promise<RoundResetPreview | { error: string; status: number }> {
+  const [clients] = await pool.query<RowDataPacket[]>(
+    `SELECT id, first_name, last_name, pipeline_stage
+     FROM clients WHERE id = ? LIMIT 1`,
+    [clientId],
+  );
+  if (!clients[0]) return { error: "Client not found", status: 404 };
+
+  const caseId = await resolveActiveCaseId(pool, clientId, null);
+  let pipelineFrom = String(clients[0].pipeline_stage || "");
+  let maxRounds = DEFAULT_MAX_ROUNDS;
+  if (caseId) {
+    const [cases] = await pool.query<RowDataPacket[]>(
+      `SELECT pipeline_stage, max_rounds FROM credit_repair_cases WHERE id = ? LIMIT 1`,
+      [caseId],
+    );
+    if (cases[0]?.pipeline_stage) {
+      pipelineFrom = String(cases[0].pipeline_stage);
+    }
+    maxRounds = clampMaxRounds(cases[0]?.max_rounds);
+  }
+
+  if (!(fromRound >= 1 && fromRound <= maxRounds)) {
+    return {
+      error: `round_number must be 1–${maxRounds}`,
+      status: 400,
+    };
+  }
+
+  const rounds = cascadeRoundsFromReset(fromRound, maxRounds);
+  const [reports] = await pool.query<RowDataPacket[]>(
+    `SELECT id, round_number, pdf_storage_key,
+            delivered_via_email, delivered_via_sms
+     FROM client_round_reports
+     WHERE client_id = ? AND round_number IN (?)`,
+    [clientId, rounds],
+  );
+  const [pdfs] = await pool.query<RowDataPacket[]>(
+    `SELECT id, round_number, storage_key
+     FROM round_report_pdfs
+     WHERE client_id = ? AND round_number IN (?)`,
+    [clientId, rounds],
+  );
+  const [sessions] = await pool.query<RowDataPacket[]>(
+    `SELECT id, round_number, status
+     FROM report_wizard_sessions
+     WHERE client_id = ? AND round_number IN (?)`,
+    [clientId, rounds],
+  );
+
+  // Unconsumed staged Before PDFs for this case (no round FK — clear on any reset).
+  let stagedRows: RowDataPacket[] = [];
+  if (caseId) {
+    const [staged] = await pool.query<RowDataPacket[]>(
+      `SELECT id, storage_key FROM report_wizard_staged_pdfs
+       WHERE client_id = ? AND case_id = ? AND consumed_at IS NULL`,
+      [clientId, caseId],
+    );
+    stagedRows = staged;
+  }
+
+  const roundsWithData = Array.from(
+    new Set([
+      ...reports.map((r) => Number(r.round_number)),
+      ...pdfs.map((p) => Number(p.round_number)),
+      ...sessions.map((s) => Number(s.round_number)),
+    ]),
+  )
+    .filter((r) => r >= fromRound && r <= maxRounds)
+    .sort((a, b) => a - b);
+
+  // Staged-only does not make a round "resettable" alone, but we still clear
+  // staged blobs when resetting rounds that have data.
+  if (!roundsWithData.length) {
+    return {
+      error: "Nothing to reset for this round (no report, PDF, or wizard session)",
+      status: 404,
+    };
+  }
+
+  const [hist] = await pool.query<RowDataPacket[]>(
+    `SELECT from_stage FROM client_pipeline_history
+     WHERE client_id = ?
+       AND notes LIKE ?
+     ORDER BY id DESC
+     LIMIT 1`,
+    [clientId, `OFG Progress Report published — Round ${fromRound}%`],
+  );
+
+  const pipelineTo = resolveResetPipelineTargetStage({
+    fromRound,
+    historyFromStage: hist[0]?.from_stage
+      ? String(hist[0].from_stage)
+      : null,
+    maxRounds,
+  });
+
+  const sessionIds = sessions.map((s) => Number(s.id));
+  let sourcePdfUrls: string[] = [];
+  if (sessionIds.length) {
+    const [sourcePdfs] = await pool.query<RowDataPacket[]>(
+      `SELECT storage_key FROM round_report_source_pdfs
+       WHERE session_id IN (?)`,
+      [sessionIds],
+    );
+    sourcePdfUrls = sourcePdfs
+      .map((p) => String(p.storage_key || ""))
+      .filter(Boolean);
+  }
+
+  const stagedIds = stagedRows.map((s) => Number(s.id));
+  const stagedUrls = stagedRows
+    .map((s) => String(s.storage_key || ""))
+    .filter(Boolean);
+
+  const pdfUrls = [
+    ...pdfs.map((p) => String(p.storage_key || "")).filter(Boolean),
+    ...reports
+      .map((r) => String(r.pdf_storage_key || ""))
+      .filter(Boolean),
+    ...sourcePdfUrls,
+    ...stagedUrls,
+  ];
+
+  const mayHaveBeenSent = reports.some(
+    (r) =>
+      Number(r.delivered_via_email) === 1 || Number(r.delivered_via_sms) === 1,
+  );
+
+  return {
+    client_id: clientId,
+    client_name:
+      `${clients[0].first_name || ""} ${clients[0].last_name || ""}`.trim(),
+    case_id: caseId,
+    reset_from_round: fromRound,
+    max_rounds: maxRounds,
+    rounds_to_clear: rounds,
+    rounds_with_data: roundsWithData,
+    report_ids: reports.map((r) => Number(r.id)),
+    pdf_ids: pdfs.map((p) => Number(p.id)),
+    pdf_storage_urls: Array.from(new Set(pdfUrls)),
+    session_ids: sessionIds,
+    staged_pdf_ids: stagedIds,
+    pipeline: { from: pipelineFrom, to: pipelineTo },
+    warnings: buildRoundResetWarningsInline(mayHaveBeenSent),
+  };
 }
 
 function formatWizardSessionResponse(session: RowDataPacket) {
@@ -15549,14 +24810,20 @@ export type ReportWizardBeforeContext = {
   report_date_after: string | null;
   score_after: number | null;
   middle_score_after: number | null;
+  /** baseline (default) or chain — drives which PDF is reused as Before. */
+  compare_mode?: ReportCompareModeInline;
+  /** Which PDF role to load from prior_session_id when reusing. */
+  reuse_pdf_role?: "before" | "after";
 };
 
-/** Resolve whether Round N can reuse Round N−1's published "after" PDF as Before. */
+/** Resolve reusable Before PDF for Round N (enrollment baseline or prior After). */
 async function resolveWizardBeforeContext(
   pool: Pool,
   caseId: number,
   roundNumber: number,
+  compareMode: ReportCompareModeInline = "baseline",
 ): Promise<ReportWizardBeforeContext> {
+  const mode = normalizeReportCompareModeInline(compareMode);
   if (roundNumber <= 1) {
     return {
       source: "enrollment",
@@ -15567,9 +24834,63 @@ async function resolveWizardBeforeContext(
       report_date_after: null,
       score_after: null,
       middle_score_after: null,
+      compare_mode: mode,
+      reuse_pdf_role: "before",
     };
   }
 
+  // Baseline: reuse Round 1 enrollment Before PDF (scores vs where they started).
+  if (mode === "baseline") {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT s.id, s.round_number, s.before_pdf_id, s.extracted_json, s.reviewed_json,
+              p.file_name
+       FROM report_wizard_sessions s
+       LEFT JOIN round_report_source_pdfs p ON p.id = s.before_pdf_id
+       WHERE s.case_id = ? AND s.round_number = 1 AND s.status = 'published'
+         AND s.before_pdf_id IS NOT NULL
+       ORDER BY s.published_at DESC, s.id DESC
+       LIMIT 1`,
+      [caseId],
+    );
+    if (rows.length === 0) {
+      return {
+        source: "none",
+        can_reuse: false,
+        prior_session_id: null,
+        prior_round: 1,
+        file_name: null,
+        report_date_after: null,
+        score_after: null,
+        middle_score_after: null,
+        compare_mode: mode,
+        reuse_pdf_role: "before",
+      };
+    }
+    const row = rows[0];
+    const reviewed = parseWizardJsonField<OfGReportData>(row.reviewed_json);
+    const extracted = parseWizardJsonField<OfGReportData>(row.extracted_json);
+    const data = reviewed ?? extracted;
+    return {
+      source: "enrollment",
+      can_reuse: true,
+      prior_session_id: row.id as number,
+      prior_round: 1,
+      file_name: (row.file_name as string) || null,
+      report_date_after: data?.reportDate?.before ?? null,
+      score_after:
+        data?.middleScore?.before != null
+          ? Number(data.middleScore.before)
+          : null,
+      middle_score_after:
+        data?.middleScore?.before != null
+          ? Number(data.middleScore.before)
+          : null,
+      compare_mode: mode,
+      reuse_pdf_role: "before",
+    };
+  }
+
+  // Chain (legacy): reuse Round N−1 After as Before.
   const priorRound = roundNumber - 1;
   const [rows] = await pool.query<RowDataPacket[]>(
     `SELECT s.id, s.round_number, s.after_pdf_id, s.extracted_json, s.reviewed_json,
@@ -15594,6 +24915,8 @@ async function resolveWizardBeforeContext(
       report_date_after: null,
       score_after: null,
       middle_score_after: null,
+      compare_mode: mode,
+      reuse_pdf_role: "after",
     };
   }
 
@@ -15618,7 +24941,66 @@ async function resolveWizardBeforeContext(
           ? Number(middleAfter)
           : null,
     middle_score_after: middleAfter != null ? Number(middleAfter) : null,
+    compare_mode: mode,
+    reuse_pdf_role: "after",
   };
+}
+
+/** Load published prior-round After PDF bytes (for incremental / this-round wins). */
+async function loadPriorRoundAfterBuffer(
+  pool: Pool,
+  caseId: number,
+  roundNumber: number,
+  decryptFileFn: typeof decryptFile,
+): Promise<Buffer | null> {
+  if (roundNumber <= 1) return null;
+  const priorRound = roundNumber - 1;
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT s.after_pdf_id
+     FROM report_wizard_sessions s
+     WHERE s.case_id = ? AND s.round_number = ? AND s.status = 'published'
+       AND s.after_pdf_id IS NOT NULL
+     ORDER BY s.published_at DESC, s.id DESC
+     LIMIT 1`,
+    [caseId, priorRound],
+  );
+  if (!rows[0]?.after_pdf_id) return null;
+  try {
+    return await loadWizardSourcePdfBuffer(
+      pool,
+      Number(rows[0].after_pdf_id),
+      decryptFileFn,
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** Load Round 1 enrollment Before PDF bytes (for since-enrollment wins in chain mode). */
+async function loadEnrollmentBeforeBuffer(
+  pool: Pool,
+  caseId: number,
+  decryptFileFn: typeof decryptFile,
+): Promise<Buffer | null> {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT s.before_pdf_id
+     FROM report_wizard_sessions s
+     WHERE s.case_id = ? AND s.round_number = 1 AND s.status = 'published'
+       AND s.before_pdf_id IS NOT NULL
+     ORDER BY s.published_at DESC, s.id DESC
+     LIMIT 1`,
+    [caseId],
+  );
+  if (!rows[0]?.before_pdf_id) return null;
+  try {
+    return await loadWizardSourcePdfBuffer(
+      pool,
+      Number(rows[0].before_pdf_id),
+      decryptFileFn,
+    );
+  } catch {
+    return null;
+  }
 }
 
 function tplRoundPdfReady(opts: {
@@ -15814,9 +25196,10 @@ function tplCaseStarted(opts: {
 }
 
 // ============================================================================
-// PROSPECT CONVERT WELCOME EMAIL (5A/7A — dedicated template, NOT
-// payment_confirmed/tplClientWelcome, sent when a prospect is converted
-// to a client + case by an admin without ever taking a payment)
+// PROSPECT CONVERT / NEW CASE WELCOME EMAIL (5A/7A — dedicated template, NOT
+// payment_confirmed/tplClientWelcome). Sent when a prospect is converted to a
+// client + case by an admin without ever taking a payment, and when New Case
+// creates a case at pipeline_stage=new_client (Get Started / docs upload link).
 // ============================================================================
 function tplProspectConvertWelcome(opts: {
   firstName: string;
@@ -15853,6 +25236,194 @@ function tplProspectConvertWelcome(opts: {
       lang: opts.lang,
     }),
   };
+}
+
+// Keep in sync with api/getCreditReportLead.ts (Vercel: no sibling runtime import).
+const MFSN_FREE_SNAPSHOT_URL =
+  "https://app.myfreescorenow.com/credit-snapshot/29544?s=MXxmYWxzZQ%3D%3D";
+const GET_CREDIT_REPORT_SMS_FROM_E164 = "+19496740714"; // César OFG (prospect welcome From)
+const GET_CREDIT_REPORT_SOURCE_LABEL = "get_credit_report";
+const GOLF_TOURNAMENT_LABEL_SLUG = "golf_tournament_prospect";
+const LAS_VEGAS_EVENT_LABEL_SLUG = "las_vegas_event";
+
+function smsGetCreditReportStaffAlert(opts: {
+  firstName: string;
+  lastName: string;
+  phone: string;
+  email: string;
+  lang?: string;
+  eventKind?: "golf" | "vegas" | null;
+  pipelineUrl: string;
+}): string {
+  const name =
+    `${String(opts.firstName || "").trim()} ${String(opts.lastName || "").trim()}`.trim() ||
+    "Lead";
+  const lang = opts.lang === "es" ? "ES" : "EN";
+  const event =
+    opts.eventKind === "golf"
+      ? " · golf"
+      : opts.eventKind === "vegas"
+        ? " · vegas"
+        : "";
+  const phone = String(opts.phone || "").trim();
+  const email = String(opts.email || "").trim();
+  const url = String(opts.pipelineUrl || "").trim();
+  return `OFG free-report lead: ${name} · ${phone} · ${email} · ${lang}${event}. ${url}`.slice(
+    0,
+    320,
+  );
+}
+
+function laCalendarDateYmd(now: Date = new Date()): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(now);
+}
+
+function getCreditReportEventLabelSlug(
+  ymd: string = laCalendarDateYmd(),
+): string | null {
+  if (ymd === "2026-09-14") return GOLF_TOURNAMENT_LABEL_SLUG;
+  if (ymd === "2026-09-15") return LAS_VEGAS_EVENT_LABEL_SLUG;
+  return null;
+}
+
+function getCreditReportLabelSlugs(
+  ymd: string = laCalendarDateYmd(),
+): string[] {
+  const slugs = [GET_CREDIT_REPORT_SOURCE_LABEL];
+  const event = getCreditReportEventLabelSlug(ymd);
+  if (event) slugs.push(event);
+  return slugs;
+}
+
+function getCreditReportEventKind(
+  ymd: string = laCalendarDateYmd(),
+): "golf" | "vegas" | null {
+  if (ymd === "2026-09-14") return "golf";
+  if (ymd === "2026-09-15") return "vegas";
+  return null;
+}
+
+function tplGetCreditReportWelcome(opts: {
+  firstName: string;
+  mfsnUrl: string;
+  lang?: string;
+  eventKind?: "golf" | "vegas" | null;
+}) {
+  const isEs = opts.lang === "es";
+  const name = escapeHtml(opts.firstName || (isEs ? "amigo/a" : "there"));
+  const event = opts.eventKind ?? null;
+  let headline: string;
+  let intro: string;
+  let subject: string;
+  let preheader: string;
+  if (event === "golf") {
+    headline = isEs
+      ? `¡Gracias por visitarnos en el torneo de golf, ${name}!`
+      : `Thanks for connecting at the golf tournament, ${name}!`;
+    intro = isEs
+      ? "El siguiente paso es obtener tu reporte de crédito gratis (soft pull) con nuestro socio de confianza."
+      : "Next step: pull your free credit snapshot (soft pull) with our trusted partner.";
+    subject = isEs
+      ? "Tu reporte gratis — torneo de golf OFG"
+      : "Your free credit report — OFG golf tournament";
+    preheader = isEs
+      ? "Un clic para tu snapshot de crédito gratis."
+      : "One tap for your free credit snapshot.";
+  } else if (event === "vegas") {
+    headline = isEs
+      ? `¡Gracias por conocernos en Las Vegas, ${name}!`
+      : `Thanks for meeting us in Las Vegas, ${name}!`;
+    intro = isEs
+      ? "Obtén tu reporte de crédito gratis ahora — es un soft pull seguro."
+      : "Get your free credit snapshot now — it's a secure soft pull.";
+    subject = isEs
+      ? "Tu reporte gratis — evento Las Vegas OFG"
+      : "Your free credit report — OFG Las Vegas event";
+    preheader = isEs
+      ? "Tu CTA al reporte gratis está listo."
+      : "Your free-report CTA is ready.";
+  } else {
+    headline = isEs
+      ? `Tu reporte de crédito gratis te espera, ${name}`
+      : `Your free credit report is ready, ${name}`;
+    intro = isEs
+      ? "Gracias por confiar en Optimum Financial Group. Usa el botón para obtener tu snapshot gratis (soft pull) con MyFreeScoreNow."
+      : "Thanks for trusting Optimum Financial Group. Use the button below for your free snapshot (soft pull) via MyFreeScoreNow.";
+    subject = isEs
+      ? "Tu reporte de crédito gratis — Optimum"
+      : "Your free credit report — Optimum";
+    preheader = isEs
+      ? "Revisa también tu SMS — o abre el reporte ahora."
+      : "Check your SMS too — or open your report now.";
+  }
+  const cta = isEs ? "Obtener mi reporte gratis" : "Get my free report";
+  const body = `<h1 style="margin:0 0 16px;font-size:26px;font-weight:800;color:#0f172a;">${headline}</h1>
+    <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">${intro}</p>
+    <div style="margin:20px 0;padding:16px 20px;background:#f8fafc;border-left:4px solid #C0A06A;border-radius:8px;">
+      <div style="font-size:13px;font-weight:700;color:#121829;">${isEs ? "Soft pull · sin impacto en tu score" : "Soft pull · no score impact"}</div>
+      <div style="font-size:13px;color:#64748b;margin-top:4px;">${isEs ? "También te enviamos un SMS con el enlace corto." : "We also texted you a short OFG link."}</div>
+    </div>
+    ${emailButton(opts.mfsnUrl, cta)}
+    <p style="margin:24px 0 0;font-size:13px;color:#64748b;">${isEs ? "¿Preguntas? Responde este correo — con gusto te ayudamos." : "Questions? Just reply — we're happy to help."}</p>`;
+  return {
+    subject,
+    html: emailLayout({
+      title: isEs ? "Reporte gratis" : "Free credit report",
+      preheader,
+      bodyHtml: body,
+      lang: opts.lang,
+    }),
+  };
+}
+
+function smsGetCreditReportWelcome(opts: {
+  firstName: string;
+  shortUrl: string;
+  lang?: string;
+  eventKind?: "golf" | "vegas" | null;
+}): string {
+  const isEs = opts.lang === "es";
+  const name = String(opts.firstName || "").trim() || (isEs ? "hola" : "hi");
+  const url = opts.shortUrl;
+  if (opts.eventKind === "golf") {
+    return isEs
+      ? `Hola ${name}, gracias por el torneo de golf. Tu reporte gratis: ${url}`
+      : `Hi ${name}, thanks for connecting at the golf tournament. Free report: ${url}`;
+  }
+  if (opts.eventKind === "vegas") {
+    return isEs
+      ? `Hola ${name}, gracias por Las Vegas. Tu reporte gratis: ${url}`
+      : `Hi ${name}, thanks for meeting us in Las Vegas. Free report: ${url}`;
+  }
+  return isEs
+    ? `Hola ${name}, Optimum Financial Group: obtén tu reporte gratis aquí: ${url}`
+    : `Hi ${name}, Optimum Financial Group: get your free credit report here: ${url}`;
+}
+
+async function resolveGetCreditReportSmsFromE164(): Promise<string | null> {
+  const envOverride = String(
+    process.env.GET_CREDIT_REPORT_SMS_FROM_E164 || "",
+  ).trim();
+  if (envOverride) return envOverride;
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT e164 FROM admin_phone_numbers
+     WHERE is_active = 1 AND (
+       e164 = ? OR e164 = ? OR REPLACE(e164,'+','') = ?
+     )
+     LIMIT 1`,
+    [
+      GET_CREDIT_REPORT_SMS_FROM_E164,
+      GET_CREDIT_REPORT_SMS_FROM_E164.replace(/^\+/, ""),
+      GET_CREDIT_REPORT_SMS_FROM_E164.replace(/\D/g, ""),
+    ],
+  );
+  if (rows[0]?.e164) return String(rows[0].e164);
+  return GET_CREDIT_REPORT_SMS_FROM_E164;
 }
 
 // ============================================================================
@@ -15977,6 +25548,7 @@ const ADMIN_NOTIFY_EVENT_KEYS: AdminNotifyEventKey[] = [
   "voicemail",
   "funding_doc_upload",
   "funding_application_created",
+  "get_credit_report_lead",
   "progress_report_alerts",
   "morning_digest",
 ];
@@ -15997,6 +25569,7 @@ function allAdminNotifyEventsOn(): AdminNotifyEventToggles {
     voicemail: true,
     funding_doc_upload: true,
     funding_application_created: true,
+    get_credit_report_lead: true,
     progress_report_alerts: true,
     morning_digest: true,
   };
@@ -16117,6 +25690,29 @@ async function appendClientFileSmsNote(
     return true;
   } catch (noteErr: any) {
     console.error("[sms] client file note", noteErr?.message ?? noteErr);
+    return false;
+  }
+}
+
+/** Append outreach log to CRM Contacts address-book `admin_notes`. */
+async function appendContactFileNote(
+  contactId: number,
+  stamped: string,
+): Promise<boolean> {
+  try {
+    await pool.query(
+      `UPDATE contacts
+       SET admin_notes = CONCAT(
+             COALESCE(admin_notes, ''),
+             CASE WHEN admin_notes IS NULL OR admin_notes = '' THEN '' ELSE '\n' END,
+             ?
+           )
+       WHERE id = ? AND deleted_at IS NULL`,
+      [stamped.slice(0, 8000), contactId],
+    );
+    return true;
+  } catch (noteErr: any) {
+    console.error("[contact] file note", noteErr?.message ?? noteErr);
     return false;
   }
 }
@@ -16467,6 +26063,12 @@ async function listActiveNotifyExtraEmails(): Promise<
         .trim()
         .toLowerCase();
       if (!email || !isValidEmail(email)) continue;
+      if (
+        isUndeliverableNotifyEmail(email) &&
+        process.env.VITEST !== "true"
+      ) {
+        continue;
+      }
       out.push({
         id: Number(r.id),
         email,
@@ -16490,10 +26092,16 @@ async function emailAdminNotifyExtraRecipients(opts: {
   html: string;
   eventKey: AdminNotifyEventKey;
   skipEmails?: Set<string>;
+  lang?: string;
 }): Promise<number> {
   const extras = await listActiveNotifyExtraEmails();
   if (!extras.length) return 0;
   const skip = opts.skipEmails || new Set<string>();
+  const brandedHtml = ensureBrandedEmailHtml({
+    title: opts.subject,
+    html: opts.html,
+    lang: opts.lang,
+  });
   let sent = 0;
   await Promise.all(
     extras.map(async (row) => {
@@ -16503,7 +26111,7 @@ async function emailAdminNotifyExtraRecipients(opts: {
         await sendEmail({
           to: row.email,
           subject: opts.subject,
-          html: opts.html,
+          html: brandedHtml,
         });
         sent += 1;
         skip.add(row.email);
@@ -16515,6 +26123,28 @@ async function emailAdminNotifyExtraRecipients(opts: {
   return sent;
 }
 
+/**
+ * Vitest / integration-test mailbox domains. Never fan out team alerts or
+ * surface these rows in production staff UI (People, Team notifications, MCP).
+ * Keep in sync with api/testDbCleanup.ts TEST_EMAIL_SUFFIXES.
+ */
+function isIntegrationTestAdminEmail(email: string | null | undefined): boolean {
+  const e = String(email || "")
+    .trim()
+    .toLowerCase();
+  return e.endsWith("@example.test") || e.endsWith("@affiliate.test");
+}
+
+/** SQL AND-fragment for admins queries (leading AND). */
+const SQL_EXCLUDE_INTEGRATION_TEST_ADMIN_EMAIL = `
+  AND LOWER(TRIM(COALESCE(email, ''))) NOT LIKE '%@example.test'
+  AND LOWER(TRIM(COALESCE(email, ''))) NOT LIKE '%@affiliate.test'`;
+
+/** Hide fixture staff from People / Settings UI outside Vitest. */
+function hideIntegrationTestStaffFromAdminUi(): boolean {
+  return process.env.VITEST !== "true";
+}
+
 type TeamAdminRecipient = {
   id: number;
   email: string;
@@ -16524,14 +26154,20 @@ type TeamAdminRecipient = {
   prefs: AdminNotificationPrefs;
 };
 
-/** Active Optimum staff (excludes affiliate portal users). */
+/** Active Optimum staff (excludes affiliate portal users).
+ * Outside Vitest, skip leftover `@example.test` / `@affiliate.test` fixture
+ * admins so they never receive real purchase/inbound fan-out. Under Vitest,
+ * include them so ephemeral-agent suites (e.g. notification prefs) can assert
+ * delivery without mutating real staff prefs. */
 async function listActiveTeamAdmins(): Promise<TeamAdminRecipient[]> {
+  const excludeFixtures = process.env.VITEST !== "true";
   const [rows] = await pool.query<RowDataPacket[]>(
     `SELECT id, email, first_name, phone, preferred_language, notification_prefs_json
      FROM admins
      WHERE status = 'active'
        AND role IN ('super_admin', 'admin', 'agent')
-       AND email IS NOT NULL AND TRIM(email) <> ''`,
+       AND email IS NOT NULL AND TRIM(email) <> ''
+       ${excludeFixtures ? SQL_EXCLUDE_INTEGRATION_TEST_ADMIN_EMAIL : ""}`,
   );
   return rows.map((r) => ({
     id: Number(r.id),
@@ -16644,7 +26280,7 @@ async function gatherMorningDigestSnapshot(
       (lang === "es" ? "Contacto" : "Contact"),
     unread: Number(cv.unread_count || 0),
     preview: cv.last_message_preview
-      ? String(cv.last_message_preview).slice(0, 140)
+      ? decodeLiteralUnicodeEscapes(String(cv.last_message_preview)).slice(0, 140)
       : null,
     status: String(cv.status || ""),
   }));
@@ -16864,13 +26500,19 @@ async function deliverAdminNotificationChannels(opts: {
 }): Promise<{ email: boolean; in_app: boolean; sms: boolean }> {
   const { admin, eventKey, tpl } = opts;
   const result = { email: false, in_app: false, sms: false };
+  const adminLang = admin.preferred_language === "es" ? "es" : "en";
+  const brandedHtml = ensureBrandedEmailHtml({
+    title: tpl.subject,
+    html: tpl.html,
+    lang: adminLang,
+  });
 
   if (adminNotifyPrefOn(admin.prefs, "email", eventKey)) {
     try {
       await sendEmail({
         to: admin.email,
         subject: tpl.subject,
-        html: tpl.html,
+        html: brandedHtml,
       });
       result.email = true;
     } catch (e: any) {
@@ -17482,11 +27124,16 @@ async function notifyFundingDocUpload(opts: {
   allDocsComplete: boolean;
 }): Promise<void> {
   const boardUrl = `${APP_URL}/admin/funding?id=${opts.applicationId}`;
-  const summary = opts.allDocsComplete
-    ? `All funding documents uploaded (${opts.docType}).`
-    : `Funding document uploaded: ${opts.docType}.`;
   await notifyAllTeamAdmins("funding_doc_upload", (admin) => {
     const lang = admin.preferred_language === "es" ? "es" : "en";
+    const summary =
+      lang === "es"
+        ? opts.allDocsComplete
+          ? `Todos los documentos de funding subidos (${opts.docType}).`
+          : `Documento de funding subido: ${opts.docType}.`
+        : opts.allDocsComplete
+          ? `All funding documents uploaded (${opts.docType}).`
+          : `Funding document uploaded: ${opts.docType}.`;
     const subject =
       lang === "es"
         ? opts.allDocsComplete
@@ -17495,9 +27142,22 @@ async function notifyFundingDocUpload(opts: {
         : opts.allDocsComplete
           ? `Funding complete — ${opts.clientName}`
           : `Funding document — ${opts.clientName}`;
+    const safeName = escapeHtml(opts.clientName);
+    const safeEmail = escapeHtml(opts.clientEmail);
+    const safeSummary = escapeHtml(summary);
+    const body =
+      lang === "es"
+        ? `<h1 style="margin:0 0 16px;font-size:22px;font-weight:800;color:#0f172a;">${escapeHtml(subject)}</h1>
+           <p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#334155;">${safeSummary}</p>
+           <p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:#64748b;">${safeName} &lt;${safeEmail}&gt;</p>
+           ${emailButton(boardUrl, "Abrir tablero de funding")}`
+        : `<h1 style="margin:0 0 16px;font-size:22px;font-weight:800;color:#0f172a;">${escapeHtml(subject)}</h1>
+           <p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#334155;">${safeSummary}</p>
+           <p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:#64748b;">${safeName} &lt;${safeEmail}&gt;</p>
+           ${emailButton(boardUrl, "Open Funding board")}`;
     return {
       subject,
-      html: `<p>${summary}</p><p>${opts.clientName} &lt;${opts.clientEmail}&gt;</p><p><a href="${boardUrl}">Open Funding board</a></p>`,
+      html: body,
       inAppTitle: subject,
       inAppBody: summary,
       linkUrl: boardUrl,
@@ -17534,9 +27194,22 @@ async function notifyFundingApplicationCreated(opts: {
       lang === "es"
         ? `Solicitud creada manualmente (${typeLabel}, ${opts.status}).`
         : `Application created manually (${typeLabel}, ${opts.status}).`;
+    const safeName = escapeHtml(opts.clientName);
+    const safeEmail = escapeHtml(opts.clientEmail);
+    const safeSummary = escapeHtml(summary);
+    const body =
+      lang === "es"
+        ? `<h1 style="margin:0 0 16px;font-size:22px;font-weight:800;color:#0f172a;">${escapeHtml(subject)}</h1>
+           <p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#334155;">${safeSummary}</p>
+           <p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:#64748b;">${safeName} &lt;${safeEmail}&gt;</p>
+           ${emailButton(boardUrl, "Abrir tablero de funding")}`
+        : `<h1 style="margin:0 0 16px;font-size:22px;font-weight:800;color:#0f172a;">${escapeHtml(subject)}</h1>
+           <p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#334155;">${safeSummary}</p>
+           <p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:#64748b;">${safeName} &lt;${safeEmail}&gt;</p>
+           ${emailButton(boardUrl, "Open Funding board")}`;
     return {
       subject,
-      html: `<p>${summary}</p><p>${opts.clientName} &lt;${opts.clientEmail}&gt;</p><p><a href="${boardUrl}">Open Funding board</a></p>`,
+      html: body,
       inAppTitle: subject,
       inAppBody: summary,
       linkUrl: boardUrl,
@@ -17572,6 +27245,89 @@ async function notifyFundingApplicationCreated(opts: {
   } catch (e: any) {
     console.error("[funding:created-client-email]", e?.message ?? e);
   }
+}
+
+/** Team alert when /get-credit-report public form captures a prospect. */
+async function notifyGetCreditReportLead(opts: {
+  clientId: number;
+  firstName: string;
+  lastName: string;
+  email: string;
+  phone: string;
+  lang: string;
+  eventKind: "golf" | "vegas" | null;
+}): Promise<void> {
+  const clientName =
+    `${opts.firstName} ${opts.lastName}`.trim() || opts.email || "Lead";
+  const pipelineUrl = `${APP_URL}/admin/pipeline?client=${opts.clientId}`;
+  await notifyAllTeamAdmins("get_credit_report_lead", (admin) => {
+    const adminLang = admin.preferred_language === "es" ? "es" : "en";
+    const eventLabel =
+      opts.eventKind === "golf"
+        ? adminLang === "es"
+          ? "Torneo de golf"
+          : "Golf tournament"
+        : opts.eventKind === "vegas"
+          ? "Las Vegas"
+          : null;
+    const langLabel = opts.lang === "es" ? "ES" : "EN";
+    const subject =
+      adminLang === "es"
+        ? `Reporte gratis — ${clientName}`
+        : `Free credit report lead — ${clientName}`;
+    const summary =
+      adminLang === "es"
+        ? [
+            `${opts.phone} · ${opts.email} · ${langLabel}`,
+            eventLabel ? `Evento: ${eventLabel}` : null,
+          ]
+            .filter(Boolean)
+            .join(" · ")
+        : [
+            `${opts.phone} · ${opts.email} · ${langLabel}`,
+            eventLabel ? `Event: ${eventLabel}` : null,
+          ]
+            .filter(Boolean)
+            .join(" · ");
+    const safeName = escapeHtml(clientName);
+    const safeEmail = escapeHtml(opts.email);
+    const safePhone = escapeHtml(opts.phone);
+    const safeSummary = escapeHtml(summary);
+    const body =
+      adminLang === "es"
+        ? `<h1 style="margin:0 0 16px;font-size:22px;font-weight:800;color:#0f172a;">${escapeHtml(subject)}</h1>
+           <p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#334155;">
+             Nuevo lead del formulario público de reporte gratis.
+           </p>
+           <p style="margin:0 0 8px;font-size:14px;line-height:1.6;color:#64748b;">${safeName}</p>
+           <p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:#64748b;">${safePhone} · ${safeEmail}</p>
+           <p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:#334155;">${safeSummary}</p>
+           ${emailButton(pipelineUrl, "Abrir en pipeline")}`
+        : `<h1 style="margin:0 0 16px;font-size:22px;font-weight:800;color:#0f172a;">${escapeHtml(subject)}</h1>
+           <p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#334155;">
+             New lead from the public free credit report form.
+           </p>
+           <p style="margin:0 0 8px;font-size:14px;line-height:1.6;color:#64748b;">${safeName}</p>
+           <p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:#64748b;">${safePhone} · ${safeEmail}</p>
+           <p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:#334155;">${safeSummary}</p>
+           ${emailButton(pipelineUrl, "Open in pipeline")}`;
+    return {
+      subject,
+      html: body,
+      inAppTitle: subject,
+      inAppBody: summary,
+      linkUrl: pipelineUrl,
+      smsBody: smsGetCreditReportStaffAlert({
+        firstName: opts.firstName,
+        lastName: opts.lastName,
+        phone: opts.phone,
+        email: opts.email,
+        lang: opts.lang,
+        eventKind: opts.eventKind,
+        pipelineUrl,
+      }),
+    };
+  });
 }
 
 async function maybeNotifyFundingClientDocsComplete(opts: {
@@ -17711,9 +27467,170 @@ async function countRequiredOnboardingProgress(
 }
 
 /**
+ * Day 2/3 payment_confirmed “upload your documents” nudges must not fire once
+ * Get Started is fully submitted (pending admin QC) or the case has left
+ * New Client / Prospect. Cancels pending/processing queue rows.
+ */
+async function cancelPaymentConfirmedUploadNudges(
+  clientId: number,
+  reason = "Cancelled: required Get Started tasks submitted (pending review)",
+): Promise<number> {
+  const [result] = await pool.query<ResultSetHeader>(
+    `UPDATE notification_queue
+     SET status = 'cancelled',
+         error_message = COALESCE(error_message, ?),
+         provider_message_id = NULL
+     WHERE client_id = ?
+       AND status IN ('pending', 'processing')
+       AND JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.trigger_event')) = 'payment_confirmed'`,
+    [reason.slice(0, 500), clientId],
+  );
+  return Number(result.affectedRows || 0);
+}
+
+/** Cron / send guard: suppress payment_confirmed upload nudges when inappropriate. */
+async function shouldSuppressPaymentConfirmedUploadNudges(
+  clientId: number,
+): Promise<boolean> {
+  if (!clientId || clientId <= 0) return false;
+  const [caseRows] = await pool.query<RowDataPacket[]>(
+    `SELECT id, pipeline_stage FROM credit_repair_cases
+     WHERE client_id = ? AND status = 'active'
+     ORDER BY id DESC LIMIT 1`,
+    [clientId],
+  );
+  if (!caseRows[0]) return true;
+  const stage = String(caseRows[0].pipeline_stage || "");
+  if (stage !== "new_client" && stage !== "prospect") return true;
+  const progress = await countRequiredOnboardingProgress(Number(caseRows[0].id));
+  return progress.required > 0 && progress.completed >= progress.required;
+}
+
+/** Test-only: cron soft-skip / cancel helpers. */
+export async function __testShouldSuppressPaymentConfirmedUploadNudges(
+  clientId: number,
+): Promise<boolean> {
+  return shouldSuppressPaymentConfirmedUploadNudges(clientId);
+}
+
+export async function __testCancelPaymentConfirmedUploadNudges(
+  clientId: number,
+): Promise<number> {
+  return cancelPaymentConfirmedUploadNudges(clientId);
+}
+
+/**
+ * Email every linked referral partner (all categories) with the Round PDF.
+ * Used by wizard publish, MCP send_round_report, and admin resend.
+ * Returns how many partner emails succeeded.
+ */
+async function emailLinkedReferrerPartnersRoundPdf(opts: {
+  clientId: number;
+  roundNumber: number;
+  clientName: string;
+  langFallback: "en" | "es";
+  pdfAttachment: {
+    filename: string;
+    content: Buffer;
+    contentType: string;
+  };
+}): Promise<number> {
+  const [partnerRows] = await pool.query<RowDataPacket[]>(
+    `SELECT r.email, r.first_name, r.preferred_language
+     FROM client_referrers cr
+     INNER JOIN referrers r ON r.id = cr.referrer_id AND r.status = 'active'
+     WHERE cr.client_id = ?`,
+    [opts.clientId],
+  );
+  const seen = new Set<string>();
+  let emailed = 0;
+  for (const p of partnerRows) {
+    const email = String(p.email || "")
+      .trim()
+      .toLowerCase();
+    if (!email || !email.includes("@") || seen.has(email)) continue;
+    seen.add(email);
+    const lang: "en" | "es" =
+      p.preferred_language === "es"
+        ? "es"
+        : p.preferred_language === "en"
+          ? "en"
+          : opts.langFallback;
+    const partnerTpl = tplReferrerRoundUpdate({
+      referrerFirstName: String(p.first_name || "Partner"),
+      clientName: opts.clientName || "Client",
+      stageLabel:
+        lang === "es"
+          ? `Ronda ${opts.roundNumber}`
+          : `Round ${opts.roundNumber}`,
+      lang,
+    });
+    const ok = await sendEmail({
+      to: email,
+      subject: partnerTpl.subject,
+      html: partnerTpl.html,
+      attachments: [opts.pdfAttachment],
+    })
+      .then(() => true)
+      .catch((err) => {
+        console.error(
+          "[emailLinkedReferrerPartnersRoundPdf] send failed:",
+          email,
+          err instanceof Error ? err.message : err,
+        );
+        return false;
+      });
+    if (ok) emailed += 1;
+  }
+  return emailed;
+}
+
+/** Count linked partners that have a usable email (for publish soft-warnings). */
+async function countLinkedReferrerPartnersWithEmail(
+  clientId: number,
+): Promise<{ linked: number; withEmail: number }> {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT
+       COUNT(*) AS linked,
+       SUM(CASE
+         WHEN r.email IS NOT NULL AND TRIM(r.email) <> '' AND r.email LIKE '%@%'
+         THEN 1 ELSE 0 END) AS with_email
+     FROM client_referrers cr
+     INNER JOIN referrers r ON r.id = cr.referrer_id AND r.status = 'active'
+     WHERE cr.client_id = ?`,
+    [clientId],
+  );
+  return {
+    linked: Number(rows[0]?.linked || 0),
+    withEmail: Number(rows[0]?.with_email || 0),
+  };
+}
+
+/**
+ * Pure publish helper: whether to fan out partner PDF mail vs flag a load failure.
+ * Exported for unit tests (wizard finalize partner path).
+ */
+export function computePartnersPdfNotifyFlags(opts: {
+  notifyPartners: boolean;
+  hasPdfAttachment: boolean;
+  partnersWithEmail: number;
+}): { shouldEmailPartners: boolean; partnersPdfLoadFailed: boolean } {
+  if (!opts.notifyPartners) {
+    return { shouldEmailPartners: false, partnersPdfLoadFailed: false };
+  }
+  if (opts.hasPdfAttachment) {
+    return { shouldEmailPartners: true, partnersPdfLoadFailed: false };
+  }
+  return {
+    shouldEmailPartners: false,
+    partnersPdfLoadFailed: opts.partnersWithEmail > 0,
+  };
+}
+
+/**
  * Phase 2: auto-email referral partners on round stage changes.
- * Fans out to all client_referrers with notify_on_round=1 (falls back to
- * legacy clients.referrer_id when junction empty).
+ * Fans out to linked client_referrers only (3A — no legacy referrer_id
+ * fallback; junction is mirrored by replaceClientReferrers). Toggle removed.
  */
 async function notifyReferrerRoundUpdate(
   clientId: number,
@@ -17730,34 +27647,27 @@ async function notifyReferrerRoundUpdate(
 
   const [linkRows] = await pool.query<RowDataPacket[]>(
     `SELECT r.id AS referrer_id, r.first_name AS ref_first, r.last_name AS ref_last,
-            r.email AS ref_email, r.preferred_language AS ref_lang, r.category AS ref_category,
+            r.email AS ref_email, r.phone AS ref_phone,
+            r.preferred_language AS ref_lang, r.category AS ref_category,
             cr.notify_on_round
      FROM client_referrers cr
      INNER JOIN referrers r ON r.id = cr.referrer_id AND r.status = 'active'
-     WHERE cr.client_id = ? AND cr.notify_on_round = 1
+     WHERE cr.client_id = ?
      ORDER BY cr.sort_order ASC, cr.id ASC`,
     [clientId],
   );
 
   let partners = linkRows;
-  if (!partners.length && client.referrer_id) {
-    const [legacy] = await pool.query<RowDataPacket[]>(
-      `SELECT id AS referrer_id, first_name AS ref_first, last_name AS ref_last,
-              email AS ref_email, preferred_language AS ref_lang, category AS ref_category,
-              1 AS notify_on_round
-       FROM referrers WHERE id = ? AND status = 'active' LIMIT 1`,
-      [client.referrer_id],
-    );
-    partners = legacy;
-  }
+  // 3A: only client_referrers — do not fall back to legacy clients.referrer_id
+  // (legacy mirror is kept in sync by replaceClientReferrers).
 
-  // Preserve legacy gate: round-update emails only when the client is
-  // realtor/broker-referred. When that gate passes, fan out to every linked
-  // partner with notify_on_round (multi-partner).
-  if (client.referral_category !== "realtor_broker") return;
+  // Every linked partner gets round updates (toggle removed — César Sep 2026).
+  // No realtor_broker-only gate.
 
   const labels = ROUND_STAGE_LABELS[stage];
   const clientName = `${client.first_name} ${client.last_name}`.trim();
+  const clientLang: "en" | "es" =
+    client.preferred_language === "es" ? "es" : "en";
   const seen = new Set<string>();
   for (const row of partners) {
     const email = String(row.ref_email || "")
@@ -17765,8 +27675,12 @@ async function notifyReferrerRoundUpdate(
       .toLowerCase();
     if (!email || !email.includes("@") || seen.has(email)) continue;
     seen.add(email);
-    const lang =
-      row.ref_lang === "es" || client.preferred_language === "es" ? "es" : "en";
+    const lang: "en" | "es" =
+      row.ref_lang === "es"
+        ? "es"
+        : row.ref_lang === "en"
+          ? "en"
+          : clientLang;
     const tpl = tplReferrerRoundUpdate({
       referrerFirstName: String(row.ref_first || "Partner"),
       clientName,
@@ -17786,6 +27700,548 @@ async function notifyReferrerRoundUpdate(
         err instanceof Error ? err.message : err,
       );
     }
+  }
+}
+
+async function resolveSignupSmsFromE164(): Promise<string | null> {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT setting_value FROM system_settings
+     WHERE setting_key = 'signup_notify_sms_from_phone_number_id' LIMIT 1`,
+  );
+  const id = Number(rows[0]?.setting_value || 0);
+  if (id > 0) {
+    const [phones] = await pool.query<RowDataPacket[]>(
+      `SELECT e164 FROM admin_phone_numbers WHERE id = ? AND is_active = 1 LIMIT 1`,
+      [id],
+    );
+    if (phones[0]?.e164) return String(phones[0].e164);
+  }
+  // Fallback: Lecca inventory number when setting empty
+  const [fallback] = await pool.query<RowDataPacket[]>(
+    `SELECT e164 FROM admin_phone_numbers
+     WHERE is_active = 1
+       AND REPLACE(REPLACE(REPLACE(e164, '+', ''), '-', ''), ' ', '') LIKE '%9497365644%'
+     ORDER BY id ASC LIMIT 1`,
+  );
+  return fallback[0]?.e164 ? String(fallback[0].e164) : null;
+}
+
+/** Lecca OFG line (signup From) + inventory id for Conversations logging. */
+async function resolveClientReminderSmsFrom(): Promise<{
+  e164: string;
+  phoneNumberId: number | null;
+  assignedAdminId: number | null;
+} | null> {
+  const e164 = await resolveSignupSmsFromE164();
+  if (!e164) return null;
+  const digits = e164.replace(/\D/g, "");
+  const [phones] = await pool.query<RowDataPacket[]>(
+    `SELECT id, assigned_admin_id, e164 FROM admin_phone_numbers
+     WHERE is_active = 1
+       AND REPLACE(REPLACE(REPLACE(e164, '+', ''), '-', ''), ' ', '') LIKE ?
+     ORDER BY id ASC LIMIT 1`,
+    [`%${digits.slice(-10)}%`],
+  );
+  return {
+    e164,
+    phoneNumberId: phones[0]?.id != null ? Number(phones[0].id) : null,
+    assignedAdminId:
+      phones[0]?.assigned_admin_id != null
+        ? Number(phones[0].assigned_admin_id)
+        : null,
+  };
+}
+
+async function isClientReminderSmsEnabled(): Promise<boolean> {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT setting_value FROM system_settings
+     WHERE setting_key = 'client_reminder_sms_enabled' LIMIT 1`,
+  );
+  const v = String(rows[0]?.setting_value ?? "1")
+    .trim()
+    .toLowerCase();
+  return v === "1" || v === "true" || v === "on" || v === "yes";
+}
+
+/** Short EN/ES SMS templates for reminder-flow triggers (portal / secure link). */
+function smsClientReminderBody(opts: {
+  triggerEvent: string;
+  firstName: string;
+  lang: string;
+  portalUrl: string;
+}): string {
+  const isEs = opts.lang === "es";
+  const name = String(opts.firstName || (isEs ? "hola" : "there")).trim();
+  const url = opts.portalUrl;
+  const ev = String(opts.triggerEvent || "");
+  if (ev === "docs_ready") {
+    return isEs
+      ? `Hola ${name}, tus documentos ya están listos en Optimum Credit. Revisa tu portal: ${url}`
+      : `Hi ${name}, your docs are ready with Optimum Credit. Check your portal: ${url}`;
+  }
+  if (ev.startsWith("round_") && ev.endsWith("_complete")) {
+    const n = ev.replace(/^round_/, "").replace(/_complete$/, "");
+    return isEs
+      ? `Hola ${name}, tu reporte de Ronda ${n} de Optimum Credit está listo. Descarga segura: ${url}`
+      : `Hi ${name}, your Optimum Credit Round ${n} report is ready. Secure download: ${url}`;
+  }
+  if (ev === "completed") {
+    return isEs
+      ? `Hola ${name}, ¡felicidades! Tu archivo de crédito con Optimum Credit está limpio. Portal: ${url}`
+      : `Hi ${name}, congrats — your Optimum Credit file is clean. Portal: ${url}`;
+  }
+  if (ev === "payment_due") {
+    return isEs
+      ? `Hola ${name}, recordatorio de pago Optimum Credit. Detalles en tu portal: ${url}`
+      : `Hi ${name}, Optimum Credit payment reminder. Details in your portal: ${url}`;
+  }
+  // payment_confirmed welcome / upload reminders (default)
+  return isEs
+    ? `Hola ${name}, Optimum Credit: sube tus documentos para continuar. Portal: ${url}`
+    : `Hi ${name}, Optimum Credit: upload your documents to continue. Portal: ${url}`;
+}
+
+/**
+ * After a reminder email succeeds: optional SMS + Conversations log.
+ * Round-complete can use the publishing admin's OFG (smsFromAdminId);
+ * otherwise Lecca / signup From via resolveClientReminderSmsFrom.
+ */
+async function maybeSendClientReminderSms(opts: {
+  clientId: number;
+  triggerEvent: string;
+  alsoSms: boolean;
+  portalUrl: string;
+  isSandbox?: boolean;
+  /** When set (e.g. round publish), SMS From = this admin's OFG line. */
+  smsFromAdminId?: number | null;
+}): Promise<{ sent: boolean; reason?: string }> {
+  if (opts.isSandbox) return { sent: false, reason: "sandbox" };
+  if (!opts.alsoSms) return { sent: false, reason: "step_also_sms_off" };
+  if (!(await isClientReminderSmsEnabled())) {
+    return { sent: false, reason: "master_off" };
+  }
+
+  const [clientRows] = await pool.query<RowDataPacket[]>(
+    `SELECT first_name, phone, preferred_language, assigned_admin_id
+     FROM clients WHERE id = ? LIMIT 1`,
+    [opts.clientId],
+  );
+  const client = clientRows[0];
+  if (!client?.phone) return { sent: false, reason: "no_phone" };
+
+  const lang = client.preferred_language === "es" ? "es" : "en";
+  const body = smsClientReminderBody({
+    triggerEvent: opts.triggerEvent,
+    firstName: String(client.first_name || ""),
+    lang,
+    portalUrl: opts.portalUrl,
+  }).slice(0, SMS_MAX_BODY_CHARS);
+  const toE164 = toSmsE164(String(client.phone));
+
+  // Publisher OFG for round reports; fall through to Lecca From if that fails.
+  if (opts.smsFromAdminId != null && Number(opts.smsFromAdminId) > 0) {
+    const sent = await sendClientSmsFromAdmin({
+      adminId: Number(opts.smsFromAdminId),
+      to: toE164,
+      body,
+    }).catch((e: any) => {
+      console.error("[flow:reminder-sms:admin]", e?.message ?? e);
+      return false;
+    });
+    if (sent) return { sent: true };
+    console.warn(
+      "[flow:reminder-sms] publisher OFG failed — falling back to reminder From",
+      opts.smsFromAdminId,
+    );
+  }
+
+  const from = await resolveClientReminderSmsFrom();
+  if (!from) return { sent: false, reason: "no_from_number" };
+
+  let providerSid: string | undefined;
+  let providerStatus: string | null = null;
+  let errorMessage: string | null = null;
+  try {
+    const result = await sendSms({
+      to: toE164,
+      body,
+      from: from.e164,
+    });
+    providerSid = result?.sid;
+    providerStatus = result?.status || "sent";
+  } catch (e: any) {
+    errorMessage = String(e?.message || e).slice(0, 480);
+    console.error("[reminder-sms]", opts.clientId, errorMessage);
+  }
+
+  try {
+    const assignee =
+      client.assigned_admin_id != null
+        ? Number(client.assigned_admin_id)
+        : from.assignedAdminId;
+    const conversationId = await getOrCreateClientChannelConversation({
+      clientId: opts.clientId,
+      channel: "sms",
+      ofgNumberId: from.phoneNumberId,
+      assignedAdminId: assignee,
+      reopenIfClosed: true,
+    });
+    const meta = JSON.stringify({
+      reminder_sms: true,
+      trigger_event: opts.triggerEvent,
+    });
+    const [ins] = await pool.query<ResultSetHeader>(
+      `INSERT INTO conversation_messages
+         (conversation_id, direction, channel, body, from_address, to_address,
+          sent_by_admin_id, provider_message_id, provider_status, error_message,
+          metadata_json)
+       VALUES (?, 'outbound', 'sms', ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        conversationId,
+        body,
+        from.e164,
+        toE164,
+        from.assignedAdminId,
+        providerSid || null,
+        providerStatus || (errorMessage ? "failed" : null),
+        errorMessage,
+        meta,
+      ],
+    );
+    await pool.query(
+      `UPDATE conversations
+       SET last_message_at = NOW(),
+           last_message_preview = ?,
+           assigned_admin_id = COALESCE(assigned_admin_id, ?)
+       WHERE id = ?`,
+      [body.slice(0, 200), assignee, conversationId],
+    );
+    await publishConversationRealtime({
+      type: "message",
+      payload: {
+        client_id: opts.clientId,
+        conversation_id: conversationId,
+        message_id: Number(ins.insertId),
+        contact: await conversationClientContactSnapshot(conversationId),
+      },
+    });
+  } catch (e: any) {
+    console.error(
+      "[reminder-sms:log]",
+      opts.clientId,
+      e?.message ?? e,
+    );
+  }
+
+  return errorMessage
+    ? { sent: false, reason: "sms_failed" }
+    : { sent: true };
+}
+
+function tplReferrerClientActivated(opts: {
+  referrerFirstName: string;
+  clientName: string;
+  caseNumber?: string | null;
+  lang?: string;
+}) {
+  const isEs = opts.lang === "es";
+  const caseBit = opts.caseNumber
+    ? isEs
+      ? ` (caso <strong>${escapeHtml(opts.caseNumber)}</strong>)`
+      : ` (case <strong>${escapeHtml(opts.caseNumber)}</strong>)`
+    : "";
+  const body = isEs
+    ? `<h1 style="margin:0 0 16px;font-size:22px;font-weight:800;color:#0f172a;">Referido activo</h1>
+       <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">
+         Hola ${escapeHtml(opts.referrerFirstName)}, tu referido
+         <strong>${escapeHtml(opts.clientName)}</strong>${caseBit} ya es cliente activo de Optimum Credit.
+         Te mantendremos al tanto en cada ronda.
+       </p>`
+    : `<h1 style="margin:0 0 16px;font-size:22px;font-weight:800;color:#0f172a;">Referral is active</h1>
+       <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">
+         Hi ${escapeHtml(opts.referrerFirstName)}, your referral
+         <strong>${escapeHtml(opts.clientName)}</strong>${caseBit} is now an active Optimum Credit client.
+         We'll keep you updated each round.
+       </p>`;
+  return {
+    subject: isEs
+      ? `Referido activo — ${opts.clientName}`
+      : `Referral active — ${opts.clientName}`,
+    html: emailLayout({
+      title: isEs ? "Referido activo" : "Referral active",
+      preheader: opts.clientName,
+      bodyHtml: body,
+      lang: opts.lang,
+    }),
+  };
+}
+
+function smsClientActivated(opts: {
+  firstName: string;
+  caseNumber?: string | null;
+  lang?: string;
+  /** Magic onboarding URL (same idea as welcome email). */
+  portalUrl: string;
+}): string {
+  const isEs = opts.lang === "es";
+  const caseBit = opts.caseNumber ? ` #${opts.caseNumber}` : "";
+  const url = String(opts.portalUrl || `${APP_URL}/portal`).trim();
+  if (isEs) {
+    return `Hola ${opts.firstName}, tu caso de Optimum Credit${caseBit} ya está activo. Completa tus tareas de inicio: ${url}`;
+  }
+  return `Hi ${opts.firstName}, your Optimum Credit case${caseBit} is now active. Complete Get Started: ${url}`;
+}
+
+function smsReferrerClientActivated(opts: {
+  referrerFirstName: string;
+  clientName: string;
+  lang?: string;
+}): string {
+  const isEs = opts.lang === "es";
+  if (isEs) {
+    return `Hola ${opts.referrerFirstName}, tu referido ${opts.clientName} ya es cliente activo en Optimum Credit.`;
+  }
+  return `Hi ${opts.referrerFirstName}, your referral ${opts.clientName} is now an active Optimum Credit client.`;
+}
+
+/**
+ * César Sep 2026: on convert / first paid enrollment, automatically SMS+email
+ * the client and every linked referral partner. From = Lecca OFG line when set.
+ * Idempotent via clients.activation_notified_at.
+ * Client SMS uses a magic onboarding link (same as welcome email when shared).
+ */
+async function fireClientActivatedNotifications(opts: {
+  clientId: number;
+  source: "convert" | "payment" | "new_case";
+  /** When set (e.g. convert already minted), reuse for SMS — same link as email. */
+  portalUrl?: string | null;
+}): Promise<{
+  fired: boolean;
+  clientSms: boolean;
+  partnerEmail: number;
+  partnerSms: number;
+}> {
+  const empty = {
+    fired: false,
+    clientSms: false,
+    partnerEmail: 0,
+    partnerSms: 0,
+  };
+  try {
+    const [claim] = await pool.query<ResultSetHeader>(
+      `UPDATE clients
+       SET activation_notified_at = NOW()
+       WHERE id = ? AND activation_notified_at IS NULL`,
+      [opts.clientId],
+    );
+    if (Number(claim.affectedRows || 0) === 0) {
+      return empty;
+    }
+
+    const [clientRows] = await pool.query<RowDataPacket[]>(
+      `SELECT c.id, c.first_name, c.last_name, c.email, c.phone, c.preferred_language,
+              c.referrer_id, c.assigned_admin_id,
+              (SELECT crc.case_number FROM credit_repair_cases crc
+               WHERE crc.client_id = c.id AND crc.status = 'active'
+               ORDER BY crc.id DESC LIMIT 1) AS case_number
+       FROM clients c WHERE c.id = ? LIMIT 1`,
+      [opts.clientId],
+    );
+    const client = clientRows[0];
+    if (!client) return empty;
+
+    const lang = client.preferred_language === "es" ? "es" : "en";
+    const clientName =
+      `${client.first_name || ""} ${client.last_name || ""}`.trim() || "Client";
+    const caseNumber = client.case_number ? String(client.case_number) : null;
+    const fromE164 = await resolveSignupSmsFromE164();
+
+    let clientSms = false;
+    if (client.phone && fromE164) {
+      try {
+        let portalUrl = String(opts.portalUrl || "").trim();
+        if (!portalUrl) {
+          const rawToken = await createOnboardingToken(opts.clientId);
+          portalUrl = `${APP_URL}/portal/onboarding/${rawToken}`;
+        }
+        const body = smsClientActivated({
+          firstName: String(client.first_name || "there"),
+          caseNumber,
+          lang,
+          portalUrl,
+        }).slice(0, SMS_MAX_BODY_CHARS);
+        const toE164 = toSmsE164(String(client.phone));
+        let providerSid: string | undefined;
+        let providerStatus: string | null = null;
+        let errorMessage: string | null = null;
+        try {
+          const result = await sendSms({
+            to: toE164,
+            body,
+            from: fromE164,
+          });
+          providerSid = result?.sid;
+          providerStatus = result?.status || "sent";
+          clientSms = true;
+        } catch (e: any) {
+          errorMessage = String(e?.message || e).slice(0, 480);
+          console.error(
+            "[activation:client-sms]",
+            opts.clientId,
+            errorMessage,
+          );
+        }
+        // Log to Conversations (same hub as reminder SMS / manual outbound).
+        try {
+          const fromMeta = await resolveClientReminderSmsFrom();
+          const assignee =
+            client.assigned_admin_id != null
+              ? Number(client.assigned_admin_id)
+              : fromMeta?.assignedAdminId ?? null;
+          const conversationId = await getOrCreateClientChannelConversation({
+            clientId: opts.clientId,
+            channel: "sms",
+            ofgNumberId: fromMeta?.phoneNumberId ?? null,
+            assignedAdminId: assignee,
+            reopenIfClosed: true,
+          });
+          const meta = JSON.stringify({
+            activation_sms: true,
+            source: opts.source,
+          });
+          const [ins] = await pool.query<ResultSetHeader>(
+            `INSERT INTO conversation_messages
+               (conversation_id, direction, channel, body, from_address, to_address,
+                sent_by_admin_id, provider_message_id, provider_status, error_message,
+                metadata_json)
+             VALUES (?, 'outbound', 'sms', ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              conversationId,
+              body,
+              fromE164,
+              toE164,
+              fromMeta?.assignedAdminId ?? null,
+              providerSid || null,
+              providerStatus || (errorMessage ? "failed" : null),
+              errorMessage,
+              meta,
+            ],
+          );
+          await pool.query(
+            `UPDATE conversations
+             SET last_message_at = NOW(),
+                 last_message_preview = ?,
+                 assigned_admin_id = COALESCE(assigned_admin_id, ?)
+             WHERE id = ?`,
+            [body.slice(0, 200), assignee, conversationId],
+          );
+          await publishConversationRealtime({
+            type: "message",
+            payload: {
+              client_id: opts.clientId,
+              conversation_id: conversationId,
+              message_id: Number(ins.insertId),
+              contact: await conversationClientContactSnapshot(conversationId),
+            },
+          });
+        } catch (e: any) {
+          console.error(
+            "[activation:client-sms:log]",
+            opts.clientId,
+            e?.message ?? e,
+          );
+        }
+      } catch (e: any) {
+        console.error(
+          "[activation:client-sms]",
+          opts.clientId,
+          e?.message ?? e,
+        );
+      }
+    } else if (client.phone && !fromE164) {
+      console.warn(
+        "[activation:client-sms] skipped — signup_notify_sms_from not configured",
+      );
+    }
+
+    const [linkRows] = await pool.query<RowDataPacket[]>(
+      `SELECT r.id AS referrer_id, r.first_name AS ref_first, r.last_name AS ref_last,
+              r.email AS ref_email, r.phone AS ref_phone,
+              r.preferred_language AS ref_lang
+       FROM client_referrers cr
+       INNER JOIN referrers r ON r.id = cr.referrer_id AND r.status = 'active'
+       WHERE cr.client_id = ?
+       ORDER BY cr.sort_order ASC, cr.id ASC`,
+      [opts.clientId],
+    );
+    let partners = linkRows;
+    if (!partners.length && client.referrer_id) {
+      const [legacy] = await pool.query<RowDataPacket[]>(
+        `SELECT id AS referrer_id, first_name AS ref_first, last_name AS ref_last,
+                email AS ref_email, phone AS ref_phone, preferred_language AS ref_lang
+         FROM referrers WHERE id = ? AND status = 'active' LIMIT 1`,
+        [client.referrer_id],
+      );
+      partners = legacy;
+    }
+
+    let partnerEmail = 0;
+    let partnerSms = 0;
+    const seenEmail = new Set<string>();
+    const seenPhone = new Set<string>();
+    for (const row of partners) {
+      const refLang =
+        row.ref_lang === "es" || lang === "es" ? "es" : "en";
+      const refFirst = String(row.ref_first || "Partner");
+      const email = String(row.ref_email || "")
+        .trim()
+        .toLowerCase();
+      if (email && email.includes("@") && !seenEmail.has(email)) {
+        seenEmail.add(email);
+        try {
+          const tpl = tplReferrerClientActivated({
+            referrerFirstName: refFirst,
+            clientName,
+            caseNumber,
+            lang: refLang,
+          });
+          await sendEmail({ to: email, subject: tpl.subject, html: tpl.html });
+          partnerEmail += 1;
+        } catch (e: any) {
+          console.error("[activation:partner-email]", email, e?.message ?? e);
+        }
+      }
+      const phone = String(row.ref_phone || "").trim();
+      const phoneKey = phone.replace(/\D/g, "");
+      if (phone && fromE164 && phoneKey.length >= 10 && !seenPhone.has(phoneKey)) {
+        seenPhone.add(phoneKey);
+        try {
+          await sendSms({
+            to: phone,
+            body: smsReferrerClientActivated({
+              referrerFirstName: refFirst,
+              clientName,
+              lang: refLang,
+            }),
+            from: fromE164,
+          });
+          partnerSms += 1;
+        } catch (e: any) {
+          console.error("[activation:partner-sms]", phone, e?.message ?? e);
+        }
+      }
+    }
+
+    console.log(
+      "[activation:notify]",
+      opts.source,
+      opts.clientId,
+      { clientSms, partnerEmail, partnerSms },
+    );
+    return { fired: true, clientSms, partnerEmail, partnerSms };
+  } catch (e: any) {
+    console.error("[activation:notify]", opts.clientId, e?.message ?? e);
+    return empty;
   }
 }
 
@@ -17866,13 +28322,15 @@ async function scheduleSplitReminders(opts: {
   const lang = (client.preferred_language as string) || "en";
 
   const [steps] = await pool.query<RowDataPacket[]>(
-    `SELECT delay_days FROM reminder_flow_steps WHERE flow_id = ? ORDER BY step_order ASC`,
+    `SELECT delay_days, also_sms, step_type FROM reminder_flow_steps
+     WHERE flow_id = ? ORDER BY step_order ASC`,
     [opts.flowId],
   );
   if (steps.length === 0) return;
 
   const now = new Date();
   for (const step of steps) {
+    if (String(step.step_type || "") !== "send_email") continue;
     const delayDays = step.delay_days as number;
     const scheduledFor = new Date(
       opts.dueDate.getTime() - delayDays * 86400000,
@@ -17898,7 +28356,12 @@ async function scheduleSplitReminders(opts: {
         tpl.subject,
         tpl.html,
         scheduledFor,
-        JSON.stringify({ split_id: opts.splitId }),
+        JSON.stringify({
+          split_id: opts.splitId,
+          also_sms: Number(step.also_sms) !== 0,
+          trigger_event: "payment_due",
+          portal_url: opts.paymentLink || `${APP_URL}/portal`,
+        }),
       ],
     );
   }
@@ -18639,6 +29102,134 @@ async function findClientIdByPhone(fromRaw: string): Promise<number | null> {
   return rows[0] ? Number(rows[0].id) : null;
 }
 
+/** Active CRM contact (not soft-deleted, not already converted) matching phone. */
+async function findContactIdByPhone(fromRaw: string): Promise<number | null> {
+  const variants = phoneMatchVariants(fromRaw);
+  if (!variants.length) return null;
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT id FROM contacts
+     WHERE deleted_at IS NULL
+       AND converted_client_id IS NULL
+       AND (
+         phone IN (${variants.map(() => "?").join(",")})
+         OR REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(phone,''),'+',''),'-',''),'(',''),')','') IN (${variants.map(() => "?").join(",")})
+       )
+     ORDER BY id DESC LIMIT 1`,
+    [...variants, ...variants.map((v) => normalizePhoneDigits(v))],
+  );
+  return rows[0] ? Number(rows[0].id) : null;
+}
+
+async function findCrmContactDuplicates(opts: {
+  phone?: string | null;
+  email?: string | null;
+  excludeContactId?: number;
+}): Promise<{
+  clients: Array<Record<string, unknown>>;
+  contacts: Array<Record<string, unknown>>;
+}> {
+  const clients: Array<Record<string, unknown>> = [];
+  const contacts: Array<Record<string, unknown>> = [];
+  const phone = opts.phone ? String(opts.phone).trim() : "";
+  const email = opts.email ? String(opts.email).trim().toLowerCase() : "";
+  if (phone) {
+    const phoneDups = await adminAiFindPhoneDuplicates(phone);
+    clients.push(...phoneDups);
+    const last10 = normalizePhoneLast10(phone);
+    if (last10) {
+      const [crows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, first_name, last_name, email, phone
+         FROM contacts
+         WHERE deleted_at IS NULL AND converted_client_id IS NULL
+           AND phone IS NOT NULL AND phone LIKE ?
+           ${opts.excludeContactId ? "AND id <> ?" : ""}
+         ORDER BY id DESC LIMIT 50`,
+        opts.excludeContactId
+          ? [`%${last10.slice(-4)}`, opts.excludeContactId]
+          : [`%${last10.slice(-4)}`],
+      );
+      for (const r of crows) {
+        if (normalizePhoneLast10(String(r.phone || "")) !== last10) continue;
+        contacts.push({
+          id: r.id,
+          name: `${r.first_name || ""} ${r.last_name || ""}`.trim(),
+          email: r.email,
+          phone: r.phone,
+          href: `/admin/contacts`,
+        });
+      }
+    }
+  }
+  if (email) {
+    const [clientEmail] = await pool.query<RowDataPacket[]>(
+      `SELECT id, first_name, last_name, email, phone, status, pipeline_stage
+       FROM clients WHERE LOWER(email) = ? AND status <> 'cancelled'
+       ORDER BY id DESC LIMIT 5`,
+      [email],
+    );
+    for (const r of clientEmail) {
+      clients.push({
+        id: r.id,
+        name: `${r.first_name || ""} ${r.last_name || ""}`.trim(),
+        email: r.email,
+        phone: r.phone,
+        status: r.status,
+        pipeline_stage: r.pipeline_stage,
+        href: `/admin/pipeline?client=${r.id}`,
+      });
+    }
+    const [contactEmail] = await pool.query<RowDataPacket[]>(
+      `SELECT id, first_name, last_name, email, phone
+       FROM contacts
+       WHERE deleted_at IS NULL AND converted_client_id IS NULL
+         AND LOWER(email) = ?
+         ${opts.excludeContactId ? "AND id <> ?" : ""}
+       ORDER BY id DESC LIMIT 5`,
+      opts.excludeContactId ? [email, opts.excludeContactId] : [email],
+    );
+    for (const r of contactEmail) {
+      contacts.push({
+        id: r.id,
+        name: `${r.first_name || ""} ${r.last_name || ""}`.trim(),
+        email: r.email,
+        phone: r.phone,
+        href: `/admin/contacts`,
+      });
+    }
+  }
+  return { clients: clients.slice(0, 10), contacts: contacts.slice(0, 10) };
+}
+
+function mapCrmContactRow(r: RowDataPacket) {
+  return {
+    id: Number(r.id),
+    first_name: String(r.first_name || ""),
+    last_name: String(r.last_name || ""),
+    email: r.email != null ? String(r.email) : null,
+    phone: r.phone != null ? String(r.phone) : null,
+    address_line1: r.address_line1 != null ? String(r.address_line1) : null,
+    address_line2: r.address_line2 != null ? String(r.address_line2) : null,
+    city: r.city != null ? String(r.city) : null,
+    state: r.state != null ? String(r.state) : null,
+    zip: r.zip != null ? String(r.zip) : null,
+    preferred_language: r.preferred_language === "es" ? "es" : "en",
+    admin_notes:
+      r.admin_notes != null
+        ? decodeLiteralUnicodeEscapes(String(r.admin_notes))
+        : null,
+    assigned_admin_id:
+      r.assigned_admin_id != null ? Number(r.assigned_admin_id) : null,
+    created_by_admin_id:
+      r.created_by_admin_id != null ? Number(r.created_by_admin_id) : null,
+    converted_client_id:
+      r.converted_client_id != null ? Number(r.converted_client_id) : null,
+    converted_at: r.converted_at ?? null,
+    deleted_at: r.deleted_at ?? null,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+  };
+}
+
 /** After invalid ABLY_API_KEY, skip Rest init (one log per process, no retry spam). */
 async function publishConversationRealtime(event: {
   type: string;
@@ -18706,7 +29297,9 @@ async function conversationClientContactSnapshot(
     phone: r.phone,
     email: r.email,
     last_message_at: r.last_message_at,
-    last_message_preview: r.last_message_preview,
+    last_message_preview: r.last_message_preview
+      ? decodeLiteralUnicodeEscapes(String(r.last_message_preview))
+      : r.last_message_preview,
     unread_count: Number(r.unread_count || 0),
     status: r.status || "open",
     assigned_admin_id:
@@ -18753,7 +29346,9 @@ async function unknownContactSnapshot(
     phone: u.phone_e164,
     email: u.email,
     last_message_at: u.last_message_at,
-    last_message_preview: u.last_message_preview,
+    last_message_preview: u.last_message_preview
+      ? decodeLiteralUnicodeEscapes(String(u.last_message_preview))
+      : u.last_message_preview,
     unread_count: Number(u.unread_count || 0),
     status: String(u.thread_status || "open"),
     assigned_admin_id: null,
@@ -18764,10 +29359,74 @@ async function unknownContactSnapshot(
   };
 }
 
+async function crmContactHubSnapshot(
+  crmContactId: number,
+): Promise<Record<string, unknown> | null> {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT c.id, c.first_name, c.last_name, c.phone, c.email,
+            (
+              SELECT cv.status FROM conversations cv
+              WHERE cv.contact_id = c.id
+              ORDER BY cv.last_message_at DESC, cv.id DESC
+              LIMIT 1
+            ) AS thread_status,
+            (
+              SELECT cv.id FROM conversations cv
+              WHERE cv.contact_id = c.id
+              ORDER BY cv.last_message_at DESC, cv.id DESC
+              LIMIT 1
+            ) AS primary_conversation_id,
+            (
+              SELECT cv.last_message_at FROM conversations cv
+              WHERE cv.contact_id = c.id
+              ORDER BY cv.last_message_at DESC, cv.id DESC
+              LIMIT 1
+            ) AS last_message_at,
+            (
+              SELECT cv.last_message_preview FROM conversations cv
+              WHERE cv.contact_id = c.id
+              ORDER BY cv.last_message_at DESC, cv.id DESC
+              LIMIT 1
+            ) AS last_message_preview,
+            (
+              SELECT COALESCE(SUM(cv.unread_count), 0) FROM conversations cv
+              WHERE cv.contact_id = c.id
+            ) AS unread_count
+     FROM contacts c
+     WHERE c.id = ? AND c.deleted_at IS NULL
+     LIMIT 1`,
+    [crmContactId],
+  );
+  const c = rows[0];
+  if (!c) return null;
+  return {
+    kind: "contact",
+    contact_id: Number(c.id),
+    crm_contact_id: Number(c.id),
+    display_name:
+      `${c.first_name || ""} ${c.last_name || ""}`.trim() ||
+      String(c.phone || c.email || "Contact"),
+    phone: c.phone,
+    email: c.email,
+    last_message_at: c.last_message_at,
+    last_message_preview: c.last_message_preview
+      ? decodeLiteralUnicodeEscapes(String(c.last_message_preview))
+      : c.last_message_preview,
+    unread_count: Number(c.unread_count || 0),
+    status: String(c.thread_status || "open"),
+    assigned_admin_id: null,
+    primary_conversation_id: c.primary_conversation_id
+      ? Number(c.primary_conversation_id)
+      : null,
+    channels: ["sms"],
+  };
+}
+
 /** True when any contact thread is closed/archived. */
 async function contactComposeBlockedByClosed(opts: {
   clientId?: number;
   unknownContactId?: number;
+  crmContactId?: number;
 }): Promise<boolean> {
   let rows: RowDataPacket[] = [];
   if (opts.clientId != null && opts.clientId > 0) {
@@ -18786,6 +29445,14 @@ async function contactComposeBlockedByClosed(opts: {
       [opts.unknownContactId],
     );
     rows = r;
+  } else if (opts.crmContactId != null && opts.crmContactId > 0) {
+    const [r] = await pool.query<RowDataPacket[]>(
+      `SELECT 1 AS x FROM conversations
+       WHERE contact_id = ? AND status IN ('closed','archived')
+       LIMIT 1`,
+      [opts.crmContactId],
+    );
+    rows = r;
   }
   return rows.length > 0;
 }
@@ -18797,6 +29464,7 @@ async function contactComposeBlockedByClosed(opts: {
 async function ensureContactOpenForStaffOutbound(opts: {
   clientId?: number;
   unknownContactId?: number;
+  crmContactId?: number;
   adminId: number;
 }): Promise<{ reopened: boolean; system_message: RowDataPacket | null }> {
   if (!(await contactComposeBlockedByClosed(opts))) {
@@ -18805,6 +29473,7 @@ async function ensureContactOpenForStaffOutbound(opts: {
   const result = await setContactConversationStatus({
     clientId: opts.clientId,
     unknownContactId: opts.unknownContactId,
+    crmContactId: opts.crmContactId,
     status: "open",
     adminId: opts.adminId,
   });
@@ -18841,6 +29510,7 @@ async function insertConversationSystemEvent(opts: {
 async function setContactConversationStatus(opts: {
   clientId?: number;
   unknownContactId?: number;
+  crmContactId?: number;
   status: "open" | "snoozed" | "closed" | "archived";
   adminId: number;
 }): Promise<{
@@ -18850,8 +29520,9 @@ async function setContactConversationStatus(opts: {
 }> {
   const hasClient = opts.clientId != null && opts.clientId > 0;
   const hasUnknown = opts.unknownContactId != null && opts.unknownContactId > 0;
-  if (!hasClient && !hasUnknown) {
-    throw new Error("client_id or unknown_contact_id required");
+  const hasCrm = opts.crmContactId != null && opts.crmContactId > 0;
+  if (!hasClient && !hasUnknown && !hasCrm) {
+    throw new Error("client_id, unknown_contact_id, or contact_id required");
   }
 
   // UI uses Close only; archived maps to closed for writes from reopen/open paths.
@@ -18862,34 +29533,43 @@ async function setContactConversationStatus(opts: {
       `UPDATE conversations SET status = ? WHERE client_id = ?`,
       [status, opts.clientId],
     );
-  } else {
+  } else if (hasUnknown) {
     await pool.query(
       `UPDATE conversations SET status = ? WHERE unknown_contact_id = ?`,
       [status, opts.unknownContactId],
+    );
+  } else {
+    await pool.query(
+      `UPDATE conversations SET status = ? WHERE contact_id = ?`,
+      [status, opts.crmContactId],
     );
   }
 
   let systemMessage: RowDataPacket | null = null;
   if (status === "closed" || status === "open") {
     let primaryId: number | null = null;
+    const whereCol = hasClient
+      ? "client_id"
+      : hasUnknown
+        ? "unknown_contact_id"
+        : "contact_id";
+    const whereId = hasClient
+      ? opts.clientId
+      : hasUnknown
+        ? opts.unknownContactId
+        : opts.crmContactId;
     const [primary] = await pool.query<RowDataPacket[]>(
-      hasClient
-        ? `SELECT id FROM conversations
-           WHERE client_id = ?
-           ORDER BY last_message_at DESC, id DESC
-           LIMIT 1`
-        : `SELECT id FROM conversations
-           WHERE unknown_contact_id = ?
-           ORDER BY last_message_at DESC, id DESC
-           LIMIT 1`,
-      [hasClient ? opts.clientId : opts.unknownContactId],
+      `SELECT id FROM conversations
+       WHERE ${whereCol} = ?
+       ORDER BY last_message_at DESC, id DESC
+       LIMIT 1`,
+      [whereId],
     );
     if (primary[0]) {
       primaryId = Number(primary[0].id);
     } else if (status === "closed") {
-      // Close with no threads yet — create a primary SMS row so Closed list + banner stick.
       let ofgNumberId: number | null = null;
-      if (hasClient) {
+      if (hasClient || hasCrm) {
         const ofgIds = await adminAssignedPhoneNumberIds(opts.adminId);
         ofgNumberId = ofgIds[0] ?? null;
       } else if (opts.unknownContactId) {
@@ -18905,14 +29585,14 @@ async function setContactConversationStatus(opts: {
           ? `INSERT INTO conversations
                (client_id, channel, status, assigned_admin_id, ofg_number_id)
              VALUES (?, 'sms', 'closed', ?, ?)`
-          : `INSERT INTO conversations
-               (unknown_contact_id, channel, status, assigned_admin_id, ofg_number_id)
-             VALUES (?, 'sms', 'closed', ?, ?)`,
-        [
-          hasClient ? opts.clientId : opts.unknownContactId,
-          opts.adminId,
-          ofgNumberId,
-        ],
+          : hasUnknown
+            ? `INSERT INTO conversations
+                 (unknown_contact_id, channel, status, assigned_admin_id, ofg_number_id)
+               VALUES (?, 'sms', 'closed', ?, ?)`
+            : `INSERT INTO conversations
+                 (contact_id, channel, status, assigned_admin_id, ofg_number_id)
+               VALUES (?, 'sms', 'closed', ?, ?)`,
+        [whereId, opts.adminId, ofgNumberId],
       );
       primaryId = Number(ins.insertId);
     }
@@ -18960,13 +29640,19 @@ async function setContactConversationStatus(opts: {
         }
         return conversationClientContactSnapshot(Number(rows[0].id));
       })()
-    : await unknownContactSnapshot(opts.unknownContactId!);
+    : hasUnknown
+      ? await unknownContactSnapshot(opts.unknownContactId!)
+      : await crmContactHubSnapshot(opts.crmContactId!);
 
   await publishConversationRealtime({
     type: "status",
     payload: {
-      kind: hasClient ? "client" : "unknown",
-      contact_id: hasClient ? opts.clientId : opts.unknownContactId,
+      kind: hasClient ? "client" : hasUnknown ? "unknown" : "contact",
+      contact_id: hasClient
+        ? opts.clientId
+        : hasUnknown
+          ? opts.unknownContactId
+          : opts.crmContactId,
       status,
       contact,
       system_message: systemMessage,
@@ -18986,17 +29672,9 @@ async function getOrCreateClientChannelConversation(opts: {
 }): Promise<number> {
   const reopenIfClosed = opts.reopenIfClosed !== false;
   const ofgId = opts.ofgNumberId ?? null;
-  // Prefer exact OFG number match; fall back to any thread for this client+channel
-  const [existing] = await pool.query<RowDataPacket[]>(
-    `SELECT id, status, ofg_number_id FROM conversations
-     WHERE client_id = ? AND channel = ?
-     ORDER BY (ofg_number_id <=> ?) DESC, id DESC
-     LIMIT 1`,
-    [opts.clientId, opts.channel, ofgId],
-  );
-  if (existing[0]) {
-    const id = Number(existing[0].id);
-    const st = String(existing[0].status || "");
+
+  const reopenIfNeeded = async (id: number, statusRaw: unknown) => {
+    const st = String(statusRaw || "");
     const isTerminal = st === "closed" || st === "archived";
     if (st === "snoozed" || (isTerminal && reopenIfClosed)) {
       await pool.query(
@@ -19004,19 +29682,81 @@ async function getOrCreateClientChannelConversation(opts: {
         [id],
       );
     }
-    if (ofgId != null && existing[0].ofg_number_id == null) {
-      await pool.query(
-        `UPDATE conversations SET ofg_number_id = ? WHERE id = ?`,
-        [ofgId, id],
-      );
+  };
+
+  // When OFG is known: exact line match, or claim an unattached (NULL) row.
+  // Never reuse another admin's OFG thread — hub timeline is OFG-scoped, so
+  // attaching outbound SMS to a peer line makes the sender see "calls only".
+  if (ofgId != null) {
+    const [exact] = await pool.query<RowDataPacket[]>(
+      `SELECT id, status FROM conversations
+       WHERE client_id = ? AND channel = ? AND ofg_number_id = ?
+       ORDER BY id DESC
+       LIMIT 1`,
+      [opts.clientId, opts.channel, ofgId],
+    );
+    if (exact[0]) {
+      const id = Number(exact[0].id);
+      await reopenIfNeeded(id, exact[0].status);
+      return id;
     }
+
+    const [unowned] = await pool.query<RowDataPacket[]>(
+      `SELECT id, status FROM conversations
+       WHERE client_id = ? AND channel = ? AND ofg_number_id IS NULL
+       ORDER BY id DESC
+       LIMIT 1`,
+      [opts.clientId, opts.channel],
+    );
+    if (unowned[0]) {
+      const id = Number(unowned[0].id);
+      await reopenIfNeeded(id, unowned[0].status);
+      const [claimed] = await pool.query<ResultSetHeader>(
+        `UPDATE conversations
+         SET ofg_number_id = ?,
+             assigned_admin_id = COALESCE(assigned_admin_id, ?)
+         WHERE id = ? AND ofg_number_id IS NULL`,
+        [ofgId, opts.assignedAdminId ?? null, id],
+      );
+      if (Number(claimed.affectedRows || 0) > 0) return id;
+      // Race: another OFG claimed it — fall through to INSERT.
+    }
+
+    const [ins] = await pool.query<ResultSetHeader>(
+      `INSERT INTO conversations
+         (client_id, channel, status, assigned_admin_id, ofg_number_id)
+       VALUES (?, ?, 'open', ?, ?)`,
+      [opts.clientId, opts.channel, opts.assignedAdminId ?? null, ofgId],
+    );
+    return Number(ins.insertId);
+  }
+
+  // No OFG: internal notes reuse any internal thread; SMS/call only claim NULL-ofg
+  // rows (never steal a peer's OFG-tagged conversation).
+  const [existing] = await pool.query<RowDataPacket[]>(
+    opts.channel === "internal"
+      ? `SELECT id, status FROM conversations
+         WHERE client_id = ? AND channel = 'internal'
+         ORDER BY id DESC
+         LIMIT 1`
+      : `SELECT id, status FROM conversations
+         WHERE client_id = ? AND channel = ? AND ofg_number_id IS NULL
+         ORDER BY id DESC
+         LIMIT 1`,
+    opts.channel === "internal"
+      ? [opts.clientId]
+      : [opts.clientId, opts.channel],
+  );
+  if (existing[0]) {
+    const id = Number(existing[0].id);
+    await reopenIfNeeded(id, existing[0].status);
     return id;
   }
   const [ins] = await pool.query<ResultSetHeader>(
     `INSERT INTO conversations
        (client_id, channel, status, assigned_admin_id, ofg_number_id)
-     VALUES (?, ?, 'open', ?, ?)`,
-    [opts.clientId, opts.channel, opts.assignedAdminId ?? null, ofgId],
+     VALUES (?, ?, 'open', ?, NULL)`,
+    [opts.clientId, opts.channel, opts.assignedAdminId ?? null],
   );
   return Number(ins.insertId);
 }
@@ -19069,6 +29809,63 @@ async function getOrCreateUnknownSmsConversation(opts: {
       opts.assignedAdminId ?? null,
       opts.ofgNumberId ?? null,
       opts.unknownContactId,
+    ],
+  );
+  return Number(insC.insertId);
+}
+
+/** SMS/call thread for a CRM contact (address book). */
+async function getOrCreateCrmContactChannelConversation(opts: {
+  crmContactId: number;
+  channel: string;
+  ofgNumberId?: number | null;
+  assignedAdminId?: number | null;
+  reopenIfClosed?: boolean;
+}): Promise<number> {
+  const reopenIfClosed = opts.reopenIfClosed !== false;
+  const channel = opts.channel === "call" ? "call" : "sms";
+  const [conv] = await pool.query<RowDataPacket[]>(
+    `SELECT id, status FROM conversations
+     WHERE contact_id = ? AND channel = ?
+     ORDER BY id DESC
+     LIMIT 1`,
+    [opts.crmContactId, channel],
+  );
+  if (conv[0]) {
+    const id = Number(conv[0].id);
+    const st = String(conv[0].status || "");
+    const isTerminal = st === "closed" || st === "archived";
+    if (st === "snoozed" || (isTerminal && reopenIfClosed)) {
+      await pool.query(
+        `UPDATE conversations SET status = 'open', updated_at = NOW() WHERE id = ?`,
+        [id],
+      );
+    }
+    if (opts.ofgNumberId != null) {
+      await pool.query(
+        `UPDATE conversations SET ofg_number_id = COALESCE(ofg_number_id, ?) WHERE id = ?`,
+        [opts.ofgNumberId, id],
+      );
+    }
+    if (opts.assignedAdminId != null) {
+      await pool.query(
+        `UPDATE conversations
+         SET assigned_admin_id = COALESCE(assigned_admin_id, ?)
+         WHERE id = ?`,
+        [opts.assignedAdminId, id],
+      );
+    }
+    return id;
+  }
+  const [insC] = await pool.query<ResultSetHeader>(
+    `INSERT INTO conversations
+       (client_id, channel, status, assigned_admin_id, ofg_number_id, contact_id)
+     VALUES (NULL, ?, 'open', ?, ?, ?)`,
+    [
+      channel,
+      opts.assignedAdminId ?? null,
+      opts.ofgNumberId ?? null,
+      opts.crmContactId,
     ],
   );
   return Number(insC.insertId);
@@ -19159,6 +29956,7 @@ async function deliverHubConversationMessage(opts: {
   adminId: number;
   clientId?: number;
   unknownContactId?: number;
+  crmContactId?: number;
   channel: string;
   textBody: string;
   isInternalNote?: boolean;
@@ -19173,26 +29971,40 @@ async function deliverHubConversationMessage(opts: {
   error: string | null;
   client_id?: number;
   unknown_contact_id?: number;
+  contact_id?: number;
+  contact_note_appended?: boolean;
 }> {
+  // Normalize LLM double-escaped unicode (e.g. literal `\u2014`) before SMS/store.
+  opts = {
+    ...opts,
+    textBody: decodeLiteralUnicodeEscapes(String(opts.textBody || "")),
+  };
   const hasClient = opts.clientId != null && opts.clientId > 0;
   const hasUnknown = opts.unknownContactId != null && opts.unknownContactId > 0;
-  if (!hasClient && !hasUnknown) {
-    throw new Error("client_id or unknown_contact_id required");
+  const hasCrm = opts.crmContactId != null && opts.crmContactId > 0;
+  if ([hasClient, hasUnknown, hasCrm].filter(Boolean).length !== 1) {
+    throw new Error(
+      "Exactly one of client_id, unknown_contact_id, or contact_id required",
+    );
   }
   const ch = opts.isInternalNote ? "internal" : String(opts.channel || "sms");
   if (!["sms", "internal"].includes(ch)) {
     throw new Error("Unsupported channel");
   }
-  if (hasUnknown && ch === "internal") {
+  if ((hasUnknown || hasCrm) && ch === "internal") {
     throw new Error("Internal notes require a linked client");
   }
   if (opts.mediaUrl && ch !== "sms") {
     throw new Error("Media attachments are SMS only");
   }
+  if (ch === "sms" && [...opts.textBody].length > SMS_MAX_BODY_CHARS) {
+    throw new Error(`SMS body exceeds ${SMS_MAX_BODY_CHARS} characters`);
+  }
   // Closed threads stay usable for staff: auto-reopen on outbound compose.
   const reopen = await ensureContactOpenForStaffOutbound({
     clientId: hasClient ? opts.clientId : undefined,
     unknownContactId: hasUnknown ? opts.unknownContactId : undefined,
+    crmContactId: hasCrm ? opts.crmContactId : undefined,
     adminId: opts.adminId,
   });
   void reopen;
@@ -19215,6 +30027,7 @@ async function deliverHubConversationMessage(opts: {
   let providerId: string | undefined;
   let providerStatus: string | null = null;
   let errorMessage: string | null = null;
+  let contactNoteAppended = false;
   let realtimePayload: Record<string, unknown> = {};
 
   if (hasClient) {
@@ -19248,6 +30061,40 @@ async function deliverHubConversationMessage(opts: {
     }
     realtimePayload = {
       client_id: opts.clientId,
+      conversation_id: conversationId,
+    };
+  } else if (hasCrm) {
+    const crmId = opts.crmContactId!;
+    const [crows] = await pool.query<RowDataPacket[]>(
+      `SELECT phone FROM contacts
+       WHERE id = ? AND deleted_at IS NULL AND converted_client_id IS NULL
+       LIMIT 1`,
+      [crmId],
+    );
+    if (!crows[0]) throw new Error("Contact not found");
+    if (!crows[0].phone) throw new Error("Contact has no phone");
+    toAddress = toSmsE164(String(crows[0].phone));
+    if (!fromE164) throw new Error("No OFG phone number assigned");
+    conversationId = await getOrCreateCrmContactChannelConversation({
+      crmContactId: crmId,
+      channel: "sms",
+      ofgNumberId,
+      assignedAdminId: opts.adminId,
+      reopenIfClosed: false,
+    });
+    const result = await sendSms({
+      to: toAddress,
+      body: opts.textBody,
+      from: fromE164,
+      mediaUrls: opts.mediaUrl ? [opts.mediaUrl] : undefined,
+    }).catch((e) => {
+      errorMessage = String(e?.message || e);
+      return null;
+    });
+    providerId = result?.sid;
+    providerStatus = result?.status || (errorMessage ? "failed" : null);
+    realtimePayload = {
+      contact_id: crmId,
       conversation_id: conversationId,
     };
   } else {
@@ -19337,6 +30184,30 @@ async function deliverHubConversationMessage(opts: {
     realtimePayload.message_id = ins.insertId;
     realtimePayload.contact =
       await conversationClientContactSnapshot(conversationId);
+  } else if (hasCrm) {
+    await pool.query(
+      `UPDATE conversations
+       SET last_message_at = NOW(), last_message_preview = ?,
+           assigned_admin_id = COALESCE(assigned_admin_id, ?)
+       WHERE id = ? AND status NOT IN ('closed','archived')`,
+      [preview.slice(0, 200), opts.adminId, conversationId],
+    );
+    realtimePayload.message_id = ins.insertId;
+    realtimePayload.contact = await crmContactHubSnapshot(opts.crmContactId!);
+    // Auto-log outbound SMS/MMS on the contact file (MCP + Conversations UI).
+    if (!errorMessage && ch === "sms" && opts.crmContactId) {
+      const ts = new Date().toISOString().slice(0, 16).replace("T", " ");
+      contactNoteAppended = await appendContactFileNote(
+        opts.crmContactId,
+        formatSmsClientFileNote({
+          direction: "sent",
+          ts,
+          peerPhone: toAddress || "",
+          body: (opts.textBody || preview).slice(0, 1500),
+          providerMessageId: providerId || null,
+        }),
+      );
+    }
   } else {
     await bumpUnknownContactAfterOutbound(
       opts.unknownContactId!,
@@ -19362,6 +30233,8 @@ async function deliverHubConversationMessage(opts: {
     error: errorMessage,
     client_id: hasClient ? opts.clientId : undefined,
     unknown_contact_id: hasUnknown ? opts.unknownContactId : undefined,
+    contact_id: hasCrm ? opts.crmContactId : undefined,
+    contact_note_appended: hasCrm ? contactNoteAppended : undefined,
   };
 }
 
@@ -20170,7 +31043,7 @@ const ADMIN_AI_DOC_ALLOWED_MIMES = new Set([
 ]);
 
 /** Keep JSON tool payloads under Vercel body limits (~4.5MB incl. base64 overhead). */
-const ADMIN_AI_DOC_MAX_BYTES = 3 * 1024 * 1024;
+const ADMIN_AI_DOC_MAX_BYTES = VERCEL_SAFE_UPLOAD_MAX_BYTES; // align MCP with CRM 4MB ceiling
 
 function adminAiDocMimeFromFilename(
   fileName: string,
@@ -20333,6 +31206,277 @@ async function resolveLanguageOwnerAdminId(
   return rows[0] ? Number(rows[0].id) : null;
 }
 
+export type StaffAdminMatchRow = {
+  id: number;
+  first_name: string;
+  last_name: string;
+  email: string;
+  phone?: string | null;
+};
+
+function normalizeStaffQuery(raw: string): string {
+  return decodeLiteralUnicodeEscapes(raw)
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+/** Spoken nicknames → staff first names (Lika is Lecca). */
+const STAFF_QUERY_ALIASES: Record<string, string> = {
+  lika: "lecca",
+};
+
+function applyStaffQueryAliases(q: string): string {
+  if (!q) return q;
+  if (STAFF_QUERY_ALIASES[q]) return STAFF_QUERY_ALIASES[q];
+  const parts = q.split(" ");
+  const first = parts[0] ? STAFF_QUERY_ALIASES[parts[0]] : undefined;
+  if (first) {
+    parts[0] = first;
+    return parts.join(" ");
+  }
+  return q;
+}
+
+/** Match assignable staff by name or email. Unique first/last name is enough. */
+function matchStaffAdmins<T extends StaffAdminMatchRow>(
+  rows: T[],
+  rawQuery: string,
+): T[] {
+  const raw = normalizeStaffQuery(rawQuery);
+  const q = applyStaffQueryAliases(raw);
+  if (!q) return [];
+  const indexed = rows.map((row) => {
+    const first = String(row.first_name || "")
+      .trim()
+      .toLowerCase();
+    const last = String(row.last_name || "")
+      .trim()
+      .toLowerCase();
+    const email = String(row.email || "")
+      .trim()
+      .toLowerCase();
+    const full = `${first} ${last}`.trim();
+    return { row, first, last, email, full };
+  });
+  if (q.includes("@")) {
+    return indexed.filter((x) => x.email === q).map((x) => x.row);
+  }
+  const exactFull = indexed.filter(
+    (x) => x.full === q || `${x.last}, ${x.first}` === q,
+  );
+  if (exactFull.length > 0) return exactFull.map((x) => x.row);
+  const firstOnly = indexed.filter((x) => x.first === q);
+  if (firstOnly.length === 1) return [firstOnly[0].row];
+  if (firstOnly.length > 1) return firstOnly.map((x) => x.row);
+  const lastOnly = indexed.filter((x) => x.last === q);
+  if (lastOnly.length === 1) return [lastOnly[0].row];
+  if (lastOnly.length > 1) return lastOnly.map((x) => x.row);
+  return indexed
+    .filter(
+      (x) =>
+        x.full.startsWith(q) ||
+        x.first.startsWith(q) ||
+        x.email.startsWith(q),
+    )
+    .map((x) => x.row);
+}
+
+async function loadAssignableStaffAdmins(): Promise<
+  Array<
+    StaffAdminMatchRow & {
+      preferred_language: string;
+      language_owner_for: string | null;
+      role: string;
+      status: string;
+    }
+  >
+> {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT id, first_name, last_name, email, phone, preferred_language,
+            language_owner_for, role, status
+     FROM admins
+     WHERE status = 'active'
+       AND role IN ('super_admin', 'admin', 'agent')
+       ${SQL_EXCLUDE_INTEGRATION_TEST_ADMIN_EMAIL}
+     ORDER BY first_name ASC, last_name ASC`,
+  );
+  return rows.map((r) => ({
+    id: Number(r.id),
+    first_name: String(r.first_name || ""),
+    last_name: String(r.last_name || ""),
+    email: String(r.email || ""),
+    phone: r.phone ? String(r.phone).trim() : null,
+    preferred_language: r.preferred_language === "es" ? "es" : "en",
+    language_owner_for:
+      r.language_owner_for === "en" || r.language_owner_for === "es"
+        ? String(r.language_owner_for)
+        : null,
+    role: String(r.role || ""),
+    status: String(r.status || ""),
+  }));
+}
+
+type McpStaffResolve =
+  | { ok: true; requested: false; id: null; meta: null }
+  | {
+      ok: true;
+      requested: true;
+      id: number;
+      meta: {
+        id: number;
+        name: string;
+        email: string;
+        preferred_language: string;
+      };
+    }
+  | { ok: false; error: string; message: string; data?: unknown };
+
+async function resolveMcpStaffAssignee(opts: {
+  adminId?: unknown;
+  name?: unknown;
+  email?: unknown;
+}): Promise<McpStaffResolve> {
+  const rawId =
+    opts.adminId != null && Number(opts.adminId) > 0
+      ? Number(opts.adminId)
+      : null;
+  const name = String(opts.name || "").trim();
+  const email = String(opts.email || "").trim();
+  if (!rawId && !name && !email) {
+    return { ok: true, requested: false, id: null, meta: null };
+  }
+  const staff = await loadAssignableStaffAdmins();
+  let hit: (typeof staff)[number] | undefined;
+  if (name || email) {
+    const matched = matchStaffAdmins(staff, email || name);
+    if (matched.length === 0) {
+      return {
+        ok: false,
+        error: "assignee_not_found",
+        message: `No active staff matching ${email || name}. Use search_admins — do not fall back to the language owner.`,
+      };
+    }
+    if (matched.length === 1) {
+      // Spoken name/email wins over a leftover language-owner id (Alex vs Lecca).
+      hit = matched[0];
+    } else if (rawId) {
+      hit = matched.find((s) => s.id === rawId);
+      if (!hit) {
+        return {
+          ok: false,
+          error: "assignee_ambiguous",
+          message:
+            "Multiple staff match that name and assignee_admin_id is not one of them. Pass the id from search_admins.",
+          data: {
+            matches: matched.map((r) => ({
+              id: r.id,
+              name: `${r.first_name} ${r.last_name}`.trim(),
+              email: r.email,
+            })),
+          },
+        };
+      }
+    } else {
+      return {
+        ok: false,
+        error: "assignee_ambiguous",
+        message:
+          "Multiple staff match that name. Pass assigned_admin_id / assignee_admin_id from search_admins.",
+        data: {
+          matches: matched.map((r) => ({
+            id: r.id,
+            name: `${r.first_name} ${r.last_name}`.trim(),
+            email: r.email,
+          })),
+        },
+      };
+    }
+  } else {
+    hit = staff.find((s) => s.id === rawId);
+  }
+  if (!hit) {
+    return {
+      ok: false,
+      error: "assignee_not_found",
+      message: "Staff id not found or inactive. Use search_admins.",
+    };
+  }
+  return {
+    ok: true,
+    requested: true,
+    id: hit.id,
+    meta: {
+      id: hit.id,
+      name: `${hit.first_name} ${hit.last_name}`.trim(),
+      email: hit.email,
+      preferred_language: hit.preferred_language,
+    },
+  };
+}
+
+async function resolveMcpSmsFromE164(
+  ctxAdminId: number,
+  args: Record<string, unknown>,
+): Promise<
+  | { ok: true; e164: string; from_admin_id: number }
+  | { ok: false; error: string; message: string }
+> {
+  const phoneNumberId =
+    args.from_phone_number_id != null && Number(args.from_phone_number_id) > 0
+      ? Number(args.from_phone_number_id)
+      : null;
+  if (phoneNumberId) {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, e164, assigned_admin_id, is_active
+       FROM admin_phone_numbers WHERE id = ? LIMIT 1`,
+      [phoneNumberId],
+    );
+    if (!rows[0] || Number(rows[0].is_active) !== 1) {
+      return {
+        ok: false,
+        error: "invalid_args",
+        message:
+          "from_phone_number_id is not an active OFG number. Use list_ofg_phone_numbers all=true.",
+      };
+    }
+    const e164 = String(rows[0].e164 || "").trim();
+    if (!e164) {
+      return {
+        ok: false,
+        error: "invalid_args",
+        message: "OFG number has no E.164",
+      };
+    }
+    return {
+      ok: true,
+      e164,
+      from_admin_id:
+        rows[0].assigned_admin_id != null
+          ? Number(rows[0].assigned_admin_id)
+          : ctxAdminId,
+    };
+  }
+
+  const named = await resolveMcpStaffAssignee({
+    adminId: args.from_admin_id,
+    name: args.from_admin_name,
+    email: args.from_admin_email,
+  });
+  if (named.ok === false) return named;
+  const ownerId = named.requested ? named.id : ctxAdminId;
+  const e164 = await resolveAssignedSmsFrom(ownerId);
+  if (!e164) {
+    return {
+      ok: false,
+      error: "conversations_number_required",
+      message:
+        "That staff member has no assigned OFG phone number. Assign one in People, or pass from_phone_number_id.",
+    };
+  }
+  return { ok: true, e164, from_admin_id: ownerId };
+}
+
 /**
  * Assign or clear language ownership. Clears any previous owner for that language
  * (including inactive) so UNIQUE(language_owner_for) never blocks reassignment.
@@ -20431,6 +31575,31 @@ function adminProspectLeadSql(): string {
     WHERE cr_enrolled.client_id = c.id
       AND cr_enrolled.status = 'active'
       AND cr_enrolled.pipeline_stage <> 'prospect'
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM client_labels cl_wr
+    JOIN labels l_wr ON l_wr.id = cl_wr.label_id
+    WHERE cl_wr.client_id = c.id AND l_wr.slug = '${WEB_LEAD_REVIEW_LABEL}'
+  )
+)`;
+}
+
+/** Prospect-shaped leads that still need staff review (public web spam bucket). */
+function adminWebReviewLeadSql(): string {
+  return `(
+  c.status <> 'cancelled'
+  AND c.status <> 'funding'
+  AND (c.status = 'prospect' OR c.pipeline_stage = 'prospect')
+  AND NOT EXISTS (
+    SELECT 1 FROM credit_repair_cases cr_enrolled
+    WHERE cr_enrolled.client_id = c.id
+      AND cr_enrolled.status = 'active'
+      AND cr_enrolled.pipeline_stage <> 'prospect'
+  )
+  AND EXISTS (
+    SELECT 1 FROM client_labels cl_wr
+    JOIN labels l_wr ON l_wr.id = cl_wr.label_id
+    WHERE cl_wr.client_id = c.id AND l_wr.slug = '${WEB_LEAD_REVIEW_LABEL}'
   )
 )`;
 }
@@ -20533,6 +31702,88 @@ async function countProspectsWithFilters(
   extra?: { where: string[]; args: any[] },
 ): Promise<number> {
   const where: string[] = [adminProspectLeadSql()];
+  const args: any[] = [];
+  if (scopedAffiliateIds && scopedAffiliateIds.length > 0) {
+    where.push("c.affiliate_id IN (?)");
+    args.push(scopedAffiliateIds);
+  }
+  if (extra?.where?.length) {
+    where.push(...extra.where);
+    args.push(...(extra.args || []));
+  }
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT COUNT(*) AS total FROM clients c WHERE ${where.join(" AND ")}`,
+    args,
+  );
+  return Number(rows[0]?.total || 0);
+}
+
+async function fetchWebReviewProspectsWithLabels(
+  scopedAffiliateIds?: number[],
+  extra?: {
+    where: string[];
+    args: any[];
+    limit?: number;
+    offset?: number;
+  },
+): Promise<RowDataPacket[]> {
+  const where: string[] = [adminWebReviewLeadSql()];
+  const args: any[] = [];
+  if (scopedAffiliateIds && scopedAffiliateIds.length > 0) {
+    where.push("c.affiliate_id IN (?)");
+    args.push(scopedAffiliateIds);
+  }
+  if (extra?.where?.length) {
+    where.push(...extra.where);
+    args.push(...(extra.args || []));
+  }
+  let sql = `SELECT c.id, c.first_name, c.last_name, c.email, c.phone,
+            c.preferred_language, c.created_at,
+            ca.id AS credit_analysis_id, ca.mode AS analysis_mode,
+            ca.client_goal, ca.notes, ca.agent_phone, ca.rep_name,
+            pc.case_id, pc.case_number
+     FROM clients c
+     LEFT JOIN (
+       SELECT ca1.*
+       FROM credit_analyses ca1
+       INNER JOIN (
+         SELECT client_id, MAX(id) AS max_id FROM credit_analyses GROUP BY client_id
+       ) latest ON latest.client_id = ca1.client_id AND latest.max_id = ca1.id
+     ) ca ON ca.client_id = c.id
+     LEFT JOIN (
+       SELECT cr.client_id, cr.id AS case_id, cr.case_number
+       FROM credit_repair_cases cr
+       INNER JOIN (
+         SELECT client_id, MAX(id) AS max_id
+         FROM credit_repair_cases
+         WHERE status = 'active' AND pipeline_stage = 'prospect'
+         GROUP BY client_id
+       ) latest_pc ON latest_pc.client_id = cr.client_id AND latest_pc.max_id = cr.id
+     ) pc ON pc.client_id = c.id
+     WHERE ${where.join(" AND ")}
+     ORDER BY c.created_at DESC`;
+  if (extra?.limit != null) {
+    sql += ` LIMIT ? OFFSET ?`;
+    args.push(
+      Math.max(1, Number(extra.limit) || 20),
+      Math.max(0, Number(extra.offset) || 0),
+    );
+  }
+  const [rows] = await pool.query<RowDataPacket[]>(sql, args);
+  await attachLabelsToRows(rows);
+  for (const r of rows) {
+    (r as any).source_label =
+      ((r as any).labels as Label[]).find((l) => l.layer === "source")?.slug ??
+      null;
+  }
+  return rows;
+}
+
+async function countWebReviewProspectsWithFilters(
+  scopedAffiliateIds?: number[],
+  extra?: { where: string[]; args: any[] },
+): Promise<number> {
+  const where: string[] = [adminWebReviewLeadSql()];
   const args: any[] = [];
   if (scopedAffiliateIds && scopedAffiliateIds.length > 0) {
     where.push("c.affiliate_id IN (?)");
@@ -21084,6 +32335,13 @@ async function markPaymentSucceeded(clientId: number, transactionId: string) {
     }
   }
 
+  fireClientActivatedNotifications({
+    clientId,
+    source: "payment",
+  }).catch((e: any) =>
+    console.error("[notify:activation-payment]", e?.message ?? e),
+  );
+
   // Push new client to Credit Repair Cloud (async — don't block payment confirmation)
   crcSyncClient(clientId).catch((e) =>
     console.error("[crc:new-client-sync]", e?.message),
@@ -21179,6 +32437,18 @@ async function triggerReminderFlow(
     skipIdempotency?: boolean;
     /** Skip delay_days=0 email/alert steps (e.g. convert already sent a welcome). */
     skipImmediateSteps?: boolean;
+    /** Attach files to immediate/queued email steps (e.g. Round PDF). */
+    emailAttachments?: Array<{
+      filename: string;
+      content: Buffer;
+      contentType: string;
+    }>;
+    /** Round publish: SMS From = publishing admin's OFG. */
+    smsFromAdminId?: number | null;
+    /** Onboarding magic link ?next= (allowlisted portal path). */
+    magicLinkNext?: string | null;
+    /** Prefer this URL in SMS (e.g. secure PDF download). */
+    smsUrlOverride?: string | null;
   },
 ): Promise<void> {
   const [flows] = await pool.query<RowDataPacket[]>(
@@ -21229,7 +32499,7 @@ async function triggerReminderFlow(
   }
 
   const [steps] = await pool.query<RowDataPacket[]>(
-    `SELECT id, step_type, delay_days, label, subject, body, template_slug
+    `SELECT id, step_type, delay_days, label, subject, body, template_slug, also_sms
      FROM reminder_flow_steps WHERE flow_id = ? ORDER BY step_order ASC`,
     [flowId],
   );
@@ -21279,6 +32549,28 @@ async function triggerReminderFlow(
           console.warn(
             `[flow:${triggerEvent}] Skipping email step "${step.label || step.id}" — client ${clientId} has no email`,
           );
+          // Round publish: still SMS when phone exists (Q6A — both when possible).
+          if (
+            isImmediate &&
+            Number(step.also_sms) !== 0 &&
+            String(triggerEvent).startsWith("round_") &&
+            String(triggerEvent).endsWith("_complete")
+          ) {
+            const smsLink =
+              String(opts?.smsUrlOverride || "").trim() ||
+              String((extraVars && extraVars.secure_pdf_url) || "").trim() ||
+              `${APP_URL}/portal/reports`;
+            await maybeSendClientReminderSms({
+              clientId,
+              triggerEvent,
+              alsoSms: true,
+              portalUrl: smsLink,
+              isSandbox: isSandboxDelivery,
+              smsFromAdminId: opts?.smsFromAdminId,
+            }).catch((e: any) =>
+              console.error("[flow:reminder-sms:no-email]", e?.message ?? e),
+            );
+          }
           continue;
         }
         let subj = step.subject as string | null;
@@ -21314,10 +32606,24 @@ async function triggerReminderFlow(
         const delayDays = step.delay_days as number;
         const tokenTtlHours = delayDays * 24 + ONBOARDING_TOKEN_TTL_HOURS;
         const rawToken = await createOnboardingToken(clientId, tokenTtlHours);
-        const magicLink = `${APP_URL}/portal/onboarding/${rawToken}`;
+        const nextPath = sanitizePortalNextPath(opts?.magicLinkNext);
+        const magicLink = nextPath
+          ? `${APP_URL}/portal/onboarding/${rawToken}?next=${encodeURIComponent(nextPath)}`
+          : `${APP_URL}/portal/onboarding/${rawToken}`;
+        const securePdfUrl = String(
+          (extraVars && extraVars.secure_pdf_url) || "",
+        ).trim();
+        const reportsUrl = String(
+          (extraVars && extraVars.reports_url) || `${APP_URL}/portal/reports`,
+        ).trim();
 
         // Build step-specific vars with the magic link overriding the generic portal_url
-        const stepVars = { ...vars, portal_url: magicLink };
+        const stepVars = {
+          ...vars,
+          portal_url: magicLink,
+          reports_url: reportsUrl,
+          secure_pdf_url: securePdfUrl || magicLink,
+        };
         const stepReplaceVars = (tmpl: string) =>
           tmpl.replace(/\{\{(\w+)\}\}/g, (_, k) => stepVars[k] ?? `{{${k}}}`);
 
@@ -21326,12 +32632,40 @@ async function triggerReminderFlow(
           resolvedSubj = `[TEST] ${resolvedSubj}`;
         }
         const resolvedBody = stepReplaceVars(bodyHtml);
-        const btnLabel = lang === "es" ? "Ir a mi portal" : "Go to My Portal";
+        const btnPortal =
+          lang === "es" ? "Ver en mi portal" : "View in My Portal";
+        const btnPdf =
+          lang === "es" ? "Descargar informe (PDF)" : "Download report (PDF)";
+        let ctaHtml = emailButton(magicLink, btnPortal);
+        if (securePdfUrl) {
+          ctaHtml += emailButton(securePdfUrl, btnPdf);
+        }
         const fullHtml = emailLayout({
           title: resolvedSubj,
-          bodyHtml: resolvedBody + emailButton(magicLink, btnLabel),
+          bodyHtml: resolvedBody + ctaHtml,
           lang,
         });
+
+        // Per-step also_sms, with Day-0 payment_confirmed suppressed when
+        // activation SMS is still pending (avoids double magic-link texts).
+        let alsoSms = Number(step.also_sms) !== 0;
+        if (
+          alsoSms &&
+          triggerEvent === "payment_confirmed" &&
+          delayDays === 0 &&
+          !isSandboxDelivery
+        ) {
+          const [actRows] = await pool.query<RowDataPacket[]>(
+            `SELECT activation_notified_at FROM clients WHERE id = ? LIMIT 1`,
+            [clientId],
+          );
+          if (!actRows[0]?.activation_notified_at) {
+            alsoSms = false;
+          }
+        }
+
+        const smsLink = String(opts?.smsUrlOverride || "").trim() || magicLink;
+        const emailAttachments = opts?.emailAttachments;
 
         if (isImmediate) {
           try {
@@ -21340,6 +32674,7 @@ async function triggerReminderFlow(
                 to: deliverTo,
                 subject: resolvedSubj,
                 html: fullHtml,
+                attachments: emailAttachments,
               }),
               new Promise<never>((_, reject) =>
                 setTimeout(
@@ -21349,6 +32684,17 @@ async function triggerReminderFlow(
               ),
             ]);
             stepsExecuted++;
+            // Q4C: SMS only after email succeeds (same schedule as email).
+            await maybeSendClientReminderSms({
+              clientId,
+              triggerEvent,
+              alsoSms,
+              portalUrl: smsLink,
+              isSandbox: isSandboxDelivery,
+              smsFromAdminId: opts?.smsFromAdminId,
+            }).catch((e: any) =>
+              console.error("[flow:reminder-sms]", e?.message ?? e),
+            );
             // Enrollment Day-0 welcome includes the upload magic link — alert
             // the language owner the same way convert / admin welcome do.
             if (triggerEvent === "payment_confirmed" && !isSandboxDelivery) {
@@ -21378,15 +32724,48 @@ async function triggerReminderFlow(
             // Fall back to queue so the cron worker can retry without
             // blocking stage/convert handlers on a hung SMTP socket.
             await pool.query<ResultSetHeader>(
-              `INSERT INTO notification_queue (client_id, channel, to_address, subject, body, scheduled_for) VALUES (?, 'email', ?, ?, ?, NOW())`,
-              [clientId, deliverTo, resolvedSubj, fullHtml],
+              `INSERT INTO notification_queue
+                 (client_id, channel, to_address, subject, body, scheduled_for, payload_json)
+               VALUES (?, 'email', ?, ?, ?, NOW(), ?)`,
+              [
+                clientId,
+                deliverTo,
+                resolvedSubj,
+                fullHtml,
+                JSON.stringify({
+                  also_sms: alsoSms,
+                  trigger_event: triggerEvent,
+                  portal_url: magicLink,
+                  sms_url: smsLink,
+                  sms_from_admin_id: opts?.smsFromAdminId ?? null,
+                  reminder_step_id: Number(step.id),
+                  is_sandbox: isSandboxDelivery,
+                }),
+              ],
             );
             stepsScheduled++;
           }
         } else {
           await pool.query<ResultSetHeader>(
-            `INSERT INTO notification_queue (client_id, channel, to_address, subject, body, scheduled_for) VALUES (?, 'email', ?, ?, ?, ?)`,
-            [clientId, deliverTo, resolvedSubj, fullHtml, scheduledFor],
+            `INSERT INTO notification_queue
+               (client_id, channel, to_address, subject, body, scheduled_for, payload_json)
+             VALUES (?, 'email', ?, ?, ?, ?, ?)`,
+            [
+              clientId,
+              deliverTo,
+              resolvedSubj,
+              fullHtml,
+              scheduledFor,
+              JSON.stringify({
+                also_sms: alsoSms,
+                trigger_event: triggerEvent,
+                portal_url: magicLink,
+                sms_url: smsLink,
+                sms_from_admin_id: opts?.smsFromAdminId ?? null,
+                reminder_step_id: Number(step.id),
+                is_sandbox: isSandboxDelivery,
+              }),
+            ],
           );
           stepsScheduled++;
         }
@@ -21734,18 +33113,29 @@ const KNOWN_MCP_REDIRECT_URIS = [
  *  true so Claude Desktop does not block dry-runs with "No approval received"). */
 const ADMIN_AI_MCP_WRITE_TOOLS = new Set([
   "create_prospect",
+  "create_contact",
+  "update_contact",
+  "convert_contact",
+  "send_contact_sms",
+  "send_contact_email",
   "create_work_task",
+  "update_work_task",
   "add_case_note",
   "upload_case_document",
+  "run_credit_analysis",
   "send_email",
+  "send_round_report",
   "send_sms",
   "send_text",
   "update_pipeline_stage",
   "convert_prospect",
+  "update_client",
   "update_client_status",
   "upsert_progress_report",
+  "set_case_payment_plan",
   "upsert_payment_splits",
   "update_payment_split",
+  "create_coupon",
   "update_funding_status",
   "create_funding_application",
   "convert_funding_application",
@@ -22823,6 +34213,10 @@ function buildApp() {
   app.get("/api/health", (_req, res) => {
     res.json({ status: "ok", timestamp: new Date().toISOString() });
   });
+  /** SMS-friendly masked free-report link → MyFreeScoreNow snapshot. */
+  app.get(["/go/free-score", "/api/public/go/free-score"], (_req, res) => {
+    res.redirect(302, MFSN_FREE_SNAPSHOT_URL);
+  });
   app.get("/api/ping", (_req, res) => {
     res.json({ message: "pong" });
   });
@@ -23166,6 +34560,8 @@ function buildApp() {
         conversations_enabled: phones.length > 0,
         otp_sms_available:
           !!personalPhone && phones.length > 0 && isTwilioConfigured(),
+        social_dm_enabled: socialDmFeatureStatus().mode === "live",
+        social_dm_mode: socialDmFeatureStatus().mode,
       },
     });
   });
@@ -23241,6 +34637,9 @@ function buildApp() {
         : "";
       user.otp_sms_available =
         !!personalPhone && phones.length > 0 && isTwilioConfigured();
+      const social = socialDmFeatureStatus();
+      user.social_dm_enabled = social.mode === "live";
+      user.social_dm_mode = social.mode;
 
       res.json({ user });
     },
@@ -23799,6 +35198,57 @@ function buildApp() {
     });
   });
 
+  // Short-lived secure Round PDF download (email/SMS) — no portal session required
+  app.get("/api/public/round-report-pdf/:token", async (req, res) => {
+    const rawToken = String(req.params.token || "").trim();
+    if (!rawToken || rawToken.length < 32) {
+      return res.status(400).json({ error: "Invalid token" });
+    }
+    try {
+      const row = await loadRoundReportPdfByDownloadToken(rawToken);
+      if (!row) {
+        return res.status(401).json({
+          error: "This download link has expired or is invalid.",
+        });
+      }
+      let raw: Buffer;
+      if (String(row.storage_provider) === "cdn") {
+        const cdnRes = await fetch(String(row.storage_key));
+        if (!cdnRes.ok) {
+          return res.status(404).json({ error: "File not available" });
+        }
+        raw = Buffer.from(await cdnRes.arrayBuffer());
+      } else if (String(row.storage_key).startsWith("vitest://")) {
+        raw = Buffer.from("%PDF-1.4 vitest");
+      } else {
+        raw = await fs.promises.readFile(
+          path.join(UPLOADS_DIR, String(row.storage_key)),
+        );
+      }
+      const buf =
+        row.encrypted && row.enc_iv && row.enc_tag
+          ? decryptFile(
+              raw,
+              String(row.enc_iv),
+              String(row.enc_tag),
+            )
+          : raw;
+      const fileName =
+        String(row.file_name || "").trim() || "OFG_Progress_Report.pdf";
+      res.set("Content-Type", "application/pdf");
+      res.set(
+        "Content-Disposition",
+        `inline; filename="${encodeURIComponent(fileName)}"`,
+      );
+      res.set("Content-Length", String(buf.length));
+      res.set("Cache-Control", "no-store, no-cache");
+      res.send(buf);
+    } catch (e: any) {
+      console.error("[public:round-report-pdf]", e?.message ?? e);
+      res.status(500).json({ error: "Failed to retrieve PDF" });
+    }
+  });
+
   // ============================================================
   // PUBLIC — legal documents (DB-backed markdown)
   // ============================================================
@@ -24068,8 +35518,6 @@ function buildApp() {
         mode === "agent" && b.rep_name ? String(b.rep_name).trim() : null;
       const emailOptIn = b.email_opt_in === "true" || b.email_opt_in === true;
       const file = (req as any).file as Express.Multer.File | undefined;
-      // Affiliate first-touch attribution — cookie is set client-side; server
-      // also accepts any of these field names for direct API callers.
       const affiliateCode =
         b.affiliate_code || b.affiliateCode || b.ref || b.slug;
 
@@ -24081,245 +35529,52 @@ function buildApp() {
       if (!PUBLIC_EMAIL_RE.test(email)) {
         return res.status(400).json({ error: "Invalid email address" });
       }
+      if (isPlaceholderPhone(phone)) {
+        return res.status(400).json({ error: "Invalid phone number" });
+      }
+      if (
+        looksLikeSpamPersonName(firstName, lastName) &&
+        looksLikeSpamEmail(email)
+      ) {
+        return res.status(400).json({ error: "Unable to submit" });
+      }
       if (!file) {
         return res.status(400).json({ error: "report_file is required" });
       }
 
-      // Best-effort text extraction — only PDFs are parsed; other file types
-      // (e.g. photos of a report) are still stored but yield no scores/negatives.
-      let reportText = "";
-      let pdfParseFailed = false;
-      if (file.mimetype === "application/pdf") {
-        try {
-          const pdfParse = await loadPdfParse();
-          const parsed = await pdfParse(file.buffer);
-          reportText = parsed.text || "";
-        } catch (e: any) {
-          pdfParseFailed = true;
-          console.error(
-            "[public:credit-analysis] pdf parse failed:",
-            e?.message,
-          );
-        }
-      }
-      const extractionStatus = resolveExtractionStatus(
-        file.mimetype,
-        reportText,
-        pdfParseFailed,
-      );
-      const charsExtracted = reportText.trim().length;
-      const weakExtraction = extractionStatus !== "ok";
-
-      const provider = reportText ? detectProvider(reportText) : "generic";
-      const scores: BureauScores = reportText
-        ? extractAllScores(reportText, provider)
-        : { transunion: null, experian: null, equifax: null };
-      const hasScores = !!(
-        scores.transunion ||
-        scores.experian ||
-        scores.equifax
-      );
-      const negativeLines = reportText ? detectNegativeLines(reportText) : [];
-      const negatives = buildNegativeItems(negativeLines);
-      const suggestedLabels = inferAnalysisLabelSlugs(
-        negativeLines,
-        reportText,
-      );
-
       try {
-        const affiliateId = await resolveAffiliateIdBySlugOrCode(affiliateCode);
-
-        const [existingRows] = await pool.query<RowDataPacket[]>(
-          `SELECT id, status FROM clients WHERE email = ? LIMIT 1`,
-          [email],
-        );
-
-        let clientId: number;
-        let isProspectFlow = true;
-        if (existingRows.length > 0) {
-          clientId = existingRows[0].id as number;
-          isProspectFlow = existingRows[0].status === "prospect";
-          if (affiliateId) {
-            // First-touch: never overwrite an existing attribution.
-            await pool.query<ResultSetHeader>(
-              `UPDATE clients SET affiliate_id = COALESCE(affiliate_id, ?) WHERE id = ?`,
-              [affiliateId, clientId],
-            );
-          }
-        } else {
-          const ownerId = await resolveLanguageOwnerAdminId(
-            textLanguage === "es" ? "es" : "en",
-          );
-          const [ins] = await pool.query<ResultSetHeader>(
-            `INSERT INTO clients (email, first_name, last_name, phone, preferred_language, assigned_admin_id, status, pipeline_stage, affiliate_id)
-             VALUES (?, ?, ?, ?, ?, ?, 'prospect', 'prospect', ?)`,
-            [
-              email,
-              firstName,
-              lastName,
-              phone || null,
-              textLanguage,
-              ownerId,
-              affiliateId,
-            ],
-          );
-          clientId = ins.insertId;
-        }
-
-        if (isProspectFlow) {
-          const sourceLabel =
-            mode === "agent" ? "agent_submission" : "web_analysis";
-          const labelSlugs = [sourceLabel, ...suggestedLabels];
-          if (b.lead_source === "get_started")
-            labelSlugs.push("get_started_wizard");
-          if (affiliateId) labelSlugs.push("affiliate_referral");
-          attachLabelsBySlug(clientId, labelSlugs).catch((e) =>
-            console.error(
-              "[public:credit-analysis] attachLabels failed:",
-              e?.message,
-            ),
-          );
-        }
-
-        // Best-effort CDN upload of the raw report — never blocks analysis generation.
-        let storageKey: string | null = null;
-        try {
-          storageKey = await uploadToCDN(
-            file.buffer,
-            file.originalname,
-            file.mimetype,
-            `analysis-${clientId}`,
-          );
-        } catch (e: any) {
-          console.error(
-            "[public:credit-analysis] CDN upload failed:",
-            e?.message,
-          );
-        }
-
-        const utilization = reportText
-          ? extractUtilization(reportText).map((u) => ({
-              account: u.account,
-              limit: u.limit,
-              balance: u.balance,
-              pctUsed: u.pctUsed,
-              payTo30: u.payTo30,
-              payTo10: u.payTo10,
-            }))
-          : [];
-        const positiveAccounts = reportText
-          ? extractPositiveAccounts(reportText)
-          : [];
-
-        const analyst: CreditAnalysisAnalystFlat = runCreditAnalysisAlgorithm({
-          clientName: `${firstName} ${lastName}`.trim(),
+        const result = await executeCreditAnalysisUpload({
+          mode,
           firstName,
           lastName,
-          repName,
+          email,
+          phone,
+          textLanguage,
           clientGoal,
-          language: textLanguage,
-          scores,
-          negatives,
-          reportText,
-          utilization,
-          positiveAccounts,
-          weakExtraction,
+          notes,
+          agentPhone,
+          repName,
+          emailOptIn,
+          file: {
+            buffer: file.buffer,
+            originalname: file.originalname,
+            mimetype: file.mimetype,
+          },
+          affiliateCode,
+          leadSource: b.lead_source ? String(b.lead_source) : null,
         });
-
-        const croa =
-          analyst.text_language === "Spanish"
-            ? CROA_DISCLOSURE_ES
-            : CROA_DISCLOSURE_EN;
-        const { html, text } = buildAnalystAnalysisHtml({
-          firstName,
-          analyst,
-          weakExtraction,
-          croaDisclosure: croa,
-        });
-
-        // Prefer algorithm language for email copy when surname-biased Spanish.
-        const emailLang: "en" | "es" =
-          analyst.text_language === "Spanish" ? "es" : "en";
-
-        let emailSent = false;
-        if (emailOptIn) {
-          try {
-            await sendEmail({
-              to: email,
-              subject:
-                emailLang === "es"
-                  ? "Tu análisis de crédito — Optimum Credit"
-                  : "Your Credit Analysis — Optimum Credit",
-              html: emailLayout({
-                title:
-                  emailLang === "es"
-                    ? "Tu análisis de crédito"
-                    : "Your Credit Analysis",
-                bodyHtml: html,
-                lang: emailLang,
-              }),
-              text,
-            });
-            emailSent = true;
-          } catch (e: any) {
-            console.error(
-              "[public:credit-analysis] email send failed:",
-              e?.message,
-            );
-          }
-        }
-
-        const generatedAt = new Date();
-        const [insAnalysis] = await pool.query<ResultSetHeader>(
-          `INSERT INTO credit_analyses
-             (client_id, mode, submitter_first_name, submitter_last_name, agent_phone, rep_name,
-              client_goal, text_language, notes, report_file_name, report_mime_type, report_storage_key,
-              provider_detected, scores_json, negatives_json, labels_suggested_json, analyst_json,
-              analysis_html, analysis_text, email_opt_in, email_sent_at, generated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            clientId,
-            mode,
-            firstName,
-            lastName,
-            agentPhone,
-            repName,
-            clientGoal,
-            textLanguage,
-            notes,
-            file.originalname || null,
-            file.mimetype || null,
-            storageKey,
-            provider,
-            JSON.stringify(scores),
-            JSON.stringify(negatives),
-            JSON.stringify(suggestedLabels),
-            JSON.stringify(analyst),
-            html,
-            text,
-            emailOptIn ? 1 : 0,
-            emailSent ? generatedAt : null,
-            generatedAt,
-          ],
-        );
-
-        const result: CreditAnalysisResult = {
-          id: insAnalysis.insertId,
-          client_id: clientId,
-          mode,
-          scores: hasScores ? scores : null,
-          negatives,
-          suggested_labels: suggestedLabels,
-          analysis_html: html,
-          analysis_text: text,
-          email_sent: emailSent,
-          generated_at: generatedAt.toISOString(),
-          extraction_status: extractionStatus,
-          chars_extracted: charsExtracted,
-          analyst,
-        };
         res.json(result);
       } catch (err: any) {
+        if (err?.statusCode === 400) {
+          return res.status(400).json({
+            error:
+              err.code === "placeholder_phone"
+                ? "Invalid phone number"
+                : err.code === "spam_rejected"
+                  ? "Unable to submit"
+                  : err.message || "Unable to submit",
+          });
+        }
         if (sendFriendlyError(res, err, { duplicateLabel: "email" })) return;
         console.error("[public:credit-analysis] error:", err?.message ?? err);
         res.status(500).json({
@@ -24355,6 +35610,15 @@ function buildApp() {
     if (!PUBLIC_EMAIL_RE.test(email)) {
       return res.status(400).json({ error: "Invalid email address" });
     }
+    if (phone && isPlaceholderPhone(phone)) {
+      return res.status(400).json({ error: "Invalid phone number" });
+    }
+    if (
+      looksLikeSpamPersonName(firstName, lastName) &&
+      looksLikeSpamEmail(email)
+    ) {
+      return res.status(400).json({ error: "Unable to submit" });
+    }
 
     try {
       const affiliateId = await resolveAffiliateIdBySlugOrCode(affiliateCode);
@@ -24381,17 +35645,47 @@ function buildApp() {
           );
         }
       } else {
-        const ownerId = await resolveLanguageOwnerAdminId(lang);
-        const [ins] = await pool.query<ResultSetHeader>(
-          `INSERT INTO clients (email, first_name, last_name, phone, preferred_language, assigned_admin_id, status, pipeline_stage, affiliate_id)
-           VALUES (?, ?, ?, ?, ?, ?, 'prospect', 'prospect', ?)`,
-          [email, firstName, lastName, phone, lang, ownerId, affiliateId],
-        );
-        clientId = ins.insertId;
+        const phoneMatchId = phone ? await findClientIdByPhone(phone) : null;
+        if (phoneMatchId) {
+          clientId = phoneMatchId;
+          const [phoneRows] = await pool.query<RowDataPacket[]>(
+            `SELECT status FROM clients WHERE id = ? LIMIT 1`,
+            [clientId],
+          );
+          isProspectFlow = phoneRows[0]?.status === "prospect";
+          if (isProspectFlow) {
+            await pool.query<ResultSetHeader>(
+              `UPDATE clients
+               SET email = COALESCE(NULLIF(TRIM(email), ''), ?),
+                   first_name = ?, last_name = ?,
+                   phone = COALESCE(NULLIF(TRIM(phone), ''), ?),
+                   preferred_language = ?
+               WHERE id = ?`,
+              [email, firstName, lastName, phone, lang, clientId],
+            );
+          }
+          if (affiliateId) {
+            await pool.query<ResultSetHeader>(
+              `UPDATE clients SET affiliate_id = COALESCE(affiliate_id, ?) WHERE id = ?`,
+              [affiliateId, clientId],
+            );
+          }
+        } else {
+          const ownerId = await resolveLanguageOwnerAdminId(lang);
+          const [ins] = await pool.query<ResultSetHeader>(
+            `INSERT INTO clients (email, first_name, last_name, phone, preferred_language, assigned_admin_id, status, pipeline_stage, affiliate_id)
+             VALUES (?, ?, ?, ?, ?, ?, 'prospect', 'prospect', ?)`,
+            [email, firstName, lastName, phone, lang, ownerId, affiliateId],
+          );
+          clientId = ins.insertId;
+        }
       }
 
       if (isProspectFlow) {
+        // Affiliate-referred leads skip the Web leads review bucket — they land
+        // on the main Prospect column for the affiliate (and staff).
         const labelSlugs = [sourceLabel];
+        if (!affiliateId) labelSlugs.push(WEB_LEAD_REVIEW_LABEL);
         if (b.lead_source === "get_started")
           labelSlugs.push("get_started_wizard");
         if (affiliateId) labelSlugs.push("affiliate_referral");
@@ -24410,6 +35704,217 @@ function buildApp() {
     } catch (err: any) {
       if (sendFriendlyError(res, err, { duplicateLabel: "email" })) return;
       console.error("[public:prospect-lead] error:", err?.message ?? err);
+      res
+        .status(500)
+        .json({ error: "We couldn't submit your info. Please try again." });
+    }
+  });
+
+  /**
+   * /get-credit-report lead capture: insert/update prospect, event labels,
+   * branded email (MFSN CTA) + SMS (OFG short link). Unassigned prospect.
+   */
+  app.post("/api/public/get-credit-report-lead", async (req, res) => {
+    if (
+      hitRateLimit(
+        rateLimitKey(req, "public-get-credit-report"),
+        12,
+        15 * 60 * 1000,
+      )
+    ) {
+      return res
+        .status(429)
+        .json({ error: "Too many requests. Try again later." });
+    }
+
+    const b = req.body || {};
+    const firstName = String(b.first_name || "").trim();
+    const lastName = String(b.last_name || "").trim();
+    const email = String(b.email || "")
+      .trim()
+      .toLowerCase();
+    const phoneRaw = String(b.phone || "").trim();
+    const notes = b.notes ? String(b.notes).trim().slice(0, 2000) : "";
+    const hearAbout = b.hear_about
+      ? String(b.hear_about).trim().slice(0, 200)
+      : "";
+    const lang =
+      b.preferred_language === "es" || b.text_language === "es" ? "es" : "en";
+
+    if (!firstName || !lastName || !email || !phoneRaw) {
+      return res.status(400).json({
+        error: "first_name, last_name, email, and phone are required",
+      });
+    }
+    if (!PUBLIC_EMAIL_RE.test(email)) {
+      return res.status(400).json({ error: "Invalid email address" });
+    }
+    const phoneDigits = normalizePhoneDigits(phoneRaw);
+    if (phoneDigits.length < 10) {
+      return res.status(400).json({ error: "Invalid phone number" });
+    }
+    if (isPlaceholderPhone(phoneRaw)) {
+      return res.status(400).json({ error: "Invalid phone number" });
+    }
+    if (
+      looksLikeSpamPersonName(firstName, lastName) &&
+      looksLikeSpamEmail(email)
+    ) {
+      return res.status(400).json({ error: "Unable to submit" });
+    }
+
+    const ymd = laCalendarDateYmd();
+    const eventKind = getCreditReportEventKind(ymd);
+    const labelSlugs = [
+      ...getCreditReportLabelSlugs(ymd),
+      WEB_LEAD_REVIEW_LABEL,
+    ];
+    const mfsnUrl = MFSN_FREE_SNAPSHOT_URL;
+    const shortUrl = `${APP_URL}/go/free-score`;
+
+    try {
+      let clientId: number | null = null;
+      let status: string | null = null;
+
+      const [byEmail] = await pool.query<RowDataPacket[]>(
+        `SELECT id, status, phone, preferred_language FROM clients WHERE email = ? LIMIT 1`,
+        [email],
+      );
+      if (byEmail[0]) {
+        clientId = Number(byEmail[0].id);
+        status = String(byEmail[0].status || "");
+      } else {
+        const byPhone = await findClientIdByPhone(phoneRaw);
+        if (byPhone) {
+          clientId = byPhone;
+          const [rows] = await pool.query<RowDataPacket[]>(
+            `SELECT status FROM clients WHERE id = ? LIMIT 1`,
+            [clientId],
+          );
+          status = rows[0] ? String(rows[0].status || "") : null;
+        }
+      }
+
+      const noteBits = [
+        hearAbout ? `How heard: ${hearAbout}` : "",
+        notes || "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      if (clientId) {
+        if (status === "prospect") {
+          // Do NOT clear assigned_admin_id — staff may already own the lead.
+          await pool.query(
+            `UPDATE clients
+             SET first_name = ?, last_name = ?,
+                 phone = ?,
+                 preferred_language = ?,
+                 email = COALESCE(NULLIF(TRIM(email), ''), ?)
+             WHERE id = ?`,
+            [firstName, lastName, phoneRaw, lang, email, clientId],
+          );
+        } else {
+          // Enrolled / other: refresh contact fields only; do not demote.
+          await pool.query(
+            `UPDATE clients
+             SET phone = COALESCE(NULLIF(TRIM(phone), ''), ?),
+                 preferred_language = COALESCE(preferred_language, ?)
+             WHERE id = ?`,
+            [phoneRaw, lang, clientId],
+          );
+        }
+      } else {
+        const [ins] = await pool.query<ResultSetHeader>(
+          `INSERT INTO clients
+             (email, first_name, last_name, phone, preferred_language,
+              assigned_admin_id, status, pipeline_stage)
+           VALUES (?, ?, ?, ?, ?, NULL, 'prospect', 'prospect')`,
+          [email, firstName, lastName, phoneRaw, lang],
+        );
+        clientId = ins.insertId;
+        status = "prospect";
+      }
+
+      await attachLabelsBySlug(clientId!, labelSlugs).catch((e: any) =>
+        console.error("[get-credit-report] labels", e?.message ?? e),
+      );
+
+      if (noteBits) {
+        await pool
+          .query(
+            `INSERT INTO credit_analyses
+               (client_id, mode, submitter_first_name, submitter_last_name, notes, generated_at)
+             VALUES (?, 'client', ?, ?, ?, NOW())`,
+            [clientId, firstName, lastName, noteBits.slice(0, 4000)],
+          )
+          .catch(() => null);
+      }
+
+      const tpl = tplGetCreditReportWelcome({
+        firstName,
+        mfsnUrl,
+        lang,
+        eventKind,
+      });
+      let emailSent = false;
+      try {
+        await sendEmail({
+          to: email,
+          subject: tpl.subject,
+          html: tpl.html,
+        });
+        emailSent = true;
+      } catch (e: any) {
+        console.error("[get-credit-report] email", e?.message ?? e);
+      }
+
+      let smsSent = false;
+      try {
+        const fromE164 = await resolveGetCreditReportSmsFromE164();
+        if (fromE164) {
+          const body = smsGetCreditReportWelcome({
+            firstName,
+            shortUrl,
+            lang,
+            eventKind,
+          });
+          await sendSms({ to: phoneRaw, from: fromE164, body });
+          smsSent = true;
+        } else {
+          console.warn("[get-credit-report] SMS skipped — no From number");
+        }
+      } catch (e: any) {
+        console.error("[get-credit-report] sms", e?.message ?? e);
+      }
+
+      try {
+        await notifyGetCreditReportLead({
+          clientId: clientId!,
+          firstName,
+          lastName,
+          email,
+          phone: phoneRaw,
+          lang,
+          eventKind,
+        });
+      } catch (e: any) {
+        console.error("[get-credit-report] staff notify", e?.message ?? e);
+      }
+
+      res.json({
+        ok: true,
+        client_id: clientId,
+        mfsn_url: mfsnUrl,
+        short_url: shortUrl,
+        event_kind: eventKind,
+        labels: labelSlugs,
+        email_sent: emailSent,
+        sms_sent: smsSent,
+      });
+    } catch (err: any) {
+      if (sendFriendlyError(res, err, { duplicateLabel: "email" })) return;
+      console.error("[public:get-credit-report-lead]", err?.message ?? err);
       res
         .status(500)
         .json({ error: "We couldn't submit your info. Please try again." });
@@ -26141,12 +37646,27 @@ function buildApp() {
         [clientId],
       );
       const [reportRows] = await pool.query<RowDataPacket[]>(
-        `SELECT id, round_number, score_before, score_after, items_removed, items_disputed, summary_md,
-              bureau_scores_json, wins_json, targets_json, file_strength_score,
-              pdf_file_name, (pdf_storage_key IS NOT NULL) AS has_pdf, pdf_uploaded_at, created_at
-       FROM client_round_reports
-       WHERE client_id = ? AND pdf_storage_key IS NOT NULL
-       ORDER BY round_number DESC`,
+        `SELECT crr.id, crr.round_number, crr.score_before, crr.score_after, crr.items_removed, crr.items_disputed, crr.summary_md,
+              crr.bureau_scores_json, crr.wins_json, crr.targets_json, crr.file_strength_score,
+              crr.pdf_file_name,
+              (
+                crr.pdf_storage_key IS NOT NULL
+                OR EXISTS (
+                  SELECT 1 FROM round_report_pdfs rrp
+                  WHERE rrp.client_id = crr.client_id AND rrp.round_number = crr.round_number
+                )
+              ) AS has_pdf,
+              crr.pdf_uploaded_at, crr.created_at
+       FROM client_round_reports crr
+       WHERE crr.client_id = ?
+         AND (
+           crr.pdf_storage_key IS NOT NULL
+           OR EXISTS (
+             SELECT 1 FROM round_report_pdfs rrp
+             WHERE rrp.client_id = crr.client_id AND rrp.round_number = crr.round_number
+           )
+         )
+       ORDER BY crr.round_number DESC`,
         [clientId],
       );
       await attachPdfsToReports(clientId, reportRows);
@@ -26163,13 +37683,130 @@ function buildApp() {
         [clientId],
       );
 
+      const clientOut = { ...clientRows[0] };
+      if (clientOut.admin_notes != null) {
+        clientOut.admin_notes = decodeLiteralUnicodeEscapes(
+          String(clientOut.admin_notes),
+        );
+      }
+      for (const r of reportRows) {
+        if (r.summary_md != null) {
+          r.summary_md = decodeLiteralUnicodeEscapes(String(r.summary_md));
+        }
+      }
       res.json({
-        client: clientRows[0],
+        client: clientOut,
         documents: docRows,
         reports: reportRows,
         tickets: ticketRows,
         active_case: activeCase[0] ?? null,
       });
+    },
+  );
+
+  app.get(
+    "/api/portal/credit-analysis",
+    requireClient,
+    async (req: AuthedRequest, res) => {
+      const clientId = req.auth!.id;
+      const [cRows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, status, pipeline_stage FROM clients WHERE id = ? LIMIT 1`,
+        [clientId],
+      );
+      if (cRows.length === 0) {
+        return res.status(404).json({ error: "Not found" });
+      }
+      const isProspect = isProspectClientRow(cRows[0]);
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM credit_analyses WHERE client_id = ? ORDER BY id DESC LIMIT 1`,
+        [clientId],
+      );
+      if (!isProspect) {
+        if (rows.length === 0) {
+          return res.status(403).json({
+            error: "Credit analysis is only available for prospects",
+            code: "prospect_only",
+          });
+        }
+        return res.json({ analysis: creditAnalysisRowToResult(rows[0]) });
+      }
+      if (rows.length === 0) {
+        return res.json({ analysis: null });
+      }
+      res.json({ analysis: creditAnalysisRowToResult(rows[0]) });
+    },
+  );
+
+  app.post(
+    "/api/portal/credit-analysis",
+    requireClient,
+    upload.single("report_file"),
+    async (req: AuthedRequest, res) => {
+      const clientId = req.auth!.id;
+      const [cRows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, email, first_name, last_name, phone, preferred_language, status, pipeline_stage
+         FROM clients WHERE id = ? LIMIT 1`,
+        [clientId],
+      );
+      if (cRows.length === 0) {
+        return res.status(404).json({ error: "Not found" });
+      }
+      const client = cRows[0];
+      if (!isProspectClientRow(client)) {
+        return res.status(403).json({
+          error: "Credit analysis is only available for prospects",
+          code: "prospect_only",
+        });
+      }
+      const file = (req as any).file as Express.Multer.File | undefined;
+      if (!file) {
+        return res.status(400).json({ error: "report_file is required" });
+      }
+      const b = req.body || {};
+      const textLanguage: "en" | "es" =
+        b.text_language === "es" ||
+        (b.text_language !== "en" && client.preferred_language === "es")
+          ? "es"
+          : "en";
+      const clientGoal = b.client_goal
+        ? String(b.client_goal).trim().slice(0, 255)
+        : null;
+      const notes = b.notes ? String(b.notes).trim() : null;
+      const emailOptIn =
+        b.email_opt_in === "true" || b.email_opt_in === true;
+      const firstName = String(client.first_name || "").trim();
+      const lastName = String(client.last_name || "").trim();
+      const email = String(client.email || "")
+        .trim()
+        .toLowerCase();
+      const phone = String(client.phone || "").trim();
+
+      try {
+        const result = await executeCreditAnalysisUpload({
+          mode: "client",
+          firstName,
+          lastName,
+          email,
+          phone,
+          textLanguage,
+          clientGoal,
+          notes,
+          emailOptIn,
+          file: {
+            buffer: file.buffer,
+            originalname: file.originalname,
+            mimetype: file.mimetype,
+          },
+          fixedClientId: clientId,
+          sourceLabel: "web_analysis",
+        });
+        res.json(result);
+      } catch (err: any) {
+        console.error("[portal:credit-analysis] error:", err?.message ?? err);
+        res.status(500).json({
+          error: "We couldn't generate your analysis. Please try again.",
+        });
+      }
     },
   );
 
@@ -27300,21 +38937,49 @@ function buildApp() {
        ORDER BY p.paid_at DESC LIMIT 5`,
       );
       const [upcomingRounds] = await pool.query<RowDataPacket[]>(
-        `SELECT r.case_id, cr.case_number, cr.client_id,
-                c.first_name, c.last_name,
-                r.round_number, r.target_date,
-                DATEDIFF(r.target_date, CURDATE()) AS days_until
+        `SELECT case_id, case_number, client_id, first_name, last_name,
+                round_number, target_date, days_until, event_kind
          FROM (
-           SELECT case_id, 1 AS round_number, round_1_date AS target_date FROM case_round_schedules
-           UNION ALL SELECT case_id, 2, round_2_date FROM case_round_schedules
-           UNION ALL SELECT case_id, 3, round_3_date FROM case_round_schedules
-           UNION ALL SELECT case_id, 4, round_4_date FROM case_round_schedules
-           UNION ALL SELECT case_id, 5, round_5_date FROM case_round_schedules
-         ) r
-         JOIN credit_repair_cases cr ON cr.id = r.case_id AND cr.status = 'active'
-         JOIN clients c ON c.id = cr.client_id
-         WHERE r.target_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 21 DAY)
-         ORDER BY r.target_date ASC, r.round_number ASC
+           SELECT r.case_id, cr.case_number, cr.client_id,
+                  c.first_name, c.last_name,
+                  r.round_number, r.target_date,
+                  DATEDIFF(r.target_date, CURDATE()) AS days_until,
+                  'schedule' AS event_kind
+           FROM (
+             SELECT case_id, 1 AS round_number, round_1_date AS target_date FROM case_round_schedules
+             UNION ALL SELECT case_id, 2, round_2_date FROM case_round_schedules
+             UNION ALL SELECT case_id, 3, round_3_date FROM case_round_schedules
+             UNION ALL SELECT case_id, 4, round_4_date FROM case_round_schedules
+             UNION ALL SELECT case_id, 5, round_5_date FROM case_round_schedules
+           ) r
+           JOIN credit_repair_cases cr ON cr.id = r.case_id AND cr.status = 'active'
+           JOIN clients c ON c.id = cr.client_id
+           WHERE r.target_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 21 DAY)
+           UNION ALL
+           SELECT cr.id AS case_id, cr.case_number, cr.client_id,
+                  c.first_name, c.last_name,
+                  LEAST(
+                    cr.max_rounds,
+                    GREATEST(
+                      COALESCE((
+                        SELECT MAX(crr.round_number) FROM client_round_reports crr
+                        WHERE crr.client_id = cr.client_id
+                      ), 0) + 1,
+                      6
+                    )
+                  ) AS round_number,
+                  cr.next_dispute_target_date AS target_date,
+                  DATEDIFF(cr.next_dispute_target_date, CURDATE()) AS days_until,
+                  'extended' AS event_kind
+           FROM credit_repair_cases cr
+           JOIN clients c ON c.id = cr.client_id
+           WHERE cr.status = 'active'
+             AND cr.next_dispute_target_date IS NOT NULL
+             AND cr.next_dispute_target_date BETWEEN CURDATE()
+               AND DATE_ADD(CURDATE(), INTERVAL 21 DAY)
+             AND cr.max_rounds > 5
+         ) u
+         ORDER BY u.target_date ASC, u.round_number ASC
          LIMIT 8`,
       );
       const adminId = req.auth!.id;
@@ -27346,22 +39011,33 @@ function buildApp() {
         recent_clients: recent,
         recent_tickets,
         recent_payments,
-        upcoming_rounds: upcomingRounds.map((r) => ({
-          id: `${r.case_id}-r${r.round_number}`,
-          case_id: r.case_id,
-          case_number: r.case_number,
-          client_id: r.client_id,
-          first_name: r.first_name,
-          last_name: r.last_name,
-          round_number: Number(r.round_number),
-          target_date: mysqlDateToYmd(r.target_date),
-          days_until: Number(r.days_until),
-        })),
+        upcoming_rounds: upcomingRounds.map((r) => {
+          const kind =
+            r.event_kind === "extended" ? ("extended" as const) : ("schedule" as const);
+          const roundNumber = Number(r.round_number);
+          return {
+            id:
+              kind === "extended"
+                ? `${r.case_id}-extended-target`
+                : `${r.case_id}-r${roundNumber}`,
+            case_id: r.case_id,
+            case_number: r.case_number,
+            client_id: r.client_id,
+            first_name: r.first_name,
+            last_name: r.last_name,
+            round_number: roundNumber,
+            target_date: mysqlDateToYmd(r.target_date),
+            days_until: Number(r.days_until),
+            kind,
+            label:
+              kind === "extended" ? `Round ${roundNumber} target` : undefined,
+          };
+        }),
         my_work_tasks: myWorkTasks.map((r) => {
           const daysUntil = r.days_until == null ? null : Number(r.days_until);
           return {
             id: Number(r.id),
-            title: String(r.title),
+            title: decodeLiteralUnicodeEscapes(String(r.title)),
             status: r.status as string,
             priority: r.priority as string,
             due_at: r.due_at ? new Date(r.due_at).toISOString() : null,
@@ -27513,7 +39189,7 @@ function buildApp() {
                 SUM(status = 'paid')                                            AS splits_paid,
                 SUM(status IN ('pending','overdue'))                            AS splits_pending,
                 SUM(status = 'overdue')                                         AS splits_overdue,
-                SUM(amount_cents)                                               AS splits_amount_cents,
+                SUM(CASE WHEN status <> 'cancelled' THEN amount_cents ELSE 0 END) AS splits_amount_cents,
                 SUM(CASE WHEN status = 'paid' THEN amount_cents ELSE 0 END)    AS splits_paid_cents
          FROM payment_splits
          GROUP BY client_id
@@ -27562,6 +39238,9 @@ function buildApp() {
         }
         for (const r of rows) {
           (r as any).labels = byClient.get(r.id as number) ?? [];
+          if (r.admin_notes != null) {
+            r.admin_notes = decodeLiteralUnicodeEscapes(String(r.admin_notes));
+          }
         }
       }
       res.json({
@@ -27573,6 +39252,504 @@ function buildApp() {
           totalPages: Math.max(1, Math.ceil(total / limit)),
         },
       });
+    },
+  );
+
+  // ─── CRM Contacts (address book; convert → prospect client) ───────────────
+  app.get(
+    "/api/admin/contacts",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const search = req.query.search as string | undefined;
+      const language = req.query.language as string | undefined;
+      const has_notes = req.query.has_notes as string | undefined;
+      const includeDeleted =
+        req.query.include_deleted === "1" ||
+        req.query.include_deleted === "true";
+      const includeConverted =
+        req.query.include_converted === "1" ||
+        req.query.include_converted === "true";
+      const page = Math.max(1, parseInt((req.query.page as string) || "1", 10));
+      const limit = Math.min(
+        100,
+        Math.max(1, parseInt((req.query.limit as string) || "50", 10)),
+      );
+      const offset = (page - 1) * limit;
+      const sortColMap: Record<string, string> = {
+        created_at: "c.created_at",
+        first_name: "c.first_name",
+        last_name: "c.last_name",
+        email: "c.email",
+        phone: "c.phone",
+        preferred_language: "c.preferred_language",
+      };
+      const sortByRaw = String(req.query.sort_by || "created_at");
+      const orderCol = sortColMap[sortByRaw] || "c.created_at";
+      const orderDir =
+        String(req.query.sort_dir || "DESC").toUpperCase() === "ASC"
+          ? "ASC"
+          : "DESC";
+      const where: string[] = [];
+      const args: any[] = [];
+      if (!includeDeleted) where.push("c.deleted_at IS NULL");
+      if (!includeConverted) where.push("c.converted_client_id IS NULL");
+      if (search) {
+        const like = likeContains(search);
+        const parts = [
+          `c.email LIKE ? ESCAPE '!'`,
+          `c.first_name LIKE ? ESCAPE '!'`,
+          `c.last_name LIKE ? ESCAPE '!'`,
+          `CONCAT(c.first_name,' ',c.last_name) LIKE ? ESCAPE '!'`,
+          `c.phone LIKE ? ESCAPE '!'`,
+        ];
+        args.push(like, like, like, like, like);
+        const digits = String(search || "").replace(/\D/g, "");
+        if (digits.length >= 7 && digits.length <= 15) {
+          parts.push(`${mysqlPhoneDigitsExpr("c.phone")} LIKE ?`);
+          args.push(`%${digits}%`);
+        }
+        where.push(`(${parts.join(" OR ")})`);
+      }
+      if (language === "en" || language === "es") {
+        where.push("c.preferred_language = ?");
+        args.push(language);
+      }
+      if (has_notes === "yes") {
+        where.push("(c.admin_notes IS NOT NULL AND c.admin_notes != '')");
+      } else if (has_notes === "no") {
+        where.push("(c.admin_notes IS NULL OR c.admin_notes = '')");
+      }
+      const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+      const [countRow] = await pool.query<RowDataPacket[]>(
+        `SELECT COUNT(*) AS total FROM contacts c ${whereClause}`,
+        args,
+      );
+      const total = Number(countRow[0]?.total ?? 0);
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT c.* FROM contacts c
+         ${whereClause}
+         ORDER BY ${orderCol} ${orderDir}, c.id DESC
+         LIMIT ? OFFSET ?`,
+        [...args, limit, offset],
+      );
+      res.json({
+        contacts: rows.map(mapCrmContactRow),
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.max(1, Math.ceil(total / limit)),
+        },
+      });
+    },
+  );
+
+  app.get(
+    "/api/admin/contacts/:id",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const id = Number(req.params.id);
+      if (!id) return res.status(400).json({ error: "Invalid id" });
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM contacts WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+        [id],
+      );
+      if (!rows[0]) return res.status(404).json({ error: "Not found" });
+      res.json({ contact: mapCrmContactRow(rows[0]) });
+    },
+  );
+
+  app.post(
+    "/api/admin/contacts",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const first = String(req.body?.first_name || "").trim();
+      const last = String(req.body?.last_name || "").trim();
+      if (!first || !last) {
+        return res
+          .status(400)
+          .json({ error: "first_name and last_name are required" });
+      }
+      const emailRaw = String(req.body?.email || "")
+        .trim()
+        .toLowerCase();
+      const email = emailRaw || null;
+      const phoneRaw = String(req.body?.phone || "").trim();
+      let phone: string | null = phoneRaw || null;
+      if (!email && !phone) {
+        return res
+          .status(400)
+          .json({ error: "email or phone is required", code: "contact_required" });
+      }
+      if (email && !isValidEmail(email)) {
+        return res.status(400).json({ error: "Invalid email" });
+      }
+      if (phone) {
+        if (!normalizePhoneLast10(phone)) {
+          return res.status(400).json({ error: "Invalid phone" });
+        }
+        phone = toSmsE164(phone).slice(0, 20);
+      }
+      const lang =
+        req.body?.preferred_language === "es" ? "es" : "en";
+      const confirmDuplicate = req.body?.confirm_duplicate === true;
+      const dups = await findCrmContactDuplicates({ phone, email });
+      if (
+        !confirmDuplicate &&
+        (dups.clients.length > 0 || dups.contacts.length > 0)
+      ) {
+        return res.status(409).json({
+          error: "duplicate",
+          duplicates: dups,
+          message:
+            "A matching phone or email already exists. Confirm to save anyway.",
+        });
+      }
+      const ownerId = await resolveLanguageOwnerAdminId(lang);
+      const [ins] = await pool.query<ResultSetHeader>(
+        `INSERT INTO contacts
+           (first_name, last_name, email, phone, address_line1, address_line2,
+            city, state, zip, preferred_language, admin_notes,
+            assigned_admin_id, created_by_admin_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          first,
+          last,
+          email,
+          phone,
+          String(req.body?.address_line1 || "").trim() || null,
+          String(req.body?.address_line2 || "").trim() || null,
+          String(req.body?.city || "").trim() || null,
+          String(req.body?.state || "").trim() || null,
+          String(req.body?.zip || "").trim() || null,
+          lang,
+          String(req.body?.admin_notes || "").trim() || null,
+          ownerId ?? req.auth!.id,
+          req.auth!.id,
+        ],
+      );
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM contacts WHERE id = ? LIMIT 1`,
+        [ins.insertId],
+      );
+      res.status(201).json({ contact: mapCrmContactRow(rows[0]) });
+    },
+  );
+
+  app.put(
+    "/api/admin/contacts/:id",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const id = Number(req.params.id);
+      if (!id) return res.status(400).json({ error: "Invalid id" });
+      const [existing] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM contacts
+         WHERE id = ? AND deleted_at IS NULL AND converted_client_id IS NULL
+         LIMIT 1`,
+        [id],
+      );
+      if (!existing[0]) return res.status(404).json({ error: "Not found" });
+      const first =
+        req.body?.first_name != null
+          ? String(req.body.first_name).trim()
+          : String(existing[0].first_name);
+      const last =
+        req.body?.last_name != null
+          ? String(req.body.last_name).trim()
+          : String(existing[0].last_name);
+      if (!first || !last) {
+        return res
+          .status(400)
+          .json({ error: "first_name and last_name are required" });
+      }
+      const email =
+        req.body?.email !== undefined
+          ? String(req.body.email || "")
+              .trim()
+              .toLowerCase() || null
+          : existing[0].email;
+      let phone: string | null =
+        req.body?.phone !== undefined
+          ? String(req.body.phone || "").trim() || null
+          : existing[0].phone
+            ? String(existing[0].phone)
+            : null;
+      if (!email && !phone) {
+        return res
+          .status(400)
+          .json({ error: "email or phone is required", code: "contact_required" });
+      }
+      if (email && !isValidEmail(email)) {
+        return res.status(400).json({ error: "Invalid email" });
+      }
+      if (phone) {
+        if (!normalizePhoneLast10(phone)) {
+          return res.status(400).json({ error: "Invalid phone" });
+        }
+        // Normalize newly submitted phones; keep existing value if body omitted phone
+        if (req.body?.phone !== undefined) {
+          phone = toSmsE164(phone).slice(0, 20);
+        }
+      }
+      const confirmDuplicate = req.body?.confirm_duplicate === true;
+      const dups = await findCrmContactDuplicates({
+        phone,
+        email,
+        excludeContactId: id,
+      });
+      if (
+        !confirmDuplicate &&
+        (dups.clients.length > 0 || dups.contacts.length > 0)
+      ) {
+        return res.status(409).json({
+          error: "duplicate",
+          duplicates: dups,
+          message:
+            "A matching phone or email already exists. Confirm to save anyway.",
+        });
+      }
+      const lang =
+        req.body?.preferred_language === "es"
+          ? "es"
+          : req.body?.preferred_language === "en"
+            ? "en"
+            : existing[0].preferred_language === "es"
+              ? "es"
+              : "en";
+      await pool.query(
+        `UPDATE contacts SET
+           first_name = ?, last_name = ?, email = ?, phone = ?,
+           address_line1 = ?, address_line2 = ?, city = ?, state = ?, zip = ?,
+           preferred_language = ?, admin_notes = ?
+         WHERE id = ?`,
+        [
+          first,
+          last,
+          email,
+          phone,
+          req.body?.address_line1 !== undefined
+            ? String(req.body.address_line1 || "").trim() || null
+            : existing[0].address_line1,
+          req.body?.address_line2 !== undefined
+            ? String(req.body.address_line2 || "").trim() || null
+            : existing[0].address_line2,
+          req.body?.city !== undefined
+            ? String(req.body.city || "").trim() || null
+            : existing[0].city,
+          req.body?.state !== undefined
+            ? String(req.body.state || "").trim() || null
+            : existing[0].state,
+          req.body?.zip !== undefined
+            ? String(req.body.zip || "").trim() || null
+            : existing[0].zip,
+          lang,
+          req.body?.admin_notes !== undefined
+            ? String(req.body.admin_notes || "").trim() || null
+            : existing[0].admin_notes,
+          id,
+        ],
+      );
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM contacts WHERE id = ? LIMIT 1`,
+        [id],
+      );
+      res.json({ contact: mapCrmContactRow(rows[0]) });
+    },
+  );
+
+  app.delete(
+    "/api/admin/contacts/:id",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const id = Number(req.params.id);
+      if (!id) return res.status(400).json({ error: "Invalid id" });
+      const [result] = await pool.query<ResultSetHeader>(
+        `UPDATE contacts SET deleted_at = NOW()
+         WHERE id = ? AND deleted_at IS NULL`,
+        [id],
+      );
+      if (!result.affectedRows) {
+        return res.status(404).json({ error: "Not found" });
+      }
+      res.json({ ok: true });
+    },
+  );
+
+  app.post(
+    "/api/admin/contacts/:id/convert",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const id = Number(req.params.id);
+      if (!id) return res.status(400).json({ error: "Invalid id" });
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM contacts
+         WHERE id = ? AND deleted_at IS NULL AND converted_client_id IS NULL
+         LIMIT 1`,
+        [id],
+      );
+      if (!rows[0]) return res.status(404).json({ error: "Not found" });
+      const c = rows[0];
+      const phone = c.phone ? String(c.phone) : null;
+      const email = c.email ? String(c.email).toLowerCase() : null;
+      const phoneDups = phone ? await adminAiFindPhoneDuplicates(phone) : [];
+      let emailDupClientId: number | null = null;
+      if (email) {
+        const [emailDup] = await pool.query<RowDataPacket[]>(
+          `SELECT id FROM clients WHERE LOWER(email) = ? LIMIT 1`,
+          [email],
+        );
+        if (emailDup[0]) emailDupClientId = Number(emailDup[0].id);
+      }
+      const existingClientId =
+        phoneDups.length > 0
+          ? Number(phoneDups[0].id)
+          : emailDupClientId != null
+            ? emailDupClientId
+            : null;
+      const lang = c.preferred_language === "es" ? "es" : "en";
+      const ownerId =
+        c.assigned_admin_id != null
+          ? Number(c.assigned_admin_id)
+          : ((await resolveLanguageOwnerAdminId(lang)) ?? req.auth!.id);
+
+      // Never create a twin — link contact to the existing client instead.
+      if (existingClientId != null) {
+        await pool.query(
+          `UPDATE conversations
+           SET client_id = ?, contact_id = NULL
+           WHERE contact_id = ?`,
+          [existingClientId, id],
+        );
+        await pool.query(
+          `UPDATE contacts
+           SET converted_client_id = ?, converted_at = NOW()
+           WHERE id = ?`,
+          [existingClientId, id],
+        );
+        return res.json({
+          ok: true,
+          existing: true,
+          linked_existing: true,
+          contact_id: id,
+          client_id: existingClientId,
+          preferred_language: lang,
+          duplicates: phoneDups,
+          message: `Contact linked to existing client_id=${existingClientId}.`,
+        });
+      }
+
+      let clientId: number;
+      try {
+        const [ins] = await pool.query<ResultSetHeader>(
+          `INSERT INTO clients
+             (first_name, last_name, phone, email, status, pipeline_stage,
+              preferred_language, assigned_admin_id, admin_notes,
+              address_line1, address_line2, city, state, zip)
+           VALUES (?, ?, ?, ?, 'prospect', 'prospect', ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            c.first_name,
+            c.last_name,
+            phone,
+            email,
+            lang,
+            ownerId,
+            c.admin_notes,
+            c.address_line1,
+            c.address_line2,
+            c.city,
+            c.state,
+            c.zip,
+          ],
+        );
+        clientId = Number(ins.insertId);
+      } catch (e: any) {
+        if (e?.code === "ER_DUP_ENTRY" || /Duplicate/i.test(String(e?.message))) {
+          const [dup] = await pool.query<RowDataPacket[]>(
+            `SELECT id FROM clients WHERE LOWER(email) = ? LIMIT 1`,
+            [email],
+          );
+          if (dup[0]) {
+            const dupId = Number(dup[0].id);
+            await pool.query(
+              `UPDATE conversations
+               SET client_id = ?, contact_id = NULL
+               WHERE contact_id = ?`,
+              [dupId, id],
+            );
+            await pool.query(
+              `UPDATE contacts
+               SET converted_client_id = ?, converted_at = NOW()
+               WHERE id = ?`,
+              [dupId, id],
+            );
+            return res.json({
+              ok: true,
+              existing: true,
+              linked_existing: true,
+              contact_id: id,
+              client_id: dupId,
+              preferred_language: lang,
+              message: `Contact linked to existing client_id=${dupId}.`,
+            });
+          }
+          return res.status(409).json({
+            error: "duplicate",
+            message: "A client with this email already exists.",
+          });
+        }
+        throw e;
+      }
+      await pool.query(
+        `UPDATE conversations
+         SET client_id = ?, contact_id = NULL
+         WHERE contact_id = ?`,
+        [clientId, id],
+      );
+      await pool.query(
+        `UPDATE contacts
+         SET converted_client_id = ?, converted_at = NOW()
+         WHERE id = ?`,
+        [clientId, id],
+      );
+      res.json({
+        ok: true,
+        contact_id: id,
+        client_id: clientId,
+        preferred_language: lang,
+      });
+    },
+  );
+
+  app.post(
+    "/api/admin/conversations/contact/:id/status",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      if (!(await requireConversationsAccess(req, res))) return;
+      const contactId = Number(req.params.id);
+      const status = String(req.body?.status || "").trim();
+      if (
+        !contactId ||
+        !["open", "snoozed", "closed", "archived"].includes(status)
+      ) {
+        return res.status(400).json({ error: "Invalid status" });
+      }
+      try {
+        const result = await setContactConversationStatus({
+          crmContactId: contactId,
+          status: status as "open" | "snoozed" | "closed" | "archived",
+          adminId: req.auth!.id,
+        });
+        res.json(result);
+      } catch (e: any) {
+        return res.status(400).json({ error: String(e?.message || e) });
+      }
     },
   );
 
@@ -27608,6 +39785,13 @@ function buildApp() {
         [id],
       );
       await attachPdfsToReports(Number(id), reports);
+      const [wizardSessions] = await pool.query<RowDataPacket[]>(
+        `SELECT id, round_number, status, created_at, published_at
+         FROM report_wizard_sessions
+         WHERE client_id = ?
+         ORDER BY round_number ASC, id DESC`,
+        [id],
+      );
       const [payments] = await pool.query<RowDataPacket[]>(
         `SELECT p.id, p.amount_cents, p.status, p.paid_at, p.created_at, p.provider_transaction_id,
               pk.name AS package_name, pk.slug AS package_slug
@@ -27636,14 +39820,147 @@ function buildApp() {
         `SELECT id, from_stage, to_stage, notes, created_at FROM client_pipeline_history WHERE client_id = ? ORDER BY created_at DESC`,
         [id],
       );
+      const clientOut = { ...c[0] };
+      if (clientOut.admin_notes != null) {
+        clientOut.admin_notes = decodeLiteralUnicodeEscapes(
+          String(clientOut.admin_notes),
+        );
+      }
+      for (const r of reports) {
+        if (r.summary_md != null) {
+          r.summary_md = decodeLiteralUnicodeEscapes(String(r.summary_md));
+        }
+      }
       res.json({
-        client: c[0],
+        client: clientOut,
         documents: docs,
         reports,
+        wizard_sessions: wizardSessions,
         payments: paymentsWithLines,
         subscriptions,
         pipeline_history: pipeline,
       });
+    },
+  );
+
+  app.get(
+    "/api/admin/clients/:id/credit-analysis",
+    requireAdmin,
+    async (req: AuthedRequest, res) => {
+      const id = Number(req.params.id);
+      const scope = await getAffiliateScope(req.auth!.id);
+      if (scope && !scope.hasPortalAccess) {
+        return res.status(403).json({ error: "Portal access required" });
+      }
+      if (scope && !(await assertClientInAffiliateScope(id, scope))) {
+        return res.status(404).json({ error: "Not found" });
+      }
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM credit_analyses WHERE client_id = ? ORDER BY id DESC LIMIT 1`,
+        [id],
+      );
+      if (rows.length === 0) {
+        return res.json({ analysis: null });
+      }
+      res.json({ analysis: creditAnalysisRowToResult(rows[0]) });
+    },
+  );
+
+  app.post(
+    "/api/admin/clients/:id/credit-analysis",
+    requireAdmin,
+    upload.single("report_file"),
+    async (req: AuthedRequest, res) => {
+      const clientId = Number(req.params.id);
+      const scope = await getAffiliateScope(req.auth!.id);
+      if (scope && !scope.hasPortalAccess) {
+        return res.status(403).json({ error: "Portal access required" });
+      }
+      if (scope && !(await assertClientInAffiliateScope(clientId, scope))) {
+        return res.status(404).json({ error: "Not found" });
+      }
+      const file = (req as any).file as Express.Multer.File | undefined;
+      if (!file) {
+        return res.status(400).json({ error: "report_file is required" });
+      }
+      const [cRows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, email, first_name, last_name, phone, preferred_language, status, pipeline_stage
+         FROM clients WHERE id = ? LIMIT 1`,
+        [clientId],
+      );
+      if (cRows.length === 0) {
+        return res.status(404).json({ error: "Not found" });
+      }
+      const client = cRows[0];
+      if (!isProspectClientRow(client)) {
+        return res.status(403).json({
+          error: "Credit analysis is only available for prospects",
+          code: "prospect_only",
+        });
+      }
+      const b = req.body || {};
+      const textLanguage: "en" | "es" =
+        b.text_language === "es" ||
+        (b.text_language !== "en" && client.preferred_language === "es")
+          ? "es"
+          : "en";
+      const clientGoal = b.client_goal
+        ? String(b.client_goal).trim().slice(0, 255)
+        : null;
+      const notes = b.notes ? String(b.notes).trim() : null;
+      const emailOptIn =
+        b.email_opt_in === "true" || b.email_opt_in === true;
+      const [adminRows] = await pool.query<RowDataPacket[]>(
+        `SELECT first_name, last_name FROM admins WHERE id = ? LIMIT 1`,
+        [req.auth!.id],
+      );
+      const adminName = adminRows[0]
+        ? `${adminRows[0].first_name || ""} ${adminRows[0].last_name || ""}`.trim()
+        : "";
+      const repName =
+        (b.rep_name ? String(b.rep_name).trim() : null) || adminName || null;
+      const agentPhone = b.agent_phone ? String(b.agent_phone).trim() : null;
+      const firstName = String(client.first_name || "").trim();
+      const lastName = String(client.last_name || "").trim();
+      const email = String(client.email || "")
+        .trim()
+        .toLowerCase();
+      const phone = String(client.phone || "").trim();
+
+      try {
+        const result = await executeCreditAnalysisUpload({
+          mode: "agent",
+          firstName,
+          lastName,
+          email,
+          phone,
+          textLanguage,
+          clientGoal,
+          notes,
+          agentPhone,
+          repName,
+          emailOptIn,
+          file: {
+            buffer: file.buffer,
+            originalname: file.originalname,
+            mimetype: file.mimetype,
+          },
+          fixedClientId: clientId,
+          sourceLabel: "agent_submission",
+        });
+        res.json(result);
+      } catch (err: any) {
+        if (err?.statusCode === 404) {
+          return res.status(404).json({ error: "Not found" });
+        }
+        console.error(
+          "[admin:credit-analysis] error:",
+          err?.message ?? err,
+        );
+        res.status(500).json({
+          error: "We couldn't generate the analysis. Please try again.",
+        });
+      }
     },
   );
 
@@ -27895,6 +40212,10 @@ function buildApp() {
       const caseSelectSql = `
           SELECT cr.id, cr.case_number, cr.client_id, cr.pipeline_stage,
                 cr.pipeline_stage_changed_at, cr.status, cr.created_at,
+                cr.max_rounds, cr.next_dispute_target_date, cr.report_compare_mode,
+                (SELECT COALESCE(MAX(crr.round_number), 0)
+                   FROM client_round_reports crr
+                  WHERE crr.client_id = cr.client_id) AS highest_published_round,
                 c.first_name, c.last_name, c.email, c.phone,
                 c.status AS client_status, c.preferred_language,
                 c.assigned_admin_id, c.referral_category,
@@ -27965,6 +40286,22 @@ function buildApp() {
           [...args, pageLimit, pageOffset],
         );
         await attachLabelsToRows(caseRows, "client_id");
+        for (const row of caseRows) {
+          const maxR = clampMaxRounds(row.max_rounds);
+          row.max_rounds = maxR;
+          row.next_dispute_target_date = row.next_dispute_target_date
+            ? mysqlDateToYmd(row.next_dispute_target_date)
+            : null;
+          const highest = Number(row.highest_published_round || 0);
+          row.highest_published_round = highest;
+          row.extended_rounds_legend = extendedRoundsLegend({
+            maxRounds: maxR,
+            highestPublished: highest,
+          });
+          row.report_compare_mode = normalizeReportCompareModeInline(
+            row.report_compare_mode,
+          );
+        }
         return {
           items: caseRows,
           total,
@@ -28012,11 +40349,60 @@ function buildApp() {
         };
       }
 
+      async function fetchWebReviewColumnPage(
+        pageOffset: number,
+        pageLimit: number,
+      ) {
+        if (
+          !includeProspects ||
+          (prospectIncompatible && stage !== "prospect")
+        ) {
+          return {
+            items: [] as RowDataPacket[],
+            total: 0,
+            offset: pageOffset,
+            limit: pageLimit,
+            has_more: false,
+          };
+        }
+        const total = await countWebReviewProspectsWithFilters(
+          scope?.scopedAffiliateIds,
+          { where: prospectWhere, args: prospectArgs },
+        );
+        const items = await fetchWebReviewProspectsWithLabels(
+          scope?.scopedAffiliateIds,
+          {
+            where: prospectWhere,
+            args: prospectArgs,
+            limit: pageLimit,
+            offset: pageOffset,
+          },
+        );
+        return {
+          items,
+          total,
+          offset: pageOffset,
+          limit: pageLimit,
+          has_more: pageOffset + items.length < total,
+        };
+      }
+
       // Load-more for a single column
       if (columnParam === "prospect") {
         const page = await fetchProspectColumnPage(offset, limit);
         return res.json({
           column: "prospect",
+          items: page.items,
+          total: page.total,
+          offset: page.offset,
+          limit: page.limit,
+          has_more: page.has_more,
+        });
+      }
+      if (columnParam === "web_review") {
+        const page = await fetchWebReviewColumnPage(offset, limit);
+        return res.json({
+          column: "web_review",
           items: page.items,
           total: page.total,
           offset: page.offset,
@@ -28053,6 +40439,7 @@ function buildApp() {
       const columns: Record<string, any> = {};
 
       columns.prospect = await fetchProspectColumnPage(0, limit);
+      columns.web_review = await fetchWebReviewColumnPage(0, limit);
 
       if (includeCases) {
         const stagesToFetch = stageFilterActive
@@ -28083,13 +40470,16 @@ function buildApp() {
       }
 
       const cases = CASE_BOARD_STAGES.flatMap((st) => columns[st]?.items || []);
+      // Flat prospects = main Prospect column only (web review is separate).
       const prospects = columns.prospect?.items || [];
+      const web_review_prospects = columns.web_review?.items || [];
 
       res.json({
         limit,
         columns,
         cases,
         prospects,
+        web_review_prospects,
       });
     },
   );
@@ -28340,12 +40730,23 @@ function buildApp() {
       }
 
       const lang = (client.preferred_language as string) || "en";
+      // One magic link for welcome email + activation SMS when both fire.
+      let sharedPortalUrl: string | null = null;
+      try {
+        const token = await createOnboardingToken(clientId);
+        sharedPortalUrl = `${APP_URL}/portal/onboarding/${token}`;
+      } catch (e: any) {
+        console.error(
+          "[prospects:convert] onboarding token mint failed:",
+          e?.message,
+        );
+      }
+
       // Welcome email is best-effort — don't block the convert response on SMTP.
-      if (client.email) {
+      if (client.email && sharedPortalUrl) {
         (async () => {
           try {
-            const token = await createOnboardingToken(clientId);
-            const portalUrl = `${APP_URL}/portal/onboarding/${token}`;
+            const portalUrl = sharedPortalUrl!;
             const tpl = tplProspectConvertWelcome({
               firstName: client.first_name as string,
               caseNumber,
@@ -28373,11 +40774,25 @@ function buildApp() {
             );
           }
         })();
+      } else if (client.email && !sharedPortalUrl) {
+        console.warn(
+          `[prospects:convert] Skipping welcome email — could not mint onboarding token for client ${clientId}`,
+        );
       } else {
         console.warn(
           `[prospects:convert] Skipping welcome email — client ${clientId} has no email`,
         );
       }
+
+      // Activation SMS/email is independent of welcome email (idempotent stamp).
+      // Reuses sharedPortalUrl so SMS and email open the same magic link.
+      fireClientActivatedNotifications({
+        clientId,
+        source: "convert",
+        portalUrl: sharedPortalUrl,
+      }).catch((e: any) =>
+        console.error("[prospects:convert] activation notify", e?.message),
+      );
 
       crcSyncClient(clientId).catch((e) =>
         console.error("[crc:convert-sync]", e?.message),
@@ -28643,38 +41058,86 @@ function buildApp() {
 
         // Post-commit: emails + reminders (best effort).
         // Prospect-stage cases stay leads — no welcome/tasks until convert.
+        // New Client stage always sends convert-welcome (Get Started / docs
+        // upload magic link) — same template as Prospect → Convert.
         const lang = (client.preferred_language as string) || "en";
         const appUrl = APP_URL;
 
-        if (!isProspectStageCase && effectiveSendCaseEmail && client.email) {
-          try {
-            const tpl = tplCaseStarted({
-              firstName: client.first_name as string,
-              caseNumber,
-              portalUrl: `${appUrl}/portal/payments`,
-              lang,
-            });
-            await sendEmail({
-              to: client.email as string,
-              subject: tpl.subject,
-              html: tpl.html,
-            });
-          } catch (e) {
-            console.error("[admin/cases] case-started email failed:", e);
-          }
-        } else if (
-          !isProspectStageCase &&
-          effectiveSendCaseEmail &&
-          !client.email
-        ) {
-          console.warn(
-            `[admin/cases] Skipping case-started email — client ${cId} has no email`,
-          );
-        }
-
+        let sharedPortalUrl: string | null = null;
         if (!isProspectStageCase) {
           try {
-            await triggerReminderFlow("payment_confirmed", cId, {});
+            const token = await createOnboardingToken(cId);
+            sharedPortalUrl = `${appUrl}/portal/onboarding/${token}`;
+          } catch (e: any) {
+            console.error(
+              "[admin/cases] onboarding token mint failed:",
+              e?.message,
+            );
+          }
+
+          if (client.email && sharedPortalUrl) {
+            try {
+              const portalUrl = sharedPortalUrl;
+              const tpl = tplProspectConvertWelcome({
+                firstName: client.first_name as string,
+                caseNumber,
+                portalUrl,
+                lang,
+              });
+              await sendEmail({
+                to: client.email as string,
+                subject: tpl.subject,
+                html: tpl.html,
+              });
+              await notifyLanguageOwnerDocUploadLink({
+                clientId: cId,
+                firstName: client.first_name as string,
+                lastName: client.last_name as string,
+                clientEmail: client.email as string,
+                lang,
+                portalUrl,
+                caseId,
+              });
+            } catch (e: any) {
+              console.error(
+                "[admin/cases] convert-welcome email failed:",
+                e?.message,
+              );
+            }
+          } else if (client.email && !sharedPortalUrl) {
+            console.warn(
+              `[admin/cases] Skipping welcome email — could not mint onboarding token for client ${cId}`,
+            );
+          } else {
+            console.warn(
+              `[admin/cases] Skipping welcome email — client ${cId} has no email`,
+            );
+          }
+
+          // Optional legacy payments email (Pipeline UI does not set this).
+          if (effectiveSendCaseEmail && client.email) {
+            try {
+              const tpl = tplCaseStarted({
+                firstName: client.first_name as string,
+                caseNumber,
+                portalUrl: `${appUrl}/portal/payments`,
+                lang,
+              });
+              await sendEmail({
+                to: client.email as string,
+                subject: tpl.subject,
+                html: tpl.html,
+              });
+            } catch (e) {
+              console.error("[admin/cases] case-started email failed:", e);
+            }
+          }
+
+          // Skip Day-0 — welcome already covers first contact (same as convert).
+          try {
+            await triggerReminderFlow("payment_confirmed", cId, undefined, {
+              skipImmediateSteps: true,
+            });
           } catch (e) {
             console.error("[admin/cases] triggerReminderFlow failed:", e);
           }
@@ -28684,6 +41147,15 @@ function buildApp() {
           } catch (e) {
             console.error("[admin/cases] autoAssignTasks failed:", e);
           }
+
+          // First-time activation SMS/email (idempotent stamp) — same magic link.
+          fireClientActivatedNotifications({
+            clientId: cId,
+            source: "new_case",
+            portalUrl: sharedPortalUrl,
+          }).catch((e: any) =>
+            console.error("[admin/cases] activation notify", e?.message),
+          );
         }
 
         let round_calendar: any = null;
@@ -28761,6 +41233,694 @@ function buildApp() {
       }
     },
   );
+
+  // ── Prepaid onboard invites (already-paid unknown → New Client) ───────────
+  app.get(
+    "/api/admin/prepaid-onboard-invites",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const limit = Math.min(Math.max(Number(req.query.limit) || 30, 1), 100);
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT i.*, p.name AS package_name
+         FROM prepaid_onboard_invites i
+         LEFT JOIN packages p ON p.id = i.package_id
+         ORDER BY i.id DESC
+         LIMIT ?`,
+        [limit],
+      );
+      res.json({ invites: rows.map((r) => serializePrepaidOnboardInvite(r)) });
+    },
+  );
+
+  app.post(
+    "/api/admin/prepaid-onboard-invites",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const body = req.body || {};
+      const packageId = Number(body.package_id);
+      const paidAmount = Number(body.paid_amount_cents);
+      if (!packageId || !Number.isFinite(packageId) || packageId <= 0) {
+        return res.status(400).json({ error: "package_id is required" });
+      }
+      if (!Number.isFinite(paidAmount) || paidAmount <= 0) {
+        return res.status(400).json({
+          error: "paid_amount_cents must be a positive integer",
+        });
+      }
+      const method = String(body.payment_method || "").trim();
+      if (
+        !PREPAID_ONBOARD_PAYMENT_METHODS.includes(
+          method as PrepaidOnboardPaymentMethod,
+        )
+      ) {
+        return res.status(400).json({
+          error:
+            "payment_method must be cash, zelle, venmo, card_offline, or other",
+        });
+      }
+      const remainingParsed = parsePrepaidRemainingSplits(
+        body.remaining_splits,
+      );
+      if (remainingParsed.ok === false) {
+        return res.status(400).json({ error: remainingParsed.error });
+      }
+      const [pkgRows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, name FROM packages WHERE id = ? LIMIT 1`,
+        [packageId],
+      );
+      if (!pkgRows[0]) {
+        return res.status(400).json({ error: "Package not found" });
+      }
+      let preferredLanguage: string | null = null;
+      if (body.preferred_language === "en" || body.preferred_language === "es") {
+        preferredLanguage = body.preferred_language;
+      }
+      const allowedRef = ["realtor_broker", "one_off", "affiliate_partner"];
+      const refCategory = allowedRef.includes(body.referral_category)
+        ? String(body.referral_category)
+        : null;
+      let referrerId: number | null = null;
+      if (body.referrer_id != null && body.referrer_id !== "") {
+        referrerId = Number(body.referrer_id);
+        if (!Number.isFinite(referrerId) || referrerId <= 0) {
+          return res.status(400).json({ error: "Invalid referrer_id" });
+        }
+        const [refRows] = await pool.query<RowDataPacket[]>(
+          `SELECT id FROM referrers WHERE id = ? AND status = 'active' LIMIT 1`,
+          [referrerId],
+        );
+        if (!refRows[0]) {
+          return res.status(400).json({ error: "Referrer not found" });
+        }
+      }
+      const expiresHours = Math.min(
+        Math.max(Number(body.expires_in_hours) || 168, 1),
+        720,
+      );
+      const expiresAt = new Date(Date.now() + expiresHours * 60 * 60 * 1000);
+      const rawToken = crypto.randomBytes(32).toString("hex");
+      const tokenHash = sha256(rawToken);
+      const paidLabel =
+        String(body.paid_label || "Enrollment (prepaid)").trim().slice(0, 200) ||
+        "Enrollment (prepaid)";
+      const paymentNote = body.payment_note
+        ? String(body.payment_note).trim().slice(0, 500)
+        : null;
+      const staffNotes = body.staff_notes
+        ? String(body.staff_notes).trim().slice(0, 4000)
+        : null;
+
+      const [ins] = await pool.query<ResultSetHeader>(
+        `INSERT INTO prepaid_onboard_invites
+           (token_hash, package_id, paid_amount_cents, paid_label, payment_method,
+            payment_note, remaining_splits_json, preferred_language, referral_category,
+            referrer_id, staff_notes, created_by_admin_id, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          tokenHash,
+          packageId,
+          Math.round(paidAmount),
+          paidLabel,
+          method,
+          paymentNote,
+          remainingParsed.splits.length
+            ? JSON.stringify(remainingParsed.splits)
+            : null,
+          preferredLanguage,
+          refCategory,
+          referrerId,
+          staffNotes,
+          req.auth!.id,
+          expiresAt,
+        ],
+      );
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT i.*, p.name AS package_name
+         FROM prepaid_onboard_invites i
+         LEFT JOIN packages p ON p.id = i.package_id
+         WHERE i.id = ? LIMIT 1`,
+        [ins.insertId],
+      );
+      const url = `${APP_URL}/join/${rawToken}`;
+      res.status(201).json({
+        invite: serializePrepaidOnboardInvite(rows[0], { url, token: rawToken }),
+      });
+    },
+  );
+
+  app.post(
+    "/api/admin/prepaid-onboard-invites/:id/revoke",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id)) {
+        return res.status(400).json({ error: "Invalid invite id" });
+      }
+      const [result] = await pool.query<ResultSetHeader>(
+        `UPDATE prepaid_onboard_invites
+         SET revoked_at = NOW()
+         WHERE id = ? AND revoked_at IS NULL AND redeemed_at IS NULL`,
+        [id],
+      );
+      if (Number(result.affectedRows || 0) === 0) {
+        return res.status(404).json({
+          error: "Invite not found, already revoked, or already redeemed",
+        });
+      }
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT i.*, p.name AS package_name
+         FROM prepaid_onboard_invites i
+         LEFT JOIN packages p ON p.id = i.package_id
+         WHERE i.id = ? LIMIT 1`,
+        [id],
+      );
+      res.json({ invite: serializePrepaidOnboardInvite(rows[0]) });
+    },
+  );
+
+  app.get("/api/public/prepaid-onboard/:token", async (req, res) => {
+    const rawToken = String(req.params.token || "").trim();
+    if (!rawToken || rawToken.length < 32) {
+      return res.status(400).json({ error: "Invalid invite link" });
+    }
+    const tokenHash = sha256(rawToken);
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT i.*, p.name AS package_name
+       FROM prepaid_onboard_invites i
+       LEFT JOIN packages p ON p.id = i.package_id
+       WHERE i.token_hash = ?
+       LIMIT 1`,
+      [tokenHash],
+    );
+    if (!rows[0] || !prepaidInviteIsOpen(rows[0])) {
+      return res.status(410).json({
+        error: "This invite link has expired or is no longer valid.",
+        code: "invite_closed",
+      });
+    }
+    const invite = rows[0];
+    let remainingCount = 0;
+    try {
+      const raw = invite.remaining_splits_json;
+      if (raw != null) {
+        const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+        const check = parsePrepaidRemainingSplits(parsed);
+        if (check.ok) remainingCount = check.splits.length;
+      }
+    } catch {
+      remainingCount = 0;
+    }
+    res.json({
+      package_name: String(invite.package_name || "Credit Repair"),
+      paid_amount_cents: Number(invite.paid_amount_cents),
+      paid_label: String(invite.paid_label || "Enrollment (prepaid)"),
+      remaining_count: remainingCount,
+      preferred_language: (invite.preferred_language as string) || null,
+      expires_at: invite.expires_at,
+    });
+  });
+
+  app.post("/api/public/prepaid-onboard/:token", async (req, res) => {
+    const rawToken = String(req.params.token || "").trim();
+    if (!rawToken || rawToken.length < 32) {
+      return res.status(400).json({ error: "Invalid invite link" });
+    }
+    const ip = String(req.ip || "");
+    if (hitRateLimit(`prepaid-onboard:${ip}`, 20, 15 * 60 * 1000)) {
+      return res.status(429).json({ error: "Too many attempts. Try again later." });
+    }
+
+    const body = req.body || {};
+    const firstName = String(body.first_name || "").trim();
+    const lastName = String(body.last_name || "").trim();
+    if (!firstName || !lastName) {
+      return res.status(400).json({ error: "first_name and last_name are required" });
+    }
+    const normalizedEmail = String(body.email ?? "")
+      .trim()
+      .toLowerCase();
+    const normalizedPhone = String(body.phone ?? "").trim();
+    // Email required — portal OTP / welcome / return path are email-based.
+    if (!normalizedEmail) {
+      return res.status(400).json({
+        error: "Email is required to open your portal account",
+        code: "email_required",
+      });
+    }
+    const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRe.test(normalizedEmail)) {
+      return res.status(400).json({ error: "Invalid email address" });
+    }
+    const clientEmail = normalizedEmail;
+    const clientPhone = normalizedPhone || null;
+
+    const tokenHash = sha256(rawToken);
+    const conn = await pool.getConnection();
+    let clientId = 0;
+    let caseId = 0;
+    let caseNumber = "";
+    let inviteRow: RowDataPacket | null = null;
+    let remainingSplits: PrepaidRemainingSplitDef[] = [];
+    let clientLang: "en" | "es" = "en";
+    let clientFirst = firstName;
+    let clientLast = lastName;
+    let committed = false;
+
+    try {
+      await conn.beginTransaction();
+      const [invites] = await conn.query<RowDataPacket[]>(
+        `SELECT i.*, p.name AS package_name
+         FROM prepaid_onboard_invites i
+         LEFT JOIN packages p ON p.id = i.package_id
+         WHERE i.token_hash = ?
+         LIMIT 1
+         FOR UPDATE`,
+        [tokenHash],
+      );
+      if (!invites[0] || !prepaidInviteIsOpen(invites[0])) {
+        await conn.rollback();
+        return res.status(410).json({
+          error: "This invite link has expired or is no longer valid.",
+          code: "invite_closed",
+        });
+      }
+      inviteRow = invites[0];
+      remainingSplits = [];
+      try {
+        const rawRem = inviteRow.remaining_splits_json;
+        const parsedRem =
+          typeof rawRem === "string" ? JSON.parse(rawRem) : rawRem;
+        const remCheck = parsePrepaidRemainingSplits(parsedRem);
+        if (remCheck.ok) remainingSplits = remCheck.splits;
+      } catch {
+        remainingSplits = [];
+      }
+
+      const lockedLang: "en" | "es" | null =
+        inviteRow.preferred_language === "es"
+          ? "es"
+          : inviteRow.preferred_language === "en"
+            ? "en"
+            : null;
+      clientLang =
+        lockedLang ||
+        (body.preferred_language === "es" ? "es" : "en");
+
+      const existing = await findClientMatchForPrepaidOnboard(
+        {
+          email: clientEmail,
+          phone: clientPhone,
+        },
+        conn,
+      );
+
+      if (existing) {
+        clientId = Number(existing.id);
+        if (await clientHasEnrolledActiveCase(clientId, conn)) {
+          await conn.rollback();
+          return res.status(409).json({
+            error:
+              "You already have an active Optimum Credit case. Please sign in to the portal.",
+            code: "already_client",
+          });
+        }
+        const assignedAdminId =
+          existing.assigned_admin_id != null
+            ? Number(existing.assigned_admin_id)
+            : await resolveLanguageOwnerAdminId(clientLang);
+        try {
+          await conn.query<ResultSetHeader>(
+            `UPDATE clients SET
+             first_name = ?,
+             last_name = ?,
+             email = COALESCE(?, email),
+             phone = COALESCE(?, phone),
+             preferred_language = ?,
+             assigned_admin_id = COALESCE(assigned_admin_id, ?),
+             package_id = ?,
+             status = 'onboarding',
+             pipeline_stage = 'new_client',
+             pipeline_stage_changed_at = NOW(),
+             referral_category = COALESCE(?, referral_category),
+             referrer_id = COALESCE(?, referrer_id),
+             admin_notes = CASE
+               WHEN ? IS NULL OR ? = '' THEN admin_notes
+               WHEN admin_notes IS NULL OR admin_notes = '' THEN ?
+               ELSE CONCAT(admin_notes, '\n', ?)
+             END
+           WHERE id = ?`,
+            [
+              firstName,
+              lastName,
+              clientEmail,
+              clientPhone,
+              clientLang,
+              assignedAdminId,
+              Number(inviteRow.package_id),
+              inviteRow.referral_category || null,
+              inviteRow.referrer_id != null
+                ? Number(inviteRow.referrer_id)
+                : null,
+              inviteRow.staff_notes,
+              inviteRow.staff_notes,
+              inviteRow.staff_notes
+                ? `Prepaid onboard: ${inviteRow.staff_notes}`
+                : null,
+              inviteRow.staff_notes
+                ? `Prepaid onboard: ${inviteRow.staff_notes}`
+                : null,
+              clientId,
+            ],
+          );
+        } catch (e: any) {
+          if (
+            e?.code === "ER_DUP_ENTRY" ||
+            /Duplicate entry/i.test(String(e?.message))
+          ) {
+            await conn.rollback();
+            return res.status(409).json({
+              error:
+                "An account with this email already exists. Please sign in to the portal.",
+              code: "already_client",
+            });
+          }
+          throw e;
+        }
+
+        // Cancel leftover prospect-stage cases; create fresh New Client case
+        await conn.query<ResultSetHeader>(
+          `UPDATE credit_repair_cases
+           SET status = 'cancelled', pipeline_stage_changed_at = NOW()
+           WHERE client_id = ? AND status = 'active' AND pipeline_stage = 'prospect'`,
+          [clientId],
+        );
+      } else {
+        const assignedAdminId = await resolveLanguageOwnerAdminId(clientLang);
+        try {
+          const [insClient] = await conn.query<ResultSetHeader>(
+            `INSERT INTO clients
+               (first_name, last_name, email, phone, preferred_language,
+                assigned_admin_id, package_id, status, pipeline_stage,
+                pipeline_stage_changed_at, referral_category, referrer_id, admin_notes)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'onboarding', 'new_client', NOW(), ?, ?, ?)`,
+            [
+              firstName,
+              lastName,
+              clientEmail,
+              clientPhone,
+              clientLang,
+              assignedAdminId,
+              Number(inviteRow.package_id),
+              inviteRow.referral_category || null,
+              inviteRow.referrer_id != null
+                ? Number(inviteRow.referrer_id)
+                : null,
+              inviteRow.staff_notes
+                ? `Prepaid onboard: ${inviteRow.staff_notes}`
+                : null,
+            ],
+          );
+          clientId = Number(insClient.insertId);
+        } catch (e: any) {
+          if (e?.code === "ER_DUP_ENTRY" || /Duplicate entry/i.test(String(e?.message))) {
+            await conn.rollback();
+            return res.status(409).json({
+              error:
+                "An account with this email already exists. Please sign in to the portal.",
+              code: "already_client",
+            });
+          }
+          throw e;
+        }
+      }
+
+      const [caseIns] = await conn.query<ResultSetHeader>(
+        `INSERT INTO credit_repair_cases
+           (client_id, package_id, pipeline_stage, status, notes)
+         VALUES (?, ?, 'new_client', 'active', ?)`,
+        [
+          clientId,
+          Number(inviteRow.package_id),
+          `Prepaid onboard invite #${inviteRow.id}`,
+        ],
+      );
+      caseId = Number(caseIns.insertId);
+      caseNumber = `CR-${String(caseId).padStart(6, "0")}`;
+      await conn.query(
+        `UPDATE credit_repair_cases SET case_number = ? WHERE id = ?`,
+        [caseNumber, caseId],
+      );
+
+      await conn.query<ResultSetHeader>(
+        `INSERT INTO client_pipeline_history
+           (client_id, from_stage, to_stage, changed_by_admin_id, notes)
+         VALUES (?, ?, 'new_client', ?, ?)`,
+        [
+          clientId,
+          existing ? String(existing.pipeline_stage || "prospect") : null,
+          Number(inviteRow.created_by_admin_id),
+          "Prepaid onboard invite redeemed",
+        ],
+      );
+
+      const methodLabel = String(inviteRow.payment_method || "other");
+      const paidNoteParts = [
+        `Prepaid onboard (${methodLabel})`,
+        inviteRow.payment_note ? String(inviteRow.payment_note) : null,
+      ].filter(Boolean);
+      const paidNotes = paidNoteParts.join(" — ").slice(0, 2000);
+      const paidDue = new Date().toISOString().slice(0, 10);
+
+      const [paidSplitIns] = await conn.query<ResultSetHeader>(
+        `INSERT INTO payment_splits
+           (case_id, client_id, label, amount_cents, due_date,
+            status, completion_source, paid_at, send_payment_link, notes, created_by_admin_id)
+         VALUES (?, ?, ?, ?, ?, 'paid', 'manual', NOW(), 0, ?, ?)`,
+        [
+          caseId,
+          clientId,
+          String(inviteRow.paid_label || "Enrollment (prepaid)"),
+          Number(inviteRow.paid_amount_cents),
+          paidDue,
+          paidNotes,
+          Number(inviteRow.created_by_admin_id),
+        ],
+      );
+      const paidSplitId = Number(paidSplitIns.insertId);
+      const meta = JSON.stringify({
+        source: "prepaid_onboard",
+        payment_method: methodLabel,
+        payment_note: inviteRow.payment_note || null,
+        invite_id: Number(inviteRow.id),
+      });
+      const [manualPayment] = await conn.query<ResultSetHeader>(
+        `INSERT INTO payments
+           (client_id, package_id, case_id, split_id, amount_cents, currency,
+            status, provider, provider_transaction_id, metadata_json, paid_at)
+         VALUES (?, ?, ?, ?, ?, 'USD', 'succeeded', 'manual', ?, ?, NOW())`,
+        [
+          clientId,
+          Number(inviteRow.package_id),
+          caseId,
+          paidSplitId,
+          Number(inviteRow.paid_amount_cents),
+          `prepaid-onboard-${inviteRow.id}-${crypto.randomUUID()}`,
+          meta,
+        ],
+      );
+      const manualPaymentId = Number(manualPayment.insertId);
+      await conn.query(
+        `UPDATE payment_splits SET payments_id = ? WHERE id = ?`,
+        [manualPaymentId, paidSplitId],
+      );
+
+      const insertedPending: Array<{
+        id: number;
+        token: string | null;
+        label: string;
+        amount_cents: number;
+        due_date: Date;
+        send_link: boolean;
+      }> = [];
+
+      for (const sp of remainingSplits) {
+        const sendLink = !!sp.send_payment_link;
+        const [spIns] = await conn.query<ResultSetHeader>(
+          `INSERT INTO payment_splits
+             (case_id, client_id, label, amount_cents, due_date,
+              status, send_payment_link, notes, created_by_admin_id)
+           VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+          [
+            caseId,
+            clientId,
+            sp.label,
+            sp.amount_cents,
+            sp.due_date,
+            sendLink ? 1 : 0,
+            "Prepaid onboard remaining balance",
+            Number(inviteRow.created_by_admin_id),
+          ],
+        );
+        const splitId = Number(spIns.insertId);
+        let tokenStr: string | null = null;
+        if (sendLink) {
+          tokenStr = crypto.randomUUID();
+          const expiresAt = new Date(sp.due_date);
+          expiresAt.setDate(expiresAt.getDate() + 7);
+          await conn.query(
+            `INSERT INTO payment_split_tokens (split_id, token, expires_at)
+             VALUES (?, ?, ?)`,
+            [splitId, tokenStr, expiresAt],
+          );
+        }
+        insertedPending.push({
+          id: splitId,
+          token: tokenStr,
+          label: sp.label,
+          amount_cents: sp.amount_cents,
+          due_date: new Date(sp.due_date),
+          send_link: sendLink,
+        });
+      }
+
+      const [claim] = await conn.query<ResultSetHeader>(
+        `UPDATE prepaid_onboard_invites
+         SET redeemed_at = NOW(),
+             redeemed_client_id = ?,
+             redeemed_case_id = ?
+         WHERE id = ? AND redeemed_at IS NULL AND revoked_at IS NULL`,
+        [clientId, caseId, Number(inviteRow.id)],
+      );
+      if (Number(claim.affectedRows || 0) === 0) {
+        await conn.rollback();
+        return res.status(410).json({
+          error: "This invite link has expired or is no longer valid.",
+          code: "invite_closed",
+        });
+      }
+
+      await conn.commit();
+      committed = true;
+
+      // Post-commit side effects (best effort). Enrollment is persisted —
+      // session/email failures must not leave the invite unusable.
+      try {
+        await recordEnrollmentCommissions(
+          clientId,
+          manualPaymentId,
+          Number(inviteRow!.paid_amount_cents),
+        );
+      } catch (e: any) {
+        console.error("[prepaid-onboard:commission]", e?.message ?? e);
+      }
+
+      autoAssignTasksForCase(clientId, caseId).catch((e: any) =>
+        console.error("[prepaid-onboard] autoAssignTasks", e?.message),
+      );
+      triggerReminderFlow("payment_confirmed", clientId, undefined, {
+        skipImmediateSteps: true,
+      }).catch((e: any) =>
+        console.error("[prepaid-onboard] payment_confirmed", e?.message),
+      );
+
+      let sharedPortalUrl: string | null = null;
+      try {
+        const portalTok = await createOnboardingToken(clientId);
+        sharedPortalUrl = `${APP_URL}/portal/onboarding/${portalTok}`;
+      } catch (e: any) {
+        console.error("[prepaid-onboard] onboarding token", e?.message);
+      }
+
+      if (clientEmail && sharedPortalUrl) {
+        try {
+          const tpl = tplProspectConvertWelcome({
+            firstName,
+            caseNumber,
+            portalUrl: sharedPortalUrl,
+            lang: clientLang,
+          });
+          await sendEmail({
+            to: clientEmail,
+            subject: tpl.subject,
+            html: tpl.html,
+          });
+          await notifyLanguageOwnerDocUploadLink({
+            clientId,
+            firstName,
+            lastName,
+            clientEmail,
+            lang: clientLang,
+            portalUrl: sharedPortalUrl,
+            caseId,
+          });
+        } catch (e: any) {
+          console.error("[prepaid-onboard] welcome email", e?.message);
+        }
+      }
+
+      fireClientActivatedNotifications({
+        clientId,
+        source: "new_case",
+        portalUrl: sharedPortalUrl,
+      }).catch((e: any) =>
+        console.error("[prepaid-onboard] activation", e?.message),
+      );
+
+      crcSyncClient(clientId).catch((e: any) =>
+        console.error("[crc:prepaid-onboard]", e?.message),
+      );
+
+      await pool.query<ResultSetHeader>(
+        "UPDATE clients SET email_verified_at = COALESCE(email_verified_at, NOW()) WHERE id = ?",
+        [clientId],
+      );
+
+      let sessionToken: string | null = null;
+      try {
+        sessionToken = await createSession(
+          "client",
+          clientId,
+          clientEmail,
+          req.ip,
+          String(req.headers["user-agent"] || ""),
+        );
+      } catch (e: any) {
+        console.error("[prepaid-onboard] createSession", e?.message);
+      }
+
+      const redirect = sessionToken
+        ? "/portal/documents"
+        : sharedPortalUrl
+          ? `/portal/onboarding/${sharedPortalUrl.split("/").pop()}`
+          : "/portal/login";
+
+      return res.status(201).json({
+        token: sessionToken,
+        user: {
+          id: clientId,
+          email: clientEmail,
+          first_name: clientFirst,
+          last_name: clientLast,
+        },
+        case: { id: caseId, case_number: caseNumber },
+        redirect,
+      });
+    } catch (err) {
+      if (!committed) {
+        try {
+          await conn.rollback();
+        } catch {
+          /* ignore */
+        }
+      }
+      throw err;
+    } finally {
+      conn.release();
+    }
+  });
 
   // ── Round calendar schedule (get / upsert / resend) ───────────────────────
   app.get(
@@ -29023,6 +42183,106 @@ function buildApp() {
       const sendLink = markPaid ? false : !!send_payment_link;
       const flowId =
         markPaid || !reminder_flow_id ? null : Number(reminder_flow_id);
+
+      // Marking paid on a NEW row while an open twin (same due+amount) exists
+      // was leaving false overdue flags — update the open row instead.
+      if (markPaid) {
+        const openMatch = await findMatchingPaymentSplit({
+          caseId,
+          dueDate: String(due_date).slice(0, 10),
+          amountCents: Number(amount_cents),
+          statuses: ["pending", "overdue", "processing"],
+        });
+        if (openMatch) {
+          const matchId = Number(openMatch.id);
+          await pool.query(
+            `UPDATE payment_splits
+             SET status = 'paid',
+                 completion_source = 'manual',
+                 paid_at = COALESCE(paid_at, NOW()),
+                 label = COALESCE(NULLIF(?, ''), label),
+                 notes = CASE
+                   WHEN ? IS NULL OR ? = '' THEN notes
+                   WHEN notes IS NULL OR notes = '' THEN ?
+                   ELSE CONCAT(notes, ' | ', ?)
+                 END,
+                 updated_at = NOW()
+             WHERE id = ? AND case_id = ?
+               AND status IN ('pending','overdue','processing')`,
+            [
+              String(label).trim(),
+              notes || null,
+              notes || null,
+              notes || null,
+              notes || null,
+              matchId,
+              caseId,
+            ],
+          );
+          if (!openMatch.payments_id) {
+            const [manualPayment] = await pool.query<ResultSetHeader>(
+              `INSERT INTO payments
+                 (client_id, case_id, split_id, amount_cents, currency,
+                  status, provider, provider_transaction_id, paid_at)
+               VALUES (?, ?, ?, ?, 'USD', 'succeeded', 'manual', ?, NOW())`,
+              [
+                cr.client_id,
+                caseId,
+                matchId,
+                Number(amount_cents),
+                `manual-${crypto.randomUUID()}`,
+              ],
+            );
+            const manualPaymentId = manualPayment.insertId;
+            await pool.query(
+              `UPDATE payment_splits SET payments_id = ? WHERE id = ?`,
+              [manualPaymentId, matchId],
+            );
+            try {
+              await recordEnrollmentCommissions(
+                cr.client_id as number,
+                manualPaymentId,
+                Number(amount_cents),
+              );
+            } catch (e: any) {
+              console.error(
+                "[admin/splits:manual-paid-match:commission]",
+                e?.message ?? e,
+              );
+            }
+            try {
+              await notifyAdminsPaymentByClientId({
+                clientId: cr.client_id as number,
+                amountCents: Number(amount_cents),
+                caseId,
+                packageOrLabel: String(label).trim(),
+                kind: "installment",
+              });
+            } catch (e: any) {
+              console.error(
+                "[admin/splits:manual-paid-match:notify]",
+                e?.message ?? e,
+              );
+            }
+          }
+          const [rows] = await pool.query<RowDataPacket[]>(
+            `SELECT ps.*, pst.token FROM payment_splits ps
+             LEFT JOIN payment_split_tokens pst ON pst.split_id = ps.id
+             WHERE ps.id = ? LIMIT 1`,
+            [matchId],
+          );
+          return res.json({
+            success: true,
+            matched_existing: true,
+            split: {
+              ...rows[0],
+              payment_link: rows[0]?.token
+                ? `${APP_URL}/pay/${rows[0].token}`
+                : null,
+            },
+          });
+        }
+      }
 
       const conn = await pool.getConnection();
       try {
@@ -29499,7 +42759,7 @@ function buildApp() {
       const [roundRows] = await pool.query<RowDataPacket[]>(
         `SELECT r.case_id, cr.case_number, cr.client_id,
                 c.first_name AS client_first_name, c.last_name AS client_last_name,
-                r.round_number, r.target_date
+                r.round_number, r.target_date, 'schedule' AS event_kind
          FROM (
            SELECT case_id, 1 AS round_number, round_1_date AS target_date FROM case_round_schedules
            UNION ALL SELECT case_id, 2, round_2_date FROM case_round_schedules
@@ -29510,8 +42770,29 @@ function buildApp() {
          JOIN credit_repair_cases cr ON cr.id = r.case_id AND cr.status = 'active'
          JOIN clients c ON c.id = cr.client_id
          WHERE r.target_date BETWEEN ? AND ?
-         ORDER BY r.target_date ASC, r.round_number ASC`,
-        [from, to],
+         UNION ALL
+         SELECT cr.id AS case_id, cr.case_number, cr.client_id,
+                c.first_name AS client_first_name, c.last_name AS client_last_name,
+                LEAST(
+                  cr.max_rounds,
+                  GREATEST(
+                    COALESCE((
+                      SELECT MAX(crr.round_number) FROM client_round_reports crr
+                      WHERE crr.client_id = cr.client_id
+                    ), 0) + 1,
+                    6
+                  )
+                ) AS round_number,
+                cr.next_dispute_target_date AS target_date,
+                'extended' AS event_kind
+         FROM credit_repair_cases cr
+         JOIN clients c ON c.id = cr.client_id
+         WHERE cr.status = 'active'
+           AND cr.next_dispute_target_date IS NOT NULL
+           AND cr.next_dispute_target_date BETWEEN ? AND ?
+           AND cr.max_rounds > 5
+         ORDER BY target_date ASC, round_number ASC`,
+        [from, to, from, to],
       );
 
       const [workTaskRows] = await pool.query<RowDataPacket[]>(
@@ -29542,7 +42823,10 @@ function buildApp() {
             : null,
         })),
         round_events: roundRows.map((r) => ({
-          id: `${r.case_id}-r${r.round_number}`,
+          id:
+            r.event_kind === "extended"
+              ? `${r.case_id}-extended-target`
+              : `${r.case_id}-r${r.round_number}`,
           case_id: r.case_id,
           case_number: r.case_number,
           client_id: r.client_id,
@@ -29550,6 +42834,11 @@ function buildApp() {
           client_last_name: r.client_last_name,
           round_number: Number(r.round_number),
           target_date: mysqlDateToYmd(r.target_date),
+          kind: r.event_kind === "extended" ? "extended" : "schedule",
+          label:
+            r.event_kind === "extended"
+              ? `Round ${Number(r.round_number)} target`
+              : undefined,
         })),
         work_tasks: workTaskRows.map((r) => {
           const assigneeName =
@@ -29558,7 +42847,7 @@ function buildApp() {
               : null;
           return {
             id: Number(r.id),
-            title: String(r.title),
+            title: decodeLiteralUnicodeEscapes(String(r.title)),
             status: r.status as string,
             priority: r.priority as string,
             due_date: mysqlDateToYmd(r.due_at),
@@ -29591,6 +42880,10 @@ function buildApp() {
       const [caseRows] = await pool.query<RowDataPacket[]>(
         `SELECT cr.id AS case_id, cr.case_number, cr.pipeline_stage AS case_stage,
               cr.status AS case_status, cr.created_at AS case_created_at,
+              cr.max_rounds, cr.next_dispute_target_date, cr.report_compare_mode,
+              (SELECT COALESCE(MAX(crr.round_number), 0)
+                 FROM client_round_reports crr
+                WHERE crr.client_id = cr.client_id) AS highest_published_round,
               c.id, c.first_name, c.last_name, c.email, c.phone,
               cr.pipeline_stage,
               c.status, c.contract_signed_at, c.smart_credit_connected_at,
@@ -29607,6 +42900,11 @@ function buildApp() {
 
       const row = caseRows[0];
       const clientId = row.id as number;
+      const maxRounds = clampMaxRounds(row.max_rounds);
+      const highestPublished = Number(row.highest_published_round || 0);
+      const nextDisputeTarget = row.next_dispute_target_date
+        ? mysqlDateToYmd(row.next_dispute_target_date)
+        : null;
 
       const [taskCompletions] = await pool.query<RowDataPacket[]>(
         `SELECT ctc.id, ctc.task_template_id, ctc.status AS completion_status,
@@ -29630,6 +42928,13 @@ function buildApp() {
         [clientId],
       );
       await attachPdfsToReports(clientId, reports);
+      const [wizardSessions] = await pool.query<RowDataPacket[]>(
+        `SELECT id, round_number, status, created_at, published_at
+         FROM report_wizard_sessions
+         WHERE client_id = ?
+         ORDER BY round_number ASC, id DESC`,
+        [clientId],
+      );
       const [payments] = await pool.query<RowDataPacket[]>(
         `SELECT p.id, p.amount_cents, p.status, p.paid_at, p.created_at,
               pk.name AS package_name
@@ -29658,6 +42963,17 @@ function buildApp() {
           status: row.case_status,
           pipeline_stage: row.case_stage,
           created_at: row.case_created_at,
+          max_rounds: maxRounds,
+          next_dispute_target_date: nextDisputeTarget,
+          report_compare_mode: normalizeReportCompareModeInline(
+            row.report_compare_mode,
+          ),
+          highest_published_round: highestPublished,
+          extended_rounds_legend: extendedRoundsLegend({
+            maxRounds,
+            highestPublished,
+          }),
+          available_rounds: roundNumbersUpTo(maxRounds),
         },
         client: {
           id: row.id,
@@ -29677,9 +42993,169 @@ function buildApp() {
         },
         documents: taskCompletions,
         reports,
+        wizard_sessions: wizardSessions,
         payments,
         pipeline_history: pipeline,
         sibling_cases: siblingCases,
+      });
+    },
+  );
+
+  // ── Update case extended rounds settings (any admin) ────────────────────
+  app.patch(
+    "/api/admin/cases/:id/extended-rounds",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const caseId = Number(req.params.id);
+      if (!caseId || isNaN(caseId)) {
+        return res.status(400).json({ error: "Invalid case id" });
+      }
+
+      const body = req.body || {};
+      const hasMax =
+        body.max_rounds !== undefined && body.max_rounds !== null;
+      const hasDate = Object.prototype.hasOwnProperty.call(
+        body,
+        "next_dispute_target_date",
+      );
+      const hasCompare = Object.prototype.hasOwnProperty.call(
+        body,
+        "report_compare_mode",
+      );
+      if (!hasMax && !hasDate && !hasCompare) {
+        return res.status(400).json({
+          error:
+            "Provide max_rounds, next_dispute_target_date, and/or report_compare_mode",
+        });
+      }
+
+      const [cur] = await pool.query<RowDataPacket[]>(
+        `SELECT cr.id, cr.client_id, cr.max_rounds, cr.next_dispute_target_date,
+                cr.report_compare_mode, cr.pipeline_stage, cr.status
+         FROM credit_repair_cases cr WHERE cr.id = ? LIMIT 1`,
+        [caseId],
+      );
+      if (!cur[0]) {
+        return res.status(404).json({ error: "Case not found" });
+      }
+
+      const clientId = Number(cur[0].client_id);
+      const scope = await getAffiliateScope(req.auth!.id);
+      if (scope && !scope.hasPortalAccess) {
+        return res.status(403).json({ error: "Portal access required" });
+      }
+      if (scope && !(await assertClientInAffiliateScope(clientId, scope))) {
+        return res.status(404).json({ error: "Case not found" });
+      }
+
+      let nextMax = clampMaxRounds(cur[0].max_rounds);
+      if (hasMax) {
+        const raw = Number(body.max_rounds);
+        if (!Number.isFinite(raw)) {
+          return res.status(400).json({ error: "max_rounds must be a number" });
+        }
+        // Staff may only set 5..12 (clampMaxRounds already floors below 5 up)
+        if (raw < DEFAULT_MAX_ROUNDS || raw > ABSOLUTE_MAX_ROUNDS) {
+          return res.status(400).json({
+            error: `max_rounds must be between ${DEFAULT_MAX_ROUNDS} and ${ABSOLUTE_MAX_ROUNDS}`,
+          });
+        }
+        nextMax = clampMaxRounds(raw);
+        const highest = await highestPublishedRoundForClient(pool, clientId);
+        if (nextMax < highest) {
+          return res.status(422).json({
+            error: `Cannot set max_rounds below highest published round (${highest})`,
+            highest_published_round: highest,
+          });
+        }
+      }
+
+      let nextDate: string | null = cur[0].next_dispute_target_date
+        ? mysqlDateToYmd(cur[0].next_dispute_target_date)
+        : null;
+      if (hasDate) {
+        if (
+          body.next_dispute_target_date === null ||
+          body.next_dispute_target_date === ""
+        ) {
+          nextDate = null;
+        } else {
+          const d = String(body.next_dispute_target_date).trim();
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) {
+            return res.status(400).json({
+              error: "next_dispute_target_date must be YYYY-MM-DD or null",
+            });
+          }
+          nextDate = d;
+        }
+      }
+
+      let nextCompare = normalizeReportCompareModeInline(
+        cur[0].report_compare_mode,
+      );
+      if (hasCompare) {
+        const raw = String(body.report_compare_mode || "")
+          .trim()
+          .toLowerCase();
+        if (raw !== "baseline" && raw !== "chain") {
+          return res.status(400).json({
+            error: "report_compare_mode must be baseline or chain",
+          });
+        }
+        nextCompare = raw as ReportCompareModeInline;
+      }
+
+      await pool.query<ResultSetHeader>(
+        `UPDATE credit_repair_cases
+         SET max_rounds = ?, next_dispute_target_date = ?, report_compare_mode = ?
+         WHERE id = ?`,
+        [nextMax, nextDate, nextCompare, caseId],
+      );
+
+      const highestPublished = await highestPublishedRoundForClient(
+        pool,
+        clientId,
+      );
+
+      // Raising max after graduation: reopen Round 5 column so staff can publish R6+.
+      let pipelineStage = String(cur[0].pipeline_stage || "");
+      let reopenedToRound5 = false;
+      if (
+        hasMax &&
+        nextMax > highestPublished &&
+        pipelineStage === "completed" &&
+        highestPublished >= DEFAULT_MAX_ROUNDS
+      ) {
+        await advanceCasePipeline(pool, {
+          clientId,
+          caseId,
+          stage: "round_5",
+          adminId: req.auth!.id,
+          notes: `Extended rounds enabled (max_rounds=${nextMax}) — reopened to Round 5 for additional dispute reports`,
+        });
+        pipelineStage = "round_5";
+        reopenedToRound5 = true;
+      }
+
+      res.json({
+        ok: true,
+        case: {
+          id: caseId,
+          client_id: clientId,
+          max_rounds: nextMax,
+          next_dispute_target_date: nextDate,
+          report_compare_mode: nextCompare,
+          highest_published_round: highestPublished,
+          pipeline_stage: pipelineStage,
+          reopened_to_round_5: reopenedToRound5,
+          extended_rounds_legend: extendedRoundsLegend({
+            maxRounds: nextMax,
+            highestPublished,
+          }),
+          available_rounds: roundNumbersUpTo(nextMax),
+          is_extended: isExtendedRoundsCase(nextMax),
+        },
       });
     },
   );
@@ -29819,6 +43295,46 @@ function buildApp() {
         return res.status(400).json({ error: "Invalid email address" });
       const clientEmail: string | null = normalizedEmail || null;
       const clientPhone: string | null = normalizedPhone || null;
+      if (clientPhone && isPlaceholderPhone(clientPhone)) {
+        return res.status(400).json({
+          error: "placeholder_phone",
+          message:
+            "This phone looks like a placeholder. Use the client's real phone.",
+        });
+      }
+      if (clientPhone) {
+        // Global hard-block — never two clients with the same phone (any status).
+        const phoneDups = await adminAiFindPhoneDuplicates(clientPhone);
+        if (phoneDups.length > 0) {
+          return res.status(409).json({
+            error: "duplicate_phone",
+            existing_client_id: Number(phoneDups[0].id),
+            duplicates: phoneDups,
+            message:
+              "A client with this phone already exists. Open that record instead.",
+          });
+        }
+      }
+      if (clientEmail) {
+        const [emailDup] = await pool.query<RowDataPacket[]>(
+          `SELECT id FROM clients WHERE LOWER(email) = ? LIMIT 1`,
+          [clientEmail],
+        );
+        if (emailDup[0]) {
+          return res.status(409).json({
+            error: "duplicate_email",
+            existing_client_id: Number(emailDup[0].id),
+            duplicates: [
+              {
+                id: emailDup[0].id,
+                href: `/admin/pipeline?client=${emailDup[0].id}`,
+              },
+            ],
+            message:
+              "A client with this email already exists. Open that record instead.",
+          });
+        }
+      }
       const allowedStatus = [
         "prospect",
         "pending_payment",
@@ -31038,6 +44554,118 @@ function buildApp() {
     },
   );
 
+  // Delete a case document (client_documents). If it was the last file for an
+  // onboarding upload slug on the case, reset that Get Started task to pending.
+  app.delete(
+    "/api/admin/client-documents/:id",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id)) {
+        return res.status(400).json({ error: "Invalid id" });
+      }
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, client_id, case_id, doc_type, file_name
+         FROM client_documents WHERE id = ? LIMIT 1`,
+        [id],
+      );
+      if (!rows[0]) return res.status(404).json({ error: "Not found" });
+      const doc = rows[0];
+      const caseId = doc.case_id != null ? Number(doc.case_id) : null;
+      const docType = String(doc.doc_type || "");
+
+      await pool.query(`DELETE FROM client_documents WHERE id = ?`, [id]);
+
+      let taskReset = false;
+      const uploadSlugs = ["id_front", "id_back", "ssn_card", "proof_of_address"];
+      if (caseId && uploadSlugs.includes(docType)) {
+        const [remaining] = await pool.query<RowDataPacket[]>(
+          `SELECT id FROM client_documents
+           WHERE case_id = ? AND doc_type = ?
+           LIMIT 1`,
+          [caseId, docType],
+        );
+        if (remaining.length === 0) {
+          const [result] = await pool.query<ResultSetHeader>(
+            `UPDATE client_task_completions ctc
+             JOIN onboarding_task_templates t ON t.id = ctc.task_template_id
+             SET ctc.status = 'pending',
+                 ctc.file_storage_key = NULL,
+                 ctc.file_name = NULL,
+                 ctc.file_mime = NULL,
+                 ctc.completed_at = NULL,
+                 ctc.admin_review_status = 'pending',
+                 ctc.admin_notes = NULL,
+                 ctc.admin_reviewed_at = NULL
+             WHERE ctc.case_id = ?
+               AND t.slug = ?
+               AND t.task_type = 'upload'`,
+            [caseId, docType],
+          );
+          taskReset = Number(result.affectedRows || 0) > 0;
+        }
+      }
+
+      res.json({
+        ok: true,
+        id,
+        case_id: caseId,
+        doc_type: docType,
+        task_reset: taskReset,
+      });
+    },
+  );
+
+  // Reset / remove an onboarding upload from Document Archive (task completion).
+  app.delete(
+    "/api/admin/documents/:id",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const id = Number(req.params.id);
+      if (!id || isNaN(id)) {
+        return res.status(400).json({ error: "Invalid id" });
+      }
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT ctc.id, ctc.case_id, ctc.client_id, t.slug AS doc_type, t.task_type
+         FROM client_task_completions ctc
+         JOIN onboarding_task_templates t ON t.id = ctc.task_template_id
+         WHERE ctc.id = ? LIMIT 1`,
+        [id],
+      );
+      if (!rows[0]) return res.status(404).json({ error: "Not found" });
+      if (String(rows[0].task_type) !== "upload") {
+        return res.status(400).json({ error: "Only upload documents can be deleted" });
+      }
+      if (!rows[0].case_id) {
+        return res.status(400).json({ error: "Document has no case" });
+      }
+
+      await pool.query<ResultSetHeader>(
+        `UPDATE client_task_completions
+         SET status = 'pending',
+             file_storage_key = NULL,
+             file_name = NULL,
+             file_mime = NULL,
+             completed_at = NULL,
+             admin_review_status = 'pending',
+             admin_notes = NULL,
+             admin_reviewed_at = NULL
+         WHERE id = ?`,
+        [id],
+      );
+
+      res.json({
+        ok: true,
+        id,
+        case_id: Number(rows[0].case_id),
+        client_id: Number(rows[0].client_id),
+        doc_type: String(rows[0].doc_type || ""),
+      });
+    },
+  );
+
   // ── Delete client ────────────────────────────────────────────────────────
   app.delete(
     "/api/admin/clients/:id",
@@ -31557,6 +45185,163 @@ function buildApp() {
   );
 
   /**
+   * Connect Cloud (P2) — pull tri-merge PDFs into case / analysis.
+   * Feature-flagged; returns not_configured until vendor OAuth credentials land.
+   */
+  app.get(
+    "/api/admin/connect-cloud/status",
+    requireAdmin,
+    denyAffiliateAccess,
+    (_req, res) => {
+      const enabled =
+        process.env.CONNECT_CLOUD_ENABLED === "1" ||
+        process.env.CONNECT_CLOUD_ENABLED === "true";
+      const hasCreds = !!(
+        process.env.CONNECT_CLOUD_CLIENT_ID &&
+        process.env.CONNECT_CLOUD_CLIENT_SECRET
+      );
+      res.json({
+        enabled,
+        credentials_present: hasCreds,
+        mode: !enabled
+          ? "disabled"
+          : !hasCreds
+            ? "needs_credentials"
+            : "ready_scaffold",
+        scope: "pull_pdfs_only",
+        message:
+          "Connect Cloud pull is scaffolded. Wire OAuth + vendor document API when César provides account access.",
+      });
+    },
+  );
+
+  app.post(
+    "/api/admin/connect-cloud/pull-report",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const enabled =
+        process.env.CONNECT_CLOUD_ENABLED === "1" ||
+        process.env.CONNECT_CLOUD_ENABLED === "true";
+      const clientId = Number(req.body?.client_id);
+      if (!clientId || Number.isNaN(clientId)) {
+        return res.status(400).json({ error: "client_id required" });
+      }
+      if (!enabled) {
+        return res.status(501).json({
+          error: "connect_cloud_disabled",
+          message:
+            "Set CONNECT_CLOUD_ENABLED=1 and vendor credentials to enable tri-merge pull.",
+        });
+      }
+      if (
+        !process.env.CONNECT_CLOUD_CLIENT_ID ||
+        !process.env.CONNECT_CLOUD_CLIENT_SECRET
+      ) {
+        return res.status(501).json({
+          error: "connect_cloud_needs_credentials",
+          message: "CONNECT_CLOUD_CLIENT_ID / SECRET required.",
+        });
+      }
+      return res.status(501).json({
+        error: "connect_cloud_not_implemented",
+        message:
+          "Credentials present; vendor document-pull API not wired yet. Use CRM PDF upload for analysis/report wizard.",
+        client_id: clientId,
+      });
+    },
+  );
+
+  /**
+   * MyFreeScoreNow affiliate API — status + opt-in UAT login probe.
+   * Gated OFF by default (`MFSN_ENABLED`). No ingest, cron, or consumer UX.
+   * Never returns the bearer token to the browser.
+   */
+  app.get(
+    "/api/admin/mfsn/status",
+    requireAdmin,
+    denyAffiliateAccess,
+    (_req, res) => {
+      res.json(buildMfsnPublicStatus(readMfsnEnvFromProcess()));
+    },
+  );
+
+  app.post(
+    "/api/admin/mfsn/probe-login",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (_req, res) => {
+      const cfg = readMfsnEnvFromProcess();
+      if (!cfg.enabled) {
+        return res.status(501).json({
+          error: "mfsn_disabled",
+          message:
+            "Set MFSN_ENABLED=1 locally to probe UAT. Omitted/0 keeps prod and default dev unchanged.",
+        });
+      }
+      if (!mfsnLoginCredentialsPresent(cfg)) {
+        return res.status(501).json({
+          error: "mfsn_needs_credentials",
+          message: "MFSN_API_EMAIL and MFSN_API_PASSWORD required.",
+        });
+      }
+      const probe = await probeMfsnAffiliateLogin(cfg);
+      if (!probe.ok) {
+        return res.status(502).json({
+          error: "mfsn_login_failed",
+          ...probe,
+        });
+      }
+      return res.json({
+        success: true,
+        http_status: probe.http_status,
+        message: probe.message,
+        token_received: true,
+      });
+    },
+  );
+
+  /**
+   * Meta / social DM webhook (P2). Gated by SOCIAL_DM_INBOX_ENABLED.
+   * Accepts and acknowledges; does not yet create Conversations threads.
+   */
+  app.post("/api/webhooks/meta/messaging", async (req, res) => {
+    const enabled =
+      process.env.SOCIAL_DM_INBOX_ENABLED === "1" ||
+      process.env.SOCIAL_DM_INBOX_ENABLED === "true";
+    if (!enabled) {
+      return res.status(503).json({ error: "social_dm_disabled" });
+    }
+    console.log(
+      "[social-dm] webhook received (scaffold — not persisted)",
+      typeof req.body === "object"
+        ? Object.keys(req.body || {})
+        : typeof req.body,
+    );
+    res.json({ ok: true, persisted: false, scaffold: true });
+  });
+
+  app.get("/api/webhooks/meta/messaging", (req, res) => {
+    const enabled =
+      process.env.SOCIAL_DM_INBOX_ENABLED === "1" ||
+      process.env.SOCIAL_DM_INBOX_ENABLED === "true";
+    const mode = String(req.query["hub.mode"] || "");
+    const token = String(req.query["hub.verify_token"] || "");
+    const challenge = String(req.query["hub.challenge"] || "");
+    const expected = process.env.META_WEBHOOK_VERIFY_TOKEN || "";
+    if (
+      enabled &&
+      mode === "subscribe" &&
+      expected &&
+      token === expected &&
+      challenge
+    ) {
+      return res.status(200).send(challenge);
+    }
+    res.status(403).send("Forbidden");
+  });
+
+  /**
    * GET /api/admin/crc/preview/:id — preview the XML payload for a client
    * without sending anything to CRC. Safe to use anytime.
    */
@@ -31838,124 +45623,135 @@ function buildApp() {
     requireAdmin,
     denyAffiliateAccess,
     async (req, res) => {
-      const status = (req.query.status as string) || "all";
-      const search = ((req.query.search as string) || "").trim();
-      const docType = (req.query.doc_type as string) || "";
-      const page = Math.max(1, parseInt((req.query.page as string) || "1", 10));
-      const limit = Math.min(
-        100,
-        Math.max(1, parseInt((req.query.limit as string) || "50", 10)),
-      );
-      const offset = (page - 1) * limit;
-      const sortColMap: Record<string, string> = {
-        uploaded_at: "ctc.completed_at",
-        file_name: "ctc.file_name",
-        first_name: "cl.first_name",
-        review_status: "ctc.admin_review_status",
-        doc_type: "t.slug",
-      };
-      const sortByRaw = String(req.query.sort_by || "uploaded_at");
-      const orderCol = sortColMap[sortByRaw] || "ctc.completed_at";
-      const orderDir =
-        String(req.query.sort_dir || "DESC").toUpperCase() === "ASC"
-          ? "ASC"
-          : "DESC";
-
-      const params: (string | number)[] = [];
-      const baseConditions: string[] = [
-        "t.task_type = 'upload'",
-        "ctc.file_name IS NOT NULL",
-        "ctc.status = 'completed'",
-      ];
-      const conditions = [...baseConditions];
-
-      if (status !== "all") {
-        conditions.push("ctc.admin_review_status = ?");
-        params.push(status);
-      }
-      if (docType && docType !== "all") {
-        conditions.push("t.slug = ?");
-        params.push(docType);
-      }
-      if (search) {
-        conditions.push(
-          "(cl.first_name LIKE ? ESCAPE '!' OR cl.last_name LIKE ? ESCAPE '!' OR cl.email LIKE ? ESCAPE '!' OR ctc.file_name LIKE ? ESCAPE '!')",
+      try {
+        const status = (req.query.status as string) || "all";
+        const search = ((req.query.search as string) || "").trim();
+        const docType = (req.query.doc_type as string) || "";
+        const page = Math.max(
+          1,
+          parseInt((req.query.page as string) || "1", 10),
         );
-        const like = likeContains(search);
-        params.push(like, like, like, like);
-      }
-
-      const countParams: (string | number)[] = [];
-      const countConditions = [...baseConditions];
-      if (docType && docType !== "all") {
-        countConditions.push("t.slug = ?");
-        countParams.push(docType);
-      }
-      if (search) {
-        countConditions.push(
-          "(cl.first_name LIKE ? ESCAPE '!' OR cl.last_name LIKE ? ESCAPE '!' OR cl.email LIKE ? ESCAPE '!' OR ctc.file_name LIKE ? ESCAPE '!')",
+        const limit = Math.min(
+          100,
+          Math.max(1, parseInt((req.query.limit as string) || "50", 10)),
         );
-        const like = likeContains(search);
-        countParams.push(like, like, like, like);
+        const offset = (page - 1) * limit;
+        const sortColMap: Record<string, string> = {
+          uploaded_at: "ctc.completed_at",
+          file_name: "ctc.file_name",
+          first_name: "cl.first_name",
+          review_status: "ctc.admin_review_status",
+          doc_type: "t.slug",
+        };
+        const sortByRaw = String(req.query.sort_by || "uploaded_at");
+        const orderCol = sortColMap[sortByRaw] || "ctc.completed_at";
+        const orderDir =
+          String(req.query.sort_dir || "DESC").toUpperCase() === "ASC"
+            ? "ASC"
+            : "DESC";
+
+        const params: (string | number)[] = [];
+        const baseConditions: string[] = [
+          "t.task_type = 'upload'",
+          "ctc.file_name IS NOT NULL",
+          "ctc.status = 'completed'",
+        ];
+        const conditions = [...baseConditions];
+
+        if (status !== "all") {
+          conditions.push("ctc.admin_review_status = ?");
+          params.push(status);
+        }
+        if (docType && docType !== "all") {
+          conditions.push("t.slug = ?");
+          params.push(docType);
+        }
+        if (search) {
+          conditions.push(
+            "(cl.first_name LIKE ? ESCAPE '!' OR cl.last_name LIKE ? ESCAPE '!' OR cl.email LIKE ? ESCAPE '!' OR ctc.file_name LIKE ? ESCAPE '!')",
+          );
+          const like = likeContains(search);
+          params.push(like, like, like, like);
+        }
+
+        const countParams: (string | number)[] = [];
+        const countConditions = [...baseConditions];
+        if (docType && docType !== "all") {
+          countConditions.push("t.slug = ?");
+          countParams.push(docType);
+        }
+        if (search) {
+          countConditions.push(
+            "(cl.first_name LIKE ? ESCAPE '!' OR cl.last_name LIKE ? ESCAPE '!' OR cl.email LIKE ? ESCAPE '!' OR ctc.file_name LIKE ? ESCAPE '!')",
+          );
+          const like = likeContains(search);
+          countParams.push(like, like, like, like);
+        }
+
+        const where = `WHERE ${conditions.join(" AND ")}`;
+        const countWhere = `WHERE ${countConditions.join(" AND ")}`;
+        const fromSql = `FROM client_task_completions ctc
+         JOIN onboarding_task_templates t ON t.id = ctc.task_template_id
+         JOIN clients cl ON cl.id = ctc.client_id
+         LEFT JOIN credit_repair_cases crc ON crc.id = ctc.case_id`;
+
+        // Parallelize — under suite/TiDB load sequential round-trips were a common
+        // source of intermittent 500s (connection wait / read timeout).
+        const [[countRow], [statusCountRow], [rows]] = await Promise.all([
+          pool.query<RowDataPacket[]>(
+            `SELECT COUNT(*) AS total ${fromSql} ${where}`,
+            params,
+          ),
+          pool.query<RowDataPacket[]>(
+            `SELECT
+               COUNT(*) AS all_count,
+               SUM(ctc.admin_review_status = 'pending') AS pending,
+               SUM(ctc.admin_review_status = 'approved') AS approved,
+               SUM(ctc.admin_review_status = 'rejected') AS rejected
+             ${fromSql}
+             ${countWhere}`,
+            countParams,
+          ),
+          pool.query<RowDataPacket[]>(
+            `SELECT ctc.id, ctc.client_id,
+                  t.slug AS doc_type,
+                  NULL AS pipeline_round,
+                  ctc.file_name, 0 AS file_size, ctc.file_mime AS mime_type,
+                  ctc.admin_review_status AS review_status,
+                  ctc.admin_notes AS rejection_reason,
+                  ctc.completed_at AS uploaded_at,
+                  ctc.admin_reviewed_at AS reviewed_at,
+                  cl.first_name, cl.last_name, cl.email, cl.preferred_language,
+                  crc.case_number
+           ${fromSql}
+           ${where}
+           ORDER BY ${orderCol} ${orderDir}, ctc.id DESC
+           LIMIT ? OFFSET ?`,
+            [...params, limit, offset],
+          ),
+        ]);
+        const total = Number(countRow[0]?.total ?? 0);
+        const sc = statusCountRow[0] as RowDataPacket | undefined;
+
+        res.json({
+          documents: rows,
+          pagination: {
+            page,
+            limit,
+            total,
+            totalPages: Math.max(1, Math.ceil(total / limit)),
+          },
+          status_counts: {
+            all: Number(sc?.all_count ?? 0),
+            pending: Number(sc?.pending ?? 0),
+            approved: Number(sc?.approved ?? 0),
+            rejected: Number(sc?.rejected ?? 0),
+          },
+        });
+      } catch (e: any) {
+        console.error("[admin/documents]", e?.code || e?.message || e);
+        res.status(500).json({ error: "Failed to load documents" });
       }
-
-      const where = `WHERE ${conditions.join(" AND ")}`;
-      const countWhere = `WHERE ${countConditions.join(" AND ")}`;
-      const fromSql = `FROM client_task_completions ctc
-       JOIN onboarding_task_templates t ON t.id = ctc.task_template_id
-       JOIN clients cl ON cl.id = ctc.client_id
-       LEFT JOIN credit_repair_cases crc ON crc.id = ctc.case_id`;
-
-      const [countRow] = await pool.query<RowDataPacket[]>(
-        `SELECT COUNT(*) AS total ${fromSql} ${where}`,
-        params,
-      );
-      const total = Number(countRow[0]?.total ?? 0);
-
-      const [statusCountRow] = await pool.query<RowDataPacket[]>(
-        `SELECT
-           COUNT(*) AS all_count,
-           SUM(ctc.admin_review_status = 'pending') AS pending,
-           SUM(ctc.admin_review_status = 'approved') AS approved,
-           SUM(ctc.admin_review_status = 'rejected') AS rejected
-         ${fromSql}
-         ${countWhere}`,
-        countParams,
-      );
-      const sc = statusCountRow[0] as RowDataPacket | undefined;
-
-      const [rows] = await pool.query<RowDataPacket[]>(
-        `SELECT ctc.id, ctc.client_id,
-              t.slug AS doc_type,
-              NULL AS pipeline_round,
-              ctc.file_name, 0 AS file_size, ctc.file_mime AS mime_type,
-              ctc.admin_review_status AS review_status,
-              ctc.admin_notes AS rejection_reason,
-              ctc.completed_at AS uploaded_at,
-              ctc.admin_reviewed_at AS reviewed_at,
-              cl.first_name, cl.last_name, cl.email, cl.preferred_language,
-              crc.case_number
-       ${fromSql}
-       ${where}
-       ORDER BY ${orderCol} ${orderDir}, ctc.id DESC
-       LIMIT ? OFFSET ?`,
-        [...params, limit, offset],
-      );
-      res.json({
-        documents: rows,
-        pagination: {
-          page,
-          limit,
-          total,
-          totalPages: Math.max(1, Math.ceil(total / limit)),
-        },
-        status_counts: {
-          all: Number(sc?.all_count ?? 0),
-          pending: Number(sc?.pending ?? 0),
-          approved: Number(sc?.approved ?? 0),
-          rejected: Number(sc?.rejected ?? 0),
-        },
-      });
     },
   );
 
@@ -32211,10 +46007,12 @@ function buildApp() {
     },
   );
 
-  // ── Delete a specific round_report_pdfs entry (super_admin) ──────────────
+  // ── Delete a specific round_report_pdfs entry — DEPRECATED ───────────────
+  // PDF-only delete left orphans (scores/sessions/pipeline). Use Reset Round.
   app.delete(
     "/api/admin/round-report-pdfs/:pdfId",
-    requireSuperAdmin,
+    requireStaffManager,
+    denyAffiliateAccess,
     async (req, res) => {
       const pdfId = Number(req.params.pdfId);
       if (!pdfId || isNaN(pdfId))
@@ -32227,8 +46025,430 @@ function buildApp() {
       if (rows.length === 0)
         return res.status(404).json({ error: "PDF not found" });
 
-      await pool.query(`DELETE FROM round_report_pdfs WHERE id = ?`, [pdfId]);
-      res.json({ ok: true });
+      const clientId = Number(rows[0].client_id);
+      const roundNumber = Number(rows[0].round_number);
+      return res.status(410).json({
+        error:
+          "PDF-only delete is deprecated. Use POST /api/admin/clients/{id}/round-reports/{roundNumber}/reset to clear the round (reports, PDFs, wizard sessions, pipeline).",
+        client_id: clientId,
+        round_number: roundNumber,
+        reset_path: `/api/admin/clients/${clientId}/round-reports/${roundNumber}/reset`,
+      });
+    },
+  );
+
+  // ── Reset Round N (+ cascade later rounds) — admin / super_admin ─────────
+  app.post(
+    "/api/admin/clients/:id/round-reports/:roundNumber/reset",
+    requireStaffManager,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const clientId = Number(req.params.id);
+      const fromRound = Number(req.params.roundNumber);
+      if (!clientId || isNaN(clientId)) {
+        return res.status(400).json({ error: "Invalid client id" });
+      }
+      if (!fromRound || isNaN(fromRound)) {
+        return res.status(400).json({ error: "Invalid round_number" });
+      }
+
+      const confirm =
+        req.body?.confirm === true ||
+        req.body?.confirm === 1 ||
+        req.body?.confirm === "true";
+
+      try {
+        const preview = await buildRoundReportResetPreview(clientId, fromRound);
+        if ("error" in preview) {
+          return res.status(preview.status).json({ error: preview.error });
+        }
+
+        if (!confirm) {
+          return res.json({
+            ok: true,
+            dry_run: true,
+            preview,
+            guidance:
+              'Review the checklist, then POST again with confirm=true to execute.',
+          });
+        }
+
+        const adminId = req.auth!.id;
+        const cdnUrls = [...preview.pdf_storage_urls];
+        const conn = await pool.getConnection();
+        try {
+          await conn.beginTransaction();
+
+          // Highest round first so FK/session cleanup is predictable.
+          const clearRounds = [...preview.rounds_with_data].sort(
+            (a, b) => b - a,
+          );
+          for (const rn of clearRounds) {
+            await conn.query(
+              `DELETE FROM round_report_pdfs
+               WHERE client_id = ? AND round_number = ?`,
+              [clientId, rn],
+            );
+            await conn.query(
+              `DELETE FROM client_round_reports
+               WHERE client_id = ? AND round_number = ?`,
+              [clientId, rn],
+            );
+            await conn.query(
+              `DELETE FROM report_wizard_sessions
+               WHERE client_id = ? AND round_number = ?`,
+              [clientId, rn],
+            );
+          }
+
+          if (preview.staged_pdf_ids.length) {
+            await conn.query(
+              `DELETE FROM report_wizard_staged_pdfs
+               WHERE id IN (?) AND client_id = ?`,
+              [preview.staged_pdf_ids, clientId],
+            );
+          }
+
+          await advanceCasePipeline(conn, {
+            clientId,
+            caseId: preview.case_id,
+            stage: preview.pipeline.to,
+            adminId,
+            notes: `OFG Progress Report reset — Round ${fromRound}${
+              preview.rounds_with_data.length > 1
+                ? ` (cascaded rounds ${preview.rounds_with_data.join(",")})`
+                : ""
+            }`,
+          });
+
+          // Allow republish notify: clear recent round_N_complete executions
+          // that would trip the 10-minute flow idempotency guard.
+          // Only ENUM-backed triggers (1–5); rounds 6+ used safety-fallback notify.
+          const roundTriggers = preview.rounds_with_data
+            .filter((rn) => rn >= 1 && rn <= DEFAULT_MAX_ROUNDS)
+            .map((rn) => `round_${rn}_complete`);
+          if (roundTriggers.length) {
+            await conn.query(
+              `DELETE rfe FROM reminder_flow_executions rfe
+               INNER JOIN reminder_flows rf ON rf.id = rfe.flow_id
+               WHERE rfe.client_id = ?
+                 AND rf.trigger_event IN (?)
+                 AND rfe.triggered_at >= NOW() - INTERVAL 1 DAY`,
+              [clientId, roundTriggers],
+            );
+            // Cancel delayed (not-yet-sent) round-complete messages so clients
+            // do not get dead secure-PDF links after reset. Already-sent stay
+            // (cannot unsend — product 6a).
+            await conn.query(
+              `UPDATE notification_queue
+               SET status = 'cancelled',
+                   error_message = 'Cancelled: OFG Progress Report round reset'
+               WHERE client_id = ?
+                 AND status IN ('pending', 'processing')
+                 AND JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.trigger_event')) IN (?)`,
+              [clientId, roundTriggers],
+            );
+          }
+
+          await conn.query(
+            `INSERT INTO audit_logs
+               (actor_type, actor_id, action, entity_type, entity_id, changes_json, status)
+             VALUES ('admin', ?, 'report_wizard.round_reset', 'client', ?, ?, 'success')`,
+            [
+              adminId,
+              clientId,
+              JSON.stringify({
+                reset_from_round: fromRound,
+                rounds_cleared: preview.rounds_with_data,
+                report_ids: preview.report_ids,
+                pdf_ids: preview.pdf_ids,
+                session_ids: preview.session_ids,
+                staged_pdf_ids: preview.staged_pdf_ids,
+                pipeline: preview.pipeline,
+                cancelled_round_triggers: roundTriggers,
+              }),
+            ],
+          );
+
+          await conn.commit();
+        } catch (e) {
+          await conn.rollback();
+          throw e;
+        } finally {
+          conn.release();
+        }
+
+        for (const url of cdnUrls) {
+          try {
+            await deleteFromCDN(url);
+          } catch (e: any) {
+            console.warn(
+              "[round-reset] CDN delete",
+              url.slice(0, 80),
+              e?.message ?? e,
+            );
+          }
+        }
+
+        if (process.env.CRC_SYNC_STAGES !== "false") {
+          crcSyncClient(clientId).catch((e) =>
+            console.warn("[round-reset] CRC sync", e?.message ?? e),
+          );
+        }
+
+        return res.json({
+          ok: true,
+          dry_run: false,
+          reset: {
+            ...preview,
+            warnings: preview.warnings,
+          },
+        });
+      } catch (e: any) {
+        console.error("[round-reset]", clientId, fromRound, e?.message ?? e);
+        return res
+          .status(500)
+          .json({ error: String(e?.message || "Reset failed") });
+      }
+    },
+  );
+
+  // ── Resend published Round PDF (client + optional partners) ───────────────
+  app.post(
+    "/api/admin/round-report-pdfs/:pdfId/resend",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const pdfId = Number(req.params.pdfId);
+      if (!pdfId || isNaN(pdfId)) {
+        return res.status(400).json({ error: "Invalid id" });
+      }
+
+      const alsoEmail = adminAiBoolDefaultTrue(req.body?.also_email);
+      const alsoSms = adminAiBoolDefaultTrue(req.body?.also_sms);
+      const attachPdf = adminAiBoolDefaultTrue(req.body?.attach_pdf);
+      const notifyPartners = adminAiBoolDefaultTrue(req.body?.notify_partners);
+
+      if (!alsoEmail && !alsoSms && !notifyPartners) {
+        return res.status(400).json({
+          error: "Set also_email, also_sms, and/or notify_partners",
+        });
+      }
+
+      const [pdfRows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, client_id, round_number, round_report_id, file_name,
+                storage_key, storage_provider, encrypted, enc_iv, enc_tag
+         FROM round_report_pdfs WHERE id = ? LIMIT 1`,
+        [pdfId],
+      );
+      const pdfRow = pdfRows[0];
+      if (!pdfRow) return res.status(404).json({ error: "PDF not found" });
+
+      const clientId = Number(pdfRow.client_id);
+      const roundNumber = Number(pdfRow.round_number);
+      const roundReportId =
+        pdfRow.round_report_id != null ? Number(pdfRow.round_report_id) : null;
+      const adminId = req.auth!.id;
+
+      const [cRows] = await pool.query<RowDataPacket[]>(
+        `SELECT first_name, last_name, email, phone, preferred_language, status
+         FROM clients WHERE id = ? LIMIT 1`,
+        [clientId],
+      );
+      if (!cRows[0]) return res.status(404).json({ error: "Client not found" });
+      const client = cRows[0];
+      if (String(client.status) === "cancelled") {
+        return res
+          .status(400)
+          .json({ error: "Cannot send round report to a cancelled client" });
+      }
+
+      const clientName =
+        `${client.first_name || ""} ${client.last_name || ""}`.trim();
+      const clientEmail = client.email ? String(client.email).trim() : null;
+      const clientPhone = client.phone ? String(client.phone).trim() : null;
+      const lang = client.preferred_language === "es" ? "es" : "en";
+
+      if (alsoEmail && !clientEmail && !notifyPartners) {
+        return res.status(422).json({
+          error: "no_email",
+          message: "Client has no email on file",
+        });
+      }
+      if (alsoSms && !clientPhone && !alsoEmail && !notifyPartners) {
+        return res.status(422).json({
+          error: "no_phone",
+          message: "Client has no phone on file",
+        });
+      }
+
+      let scoreBefore: number | null = null;
+      let scoreAfter: number | null = null;
+      let itemsRemoved = 0;
+      if (roundReportId) {
+        const [rr] = await pool.query<RowDataPacket[]>(
+          `SELECT score_before, score_after, items_removed
+           FROM client_round_reports WHERE id = ? AND client_id = ? LIMIT 1`,
+          [roundReportId, clientId],
+        );
+        if (rr[0]) {
+          scoreBefore =
+            rr[0].score_before != null ? Number(rr[0].score_before) : null;
+          scoreAfter =
+            rr[0].score_after != null ? Number(rr[0].score_after) : null;
+          itemsRemoved = Number(rr[0].items_removed || 0);
+        }
+      }
+
+      let pdfAttachment:
+        | { filename: string; content: Buffer; contentType: string }
+        | undefined;
+      if (attachPdf || notifyPartners) {
+        const buf = await loadRoundReportPdfBytes(pdfRow);
+        if (buf && buf.length > 0) {
+          pdfAttachment = {
+            filename:
+              String(pdfRow.file_name || "").trim() ||
+              `OFG_Progress_Report_R${roundNumber}.pdf`,
+            content: buf,
+            contentType: "application/pdf",
+          };
+        } else if (attachPdf || notifyPartners) {
+          return res.status(500).json({
+            error: "Could not load Round PDF bytes from storage",
+            code: "pdf_load_failed",
+          });
+        }
+      }
+
+      let securePdfUrl = "";
+      try {
+        const dlToken = await createRoundReportDownloadToken(pdfId, clientId);
+        securePdfUrl = `${APP_URL}/api/public/round-report-pdf/${dlToken}`;
+      } catch (e: any) {
+        return res.status(500).json({
+          error: String(e?.message || "Failed to mint secure PDF link").slice(
+            0,
+            300,
+          ),
+        });
+      }
+
+      const portalUrl = `${APP_URL}/portal/reports`;
+      const triggerEvent = `round_${roundNumber}_complete`;
+      let emailSent = false;
+      let smsSent = false;
+      let partnersEmailed = 0;
+
+      if (alsoEmail && clientEmail) {
+        const tpl = tplRoundComplete({
+          firstName: String(client.first_name || ""),
+          roundNumber,
+          scoreBefore,
+          scoreAfter,
+          itemsRemoved,
+          portalUrl,
+          securePdfUrl,
+          lang,
+        });
+        try {
+          await sendEmail({
+            to: clientEmail,
+            subject: tpl.subject,
+            html: tpl.html,
+            attachments:
+              attachPdf && pdfAttachment ? [pdfAttachment] : undefined,
+          });
+          emailSent = true;
+        } catch (e: any) {
+          return res.status(500).json({
+            error: `${String(e?.message || "Email send failed").slice(0, 300)} (secure link was minted)`,
+            secure_pdf_url: securePdfUrl,
+          });
+        }
+      }
+
+      if (alsoSms && clientPhone) {
+        const smsResult = await maybeSendClientReminderSms({
+          clientId,
+          triggerEvent,
+          alsoSms: true,
+          portalUrl: securePdfUrl,
+          smsFromAdminId: adminId,
+        }).catch((e: any) => {
+          console.error("[round-pdf-resend] sms", e?.message ?? e);
+          return { sent: false, reason: "error" as string };
+        });
+        smsSent = !!smsResult.sent;
+      }
+
+      if (notifyPartners && pdfAttachment) {
+        partnersEmailed = await emailLinkedReferrerPartnersRoundPdf({
+          clientId,
+          roundNumber,
+          clientName: clientName || "Client",
+          langFallback: lang,
+          pdfAttachment,
+        });
+      }
+
+      if (roundReportId && (emailSent || smsSent)) {
+        await pool
+          .query(
+            `UPDATE client_round_reports
+             SET delivered_via_email = IF(?, 1, delivered_via_email),
+                 delivered_via_sms = IF(?, 1, delivered_via_sms)
+             WHERE id = ?`,
+            [emailSent ? 1 : 0, smsSent ? 1 : 0, roundReportId],
+          )
+          .catch(() => null);
+      }
+
+      const partnerStats = await countLinkedReferrerPartnersWithEmail(clientId);
+      const ts = new Date().toISOString().slice(0, 16).replace("T", " ");
+      const noteBits = [
+        `[ROUND REPORT ${ts} UTC] Resent Round ${roundNumber} via CRM`,
+        emailSent ? `Email → ${clientEmail}` : null,
+        smsSent ? `SMS → ${clientPhone}` : null,
+        `Secure PDF: ${securePdfUrl}`,
+        attachPdf && pdfAttachment
+          ? `Attached: ${pdfAttachment.filename}`
+          : null,
+        partnersEmailed > 0 ? `Partners emailed: ${partnersEmailed}` : null,
+        notifyPartners && partnersEmailed === 0 && partnerStats.linked > 0
+          ? "Partners: none emailed (missing email?)"
+          : null,
+      ].filter(Boolean);
+      try {
+        await pool.query(
+          `UPDATE clients
+           SET admin_notes = CONCAT(
+                 COALESCE(admin_notes, ''),
+                 CASE WHEN admin_notes IS NULL OR admin_notes = '' THEN '' ELSE '\n' END,
+                 ?
+               )
+           WHERE id = ?`,
+          [noteBits.join("\n").slice(0, 8000), clientId],
+        );
+      } catch (noteErr: any) {
+        console.error("[round-pdf-resend] note", noteErr?.message ?? noteErr);
+      }
+
+      res.json({
+        ok: true,
+        pdf_id: pdfId,
+        client_id: clientId,
+        round_number: roundNumber,
+        round_report_id: roundReportId,
+        email_sent: emailSent,
+        sms_sent: smsSent,
+        partners_emailed: partnersEmailed,
+        partners_linked: partnerStats.linked,
+        partners_with_email: partnerStats.withEmail,
+        notify_partners: notifyPartners,
+        attach_pdf: !!(attachPdf && pdfAttachment),
+        secure_pdf_url: securePdfUrl,
+      });
     },
   );
 
@@ -32332,7 +46552,14 @@ function buildApp() {
     async (req: AuthedRequest, res) => {
       const clientId = req.auth!.id;
       const roundNumber = Number(req.params.round);
-      if (isNaN(roundNumber) || roundNumber < 1 || roundNumber > 5) {
+      if (isNaN(roundNumber) || roundNumber < 1) {
+        return res.status(400).json({ error: "Invalid round number" });
+      }
+      const activeCaseId = await resolveActiveCaseId(pool, clientId, null);
+      const maxRounds = activeCaseId
+        ? await loadCaseMaxRounds(pool, activeCaseId)
+        : DEFAULT_MAX_ROUNDS;
+      if (roundNumber > maxRounds) {
         return res.status(400).json({ error: "Invalid round number" });
       }
 
@@ -32722,7 +46949,9 @@ function buildApp() {
           phone: r.phone,
           email: r.email,
           last_message_at: r.last_message_at,
-          last_message_preview: r.last_message_preview,
+          last_message_preview: r.last_message_preview
+            ? decodeLiteralUnicodeEscapes(String(r.last_message_preview))
+            : r.last_message_preview,
           unread_count: Number(r.unread_count || 0),
           status: (r.status as string) || "open",
           assigned_admin_id: assignedId && assignedId > 0 ? assignedId : null,
@@ -32886,7 +47115,9 @@ function buildApp() {
             phone: u.phone_e164,
             email: u.email,
             last_message_at: u.last_message_at,
-            last_message_preview: u.last_message_preview,
+            last_message_preview: u.last_message_preview
+              ? decodeLiteralUnicodeEscapes(String(u.last_message_preview))
+              : u.last_message_preview,
             unread_count: Number(u.unread_count || 0),
             status: String(u.thread_status || "open"),
             assigned_admin_id: u.thread_assigned_admin_id
@@ -32900,7 +47131,118 @@ function buildApp() {
         }
       }
 
-      const items = view === "unknown" ? unknowns : [...unknowns, ...contacts];
+      // CRM contacts with conversation threads (exclude unknown-only view)
+      let crmContacts: any[] = [];
+      let crmTotal = 0;
+      if (view !== "unknown") {
+        const crmWhere: string[] = [
+          "ct.deleted_at IS NULL",
+          "cv.contact_id IS NOT NULL",
+        ];
+        const crmArgs: any[] = [];
+        if (view === "closed") {
+          crmWhere.push("cv.status IN ('closed','archived')");
+        } else if (view === "unread") {
+          crmWhere.push("cv.status NOT IN ('closed','archived')");
+          crmWhere.push("cv.unread_count > 0");
+        } else if (view === "mine") {
+          crmWhere.push("cv.status NOT IN ('closed','archived')");
+          crmWhere.push("cv.assigned_admin_id = ?");
+          crmArgs.push(adminId);
+        } else if (
+          view === "open" ||
+          view === "unassigned" ||
+          view === "all"
+        ) {
+          crmWhere.push("cv.status NOT IN ('closed','archived')");
+          if (view === "unassigned") {
+            crmWhere.push("cv.assigned_admin_id IS NULL");
+          }
+        }
+        if (q) {
+          const like = likeContains(q);
+          crmWhere.push(
+            `(ct.first_name LIKE ? ESCAPE '!' OR ct.last_name LIKE ? ESCAPE '!'
+              OR ct.email LIKE ? ESCAPE '!' OR ct.phone LIKE ? ESCAPE '!'
+              OR cv.last_message_preview LIKE ? ESCAPE '!')`,
+          );
+          crmArgs.push(like, like, like, like, like);
+        }
+        const crmWhereSql = crmWhere.join(" AND ");
+        const [crmCountRow] = await pool.query<RowDataPacket[]>(
+          `SELECT COUNT(*) AS cnt FROM (
+             SELECT ct.id
+             FROM conversations cv
+             JOIN contacts ct ON ct.id = cv.contact_id
+             WHERE ${crmWhereSql}
+             GROUP BY ct.id
+           ) grouped_crm`,
+          crmArgs,
+        );
+        crmTotal = Number(crmCountRow[0]?.cnt ?? 0);
+        const [crmRows] = await pool.query<RowDataPacket[]>(
+          `SELECT
+             ct.id AS contact_id,
+             CONCAT(ct.first_name,' ',ct.last_name) AS display_name,
+             ct.phone, ct.email,
+             MAX(cv.last_message_at) AS last_message_at,
+             SUBSTRING_INDEX(
+               GROUP_CONCAT(cv.last_message_preview ORDER BY cv.last_message_at DESC SEPARATOR '\n'),
+               '\n', 1
+             ) AS last_message_preview,
+             SUM(cv.unread_count) AS unread_count,
+             SUBSTRING_INDEX(
+               GROUP_CONCAT(cv.status ORDER BY cv.last_message_at DESC),
+               ',', 1
+             ) AS status,
+             SUBSTRING_INDEX(
+               GROUP_CONCAT(IFNULL(cv.assigned_admin_id,'') ORDER BY cv.last_message_at DESC),
+               ',', 1
+             ) AS assigned_admin_id,
+             SUBSTRING_INDEX(
+               GROUP_CONCAT(cv.id ORDER BY cv.last_message_at DESC),
+               ',', 1
+             ) AS primary_conversation_id,
+             GROUP_CONCAT(DISTINCT cv.channel) AS channels
+           FROM conversations cv
+           JOIN contacts ct ON ct.id = cv.contact_id
+           WHERE ${crmWhereSql}
+           GROUP BY ct.id, ct.first_name, ct.last_name, ct.phone, ct.email
+           ORDER BY last_message_at DESC`,
+          crmArgs,
+        );
+        crmContacts = crmRows.map((r) => {
+          const assignedId = r.assigned_admin_id
+            ? Number(r.assigned_admin_id)
+            : null;
+          return {
+            kind: "contact" as const,
+            contact_id: Number(r.contact_id),
+            crm_contact_id: Number(r.contact_id),
+            display_name: String(r.display_name || "").trim() || "Contact",
+            phone: r.phone,
+            email: r.email,
+            last_message_at: r.last_message_at,
+            last_message_preview: r.last_message_preview
+              ? decodeLiteralUnicodeEscapes(String(r.last_message_preview))
+              : r.last_message_preview,
+            unread_count: Number(r.unread_count || 0),
+            status: (r.status as string) || "open",
+            assigned_admin_id: assignedId && assignedId > 0 ? assignedId : null,
+            channels: String(r.channels || "sms")
+              .split(",")
+              .filter(Boolean) as any[],
+            primary_conversation_id: r.primary_conversation_id
+              ? Number(r.primary_conversation_id)
+              : null,
+          };
+        });
+      }
+
+      const items =
+        view === "unknown"
+          ? unknowns
+          : [...unknowns, ...contacts, ...crmContacts];
       items.sort((a, b) => {
         const ta = a.last_message_at
           ? new Date(a.last_message_at).getTime()
@@ -32912,7 +47254,9 @@ function buildApp() {
       });
 
       const total =
-        view === "unknown" ? unknownTotal : unknownTotal + clientTotal;
+        view === "unknown"
+          ? unknownTotal
+          : unknownTotal + clientTotal + crmTotal;
       const offset = (page - 1) * limit;
       const paginated = items.slice(offset, offset + limit);
 
@@ -32973,7 +47317,44 @@ function buildApp() {
           kind: "unknown",
           contact: urows[0],
           threads: convRows,
-          messages,
+          messages: messages.map(mapConversationMessageApiRow),
+        });
+      }
+
+      if (kind === "contact") {
+        const [crows] = await pool.query<RowDataPacket[]>(
+          `SELECT * FROM contacts WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+          [id],
+        );
+        if (!crows[0]) return res.status(404).json({ error: "Not found" });
+        const [convRows] = await pool.query<RowDataPacket[]>(
+          `SELECT id, channel, status, assigned_admin_id, ofg_number_id, unread_count, last_message_at
+           FROM conversations WHERE contact_id = ? ORDER BY last_message_at DESC`,
+          [id],
+        );
+        const convIds = convRows.map((c) => Number(c.id));
+        let messages: RowDataPacket[] = [];
+        if (convIds.length) {
+          const [m] = await pool.query<RowDataPacket[]>(
+            `SELECT m.*, CONCAT(a.first_name,' ',a.last_name) AS sent_by_admin_name
+             FROM conversation_messages m
+             LEFT JOIN admins a ON a.id = m.sent_by_admin_id
+             WHERE m.conversation_id IN (?)
+             ORDER BY m.id ASC LIMIT 500`,
+            [convIds],
+          );
+          messages = m;
+          await pool.query(
+            `UPDATE conversations SET unread_count = 0
+             WHERE contact_id = ? AND id IN (?)`,
+            [id, convIds],
+          );
+        }
+        return res.json({
+          kind: "contact",
+          contact: mapCrmContactRow(crows[0]),
+          threads: convRows,
+          messages: messages.map(mapConversationMessageApiRow),
         });
       }
 
@@ -33019,8 +47400,132 @@ function buildApp() {
         kind: "client",
         contact: crows[0],
         threads,
-        messages,
+        messages: messages.map(mapConversationMessageApiRow),
       });
+    },
+  );
+
+  app.post(
+    "/api/admin/conversations/messages/:messageId/retry-call-insights",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      if (!(await requireConversationsAccess(req, res))) return;
+      const messageId = Number(req.params.messageId);
+      if (!(messageId > 0)) {
+        return res.status(400).json({ error: "Invalid message id" });
+      }
+      try {
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT m.id, m.channel, m.recording_url, m.provider_message_id,
+                  m.metadata_json, m.conversation_id,
+                  c.client_id, c.unknown_contact_id, c.contact_id,
+                  c.ofg_number_id, c.assigned_admin_id
+           FROM conversation_messages m
+           JOIN conversations c ON c.id = m.conversation_id
+           WHERE m.id = ?
+           LIMIT 1`,
+          [messageId],
+        );
+        const row = rows[0];
+        if (!row || String(row.channel) !== "call") {
+          return res.status(404).json({ error: "Not found" });
+        }
+
+        const adminId = req.auth!.id;
+        let allowed = false;
+        if (row.client_id != null) {
+          allowed = await adminCanAccessClientConversations(
+            adminId,
+            Number(row.client_id),
+          );
+        } else if (row.unknown_contact_id != null) {
+          allowed = await adminCanAccessUnknownContact(
+            adminId,
+            Number(row.unknown_contact_id),
+          );
+        } else if (row.contact_id != null) {
+          // CRM contacts: any conversations-enabled admin can retry
+          allowed = true;
+        } else {
+          const ofgIds = await adminAssignedPhoneNumberIds(adminId);
+          const ofgOk =
+            row.ofg_number_id != null &&
+            ofgIds.includes(Number(row.ofg_number_id));
+          const assigneeOk =
+            row.assigned_admin_id != null &&
+            Number(row.assigned_admin_id) === adminId;
+          allowed = ofgOk || assigneeOk;
+        }
+        if (!allowed) {
+          return res.status(403).json({ error: "Forbidden" });
+        }
+
+        if (!row.recording_url) {
+          let meta: Record<string, unknown> = {};
+          try {
+            meta =
+              typeof row.metadata_json === "string"
+                ? JSON.parse(row.metadata_json)
+                : (row.metadata_json as any) || {};
+          } catch {
+            meta = {};
+          }
+          await pullAndAttachTwilioRecording(messageId, [
+            String(row.provider_message_id || ""),
+            String(meta.call_sid || ""),
+            String(meta.parent_call_sid || ""),
+          ]);
+        }
+
+        const [hasRec] = await pool.query<RowDataPacket[]>(
+          `SELECT recording_url FROM conversation_messages WHERE id = ? LIMIT 1`,
+          [messageId],
+        );
+        if (!hasRec[0]?.recording_url) {
+          return res
+            .status(409)
+            .json({ error: "Recording not available yet" });
+        }
+
+        // Force re-queue even from ready (e.g. transcript-only, Claude retry).
+        await pool.query(
+          `UPDATE conversation_messages
+           SET call_insights_status = 'pending',
+               call_insights_error = NULL,
+               call_insights_updated_at = NOW()
+           WHERE id = ? AND channel = 'call'`,
+          [messageId],
+        );
+        await publishCallInsightsRealtime(
+          Number(row.conversation_id),
+          messageId,
+          { call_insights_status: "pending", call_insights_error: null },
+        );
+        await processCallInsightsForMessage(messageId);
+
+        const [out] = await pool.query<RowDataPacket[]>(
+          `SELECT m.*, CONCAT(a.first_name,' ',a.last_name) AS sent_by_admin_name
+           FROM conversation_messages m
+           LEFT JOIN admins a ON a.id = m.sent_by_admin_id
+           WHERE m.id = ?
+           LIMIT 1`,
+          [messageId],
+        );
+        const updated = out[0];
+        if (!updated) {
+          return res.status(500).json({ error: "Message missing after retry" });
+        }
+        return res.json({
+          ok: true,
+          message: mapConversationMessageApiRow(updated),
+        });
+      } catch (e: any) {
+        console.error("[call-insights] retry", messageId, e?.message ?? e);
+        return res
+          .status(500)
+          .json({ error: String(e?.message || "Retry failed") });
+      }
     },
   );
 
@@ -33165,6 +47670,7 @@ function buildApp() {
       const {
         client_id,
         unknown_contact_id,
+        contact_id,
         channel,
         body,
         is_internal_note,
@@ -33180,13 +47686,12 @@ function buildApp() {
       const hasClient = client_id != null && Number(client_id) > 0;
       const hasUnknown =
         unknown_contact_id != null && Number(unknown_contact_id) > 0;
-      if ((!hasClient && !hasUnknown) || (!textBody.trim() && !mediaUrlRaw)) {
+      const hasCrm = contact_id != null && Number(contact_id) > 0;
+      if (
+        [hasClient, hasUnknown, hasCrm].filter(Boolean).length !== 1 ||
+        (!textBody.trim() && !mediaUrlRaw)
+      ) {
         return res.status(400).json({ error: "Missing fields" });
-      }
-      if (hasClient && hasUnknown) {
-        return res
-          .status(400)
-          .json({ error: "Provide client_id or unknown_contact_id, not both" });
       }
       try {
         const mediaUrl = mediaUrlRaw
@@ -33196,6 +47701,7 @@ function buildApp() {
           adminId: req.auth!.id,
           clientId: hasClient ? Number(client_id) : undefined,
           unknownContactId: hasUnknown ? Number(unknown_contact_id) : undefined,
+          crmContactId: hasCrm ? Number(contact_id) : undefined,
           channel: String(channel || "sms"),
           textBody,
           isInternalNote: !!is_internal_note,
@@ -33217,7 +47723,9 @@ function buildApp() {
           return res.status(404).json({ error: msg });
         }
         if (
-          /required|unsupported|internal notes|invalid media|expired/i.test(msg)
+          /required|unsupported|internal notes|invalid media|expired|exceeds/i.test(
+            msg,
+          )
         ) {
           return res.status(400).json({ error: msg });
         }
@@ -33292,6 +47800,20 @@ function buildApp() {
           return res.json({ kind: "client", ...result });
         }
 
+        const existingContactId = await findContactIdByPhone(phoneRaw);
+        if (existingContactId) {
+          const result = await deliverHubConversationMessage({
+            adminId: req.auth!.id,
+            crmContactId: existingContactId,
+            channel: "sms",
+            textBody,
+            ofgNumberId,
+            mediaUrl,
+            mediaContentType: media_content_type,
+          });
+          return res.json({ kind: "contact", ...result });
+        }
+
         const { unknownId, created, phoneE164 } =
           await findOrCreateOpenUnknownContact({
             phoneRaw,
@@ -33325,7 +47847,7 @@ function buildApp() {
         if (/not found/i.test(msg)) {
           return res.status(404).json({ error: msg });
         }
-        if (/required|invalid media|expired|digits/i.test(msg)) {
+        if (/required|invalid media|expired|digits|exceeds/i.test(msg)) {
           return res.status(400).json({ error: msg });
         }
         console.error("[conversations:start]", msg);
@@ -33348,7 +47870,7 @@ function buildApp() {
             body: String(m?.body || "").slice(0, 400),
           }))
         : [];
-      if (!["client", "unknown"].includes(kind) || !contactId) {
+      if (!["client", "unknown", "contact"].includes(kind) || !contactId) {
         return res.status(400).json({ error: "Invalid kind or contact_id" });
       }
 
@@ -33375,6 +47897,22 @@ function buildApp() {
           phone: c.phone,
           pipelineStage: c.pipeline_stage,
           clientStatus: c.status,
+          preferredLanguage: c.preferred_language,
+        };
+      } else if (kind === "contact") {
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT first_name, last_name, phone, preferred_language
+           FROM contacts
+           WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+          [contactId],
+        );
+        if (!rows[0])
+          return res.status(404).json({ error: "Contact not found" });
+        const c = rows[0];
+        context = {
+          displayName:
+            `${c.first_name || ""} ${c.last_name || ""}`.trim() || "there",
+          phone: c.phone,
           preferredLanguage: c.preferred_language,
         };
       } else {
@@ -33451,13 +47989,15 @@ function buildApp() {
               for (const [i, s] of (parsed.suggestions || [])
                 .slice(0, 3)
                 .entries()) {
-                const body = String(s.body || "")
-                  .trim()
-                  .slice(0, 480);
+                const body = decodeLiteralUnicodeEscapes(
+                  String(s.body || "").trim(),
+                ).slice(0, 480);
                 if (!body) continue;
                 aiSuggestions.push({
                   id: `ai-${i}`,
-                  label: String(s.label || body).slice(0, 48),
+                  label: decodeLiteralUnicodeEscapes(
+                    String(s.label || body),
+                  ).slice(0, 48),
                   body,
                 });
               }
@@ -33649,19 +48189,40 @@ function buildApp() {
           ? req.body.preferred_language
           : "en";
       const createCase = req.body?.create_case === true;
-      const confirmDuplicate = req.body?.confirm_duplicate === true;
 
       if (email && !isValidEmail(email)) {
         return res.status(400).json({ error: "Invalid email" });
       }
+      if (phone && isPlaceholderPhone(String(phone))) {
+        return res.status(400).json({
+          error: "placeholder_phone",
+          message:
+            "This phone looks like a placeholder. Use the client's real phone.",
+        });
+      }
       if (phone) {
         const duplicates = await adminAiFindPhoneDuplicates(String(phone));
-        if (duplicates.length > 0 && !confirmDuplicate) {
+        if (duplicates.length > 0) {
           return res.status(409).json({
             error: "duplicate_phone",
+            existing_client_id: Number(duplicates[0].id),
             duplicates,
             message:
-              "A client with this phone already exists. Link instead, or confirm duplicate.",
+              "A client with this phone already exists. Link to that client instead.",
+          });
+        }
+      }
+      if (email) {
+        const [emailDup] = await pool.query<RowDataPacket[]>(
+          `SELECT id FROM clients WHERE LOWER(email) = ? LIMIT 1`,
+          [email],
+        );
+        if (emailDup[0]) {
+          return res.status(409).json({
+            error: "duplicate_email",
+            existing_client_id: Number(emailDup[0].id),
+            message:
+              "A client with this email already exists. Link to that client instead.",
           });
         }
       }
@@ -33702,9 +48263,6 @@ function buildApp() {
         client_id: clientId,
         case_id: caseId,
         preferred_language: lang,
-        duplicate_warning: phone
-          ? (await adminAiFindPhoneDuplicates(String(phone))).length > 0
-          : false,
       });
     },
   );
@@ -33727,6 +48285,21 @@ function buildApp() {
     },
   );
 
+
+  function mapConversationMessageApiRow(m: RowDataPacket) {
+    return {
+      ...m,
+      body:
+        m.body != null
+          ? decodeLiteralUnicodeEscapes(String(m.body))
+          : m.body,
+      call_transcript:
+        m.call_transcript != null
+          ? decodeLiteralUnicodeEscapes(String(m.call_transcript))
+          : m.call_transcript,
+    };
+  }
+
   function mapConversationTemplateRow(r: RowDataPacket) {
     let variables: string[] = [];
     try {
@@ -33742,8 +48315,10 @@ function buildApp() {
       id: Number(r.id),
       name: String(r.name),
       channel: r.channel as "sms" | "email" | "internal",
-      subject: (r.subject as string) || null,
-      body: String(r.body || ""),
+      subject: r.subject
+        ? decodeLiteralUnicodeEscapes(String(r.subject))
+        : null,
+      body: decodeLiteralUnicodeEscapes(String(r.body || "")),
       variables,
       is_active: Number(r.is_active) === 1,
       sort_order: Number(r.sort_order || 0),
@@ -33794,7 +48369,7 @@ function buildApp() {
       }
       const name = String(req.body?.name || "").trim();
       const channel = String(req.body?.channel || "sms").trim();
-      const body = String(req.body?.body || "");
+      const body = decodeLiteralUnicodeEscapes(String(req.body?.body || ""));
       const variables = Array.isArray(req.body?.variables)
         ? req.body.variables.map(String)
         : [];
@@ -33868,12 +48443,14 @@ function buildApp() {
       if (req.body?.subject !== undefined) {
         sets.push("subject = ?");
         args.push(
-          req.body.subject == null ? null : String(req.body.subject).trim(),
+          req.body.subject == null
+            ? null
+            : decodeLiteralUnicodeEscapes(String(req.body.subject).trim()),
         );
       }
       if (req.body?.body != null) {
         sets.push("body = ?");
-        args.push(String(req.body.body));
+        args.push(decodeLiteralUnicodeEscapes(String(req.body.body)));
       }
       if (req.body?.variables != null) {
         sets.push("variables_json = ?");
@@ -35113,12 +49690,14 @@ function buildApp() {
     "/api/admin/notify-recipients",
     requireSuperAdmin,
     async (_req, res) => {
+      const hideFixtures = hideIntegrationTestStaffFromAdminUi();
       const [staffRows] = await pool.query<RowDataPacket[]>(
         `SELECT id, email, first_name, last_name, role, phone, notification_prefs_json
          FROM admins
          WHERE status = 'active'
            AND role IN ('super_admin', 'admin', 'agent')
            AND email IS NOT NULL AND TRIM(email) <> ''
+           ${hideFixtures ? SQL_EXCLUDE_INTEGRATION_TEST_ADMIN_EMAIL : ""}
          ORDER BY first_name ASC, last_name ASC, id ASC`,
       );
       const staff = await Promise.all(
@@ -35141,9 +49720,15 @@ function buildApp() {
          FROM admin_notify_extra_emails
          ORDER BY id ASC`,
       );
+      const extras = extraRows
+        .map(mapNotifyExtraEmailRow)
+        .filter(
+          (row) =>
+            !hideFixtures || !isIntegrationTestAdminEmail(row.email),
+        );
       res.json({
         staff,
-        extras: extraRows.map(mapNotifyExtraEmailRow),
+        extras,
         events: ADMIN_NOTIFY_EVENT_KEYS,
       });
     },
@@ -35247,6 +49832,16 @@ function buildApp() {
       if (!email || !isValidEmail(email)) {
         return res.status(400).json({ error: "Valid email required" });
       }
+      if (
+        isUndeliverableNotifyEmail(email) &&
+        process.env.VITEST !== "true"
+      ) {
+        return res.status(400).json({
+          error:
+            "That email domain cannot receive team alerts. Use a real inbox address.",
+          code: "undeliverable_notify_email",
+        });
+      }
       const eventsIn = normalizeNotifyExtraEventsInput(req.body?.events);
       const eventsJson =
         eventsIn === undefined || eventsIn === null
@@ -35311,6 +49906,16 @@ function buildApp() {
           .toLowerCase();
         if (!isValidEmail(email)) {
           return res.status(400).json({ error: "Valid email required" });
+        }
+        if (
+          isUndeliverableNotifyEmail(email) &&
+          process.env.VITEST !== "true"
+        ) {
+          return res.status(400).json({
+            error:
+              "That email domain cannot receive team alerts. Use a real inbox address.",
+            code: "undeliverable_notify_email",
+          });
         }
         updates.push("email = ?");
         params.push(email);
@@ -35517,6 +50122,14 @@ function buildApp() {
     const role = (req.query.role as string) || "";
     const conditions: string[] = [];
     const params: any[] = [];
+    if (hideIntegrationTestStaffFromAdminUi()) {
+      conditions.push(
+        "LOWER(TRIM(COALESCE(email, ''))) NOT LIKE '%@example.test'",
+      );
+      conditions.push(
+        "LOWER(TRIM(COALESCE(email, ''))) NOT LIKE '%@affiliate.test'",
+      );
+    }
     if (search) {
       conditions.push(
         "(email LIKE ? ESCAPE '!' OR first_name LIKE ? ESCAPE '!' OR last_name LIKE ? ESCAPE '!')",
@@ -35567,6 +50180,15 @@ function buildApp() {
         });
       }
       const emailNorm = String(email).trim().toLowerCase();
+      if (
+        hideIntegrationTestStaffFromAdminUi() &&
+        isIntegrationTestAdminEmail(emailNorm)
+      ) {
+        return res.status(400).json({
+          error:
+            "That email domain is reserved for automated tests (@example.test).",
+        });
+      }
       const lang = preferred_language === "es" ? "es" : "en";
       const ownerFor =
         language_owner_for === "en" || language_owner_for === "es"
@@ -36754,6 +51376,23 @@ function buildApp() {
       if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         return res.status(400).json({ error: "Invalid email address" });
       }
+      if (phone && isPlaceholderPhone(phone)) {
+        return res.status(400).json({
+          error: "placeholder_phone",
+          message: "This phone looks like a placeholder.",
+        });
+      }
+      if (phone) {
+        const phoneDups = await adminAiFindPhoneDuplicates(phone);
+        if (phoneDups.length > 0) {
+          return res.status(409).json({
+            error: "duplicate_phone",
+            existing_client_id: Number(phoneDups[0].id),
+            duplicates: phoneDups,
+            message: "A client with this phone already exists.",
+          });
+        }
+      }
       const clientEmail = email || null;
       try {
         let clientId: number;
@@ -36956,6 +51595,66 @@ function buildApp() {
           : "");
 
     if (!clientId) {
+      const crmContactId = await findContactIdByPhone(from);
+      if (crmContactId) {
+        const conversationId = await getOrCreateCrmContactChannelConversation({
+          crmContactId,
+          channel: "sms",
+          ofgNumberId,
+          assignedAdminId: assigneeId,
+          reopenIfClosed: true,
+        });
+        await pool.query(
+          `INSERT INTO conversation_messages
+             (conversation_id, direction, channel, body, media_url, media_content_type,
+              from_address, to_address, provider_message_id, provider_status)
+           VALUES (?, 'inbound', 'sms', ?, ?, ?, ?, ?, ?, 'received')`,
+          [
+            conversationId,
+            body || null,
+            inboundMedia.mediaUrl,
+            inboundMedia.mediaContentType,
+            from,
+            to,
+            sid || null,
+          ],
+        );
+        await pool.query(
+          `UPDATE conversations
+           SET last_message_at = NOW(), last_message_preview = ?,
+               unread_count = unread_count + 1, status = 'open'
+           WHERE id = ?`,
+          [preview.slice(0, 200), conversationId],
+        );
+        const contactSnap = await crmContactHubSnapshot(crmContactId);
+        const inboundTs = new Date().toISOString().slice(0, 16).replace("T", " ");
+        const inboundNoteBody =
+          body ||
+          (inboundMedia.mediaContentType?.startsWith("image/")
+            ? "[Image]"
+            : inboundMedia.mediaUrl
+              ? "[MMS]"
+              : "");
+        await appendContactFileNote(
+          crmContactId,
+          formatSmsClientFileNote({
+            direction: "received",
+            ts: inboundTs,
+            peerPhone: from,
+            body: inboundNoteBody,
+            providerMessageId: sid || null,
+          }),
+        );
+        await publishConversationRealtime({
+          type: "message",
+          payload: {
+            contact_id: crmContactId,
+            conversation_id: conversationId,
+            contact: contactSnap,
+          },
+        });
+        return res.type("text/xml").send("<Response></Response>");
+      }
       // Unknown queue
       let unknownId: number;
       const phoneVariants = phoneMatchVariants(from);
@@ -37473,7 +52172,7 @@ function buildApp() {
     denyAffiliateAccess,
     async (req, res) => {
       const flowId = Number(req.params.id);
-      const { step_type, delay_days, label, subject, body, template_slug } =
+      const { step_type, delay_days, label, subject, body, template_slug, also_sms } =
         req.body || {};
       if (!step_type)
         return res.status(400).json({ error: "step_type required" });
@@ -37482,8 +52181,12 @@ function buildApp() {
         [flowId],
       );
       const nextOrder = ((maxOrder[0]?.max_order as number) ?? 0) + 1;
+      const alsoSmsVal =
+        also_sms === false || also_sms === 0 || also_sms === "0" ? 0 : 1;
       const [r] = await pool.query<ResultSetHeader>(
-        `INSERT INTO reminder_flow_steps (flow_id, step_order, step_type, delay_days, label, subject, body, template_slug) VALUES (?,?,?,?,?,?,?,?)`,
+        `INSERT INTO reminder_flow_steps
+           (flow_id, step_order, step_type, delay_days, label, subject, body, template_slug, also_sms)
+         VALUES (?,?,?,?,?,?,?,?,?)`,
         [
           flowId,
           nextOrder,
@@ -37493,6 +52196,7 @@ function buildApp() {
           subject || null,
           body || null,
           template_slug || null,
+          alsoSmsVal,
         ],
       );
       const [rows] = await pool.query<RowDataPacket[]>(
@@ -37519,6 +52223,7 @@ function buildApp() {
         body,
         template_slug,
         step_order,
+        also_sms,
       } = req.body || {};
       const updates: string[] = [];
       const args: any[] = [];
@@ -37545,6 +52250,12 @@ function buildApp() {
       if (template_slug !== undefined) {
         updates.push("template_slug = ?");
         args.push(template_slug || null);
+      }
+      if (also_sms !== undefined) {
+        updates.push("also_sms = ?");
+        args.push(
+          also_sms === false || also_sms === 0 || also_sms === "0" ? 0 : 1,
+        );
       }
       if (step_order !== undefined) {
         updates.push("step_order = ?");
@@ -37693,69 +52404,129 @@ function buildApp() {
 
       const batchSize = 50;
       const maxAttempts = 3;
-      const claimMs = Date.now();
-      const claimTag = `claim-${claimMs}-${crypto.randomBytes(4).toString("hex")}`;
 
-      // Recover rows stuck in `processing` from a killed serverless run.
-      // Claim tags are `claim-<epochMs>-<hex>`; anything older than 15m is stale.
-      const stuckBefore = claimMs - 15 * 60 * 1000;
-      const [reclaimed] = await pool.query<ResultSetHeader>(
-        `UPDATE notification_queue
-         SET status = 'pending', provider_message_id = NULL
-         WHERE status = 'processing'
-           AND provider_message_id LIKE 'claim-%'
-           AND CAST(
-                 SUBSTRING_INDEX(SUBSTRING_INDEX(provider_message_id, '-', 2), '-', -1)
-                 AS UNSIGNED
-               ) < ?`,
-        [stuckBefore],
-      );
-      const stuckReclaimed = Number(reclaimed.affectedRows || 0);
+      // Claim under retry — parallel vitest/cron workers often deadlock on
+      // notification_queue UPDATEs (TiDB lock wait → flaky 500).
+      const {
+        stuckReclaimed,
+        staleCancelled,
+        claimTag,
+        rows,
+      } = await withTransientDbRetry("cron:process-queue:claim", async () => {
+        const claimMs = Date.now();
+        const tag = `claim-${claimMs}-${crypto.randomBytes(4).toString("hex")}`;
 
-      // Stale backlog (cron was down): cancel instead of surprise-blasting
-      // clients with Day-2/3 reminders that are long overdue.
-      const [stale] = await pool.query<ResultSetHeader>(
-        `UPDATE notification_queue
-         SET status = 'cancelled',
-             error_message = COALESCE(error_message, 'stale: scheduled_for older than 14 days')
-         WHERE status = 'pending'
-           AND scheduled_for < NOW() - INTERVAL 14 DAY`,
-      );
-      const staleCancelled = Number(stale.affectedRows || 0);
+        // Recover rows stuck in `processing` from a killed serverless run.
+        // Claim tags are `claim-<epochMs>-<hex>`; anything older than 15m is stale.
+        const stuckBefore = claimMs - 15 * 60 * 1000;
+        const [reclaimed] = await pool.query<ResultSetHeader>(
+          `UPDATE notification_queue
+           SET status = 'pending', provider_message_id = NULL
+           WHERE status = 'processing'
+             AND provider_message_id LIKE 'claim-%'
+             AND CAST(
+                   SUBSTRING_INDEX(SUBSTRING_INDEX(provider_message_id, '-', 2), '-', -1)
+                   AS UNSIGNED
+                 ) < ?`,
+          [stuckBefore],
+        );
+        const stuck = Number(reclaimed.affectedRows || 0);
 
-      // Claim a batch with a unique tag so overlapping crons cannot double-send
-      // (SELECT all `processing` was racy when two workers ran at once).
-      await pool.query<ResultSetHeader>(
-        `UPDATE notification_queue
-         SET status = 'processing', provider_message_id = ?
-         WHERE id IN (
-           SELECT id FROM (
-             SELECT id FROM notification_queue
-             WHERE status = 'pending'
-               AND scheduled_for <= NOW()
-               AND attempts < ?
-             ORDER BY scheduled_for ASC
-             LIMIT ?
-           ) claim_ids
-         )`,
-        [claimTag, maxAttempts, batchSize],
-      );
+        // Stale backlog (cron was down): cancel instead of surprise-blasting
+        // clients with Day-2/3 reminders that are long overdue.
+        const [stale] = await pool.query<ResultSetHeader>(
+          `UPDATE notification_queue
+           SET status = 'cancelled',
+               error_message = COALESCE(error_message, 'stale: scheduled_for older than 14 days')
+           WHERE status = 'pending'
+             AND scheduled_for < NOW() - INTERVAL 14 DAY`,
+        );
+        const cancelled = Number(stale.affectedRows || 0);
 
-      const [rows] = await pool.query<RowDataPacket[]>(
-        `SELECT id, client_id, channel, to_address, subject, body, attempts
-         FROM notification_queue
-         WHERE status = 'processing' AND provider_message_id = ?
-         ORDER BY scheduled_for ASC`,
-        [claimTag],
-      );
+        // Claim a batch with a unique tag so overlapping crons cannot double-send
+        // (SELECT all `processing` was racy when two workers ran at once).
+        await pool.query<ResultSetHeader>(
+          `UPDATE notification_queue
+           SET status = 'processing', provider_message_id = ?
+           WHERE id IN (
+             SELECT id FROM (
+               SELECT id FROM notification_queue
+               WHERE status = 'pending'
+                 AND scheduled_for <= NOW()
+                 AND attempts < ?
+               ORDER BY scheduled_for ASC
+               LIMIT ?
+             ) claim_ids
+           )`,
+          [tag, maxAttempts, batchSize],
+        );
+
+        const [claimed] = await pool.query<RowDataPacket[]>(
+          `SELECT id, client_id, channel, to_address, subject, body, attempts, payload_json
+           FROM notification_queue
+           WHERE status = 'processing' AND provider_message_id = ?
+           ORDER BY scheduled_for ASC`,
+          [tag],
+        );
+        return {
+          stuckReclaimed: stuck,
+          staleCancelled: cancelled,
+          claimTag: tag,
+          rows: claimed,
+        };
+      });
 
       let sent = 0;
       let failed = 0;
+      let suppressed = 0;
 
       for (const row of rows as RowDataPacket[]) {
         const qid = row.id as number;
         try {
           if (row.channel === "email") {
+            let payload: Record<string, unknown> = {};
+            try {
+              payload =
+                typeof row.payload_json === "string"
+                  ? JSON.parse(row.payload_json)
+                  : (row.payload_json as any) || {};
+            } catch {
+              payload = {};
+            }
+            const clientId = Number(row.client_id || 0);
+            // Only explicit payment_confirmed payloads are upload nudges.
+            // Missing trigger_event must NOT default here — bare queue emails
+            // (no payload_json) would otherwise be soft-cancelled whenever the
+            // client has no active New Client/Prospect case.
+            const triggerEventExplicit =
+              payload.trigger_event != null &&
+              String(payload.trigger_event).trim() !== ""
+                ? String(payload.trigger_event).trim()
+                : "";
+            const triggerEvent =
+              triggerEventExplicit || "payment_confirmed";
+            // Soft-skip Day 2/3 upload nudges once Get Started is submitted
+            // (pending QC) or the case has left New Client — do not SMS either.
+            if (
+              triggerEventExplicit === "payment_confirmed" &&
+              clientId > 0 &&
+              (await shouldSuppressPaymentConfirmedUploadNudges(clientId))
+            ) {
+              await pool.query<ResultSetHeader>(
+                `UPDATE notification_queue
+                 SET status = 'cancelled',
+                     provider_message_id = NULL,
+                     error_message = ?
+                 WHERE id = ?`,
+                [
+                  "Skipped: required Get Started tasks already submitted (pending review) or case left New Client",
+                  qid,
+                ],
+              );
+              suppressed++;
+              continue;
+            }
+
             const result = await sendEmail({
               to: row.to_address as string,
               subject: row.subject as string,
@@ -37769,6 +52540,38 @@ function buildApp() {
               [String((result as any)?.id || claimTag).slice(0, 255), qid],
             );
             sent++;
+            // Reminder-flow emails: SMS after successful email (same schedule).
+            if (
+              clientId > 0 &&
+              payload &&
+              (payload.also_sms === true || payload.also_sms === 1)
+            ) {
+              const portalUrl = String(
+                payload.sms_url ||
+                  payload.portal_url ||
+                  `${APP_URL}/portal`,
+              );
+              const smsFromAdminId =
+                payload.sms_from_admin_id != null
+                  ? Number(payload.sms_from_admin_id)
+                  : null;
+              await maybeSendClientReminderSms({
+                clientId,
+                triggerEvent,
+                alsoSms: true,
+                portalUrl,
+                isSandbox:
+                  payload.is_sandbox === true ||
+                  payload.is_sandbox === 1 ||
+                  payload.sandbox === true,
+                smsFromAdminId:
+                  smsFromAdminId && smsFromAdminId > 0
+                    ? smsFromAdminId
+                    : null,
+              }).catch((e: any) =>
+                console.error("[cron:reminder-sms]", e?.message ?? e),
+              );
+            }
           } else {
             await pool.query<ResultSetHeader>(
               `UPDATE notification_queue
@@ -37797,58 +52600,100 @@ function buildApp() {
         }
       }
 
-      // Work Hub overdue reminders (assignees with due_at in the past, not done)
+      // Work Hub overdue reminders (assignees with due_at in the past, not done).
+      // Loop batches and always stamp due_notified_at so muted/poison rows cannot
+      // occupy LIMIT forever and starve newer overdue tasks (incl. integration tests).
       let workDueNotified = 0;
       try {
-        const [dueRows] = await pool.query<RowDataPacket[]>(
-          `SELECT t.id, t.title, t.due_at, a.id AS admin_id, a.email, a.first_name,
-                  a.phone, a.notification_prefs_json
-           FROM admin_work_tasks t
-           JOIN admins a ON a.id = t.assignee_admin_id
-           WHERE t.status <> 'done'
-             AND t.assignee_admin_id IS NOT NULL
-             AND t.due_at IS NOT NULL
-             AND t.due_at < NOW()
-             AND t.due_notified_at IS NULL
-             AND a.status = 'active'
-           ORDER BY t.due_at ASC
-           LIMIT 40`,
-        );
-        for (const row of dueRows) {
-          try {
-            const admin: TeamAdminRecipient = {
-              id: Number(row.admin_id),
-              email: String(row.email),
-              first_name: String(row.first_name || "there"),
-              phone: row.phone ? String(row.phone) : null,
-              preferred_language: "en",
-              prefs: parseAdminNotificationPrefs(row.notification_prefs_json),
-            };
-            const link = `${APP_URL}/admin/my-tasks`;
-            const delivered = await deliverAdminNotificationChannels({
-              admin,
-              eventKey: "work_task_overdue",
-              tpl: {
-                subject: `Overdue task: ${row.title}`,
-                html: `<p>Hi ${admin.first_name},</p>
-              <p>This work task is overdue: <strong>${escapeHtml(String(row.title || ""))}</strong>.</p>
-              <p>Due: ${new Date(row.due_at).toLocaleString()}</p>
-              <p><a href="${link}">Open My Tasks</a></p>`,
-                inAppTitle: `Overdue task: ${String(row.title || "").slice(0, 200)}`,
-                inAppBody: `Due: ${new Date(row.due_at).toLocaleString()}`,
-                linkUrl: link,
-                smsBody: `Optimum: overdue task — ${String(row.title || "").slice(0, 120)}`,
-              },
-            });
-            if (delivered.email || delivered.in_app || delivered.sms) {
-              await pool.query(
-                `UPDATE admin_work_tasks SET due_notified_at = NOW() WHERE id = ?`,
-                [row.id],
+        const WORK_DUE_BATCH = 200;
+        const WORK_DUE_MAX_BATCHES = 8;
+        for (let batch = 0; batch < WORK_DUE_MAX_BATCHES; batch++) {
+          const [dueRows] = await pool.query<RowDataPacket[]>(
+            `SELECT t.id, t.title, t.due_at, a.id AS admin_id, a.email, a.first_name,
+                    a.phone, a.preferred_language, a.notification_prefs_json
+             FROM admin_work_tasks t
+             JOIN admins a ON a.id = t.assignee_admin_id
+             WHERE t.status <> 'done'
+               AND t.assignee_admin_id IS NOT NULL
+               AND t.due_at IS NOT NULL
+               AND t.due_at < UTC_TIMESTAMP()
+               AND t.due_notified_at IS NULL
+               AND a.status = 'active'
+             ORDER BY t.due_at ASC, t.id ASC
+             LIMIT ${WORK_DUE_BATCH}`,
+          );
+          if (!dueRows.length) break;
+          for (const row of dueRows) {
+            try {
+              const adminLang = row.preferred_language === "es" ? "es" : "en";
+              const admin: TeamAdminRecipient = {
+                id: Number(row.admin_id),
+                email: String(row.email || ""),
+                first_name: String(row.first_name || "there"),
+                phone: row.phone ? String(row.phone) : null,
+                preferred_language: adminLang,
+                prefs: parseAdminNotificationPrefs(row.notification_prefs_json),
+              };
+              const link = `${APP_URL}/admin/my-tasks`;
+              const taskTitle = decodeLiteralUnicodeEscapes(
+                String(row.title || ""),
               );
-              workDueNotified++;
+              const emailTpl = tplAdminWorkTaskOverdue({
+                adminFirstName: admin.first_name,
+                title: taskTitle,
+                dueAt: row.due_at,
+                linkUrl: link,
+                lang: adminLang,
+              });
+              const delivered = await deliverAdminNotificationChannels({
+                admin,
+                eventKey: "work_task_overdue",
+                tpl: {
+                  subject: emailTpl.subject,
+                  html: emailTpl.html,
+                  inAppTitle:
+                    adminLang === "es"
+                      ? `Tarea vencida: ${taskTitle.slice(0, 200)}`
+                      : `Overdue task: ${taskTitle.slice(0, 200)}`,
+                  inAppBody: `Due: ${new Date(row.due_at).toLocaleString()}`,
+                  linkUrl: link,
+                  smsBody:
+                    adminLang === "es"
+                      ? `Optimum: tarea vencida — ${String(row.title || "").slice(0, 120)}`
+                      : `Optimum: overdue task — ${String(row.title || "").slice(0, 120)}`,
+                },
+              });
+              const deliveredAny =
+                delivered.email || delivered.in_app || delivered.sms;
+              const canEmail =
+                adminNotifyPrefOn(admin.prefs, "email", "work_task_overdue") &&
+                !!String(admin.email || "").trim();
+              const canInApp = adminNotifyPrefOn(
+                admin.prefs,
+                "in_app",
+                "work_task_overdue",
+              );
+              const canSms =
+                adminNotifyPrefOn(admin.prefs, "sms", "work_task_overdue") &&
+                !!admin.phone;
+              const undeliverable = !canEmail && !canInApp && !canSms;
+              // Stamp muted/no-channel rows so they cannot starve the batch.
+              // Leave unstamped when a channel was on but every send failed
+              // (transient outage) so the next cron can retry.
+              if (deliveredAny || undeliverable) {
+                await pool.query(
+                  `UPDATE admin_work_tasks
+                   SET due_notified_at = UTC_TIMESTAMP()
+                   WHERE id = ? AND due_notified_at IS NULL`,
+                  [row.id],
+                );
+              }
+              if (deliveredAny) {
+                workDueNotified++;
+              }
+            } catch (e: any) {
+              console.error("[cron:work-due]", e?.message ?? e);
             }
-          } catch (e: any) {
-            console.error("[cron:work-due]", e?.message ?? e);
           }
         }
       } catch (e: any) {
@@ -37865,15 +52710,30 @@ function buildApp() {
         console.error("[cron:mms-cleanup]", e?.message ?? e);
       }
 
+      let callInsights = {
+        processed: 0,
+        ready: 0,
+        failed: 0,
+        skipped: 0,
+        reclaimed: 0,
+      };
+      try {
+        callInsights = await processCallInsightsBatch(5);
+      } catch (e: any) {
+        console.error("[cron:call-insights]", e?.message ?? e);
+      }
+
       return res.json({
         ok: true,
         processed: rows.length,
         sent,
         failed,
+        suppressed,
         stale_cancelled: staleCancelled,
         stuck_reclaimed: stuckReclaimed,
         work_due_notified: workDueNotified,
         mms_expired_deleted: mmsExpiredDeleted,
+        call_insights: callInsights,
       });
     } catch (e: any) {
       console.error("[cron:process-queue]", e?.message ?? e);
@@ -37922,6 +52782,9 @@ function buildApp() {
       )
         .trim()
         .toLowerCase();
+      const filterAdminIdRaw =
+        req.query.admin_id ?? req.body?.admin_id ?? "";
+      const filterAdminId = Number(filterAdminIdRaw);
       const denver = denverParts();
       if (
         !force &&
@@ -37937,13 +52800,34 @@ function buildApp() {
       }
 
       let admins = await listActiveTeamAdmins();
-      if (filterEmail) {
+      if (Number.isFinite(filterAdminId) && filterAdminId > 0) {
+        admins = admins.filter((a) => Number(a.id) === filterAdminId);
+        if (!admins.length) {
+          // Soft miss — cron filters should be idempotent (no hard 404 flake in CI).
+          return res.json({
+            ok: true,
+            denver,
+            elapsed_ms: Date.now() - started,
+            admins: 0,
+            sent: 0,
+            results: [],
+            warning: "admin_not_found",
+            admin_id: filterAdminId,
+          });
+        }
+      } else if (filterEmail) {
         admins = admins.filter(
           (a) => a.email.trim().toLowerCase() === filterEmail,
         );
         if (!admins.length) {
-          return res.status(404).json({
-            error: "No active admin with that email",
+          return res.json({
+            ok: true,
+            denver,
+            elapsed_ms: Date.now() - started,
+            admins: 0,
+            sent: 0,
+            results: [],
+            warning: "admin_email_not_found",
             admin_email: filterEmail,
           });
         }
@@ -37957,14 +52841,6 @@ function buildApp() {
       const wallMs = 52_000;
 
       for (const admin of admins) {
-        if (Date.now() - started > wallMs) {
-          results.push({
-            admin_id: admin.id,
-            email: admin.email,
-            status: "skipped_wall_clock",
-          });
-          continue;
-        }
         if (
           !adminNotifyPrefOn(admin.prefs, "email", "morning_digest") &&
           !adminNotifyPrefOn(admin.prefs, "in_app", "morning_digest")
@@ -37973,6 +52849,27 @@ function buildApp() {
             admin_id: admin.id,
             email: admin.email,
             status: "prefs_off",
+          });
+          continue;
+        }
+        // Report already_sent before wall-clock skip so a near-timeout pass
+        // still returns the correct status for admins who got today's digest.
+        if (
+          !forceResend &&
+          (await morningDigestAlreadySent(admin.id, denver.ymd))
+        ) {
+          results.push({
+            admin_id: admin.id,
+            email: admin.email,
+            status: "already_sent",
+          });
+          continue;
+        }
+        if (Date.now() - started > wallMs) {
+          results.push({
+            admin_id: admin.id,
+            email: admin.email,
+            status: "skipped_wall_clock",
           });
           continue;
         }
@@ -38053,11 +52950,34 @@ function buildApp() {
               delivered.email || delivered.in_app ? "sent" : "no_channel",
             claude: enhanced,
           });
+          if (claudeErr) {
+            console.error(
+              `[cron:morning-digest] Claude fallback admin=${admin.id}:`,
+              claudeErr,
+            );
+          }
         } catch (e: any) {
           console.error(
             `[cron:morning-digest] admin ${admin.id}:`,
             e?.message ?? e,
           );
+          // Release pending claim so a later cron tick can retry this admin today.
+          if (claimId) {
+            try {
+              await pool.query(
+                `DELETE FROM audit_logs
+                 WHERE id = ?
+                   AND action = 'morning_digest.sent'
+                   AND JSON_EXTRACT(changes_json, '$.pending') = true`,
+                [claimId],
+              );
+            } catch (delErr: any) {
+              console.warn(
+                `[cron:morning-digest] claim release ${claimId}:`,
+                delErr?.message ?? delErr,
+              );
+            }
+          }
           results.push({
             admin_id: admin.id,
             email: admin.email,
@@ -38066,12 +52986,24 @@ function buildApp() {
         }
       }
 
+      const claudeFailed = results.filter(
+        (r) => r.status === "sent" && r.claude === false,
+      ).length;
+      const claudeOk = results.filter((r) => r.claude === true).length;
+      if (claudeFailed > 0 && claudeOk === 0 && process.env.ANTHROPIC_API_KEY) {
+        console.error(
+          `[cron:morning-digest] ALL Claude enhances failed (${claudeFailed} sent with fallback). Check ANTHROPIC_API_KEY on this environment (401 = invalid/expired key).`,
+        );
+      }
+
       return res.json({
         ok: true,
         denver,
         elapsed_ms: Date.now() - started,
         admins: results.length,
         sent: results.filter((r) => r.status === "sent").length,
+        claude_ok: claudeOk,
+        claude_fallback: claudeFailed,
         results,
       });
     } catch (e: any) {
@@ -38374,6 +53306,7 @@ function buildApp() {
     } catch {
       labels = [];
     }
+    labels = labels.map((l) => decodeLiteralUnicodeEscapes(String(l)));
     const assigneeName =
       r.assignee_first_name || r.assignee_last_name
         ? `${r.assignee_first_name || ""} ${r.assignee_last_name || ""}`.trim()
@@ -38384,8 +53317,10 @@ function buildApp() {
         : null;
     return {
       id: Number(r.id),
-      title: r.title as string,
-      description: (r.description as string) || null,
+      title: decodeLiteralUnicodeEscapes(String(r.title)),
+      description: r.description
+        ? decodeLiteralUnicodeEscapes(String(r.description))
+        : null,
       status: r.status as string,
       priority: r.priority as string,
       due_at: r.due_at ? new Date(r.due_at).toISOString() : null,
@@ -38445,32 +53380,46 @@ function buildApp() {
     if (opts.assigneeId === opts.assignerId) return;
     try {
       const [rows] = await pool.query<RowDataPacket[]>(
-        `SELECT email, first_name, phone, notification_prefs_json
+        `SELECT email, first_name, phone, preferred_language, notification_prefs_json
          FROM admins WHERE id = ? AND status = 'active' LIMIT 1`,
         [opts.assigneeId],
       );
       if (!rows[0]?.email) return;
+      const adminLang = rows[0].preferred_language === "es" ? "es" : "en";
       const admin: TeamAdminRecipient = {
         id: opts.assigneeId,
         email: String(rows[0].email),
         first_name: String(rows[0].first_name || "there"),
         phone: rows[0].phone ? String(rows[0].phone) : null,
-        preferred_language: "en",
+        preferred_language: adminLang,
         prefs: parseAdminNotificationPrefs(rows[0].notification_prefs_json),
       };
       const link = `${APP_URL}/admin/my-tasks`;
+      const emailTpl = tplAdminWorkTaskAssigned({
+        adminFirstName: admin.first_name,
+        title: opts.title,
+        linkUrl: link,
+        lang: adminLang,
+      });
       await deliverAdminNotificationChannels({
         admin,
         eventKey: "work_task_assigned",
         tpl: {
-          subject: `Task assigned: ${opts.title}`,
-          html: `<p>Hi ${admin.first_name},</p>
-          <p>You were assigned a work task: <strong>${opts.title}</strong>.</p>
-          <p><a href="${link}">Open My Tasks</a></p>`,
-          inAppTitle: `Task assigned: ${opts.title}`,
-          inAppBody: "Open My Tasks to review the assignment.",
+          subject: emailTpl.subject,
+          html: emailTpl.html,
+          inAppTitle:
+            adminLang === "es"
+              ? `Tarea asignada: ${opts.title}`
+              : `Task assigned: ${opts.title}`,
+          inAppBody:
+            adminLang === "es"
+              ? "Abre Mis Tareas para revisar la asignación."
+              : "Open My Tasks to review the assignment.",
           linkUrl: link,
-          smsBody: `Optimum: task assigned — ${opts.title}`,
+          smsBody:
+            adminLang === "es"
+              ? `Optimum: tarea asignada — ${opts.title}`
+              : `Optimum: task assigned — ${opts.title}`,
         },
       });
     } catch (e: any) {
@@ -38688,7 +53637,11 @@ function buildApp() {
           ? Number(assignee_admin_id)
           : null;
       const labelsJson = JSON.stringify(
-        Array.isArray(labels) ? labels.map(String).slice(0, 20) : [],
+        Array.isArray(labels)
+          ? labels
+              .map((l) => decodeLiteralUnicodeEscapes(String(l)))
+              .slice(0, 20)
+          : [],
       );
       const caseRes = await resolveWorkTaskCaseId(
         case_id !== undefined ? case_id : null,
@@ -38703,8 +53656,8 @@ function buildApp() {
             assignee_admin_id, case_id, created_by_admin_id)
          VALUES (?, ?, ?, ?, ?, ?, 'optimum', ?, ?, ?)`,
         [
-          String(title).trim().slice(0, 255),
-          description ? String(description) : null,
+          normalizeWorkTaskTitle(title),
+          normalizeWorkTaskDescription(description),
           st,
           pr,
           due_at || null,
@@ -38718,7 +53671,7 @@ function buildApp() {
       if (assigneeId && !isNaN(assigneeId)) {
         void notifyWorkTaskAssignee({
           assigneeId,
-          title: String(title).trim(),
+          title: normalizeWorkTaskTitle(title),
           assignerId: req.auth!.id,
           taskId,
         });
@@ -38750,11 +53703,11 @@ function buildApp() {
       const args: any[] = [];
       if (b.title != null) {
         updates.push("title = ?");
-        args.push(String(b.title).trim().slice(0, 255));
+        args.push(normalizeWorkTaskTitle(b.title));
       }
       if (b.description !== undefined) {
         updates.push("description = ?");
-        args.push(b.description ? String(b.description) : null);
+        args.push(normalizeWorkTaskDescription(b.description));
       }
       if (["backlog", "doing", "done"].includes(b.status)) {
         updates.push("status = ?");
@@ -38772,7 +53725,11 @@ function buildApp() {
         updates.push("labels_json = ?");
         args.push(
           JSON.stringify(
-            Array.isArray(b.labels) ? b.labels.map(String).slice(0, 20) : [],
+            Array.isArray(b.labels)
+              ? b.labels
+                  .map((l) => decodeLiteralUnicodeEscapes(String(l)))
+                  .slice(0, 20)
+              : [],
           ),
         );
       }
@@ -39145,8 +54102,10 @@ function buildApp() {
                    last_synced_at = NOW(), sync_error = NULL
                WHERE id = ?`,
               [
-                rt.title,
-                rt.description,
+                decodeLiteralUnicodeEscapes(String(rt.title)),
+                rt.description
+                  ? decodeLiteralUnicodeEscapes(String(rt.description))
+                  : rt.description,
                 rt.status,
                 rt.priority,
                 rt.due_at ? new Date(rt.due_at) : null,
@@ -39163,8 +54122,10 @@ function buildApp() {
                   hubspot_task_id, hubspot_owner_id, created_by_admin_id, last_synced_at)
                VALUES (?, ?, ?, ?, ?, '[]', 'hubspot', ?, ?, ?, NOW())`,
               [
-                rt.title,
-                rt.description,
+                decodeLiteralUnicodeEscapes(String(rt.title)),
+                rt.description
+                  ? decodeLiteralUnicodeEscapes(String(rt.description))
+                  : rt.description,
                 rt.status,
                 rt.priority,
                 rt.due_at ? new Date(rt.due_at) : null,
@@ -39590,6 +54551,19 @@ function buildApp() {
           });
         } catch (e: any) {
           console.error("[notify:admins-submission]", e?.message ?? e);
+        }
+        try {
+          const n = await cancelPaymentConfirmedUploadNudges(clientId);
+          if (n > 0) {
+            console.log(
+              `[notify:queue] cancelled ${n} payment_confirmed upload nudge(s) for client ${clientId}`,
+            );
+          }
+        } catch (e: any) {
+          console.error(
+            "[notify:queue] cancel payment_confirmed nudges",
+            e?.message ?? e,
+          );
         }
       }
 
@@ -40704,20 +55678,26 @@ function buildApp() {
         return res.status(400).json({ error: "Invalid case id" });
       }
       const roundNumber = Number(req.query.round_number) || 1;
-      if (roundNumber < 1 || roundNumber > 5) {
-        return res.status(400).json({ error: "round_number must be 1–5" });
-      }
       const [caseRows] = await pool.query<RowDataPacket[]>(
-        `SELECT id FROM credit_repair_cases WHERE id = ? LIMIT 1`,
+        `SELECT id, max_rounds, report_compare_mode FROM credit_repair_cases WHERE id = ? LIMIT 1`,
         [caseId],
       );
       if (caseRows.length === 0) {
         return res.status(404).json({ error: "Case not found" });
       }
+      const maxRounds = clampMaxRounds(caseRows[0].max_rounds);
+      const compareMode = normalizeReportCompareModeInline(
+        caseRows[0].report_compare_mode,
+      );
+      const rangeErr = validatePublishRoundNumber(roundNumber, maxRounds);
+      if (rangeErr) {
+        return res.status(400).json({ error: rangeErr });
+      }
       const context = await resolveWizardBeforeContext(
         pool,
         caseId,
         roundNumber,
+        compareMode,
       );
       res.json({ context });
     },
@@ -40743,6 +55723,87 @@ function buildApp() {
     },
   );
 
+  /** Stage a single Before PDF (sequential upload — stays under Vercel body limit). */
+  app.post(
+    "/api/admin/cases/:caseId/report-wizard/stage-pdf",
+    requireAdmin,
+    denyAffiliateAccess,
+    upload.single("pdf"),
+    async (req: AuthedRequest, res) => {
+      const caseId = Number(req.params.caseId);
+      if (!caseId || isNaN(caseId)) {
+        return res.status(400).json({ error: "Invalid case id" });
+      }
+      const file = req.file;
+      if (!file) {
+        return res.status(400).json({ error: "pdf is required" });
+      }
+      const sizeErr = assertMultipartUnderVercelLimit([file]);
+      if (sizeErr) {
+        return res.status(413).json({ error: sizeErr });
+      }
+      if (file.mimetype !== "application/pdf" || !isPdfBuffer(file.buffer)) {
+        return res.status(400).json({ error: "Only PDF files are accepted" });
+      }
+      if (file.buffer.length > VERCEL_SAFE_UPLOAD_MAX_BYTES) {
+        const mb = Math.round(VERCEL_SAFE_UPLOAD_MAX_BYTES / (1024 * 1024));
+        return res.status(413).json({
+          error: `Each PDF must be ${mb} MB or smaller (platform upload limit)`,
+        });
+      }
+
+      const [caseRows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, client_id FROM credit_repair_cases WHERE id = ? LIMIT 1`,
+        [caseId],
+      );
+      if (caseRows.length === 0) {
+        return res.status(404).json({ error: "Case not found" });
+      }
+      const clientId = caseRows[0].client_id as number;
+      const adminId = req.auth!.id;
+
+      try {
+        const { encrypted, iv, tag } = encryptFile(file.buffer);
+        const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
+        const cdnUrl = await uploadToCDN(
+          encrypted,
+          `staged_before_${Date.now()}_${safeName}.enc`,
+          "application/octet-stream",
+          clientId,
+        );
+        const expiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000); // 2h
+        const [ins] = await pool.query<ResultSetHeader>(
+          `INSERT INTO report_wizard_staged_pdfs
+             (case_id, client_id, file_name, storage_key, encrypted, enc_iv, enc_tag,
+              byte_size, uploaded_by_admin_id, expires_at)
+           VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
+          [
+            caseId,
+            clientId,
+            file.originalname,
+            cdnUrl,
+            iv,
+            tag,
+            file.buffer.length,
+            adminId,
+            expiresAt,
+          ],
+        );
+        res.status(201).json({
+          staged_id: ins.insertId,
+          file_name: file.originalname,
+          byte_size: file.buffer.length,
+          expires_at: expiresAt.toISOString(),
+        });
+      } catch (e: any) {
+        console.error("[report-wizard/stage-pdf]", e?.message || e);
+        return res.status(500).json({
+          error: e?.message || "Failed to stage PDF",
+        });
+      }
+    },
+  );
+
   app.post(
     "/api/admin/cases/:caseId/report-wizard/sessions",
     requireAdmin,
@@ -40764,16 +55825,28 @@ function buildApp() {
       const afterFile = files?.after_pdf?.[0];
       const reuseBeforeSessionId =
         Number(req.body?.reuse_before_session_id) || 0;
+      const stagedBeforeId = Number(req.body?.staged_before_id) || 0;
 
       if (!afterFile) {
         return res.status(400).json({ error: "after_pdf is required" });
       }
-      if (!beforeFile && !reuseBeforeSessionId) {
+      const beforeSourceCount =
+        (beforeFile ? 1 : 0) +
+        (reuseBeforeSessionId ? 1 : 0) +
+        (stagedBeforeId ? 1 : 0);
+      if (beforeSourceCount === 0) {
         return res.status(400).json({
           error:
-            "before_pdf is required unless reuse_before_session_id is provided",
+            "before_pdf, staged_before_id, or reuse_before_session_id is required",
         });
       }
+      if (beforeSourceCount > 1) {
+        return res.status(400).json({
+          error:
+            "Provide only one Before source: before_pdf, staged_before_id, or reuse_before_session_id",
+        });
+      }
+      // Only the files in THIS request count toward the Vercel body limit
       const sizeCheckFiles = [
         ...(beforeFile ? [beforeFile] : []),
         afterFile,
@@ -40790,9 +55863,6 @@ function buildApp() {
       }
 
       const roundNumber = Number(req.body?.round_number) || 1;
-      if (roundNumber < 1 || roundNumber > 5) {
-        return res.status(400).json({ error: "round_number must be 1–5" });
-      }
 
       const options: OfGReportWizardOptions = {
         highlight_win: req.body?.highlight_win || undefined,
@@ -40807,7 +55877,8 @@ function buildApp() {
       };
 
       const [caseRows] = await pool.query<RowDataPacket[]>(
-        `SELECT id, client_id, pipeline_stage FROM credit_repair_cases WHERE id = ? LIMIT 1`,
+        `SELECT id, client_id, pipeline_stage, max_rounds, report_compare_mode
+         FROM credit_repair_cases WHERE id = ? LIMIT 1`,
         [caseId],
       );
       if (caseRows.length === 0) {
@@ -40815,15 +55886,29 @@ function buildApp() {
       }
       const clientId = caseRows[0].client_id as number;
       const pipelineStage = caseRows[0].pipeline_stage as string;
+      const maxRounds = clampMaxRounds(caseRows[0].max_rounds);
+      const compareMode = normalizeReportCompareModeInline(
+        caseRows[0].report_compare_mode,
+      );
+      const rangeErr = validatePublishRoundNumber(roundNumber, maxRounds);
+      if (rangeErr) {
+        return res.status(400).json({ error: rangeErr });
+      }
 
       const alreadyPublished = await hasPublishedWizardRound(
         pool,
         clientId,
         roundNumber,
       );
+      const highestPublished = await highestPublishedRoundForClient(
+        pool,
+        clientId,
+      );
       const roundErr = validatePublishRound({
         roundNumber,
         pipelineStage,
+        maxRounds,
+        highestPublished,
         hasExistingReport: alreadyPublished,
       });
       if (roundErr) return res.status(422).json({ error: roundErr });
@@ -40832,12 +55917,25 @@ function buildApp() {
       let beforeFileName: string;
       let beforeSource: "upload" | "prior_round" | "enrollment" = "upload";
       let beforeReusedFrom: number | null = null;
+      let stagedBeforeConsumedId: number | null = null;
 
       try {
         if (beforeFile) {
           beforeBuffer = beforeFile.buffer;
           beforeFileName = beforeFile.originalname;
           beforeSource = roundNumber === 1 ? "enrollment" : "upload";
+        } else if (stagedBeforeId) {
+          const staged = await loadStagedWizardPdfBuffer(
+            pool,
+            stagedBeforeId,
+            caseId,
+            req.auth!.id,
+            decryptFile,
+          );
+          beforeBuffer = staged.buffer;
+          beforeFileName = staged.fileName;
+          beforeSource = roundNumber === 1 ? "enrollment" : "upload";
+          stagedBeforeConsumedId = stagedBeforeId;
         } else {
           const prior = await loadWizardSession(pool, reuseBeforeSessionId);
           if (!prior || prior.case_id !== caseId) {
@@ -40847,33 +55945,63 @@ function buildApp() {
           }
           if (prior.status !== "published") {
             return res.status(422).json({
-              error: "Only a published prior-round after PDF can be reused",
+              error: "Only a published session PDF can be reused as Before",
             });
           }
-          if ((prior.round_number as number) !== roundNumber - 1) {
-            return res.status(422).json({
-              error: `reuse_before_session_id must be the published Round ${roundNumber - 1} session`,
-            });
+          if (compareMode === "baseline") {
+            // Reuse Round 1 enrollment Before PDF.
+            if ((prior.round_number as number) !== 1) {
+              return res.status(422).json({
+                error:
+                  "baseline mode: reuse_before_session_id must be the published Round 1 session",
+              });
+            }
+            if (!prior.before_pdf_id) {
+              return res
+                .status(422)
+                .json({ error: "Round 1 session has no Before PDF" });
+            }
+            beforeBuffer = await loadWizardSourcePdfBuffer(
+              pool,
+              prior.before_pdf_id as number,
+              decryptFile,
+            );
+            const [srcRows] = await pool.query<RowDataPacket[]>(
+              `SELECT file_name FROM round_report_source_pdfs WHERE id = ? LIMIT 1`,
+              [prior.before_pdf_id],
+            );
+            beforeFileName =
+              (srcRows[0]?.file_name as string) ||
+              `round_1_enrollment_before.pdf`;
+            beforeSource = "enrollment";
+            beforeReusedFrom = prior.id as number;
+          } else {
+            // Chain: reuse Round N−1 After as Before.
+            if ((prior.round_number as number) !== roundNumber - 1) {
+              return res.status(422).json({
+                error: `reuse_before_session_id must be the published Round ${roundNumber - 1} session`,
+              });
+            }
+            if (!prior.after_pdf_id) {
+              return res
+                .status(422)
+                .json({ error: "Prior session has no after PDF" });
+            }
+            beforeBuffer = await loadWizardSourcePdfBuffer(
+              pool,
+              prior.after_pdf_id as number,
+              decryptFile,
+            );
+            const [srcRows] = await pool.query<RowDataPacket[]>(
+              `SELECT file_name FROM round_report_source_pdfs WHERE id = ? LIMIT 1`,
+              [prior.after_pdf_id],
+            );
+            beforeFileName =
+              (srcRows[0]?.file_name as string) ||
+              `round_${prior.round_number}_after.pdf`;
+            beforeSource = "prior_round";
+            beforeReusedFrom = prior.id as number;
           }
-          if (!prior.after_pdf_id) {
-            return res
-              .status(422)
-              .json({ error: "Prior session has no after PDF" });
-          }
-          beforeBuffer = await loadWizardSourcePdfBuffer(
-            pool,
-            prior.after_pdf_id as number,
-            decryptFile,
-          );
-          const [srcRows] = await pool.query<RowDataPacket[]>(
-            `SELECT file_name FROM round_report_source_pdfs WHERE id = ? LIMIT 1`,
-            [prior.after_pdf_id],
-          );
-          beforeFileName =
-            (srcRows[0]?.file_name as string) ||
-            `round_${prior.round_number}_after.pdf`;
-          beforeSource = "prior_round";
-          beforeReusedFrom = prior.id as number;
         }
       } catch (e: any) {
         return res.status(400).json({
@@ -40940,6 +56068,13 @@ function buildApp() {
           [beforePdfId, afterPdfId, sessionId],
         );
 
+        if (stagedBeforeConsumedId) {
+          await pool.query(
+            `UPDATE report_wizard_staged_pdfs SET consumed_at = NOW() WHERE id = ?`,
+            [stagedBeforeConsumedId],
+          );
+        }
+
         const [clientRows] = await pool.query<RowDataPacket[]>(
           `SELECT first_name FROM clients WHERE id = ? LIMIT 1`,
           [clientId],
@@ -40956,10 +56091,26 @@ function buildApp() {
             spanish: options.spanish,
             tradelineRec: options.tradeline_rec,
             fundingNote: options.funding_note,
+            compareMode,
+            maxRounds,
+            incrementalBeforeBuffer:
+              compareMode === "baseline" && roundNumber > 1
+                ? await loadPriorRoundAfterBuffer(
+                    pool,
+                    caseId,
+                    roundNumber,
+                    decryptFile,
+                  )
+                : null,
+            enrollmentBeforeBuffer:
+              compareMode === "chain" && roundNumber > 1
+                ? await loadEnrollmentBeforeBuffer(pool, caseId, decryptFile)
+                : null,
           },
         );
         meta.before_source = beforeSource;
         meta.before_reused_from_session_id = beforeReusedFrom;
+        meta.compare_mode = compareMode;
 
         let data = extracted;
         if (options.enhance_with_claude && process.env.ANTHROPIC_API_KEY) {
@@ -40998,13 +56149,14 @@ function buildApp() {
           session: session ? formatWizardSessionResponse(session) : null,
         });
       } catch (e: any) {
+        const friendly = mapReportWizardExtractError(e);
         await pool.query(
           `UPDATE report_wizard_sessions SET status = 'failed', error_message = ?, updated_at = NOW() WHERE id = ?`,
-          [String(e?.message || e).slice(0, 500), sessionId],
+          [friendly, sessionId],
         );
         console.error("[report-wizard:create]", e);
         res.status(500).json({
-          error: e?.message || "Extraction failed",
+          error: friendly,
           session_id: sessionId,
         });
       }
@@ -41084,12 +56236,13 @@ function buildApp() {
           },
         });
       } catch (e: any) {
+        const friendly = mapReportWizardExtractError(e);
         await pool.query(
           `UPDATE report_wizard_sessions SET status = 'failed', error_message = ?, updated_at = NOW() WHERE id = ?`,
-          [String(e?.message || e).slice(0, 500), sessionId],
+          [friendly, sessionId],
         );
         console.error("[report-wizard:extract]", e);
-        res.status(500).json({ error: e?.message || "Re-extraction failed" });
+        res.status(500).json({ error: friendly });
       }
     },
   );
@@ -41312,28 +56465,38 @@ function buildApp() {
       }
 
       const [caseRows] = await pool.query<RowDataPacket[]>(
-        `SELECT pipeline_stage FROM credit_repair_cases WHERE id = ? LIMIT 1`,
+        `SELECT pipeline_stage, max_rounds FROM credit_repair_cases WHERE id = ? LIMIT 1`,
         [session.case_id],
+      );
+      const maxRounds = clampMaxRounds(caseRows[0]?.max_rounds);
+      const highestPublished = await highestPublishedRoundForClient(
+        pool,
+        session.client_id as number,
       );
       const roundErr = validatePublishRound({
         roundNumber: session.round_number as number,
         pipelineStage: (caseRows[0]?.pipeline_stage as string) || "new_client",
+        maxRounds,
+        highestPublished,
         hasExistingReport: false,
       });
       if (roundErr) return res.status(422).json({ error: roundErr });
 
-      const data =
+      const rawData =
         parseWizardJsonField<OfGReportData>(session.reviewed_json) ??
         parseWizardJsonField<OfGReportData>(session.extracted_json);
-      if (!data) {
+      if (!rawData) {
         return res.status(400).json({ error: "No report data to publish" });
       }
+      const data = syncPrimaryDualFieldsInline(rawData);
 
       if (!req.body?.compliance_acknowledged) {
         return res
           .status(400)
           .json({ error: "Compliance attestation required" });
       }
+
+      const notifyPartners = adminAiBoolDefaultTrue(req.body?.notify_partners);
 
       const { errors: complianceErrors, warnings: complianceWarnings } =
         validateReportCompliance(data);
@@ -41403,7 +56566,7 @@ function buildApp() {
 
         const summaryMd = reportDataToSummaryMd(data);
         const locale = data.locale === "es" ? "es" : "en";
-        newStage = pipelineStageAfterRoundReport(roundNumber);
+        newStage = pipelineStageAfterRoundReport(roundNumber, maxRounds);
 
         // Progress QA alerts (deterministic + optional Claude enrichment)
         const [profileRows] = await pool.query<RowDataPacket[]>(
@@ -41413,6 +56576,7 @@ function buildApp() {
         );
         const profile = (profileRows[0] || {}) as RowDataPacket;
         let afterPdfText = "";
+        let utilizationBeforePct: number | null = null;
         try {
           const afterPdfId = Number(session.after_pdf_id);
           if (afterPdfId) {
@@ -41425,8 +56589,26 @@ function buildApp() {
             const parsed = await pdfParse(buf);
             afterPdfText = String(parsed?.text || "");
           }
+          const beforePdfId = Number(session.before_pdf_id);
+          if (beforePdfId) {
+            const buf = await loadWizardSourcePdfBuffer(
+              pool,
+              beforePdfId,
+              decryptFile,
+            );
+            const pdfParse = await loadPdfParse();
+            const parsed = await pdfParse(buf);
+            const beforeText = String(parsed?.text || "");
+            const beforeRows = extractUtilization(beforeText);
+            const lim = beforeRows.reduce((s, u) => s + Number(u.limit || 0), 0);
+            const bal = beforeRows.reduce(
+              (s, u) => s + Number(u.balance || 0),
+              0,
+            );
+            if (lim > 0) utilizationBeforePct = (bal / lim) * 100;
+          }
         } catch (e) {
-          console.warn("[report-wizard] after PDF text for alerts:", e);
+          console.warn("[report-wizard] PDF text for alerts:", e);
         }
 
         const afterAccounts = (data.targets || []).map((t, i) => {
@@ -41467,6 +56649,14 @@ function buildApp() {
                   "",
               ),
             })),
+            utilizationAfterPct: (() => {
+              const rows = data.utilization || [];
+              const lim = rows.reduce((s, u) => s + Number(u.limit || 0), 0);
+              const bal = rows.reduce((s, u) => s + Number(u.balance || 0), 0);
+              return lim > 0 ? (bal / lim) * 100 : null;
+            })(),
+            utilizationBeforePct,
+            utilizationIncreaseThresholdPp: DEFAULT_UTIL_INCREASE_THRESHOLD_PP,
           });
 
         // Optional Claude QA enrichment (best-effort, never blocks publish)
@@ -41506,7 +56696,7 @@ function buildApp() {
                 bureau_scores_json, wins_json, targets_json, alerts_json, utilization_json,
                 action_plan_json, file_strength_score, wizard_session_id, report_locale,
                 created_by_admin_id, delivered_via_email, delivered_via_sms)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
              ON DUPLICATE KEY UPDATE
                case_id = VALUES(case_id),
                score_before = VALUES(score_before),
@@ -41530,12 +56720,28 @@ function buildApp() {
               roundNumber,
               data.middleScore.before || null,
               data.middleScore.after || null,
-              data.wins.length,
-              data.targets.length,
+              (data.winsThisRound ?? data.wins).length,
+              (data.targetsThisRound ?? data.targets).length,
               summaryMd,
               JSON.stringify(data.bureauScores),
-              JSON.stringify(data.wins),
-              JSON.stringify(data.targets),
+              JSON.stringify(
+                serializeDualWinsJsonInline({
+                  compareMode: normalizeReportCompareModeInline(
+                    data.compareMode,
+                  ),
+                  thisRound: data.winsThisRound ?? data.wins,
+                  sinceEnrollment: data.winsSinceEnrollment ?? data.wins,
+                }),
+              ),
+              JSON.stringify(
+                serializeDualTargetsJsonInline({
+                  compareMode: normalizeReportCompareModeInline(
+                    data.compareMode,
+                  ),
+                  thisRound: data.targetsThisRound ?? data.targets,
+                  sinceEnrollment: data.targetsSinceEnrollment ?? data.targets,
+                }),
+              ),
               JSON.stringify(progressAlerts),
               JSON.stringify(data.utilization),
               JSON.stringify(data.actionPlan),
@@ -41568,6 +56774,17 @@ function buildApp() {
             ],
           );
           outputPdfId = pdfIns.insertId;
+
+          // Mirror into legacy client_round_reports.pdf_* so MCP/list tools that
+          // still read those columns see has_pdf (round_report_pdfs remains source of truth).
+          await conn.query(
+            `UPDATE client_round_reports
+             SET pdf_storage_key = ?, pdf_file_name = ?, pdf_storage_provider = 'cdn',
+                 pdf_encrypted = 1, pdf_enc_iv = ?, pdf_enc_tag = ?,
+                 pdf_uploaded_at = NOW()
+             WHERE id = ?`,
+            [cdnUrl, fileName, iv, tag, roundReportId],
+          );
 
           await advanceCasePipeline(conn, {
             clientId,
@@ -41610,66 +56827,215 @@ function buildApp() {
           conn.release();
         }
 
-        const tpl = tplRoundComplete({
-          firstName: session.first_name as string,
-          roundNumber,
-          scoreBefore: data.middleScore.before,
-          scoreAfter: data.middleScore.after,
-          itemsRemoved: data.wins.length,
-          portalUrl: `${APP_URL}/portal/reports`,
-          lang: (session.preferred_language as string) || "en",
+        // Client notify: reminder-flow only (no duplicate tplRoundComplete).
+        // Email attaches Round PDF + portal magic link (?next=/portal/reports)
+        // + short-lived secure PDF download URL. SMS uses publisher OFG + EN/ES.
+        let pdfAttachment:
+          | { filename: string; content: Buffer; contentType: string }
+          | undefined;
+        let securePdfUrl = "";
+        try {
+          const [pdfRows] = await pool.query<RowDataPacket[]>(
+            `SELECT file_name, storage_key, storage_provider, encrypted, enc_iv, enc_tag
+             FROM round_report_pdfs WHERE id = ? LIMIT 1`,
+            [outputPdfId],
+          );
+          const pdf = pdfRows[0];
+          if (pdf?.storage_key) {
+            let raw: Buffer;
+            if (String(pdf.storage_provider) === "cdn") {
+              const cdnRes = await fetch(String(pdf.storage_key));
+              if (cdnRes.ok) {
+                raw = Buffer.from(await cdnRes.arrayBuffer());
+              } else {
+                raw = Buffer.alloc(0);
+              }
+            } else if (String(pdf.storage_key).startsWith("vitest://")) {
+              raw = Buffer.from("%PDF-1.4 vitest");
+            } else {
+              raw = await fs.promises.readFile(
+                path.join(UPLOADS_DIR, String(pdf.storage_key)),
+              );
+            }
+            if (raw.length > 0) {
+              const buf =
+                pdf.encrypted && pdf.enc_iv && pdf.enc_tag
+                  ? decryptFile(
+                      raw,
+                      String(pdf.enc_iv),
+                      String(pdf.enc_tag),
+                    )
+                  : raw;
+              pdfAttachment = {
+                filename:
+                  String(pdf.file_name || "").trim() ||
+                  `OFG_Progress_Report_R${roundNumber}.pdf`,
+                content: buf,
+                contentType: "application/pdf",
+              };
+            }
+          }
+        } catch (e: any) {
+          console.warn(
+            "[report-wizard:publish] PDF attach load failed:",
+            e?.message ?? e,
+          );
+        }
+        try {
+          const dlToken = await createRoundReportDownloadToken(
+            outputPdfId,
+            clientId,
+          );
+          securePdfUrl = `${APP_URL}/api/public/round-report-pdf/${dlToken}`;
+        } catch (e: any) {
+          console.warn(
+            "[report-wizard:publish] download token failed:",
+            e?.message ?? e,
+          );
+        }
+        // Also email linked partners with the PDF when available (staff may uncheck)
+        const partnerEmailStats =
+          await countLinkedReferrerPartnersWithEmail(clientId);
+        const partnerFlags = computePartnersPdfNotifyFlags({
+          notifyPartners,
+          hasPdfAttachment: !!pdfAttachment,
+          partnersWithEmail: partnerEmailStats.withEmail,
         });
-        await sendEmail({
-          to: session.email as string,
-          subject: tpl.subject,
-          html: tpl.html,
-        }).catch(() => null);
-        if (session.phone) {
-          await sendClientSmsFromAdmin({
-            adminId,
-            to: session.phone as string,
-            body: `${session.first_name}, your Round ${roundNumber} OFG Progress Report is ready! ${APP_URL}/portal/reports`,
-          }).catch(() => null);
+        let partnersEmailedCount = 0;
+        if (partnerFlags.partnersPdfLoadFailed) {
+          console.warn(
+            "[report-wizard:publish] notify_partners requested but PDF bytes unavailable",
+            { clientId, roundNumber, outputPdfId },
+          );
+        }
+        if (partnerFlags.shouldEmailPartners && pdfAttachment) {
+          const clientName =
+            `${data.client.firstName || session.first_name || ""} ${data.client.lastName || ""}`.trim() ||
+            "Client";
+          partnersEmailedCount = await emailLinkedReferrerPartnersRoundPdf({
+            clientId,
+            roundNumber,
+            clientName,
+            langFallback:
+              session.preferred_language === "es" ? "es" : "en",
+            pdfAttachment,
+          });
         }
         const scoreChange = String(
           data.middleScore.after - data.middleScore.before,
         );
-        await triggerReminderFlow(`round_${roundNumber}_complete`, clientId, {
-          items_removed: String(data.wins.length),
-          score_change: scoreChange,
-        }).catch(() => null);
-
-        // Realtor/broker referrers get an email when the case advances to a round stage
-        notifyReferrerRoundUpdate(clientId, newStage).catch((e: any) =>
-          console.error("[referrer:wizard-publish]", e?.message ?? e),
+        // R1–5 use round_N_complete ENUM; R6+ use round_extended_complete (+ {{round_number}}).
+        const flowTrigger = reminderTriggerForRoundInline(roundNumber);
+        const [activeFlowRows] = await pool.query<RowDataPacket[]>(
+          `SELECT id FROM reminder_flows
+           WHERE trigger_event = ? AND is_active = 1 LIMIT 1`,
+          [flowTrigger],
         );
+        const activeFlowId =
+          activeFlowRows[0]?.id != null
+            ? Number(activeFlowRows[0].id)
+            : null;
+        let clientNotify: "reminder_flow" | "safety_fallback" =
+          "reminder_flow";
+        if (activeFlowId) {
+          await triggerReminderFlow(
+            flowTrigger,
+            clientId,
+            {
+              items_removed: String(
+                (data.winsThisRound ?? data.wins).length,
+              ),
+              score_change: scoreChange,
+              round_number: String(roundNumber),
+              reports_url: `${APP_URL}/portal/reports`,
+              secure_pdf_url: securePdfUrl || `${APP_URL}/portal/reports`,
+            },
+            {
+              emailAttachments: pdfAttachment ? [pdfAttachment] : undefined,
+              smsFromAdminId: adminId,
+              magicLinkNext: "/portal/reports",
+              smsUrlOverride: securePdfUrl || undefined,
+            },
+          ).catch((e: any) =>
+            console.error("[report-wizard:publish] flow", e?.message ?? e),
+          );
+          clientNotify = "reminder_flow";
+        } else {
+          // Safety net: Q2C prefers the flow, but never leave clients unnotified
+          // if the trigger is missing/inactive.
+          console.warn(
+            `[report-wizard:publish] no active flow ${flowTrigger} — safety fallback`,
+          );
+          const lang =
+            session.preferred_language === "es" ? "es" : "en";
+          const portalCta = `${APP_URL}/portal/reports`;
+          const downloadCta = securePdfUrl || portalCta;
+          const tpl = tplRoundComplete({
+            firstName: String(session.first_name || ""),
+            roundNumber,
+            scoreBefore: data.middleScore.before,
+            scoreAfter: data.middleScore.after,
+            itemsRemoved: (data.winsThisRound ?? data.wins).length,
+            portalUrl: portalCta,
+            securePdfUrl: securePdfUrl || null,
+            lang,
+          });
+          if (session.email) {
+            await sendEmail({
+              to: session.email as string,
+              subject: tpl.subject,
+              html: tpl.html,
+              attachments: pdfAttachment ? [pdfAttachment] : undefined,
+            }).catch(() => null);
+          }
+          if (session.phone) {
+            await maybeSendClientReminderSms({
+              clientId,
+              triggerEvent: flowTrigger,
+              alsoSms: true,
+              portalUrl: downloadCta,
+              smsFromAdminId: adminId,
+            }).catch(() => null);
+          }
+          clientNotify = "safety_fallback";
+        }
+
+        // Partner PDF fan-out already ran above when notify_partners (3A/4A).
+        // No bare notifyReferrerRoundUpdate fallback (that would omit the PDF).
+
+        // Flags mean "client notify path ran" (flow or safety), not SMTP ACK.
+        // Both branches above always set reminder_flow or safety_fallback.
+        await pool
+          .query(
+            `UPDATE client_round_reports
+             SET delivered_via_email = 1, delivered_via_sms = 1
+             WHERE id = ?`,
+            [roundReportId],
+          )
+          .catch(() => null);
 
         if (progressAlerts.length > 0) {
-          const alertSummary = progressAlerts
-            .slice(0, 8)
-            .map((a) => `• [${a.type}] ${a.title}: ${a.detail}`)
-            .join("\n");
           const clientName =
             `${profile.first_name || ""} ${profile.last_name || ""}`.trim() ||
             `Client #${clientId}`;
           const boardUrl = `${APP_URL}/admin/pipeline?client=${clientId}`;
           notifyAllTeamAdmins("progress_report_alerts", (admin) => {
             const lang = admin.preferred_language === "es" ? "es" : "en";
-            const subject =
-              lang === "es"
-                ? `Alertas de reporte R${roundNumber} — ${clientName}`
-                : `Progress report alerts R${roundNumber} — ${clientName}`;
-            const body =
-              lang === "es"
-                ? `${progressAlerts.length} alerta(s) al publicar Round ${roundNumber}:\n${alertSummary}`
-                : `${progressAlerts.length} alert(s) on Round ${roundNumber} publish:\n${alertSummary}`;
-            return {
-              subject,
-              html: `<p><strong>${progressAlerts.length}</strong> progress-report alert(s) for <strong>${clientName}</strong> Round ${roundNumber}.</p><pre style="white-space:pre-wrap;font-size:13px">${alertSummary.replace(/</g, "&lt;")}</pre><p><a href="${boardUrl}">Open client</a></p>`,
-              inAppTitle: subject,
-              inAppBody: body.slice(0, 280),
+            const tpl = tplProgressReportAlerts({
+              clientName,
+              round: roundNumber,
+              alerts: progressAlerts,
               linkUrl: boardUrl,
-              smsBody: `${subject}`.slice(0, 320),
+              lang,
+              context: "publish",
+            });
+            return {
+              subject: tpl.subject,
+              html: tpl.html,
+              inAppTitle: tpl.inAppTitle,
+              inAppBody: tpl.inAppBody,
+              linkUrl: tpl.linkUrl,
+              smsBody: tpl.smsBody,
             };
           }).catch((e: any) =>
             console.error("[progress_report_alerts]", e?.message ?? e),
@@ -41690,6 +57056,13 @@ function buildApp() {
           pipeline_stage: newStage,
           alerts: progressAlerts,
           alerts_count: progressAlerts.length,
+          client_notify: clientNotify,
+          secure_pdf_url: securePdfUrl || null,
+          notify_partners: notifyPartners,
+          partners_emailed: partnersEmailedCount,
+          partners_linked: partnerEmailStats.linked,
+          partners_with_email: partnerEmailStats.withEmail,
+          partners_pdf_load_failed: partnerFlags.partnersPdfLoadFailed,
         });
       } catch (e: any) {
         if (cdnUrl) {
@@ -41878,6 +57251,11 @@ export {
   canFinalizeSession,
   calcMiddleScore,
   expectedReportRoundForStage,
+  clampMaxRounds,
+  cascadeRoundsFrom,
+  extendedRoundsLegend,
+  validatePublishRoundNumber,
+  isExtendedRoundsCase,
   isPdfBuffer,
   scoresRoughlyMatchMiddle,
   detectProvider,
@@ -41888,6 +57266,7 @@ export {
   computeFileStrengthScore,
   validateReportCompliance,
   detectNegativeLines,
+  sanitizePortalNextPath,
   extractUtilization,
   extractPositiveAccounts,
   toPdfSafeText,
@@ -41896,12 +57275,19 @@ export {
   adminAiCrmRequired,
   adminAiBuildCrmHref,
   resolveLanguageOwnerAdminId,
+  matchStaffAdmins,
   isDuplicateKeyError,
   mapFriendlyError,
   classifyNegativeLine,
   buildNegativeItems,
   buildProspectAnalysisHtml,
   tplProspectConvertWelcome,
+  tplGetCreditReportWelcome,
+  smsGetCreditReportWelcome,
+  smsGetCreditReportStaffAlert,
+  getCreditReportLabelSlugs,
+  getCreditReportEventKind,
+  laCalendarDateYmd,
   attachLabelsBySlug,
   buildCorsAllowedOrigins,
   escapeLikePattern,
@@ -42063,6 +57449,49 @@ function takePendingDialStatus(callSid: string): string | null {
   pendingDialStatusBySid.delete(callSid);
   if (Date.now() - hit.at > PENDING_DIAL_TTL_MS) return null;
   return hit.status;
+}
+
+/**
+ * Dial recording callbacks can finish before outbound `/voice/log` inserts the
+ * CallSid row. Buffer the URL briefly so the log path can attach it (Twilio
+ * treats 204 as success and will not retry).
+ */
+const pendingRecordingBySid = new Map<
+  string,
+  { mp3Url: string; durationSec: number | null; at: number }
+>();
+const PENDING_RECORDING_TTL_MS = 15 * 60 * 1000;
+
+function rememberPendingRecording(
+  callSid: string,
+  mp3Url: string,
+  durationSec: number | null,
+) {
+  const sid = String(callSid || "").trim();
+  if (!sid || !mp3Url) return;
+  pendingRecordingBySid.set(sid, {
+    mp3Url,
+    durationSec,
+    at: Date.now(),
+  });
+  if (pendingRecordingBySid.size > 500) {
+    const cutoff = Date.now() - PENDING_RECORDING_TTL_MS;
+    for (const [k, v] of pendingRecordingBySid) {
+      if (v.at < cutoff) pendingRecordingBySid.delete(k);
+    }
+  }
+}
+
+function takePendingRecording(
+  callSid: string,
+): { mp3Url: string; durationSec: number | null } | null {
+  const sid = String(callSid || "").trim();
+  if (!sid) return null;
+  const hit = pendingRecordingBySid.get(sid);
+  if (!hit) return null;
+  pendingRecordingBySid.delete(sid);
+  if (Date.now() - hit.at > PENDING_RECORDING_TTL_MS) return null;
+  return { mp3Url: hit.mp3Url, durationSec: hit.durationSec };
 }
 
 function getVoiceBaseUrl(deps: VoiceRouteDeps): string {
@@ -42347,6 +57776,22 @@ async function getOrCreateCallConversation(
       reopenIfClosed,
     });
     return { conversationId, clientId, unknownContactId: null };
+  }
+
+  const crmContactId = await findContactIdByPhone(opts.callerPhone);
+  if (crmContactId) {
+    const conversationId = await getOrCreateCrmContactChannelConversation({
+      crmContactId,
+      channel: "call",
+      ofgNumberId: opts.ofgNumberId,
+      assignedAdminId: opts.assignedAdminId,
+      reopenIfClosed,
+    });
+    return {
+      conversationId,
+      clientId: null,
+      unknownContactId: null,
+    };
   }
 
   if (opts.ofgNumberId == null || opts.assignedAdminId == null) {
@@ -42702,6 +58147,878 @@ async function notifyAssignedAdmin(
       );
   }
   void delivered;
+}
+
+
+/** Call insights (answered calls + voicemails → STT → Claude resume).
+ * Pure helpers below are inlined for Vercel — keep in sync with api/callInsights.ts
+ * (unit tests import the sibling; do NOT runtime-import it from this file).
+ */
+const CALL_INSIGHTS_TWILIO_TRANSCRIPT_WAIT_MS = 30 * 60 * 1000;
+
+function isCallInsightsFeatureEnabled(raw?: string | null): boolean {
+  // Always on unless explicitly disabled (ops kill-switch).
+  // Keep in sync with api/callInsights.ts.
+  if (raw == null || String(raw).trim() === "") return true;
+  const v = String(raw).trim().toLowerCase();
+  return !(v === "0" || v === "false" || v === "off" || v === "no");
+}
+
+function callInsightsFeatureEnabled(): boolean {
+  return isCallInsightsFeatureEnabled(process.env.CALL_INSIGHTS_ENABLED);
+}
+
+const MFSN_DEFAULT_UAT_BASE = "https://uat-api.myfreescorenow.com";
+const MFSN_REQUEST_TIMEOUT_MS = 30_000;
+
+function isMfsnFeatureEnabled(raw?: string | null): boolean {
+  const v = String(raw ?? "0")
+    .trim()
+    .toLowerCase();
+  return v === "1" || v === "true" || v === "on" || v === "yes";
+}
+
+function readMfsnEnvFromProcess(): {
+  enabled: boolean;
+  baseUrl: string;
+  apiEmail: string;
+  apiPassword: string;
+  clientToken: string;
+} {
+  return {
+    enabled: isMfsnFeatureEnabled(process.env.MFSN_ENABLED),
+    baseUrl: String(
+      process.env.MFSN_API_BASE_URL || MFSN_DEFAULT_UAT_BASE,
+    ).trim(),
+    apiEmail: String(process.env.MFSN_API_EMAIL || "").trim(),
+    apiPassword: String(process.env.MFSN_API_PASSWORD || ""),
+    clientToken: String(process.env.MFSN_CLIENT_TOKEN || "").trim(),
+  };
+}
+
+function mfsnLoginCredentialsPresent(cfg: {
+  apiEmail: string;
+  apiPassword: string;
+}): boolean {
+  return Boolean(cfg.apiEmail && cfg.apiPassword);
+}
+
+function buildMfsnPublicStatus(cfg: {
+  enabled: boolean;
+  baseUrl: string;
+  apiEmail: string;
+  apiPassword: string;
+  clientToken: string;
+}): {
+  enabled: boolean;
+  credentials_present: boolean;
+  client_token_present: boolean;
+  base_url: string | null;
+  mode: "disabled" | "needs_credentials" | "ready_to_probe";
+  warnings: string[];
+} {
+  const credentials_present = mfsnLoginCredentialsPresent(cfg);
+  const warnings = [
+    "MFSN portal IP whitelist can block Vercel (dynamic egress) and local IP. Add the caller IP in API Access Setup before probing.",
+    "Promote To Production stays locked until Cesar uploads the UX proof PDF. This probe does not complete that packet.",
+    "Never store a MyFreeScoreNow member password. Affiliate API user + client_token only.",
+  ];
+  if (!cfg.enabled) {
+    return {
+      enabled: false,
+      credentials_present,
+      client_token_present: Boolean(cfg.clientToken),
+      base_url: null,
+      mode: "disabled",
+      warnings,
+    };
+  }
+  return {
+    enabled: true,
+    credentials_present,
+    client_token_present: Boolean(cfg.clientToken),
+    base_url: cfg.baseUrl,
+    mode: credentials_present ? "ready_to_probe" : "needs_credentials",
+    warnings,
+  };
+}
+
+function parseMfsnLoginResponse(
+  status: number,
+  body: unknown,
+): { ok: boolean; message: string; token: string | null } {
+  const data =
+    body && typeof body === "object"
+      ? (body as { success?: boolean; message?: string; token?: string })
+      : {};
+  const token =
+    typeof data.token === "string" && data.token.trim() ? data.token : null;
+  const message =
+    typeof data.message === "string" && data.message.trim()
+      ? data.message
+      : status === 200
+        ? "Login successful"
+        : `MFSN login failed (${status})`;
+  const ok =
+    status >= 200 && status < 300 && data.success !== false && Boolean(token);
+  return { ok, message, token };
+}
+
+async function probeMfsnAffiliateLogin(cfg: {
+  baseUrl: string;
+  apiEmail: string;
+  apiPassword: string;
+}): Promise<{ ok: boolean; http_status: number; message: string }> {
+  const url = `${cfg.baseUrl.replace(/\/$/, "")}/api/auth/login`;
+  const form = new FormData();
+  form.append("email", cfg.apiEmail);
+  form.append("password", cfg.apiPassword);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), MFSN_REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      body: form,
+      signal: controller.signal,
+    });
+    let parsed: unknown = null;
+    const text = await res.text();
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = { message: text.slice(0, 200) };
+    }
+    const result = parseMfsnLoginResponse(res.status, parsed);
+    return {
+      ok: result.ok,
+      http_status: res.status,
+      message: result.message,
+    };
+  } catch (err: any) {
+    if (err?.name === "AbortError") {
+      return {
+        ok: false,
+        http_status: 504,
+        message: `MFSN login timed out after ${MFSN_REQUEST_TIMEOUT_MS}ms`,
+      };
+    }
+    return {
+      ok: false,
+      http_status: 502,
+      message: "Could not reach MyFreeScoreNow UAT.",
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+type CallInsightSentimentLabel =
+  | "positive"
+  | "neutral"
+  | "negative"
+  | "mixed"
+  | "anxious"
+  | "frustrated"
+  | "hopeful"
+  | "confused"
+  | "angry";
+
+type CallInsightsPayload = {
+  locale: "en" | "es";
+  summary_bullets: string[];
+  sentiment: {
+    label: CallInsightSentimentLabel;
+    score: number;
+    feelings: string[];
+  };
+  topics: string[];
+  action_items: string[];
+  risk_flags: string[];
+  interesting: string[];
+  model?: string;
+  generated_at?: string;
+};
+
+const CALL_INSIGHTS_SYSTEM = `You are Optimum Financial Group's call analyst for credit-repair staff.
+Given a call or voicemail transcript, return ONLY a JSON object (no markdown) with:
+{
+  "summary_bullets": ["...", "..."],
+  "sentiment": {
+    "label": "positive|neutral|negative|mixed|anxious|frustrated|hopeful|confused|angry",
+    "score": 0.0-1.0,
+    "feelings": ["...", "..."]
+  },
+  "topics": ["..."],
+  "action_items": ["..."],
+  "risk_flags": ["..."],
+  "interesting": ["..."]
+}
+Rules:
+- Be factual; do not invent names, amounts, or promises not in the transcript.
+- Prefer the transcript language for feelings words; summary_bullets follow locale hint.
+- If transcript is empty/garbled, still return JSON with cautious neutral sentiment and one bullet noting poor audio.`;
+
+/** When STT produced no transcript yet, decide next pipeline status. */
+function decideMissingTranscriptOutcome(args: {
+  isVoicemail: boolean;
+  hasOpenAi: boolean;
+  ageMs: number;
+  maxWaitMs?: number;
+}):
+  | { action: "await_twilio" }
+  | { action: "fail"; status: "failed"; error: "stt_empty" }
+  | { action: "skip"; status: "skipped"; error: "missing_openai_stt" } {
+  const maxWait = args.maxWaitMs ?? CALL_INSIGHTS_TWILIO_TRANSCRIPT_WAIT_MS;
+  if (args.isVoicemail && !args.hasOpenAi) {
+    if (Number.isFinite(args.ageMs) && args.ageMs < maxWait) {
+      return { action: "await_twilio" };
+    }
+  }
+  if (args.hasOpenAi) {
+    return { action: "fail", status: "failed", error: "stt_empty" };
+  }
+  return { action: "skip", status: "skipped", error: "missing_openai_stt" };
+}
+
+function parseCallInsightsJson(
+  text: string,
+  locale: "en" | "es",
+): CallInsightsPayload | null {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(match[0]);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const o = parsed as Record<string, unknown>;
+  const asStrArr = (v: unknown, max: number, maxLen: number): string[] =>
+    (Array.isArray(v) ? v : [])
+      .map((x) => String(x || "").trim().slice(0, maxLen))
+      .filter(Boolean)
+      .slice(0, max);
+  const sent = (o.sentiment || {}) as Record<string, unknown>;
+  const labelRaw = String(sent.label || "neutral").toLowerCase();
+  const allowed: CallInsightSentimentLabel[] = [
+    "positive",
+    "neutral",
+    "negative",
+    "mixed",
+    "anxious",
+    "frustrated",
+    "hopeful",
+    "confused",
+    "angry",
+  ];
+  const label = (
+    allowed.includes(labelRaw as CallInsightSentimentLabel)
+      ? labelRaw
+      : "neutral"
+  ) as CallInsightSentimentLabel;
+  let score = Number(sent.score);
+  if (!Number.isFinite(score)) score = 0.5;
+  score = Math.max(0, Math.min(1, score));
+  return {
+    locale,
+    summary_bullets: asStrArr(o.summary_bullets, 6, 220),
+    sentiment: {
+      label,
+      score,
+      feelings: asStrArr(sent.feelings, 5, 40),
+    },
+    topics: asStrArr(o.topics, 8, 80),
+    action_items: asStrArr(o.action_items, 6, 200),
+    risk_flags: asStrArr(o.risk_flags, 8, 60),
+    interesting: asStrArr(o.interesting, 5, 220),
+  };
+}
+
+async function pullAndAttachTwilioRecording(
+  messageId: number,
+  callSids: string[],
+): Promise<{ recordingUrl: string; durationSec: number | null } | null> {
+  if (!(messageId > 0) || !twilioClient) return null;
+  const accountSid = String(process.env.TWILIO_ACCOUNT_SID || "").trim();
+  if (!accountSid) return null;
+  const uniqueSids = Array.from(
+    new Set(
+      callSids
+        .map((s) => String(s || "").trim())
+        .filter(Boolean)
+        .map((s) => (s.startsWith("vm_") ? s.slice(3) : s)),
+    ),
+  );
+  for (const callSid of uniqueSids) {
+    try {
+      const recordings = await twilioClient.recordings.list({
+        callSid,
+        limit: 50,
+      });
+      const completed = (recordings || [])
+        .filter(
+          (r: { status?: string; sid?: string }) =>
+            !!r?.sid && String(r.status || "").toLowerCase() === "completed",
+        )
+        .sort(
+          (
+            a: { duration?: string | number },
+            b: { duration?: string | number },
+          ) => Number(b.duration || 0) - Number(a.duration || 0),
+        );
+      const best = completed[0] as
+        | { sid?: string; duration?: string | number }
+        | undefined;
+      if (!best?.sid) continue;
+      const recordingUrl = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Recordings/${best.sid}.mp3`;
+      const recordingDuration =
+        best.duration != null ? parseInt(String(best.duration), 10) : null;
+      const durationVal = Number.isFinite(recordingDuration)
+        ? recordingDuration
+        : null;
+      await pool.query(
+        `UPDATE conversation_messages
+         SET recording_url = COALESCE(recording_url, ?),
+             call_duration_sec = COALESCE(call_duration_sec, ?)
+         WHERE id = ? AND channel = 'call'`,
+        [recordingUrl, durationVal, messageId],
+      );
+      return { recordingUrl, durationSec: durationVal };
+    } catch (e: any) {
+      console.warn(
+        "[call-insights] Twilio recording pull",
+        callSid,
+        e?.message ?? e,
+      );
+    }
+  }
+  return null;
+}
+
+async function enqueueCallInsights(messageId: number): Promise<void> {
+  if (!callInsightsFeatureEnabled() || !(messageId > 0)) return;
+  try {
+    const [preRows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, recording_url, provider_message_id, metadata_json
+       FROM conversation_messages
+       WHERE id = ? AND channel = 'call'
+       LIMIT 1`,
+      [messageId],
+    );
+    const pre = preRows[0];
+    if (!pre) return;
+    if (!pre.recording_url) {
+      let meta: Record<string, unknown> = {};
+      try {
+        meta =
+          typeof pre.metadata_json === "string"
+            ? JSON.parse(pre.metadata_json)
+            : (pre.metadata_json as any) || {};
+      } catch {
+        meta = {};
+      }
+      await pullAndAttachTwilioRecording(messageId, [
+        String(pre.provider_message_id || ""),
+        String(meta.call_sid || ""),
+        String(meta.parent_call_sid || ""),
+      ]);
+    }
+
+    // Include pending so voicemail transcription can re-queue after
+    // awaiting_twilio_transcript without waiting for a skipped/failed flip.
+    // Do not touch ready/processing (avoid clobbering in-flight work).
+    const [upd] = await pool.query<ResultSetHeader>(
+      `UPDATE conversation_messages
+       SET call_insights_status = 'pending',
+           call_insights_error = NULL,
+           call_insights_updated_at = NOW()
+       WHERE id = ?
+         AND channel = 'call'
+         AND recording_url IS NOT NULL
+         AND (call_insights_status IS NULL
+              OR call_insights_status IN ('failed', 'skipped', 'pending'))`,
+      [messageId],
+    );
+    if (Number(upd.affectedRows || 0) > 0) {
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT conversation_id FROM conversation_messages WHERE id = ? LIMIT 1`,
+        [messageId],
+      );
+      const conversationId = Number(rows[0]?.conversation_id || 0);
+      if (conversationId > 0) {
+        await publishCallInsightsRealtime(conversationId, messageId, {
+          call_insights_status: "pending",
+          call_insights_error: null,
+        });
+      }
+    }
+  } catch (e: any) {
+    console.warn("[call-insights] enqueue", e?.message ?? e);
+  }
+}
+
+async function enqueueCallInsightsByProviderId(
+  providerMessageId: string,
+): Promise<void> {
+  if (!providerMessageId) return;
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT id FROM conversation_messages
+     WHERE provider_message_id = ? AND channel = 'call'
+     LIMIT 1`,
+    [providerMessageId],
+  );
+  if (rows[0]?.id) await enqueueAndProcessCallInsights(Number(rows[0].id));
+}
+
+async function whisperTranscribeCallAudio(
+  mp3Url: string,
+): Promise<string | null> {
+  const openaiKey = String(process.env.OPENAI_API_KEY || "").trim();
+  if (!openaiKey) return null;
+  const sid = String(process.env.TWILIO_ACCOUNT_SID || "").trim();
+  const token = String(process.env.TWILIO_AUTH_TOKEN || "").trim();
+  if (!sid || !token) return null;
+  const auth = Buffer.from(`${sid}:${token}`).toString("base64");
+  const audioRes = await axios.get(mp3Url, {
+    responseType: "arraybuffer",
+    headers: { Authorization: `Basic ${auth}` },
+    timeout: 90_000,
+    maxContentLength: 25 * 1024 * 1024,
+  });
+  const buf = Buffer.from(audioRes.data);
+  if (buf.length < 200) return null;
+  const boundary = `----OFGCallInsights${Date.now()}`;
+  const preamble = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="recording.mp3"\r\nContent-Type: audio/mpeg\r\n\r\n`;
+  const postamble = `\r\n--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-1\r\n--${boundary}--\r\n`;
+  const body = Buffer.concat([
+    Buffer.from(preamble, "utf8"),
+    buf,
+    Buffer.from(postamble, "utf8"),
+  ]);
+  const tr = await axios.post(
+    "https://api.openai.com/v1/audio/transcriptions",
+    body,
+    {
+      headers: {
+        Authorization: `Bearer ${openaiKey}`,
+        "Content-Type": `multipart/form-data; boundary=${boundary}`,
+      },
+      timeout: 120_000,
+      maxBodyLength: 30 * 1024 * 1024,
+    },
+  );
+  const text = String(tr.data?.text || "").trim();
+  return text || null;
+}
+
+async function generateCallInsightsWithClaude(
+  transcript: string,
+  locale: "en" | "es",
+): Promise<CallInsightsPayload | null> {
+  const apiKey = String(process.env.ANTHROPIC_API_KEY || "").trim();
+  if (!apiKey) return null;
+  const model =
+    String(process.env.ANTHROPIC_MODEL || "").trim() || "claude-sonnet-4-6";
+  const userPrompt =
+    (locale === "es"
+      ? "Idioma del resumen: español. Transcripción:\n\n"
+      : "Summary locale: English. Transcript:\n\n") +
+    transcript.slice(0, 24_000);
+  const res = await axios.post(
+    "https://api.anthropic.com/v1/messages",
+    {
+      model,
+      max_tokens: 1200,
+      system: CALL_INSIGHTS_SYSTEM,
+      messages: [{ role: "user", content: userPrompt }],
+    },
+    {
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      timeout: 60_000,
+      validateStatus: () => true,
+    },
+  );
+  if (res.status < 200 || res.status >= 300) {
+    const detail = String(
+      res.data?.error?.message ||
+        res.data?.error?.type ||
+        JSON.stringify(res.data || {}).slice(0, 180),
+    );
+    throw new Error(`anthropic_${res.status}: ${detail}`.slice(0, 480));
+  }
+  const content = Array.isArray(res.data?.content) ? res.data.content : [];
+  const text = content
+    .filter((b: any) => b?.type === "text" && typeof b.text === "string")
+    .map((b: any) => b.text)
+    .join("\n");
+  const parsed = parseCallInsightsJson(text, locale);
+  if (!parsed) return null;
+  parsed.model = model;
+  parsed.generated_at = new Date().toISOString();
+  return parsed;
+}
+
+async function resolveCallInsightsLocale(
+  conversationId: number,
+): Promise<"en" | "es"> {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT c.preferred_language
+     FROM conversations cv
+     LEFT JOIN clients c ON c.id = cv.client_id
+     WHERE cv.id = ?
+     LIMIT 1`,
+    [conversationId],
+  );
+  return String(rows[0]?.preferred_language || "en").toLowerCase() === "es"
+    ? "es"
+    : "en";
+}
+
+async function publishCallInsightsRealtime(
+  conversationId: number,
+  messageId: number,
+  patch: {
+    call_insights_status: string;
+    call_insights_json?: CallInsightsPayload | null;
+    call_transcript?: string | null;
+    call_insights_error?: string | null;
+  },
+): Promise<void> {
+  try {
+    await publishConversationRealtime({
+      type: "call_insights",
+      payload: {
+        conversation_id: conversationId,
+        message_id: messageId,
+        call_insights_status: patch.call_insights_status,
+        ...(patch.call_insights_json !== undefined
+          ? { call_insights_json: patch.call_insights_json }
+          : {}),
+        ...(patch.call_transcript != null
+          ? { call_transcript: String(patch.call_transcript).slice(0, 4000) }
+          : {}),
+        ...(patch.call_insights_error !== undefined
+          ? {
+              call_insights_error:
+                patch.call_insights_error == null
+                  ? null
+                  : String(patch.call_insights_error).slice(0, 480),
+            }
+          : {}),
+      },
+    });
+  } catch {
+    /* non-fatal */
+  }
+}
+
+type CallInsightsProcessCounters = {
+  processed: number;
+  ready: number;
+  failed: number;
+  skipped: number;
+};
+
+/** Process one claimed call-insights row (Whisper → optional Claude). */
+async function processCallInsightRow(
+  row: RowDataPacket,
+  out: CallInsightsProcessCounters,
+): Promise<"ready" | "failed" | "skipped" | "pending"> {
+  out.processed++;
+  const messageId = Number(row.id);
+  const conversationId = Number(row.conversation_id);
+  try {
+    const duration =
+      row.call_duration_sec != null ? Number(row.call_duration_sec) : null;
+    if (duration != null && duration > 0 && duration < 3) {
+      await pool.query(
+        `UPDATE conversation_messages
+         SET call_insights_status = 'skipped',
+             call_insights_error = 'too_short',
+             call_insights_updated_at = NOW()
+         WHERE id = ?`,
+        [messageId],
+      );
+      out.skipped++;
+      await publishCallInsightsRealtime(conversationId, messageId, {
+        call_insights_status: "skipped",
+        call_insights_error: "too_short",
+      });
+      return "skipped";
+    }
+
+    let transcript = row.call_transcript
+      ? String(row.call_transcript).trim()
+      : "";
+    let meta: Record<string, unknown> = {};
+    try {
+      meta =
+        typeof row.metadata_json === "string"
+          ? JSON.parse(row.metadata_json)
+          : (row.metadata_json as any) || {};
+    } catch {
+      meta = {};
+    }
+    if (!transcript) {
+      const vm = String(meta.voicemail_transcription || "").trim();
+      if (vm) transcript = vm;
+    }
+
+    let recordingUrl = row.recording_url
+      ? String(row.recording_url)
+      : "";
+    if (!recordingUrl) {
+      const pulled = await pullAndAttachTwilioRecording(messageId, [
+        String(row.provider_message_id || ""),
+        String(meta.call_sid || ""),
+        String(meta.parent_call_sid || ""),
+      ]);
+      if (pulled?.recordingUrl) recordingUrl = pulled.recordingUrl;
+    }
+
+    if (!transcript && recordingUrl) {
+      transcript = (await whisperTranscribeCallAudio(recordingUrl)) || "";
+    }
+    if (!transcript) {
+      const hasOpenAi = !!String(process.env.OPENAI_API_KEY || "").trim();
+      const isVoicemail = !!meta.is_voicemail;
+      const ageMs =
+        row.created_at != null
+          ? Date.now() - new Date(row.created_at).getTime()
+          : 0;
+      const outcome = decideMissingTranscriptOutcome({
+        isVoicemail,
+        hasOpenAi,
+        ageMs,
+      });
+      if (outcome.action === "await_twilio") {
+        await pool.query(
+          `UPDATE conversation_messages
+           SET call_insights_status = 'pending',
+               call_insights_error = 'awaiting_twilio_transcript',
+               call_insights_updated_at = NOW()
+           WHERE id = ?`,
+          [messageId],
+        );
+        out.skipped++;
+        return "pending";
+      }
+      await pool.query(
+        `UPDATE conversation_messages
+         SET call_insights_status = ?,
+             call_insights_error = ?,
+             call_insights_updated_at = NOW()
+         WHERE id = ?`,
+        [outcome.status, outcome.error, messageId],
+      );
+      if (outcome.action === "fail") out.failed++;
+      else out.skipped++;
+      await publishCallInsightsRealtime(conversationId, messageId, {
+        call_insights_status: outcome.status,
+        call_insights_error: outcome.error,
+      });
+      return outcome.status;
+    }
+
+    // Transcript-first: ready even when Claude is missing or fails.
+    let insights: CallInsightsPayload | null = null;
+    let claudeErr: string | null = null;
+    try {
+      const locale = await resolveCallInsightsLocale(conversationId);
+      insights = await generateCallInsightsWithClaude(transcript, locale);
+      if (!insights) {
+        claudeErr = String(process.env.ANTHROPIC_API_KEY || "").trim()
+          ? "claude_parse_failed"
+          : "claude_unavailable";
+      }
+    } catch (e: any) {
+      claudeErr = String(e?.message || e).slice(0, 480);
+      insights = null;
+    }
+
+    await pool.query(
+      `UPDATE conversation_messages
+       SET call_insights_status = 'ready',
+           call_transcript = ?,
+           call_insights_json = ?,
+           call_insights_error = ?,
+           call_insights_updated_at = NOW()
+       WHERE id = ?`,
+      [
+        transcript.slice(0, 65000),
+        insights ? JSON.stringify(insights) : null,
+        claudeErr,
+        messageId,
+      ],
+    );
+    out.ready++;
+    await publishCallInsightsRealtime(conversationId, messageId, {
+      call_insights_status: "ready",
+      call_insights_json: insights,
+      call_transcript: transcript,
+      call_insights_error: claudeErr,
+    });
+    return "ready";
+  } catch (e: any) {
+    console.error("[call-insights] process", messageId, e?.message ?? e);
+    await pool.query(
+      `UPDATE conversation_messages
+       SET call_insights_status = 'failed',
+           call_insights_error = ?,
+           call_insights_updated_at = NOW()
+       WHERE id = ?`,
+      [String(e?.message || e).slice(0, 480), messageId],
+    );
+    out.failed++;
+    await publishCallInsightsRealtime(conversationId, messageId, {
+      call_insights_status: "failed",
+      call_insights_error: String(e?.message || e).slice(0, 480),
+    });
+    return "failed";
+  }
+}
+
+/** Claim + process a single message immediately (recording webhook / Retry). */
+async function processCallInsightsForMessage(
+  messageId: number,
+): Promise<"ready" | "failed" | "skipped" | "pending" | null> {
+  if (!callInsightsFeatureEnabled() || !(messageId > 0)) return null;
+  const claimTag = `ci-one-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
+  const [upd] = await pool.query<ResultSetHeader>(
+    `UPDATE conversation_messages
+     SET call_insights_status = 'processing',
+         call_insights_error = ?,
+         call_insights_updated_at = NOW()
+     WHERE id = ?
+       AND channel = 'call'
+       AND call_insights_status = 'pending'
+       AND recording_url IS NOT NULL`,
+    [claimTag, messageId],
+  );
+  if (!Number(upd.affectedRows || 0)) return null;
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT id, conversation_id, recording_url, call_duration_sec,
+            call_transcript, metadata_json, call_insights_error, created_at,
+            provider_message_id
+     FROM conversation_messages
+     WHERE id = ?
+       AND call_insights_status = 'processing'
+       AND call_insights_error = ?
+     LIMIT 1`,
+    [messageId, claimTag],
+  );
+  if (!rows[0]) return null;
+  const out: CallInsightsProcessCounters = {
+    processed: 0,
+    ready: 0,
+    failed: 0,
+    skipped: 0,
+  };
+  return processCallInsightRow(rows[0], out);
+}
+
+async function enqueueAndProcessCallInsights(messageId: number): Promise<void> {
+  await enqueueCallInsights(messageId);
+  try {
+    await processCallInsightsForMessage(messageId);
+  } catch (e: any) {
+    console.warn(
+      "[call-insights] immediate process",
+      messageId,
+      e?.message ?? e,
+    );
+  }
+}
+
+/** Claim + process a small batch of pending call insights (cron backup). */
+async function processCallInsightsBatch(limit = 5): Promise<{
+  processed: number;
+  ready: number;
+  failed: number;
+  skipped: number;
+  reclaimed: number;
+}> {
+  const out = {
+    processed: 0,
+    ready: 0,
+    failed: 0,
+    skipped: 0,
+    reclaimed: 0,
+  };
+  if (!callInsightsFeatureEnabled()) return out;
+
+  // Recover rows stuck in processing after a killed serverless cron run.
+  try {
+    const [reclaimed] = await pool.query<ResultSetHeader>(
+      `UPDATE conversation_messages
+       SET call_insights_status = 'pending',
+           call_insights_error = 'reclaimed_stuck_processing',
+           call_insights_updated_at = NOW()
+       WHERE channel = 'call'
+         AND call_insights_status = 'processing'
+         AND (
+           call_insights_updated_at IS NULL
+           OR call_insights_updated_at < NOW() - INTERVAL 15 MINUTE
+         )`,
+    );
+    out.reclaimed = Number(reclaimed.affectedRows || 0);
+  } catch (e: any) {
+    console.warn("[call-insights] reclaim", e?.message ?? e);
+  }
+
+  const claimTag = `ci-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
+  await pool.query(
+    `UPDATE conversation_messages
+     SET call_insights_status = 'processing',
+         call_insights_error = ?,
+         call_insights_updated_at = NOW()
+     WHERE id IN (
+       SELECT id FROM (
+         SELECT id FROM conversation_messages
+         WHERE channel = 'call'
+           AND call_insights_status = 'pending'
+           AND recording_url IS NOT NULL
+         ORDER BY id ASC
+         LIMIT ?
+       ) t
+     )`,
+    [claimTag, limit],
+  );
+
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT id, conversation_id, recording_url, call_duration_sec,
+            call_transcript, metadata_json, call_insights_error, created_at,
+            provider_message_id
+     FROM conversation_messages
+     WHERE channel = 'call'
+       AND call_insights_status = 'processing'
+       AND call_insights_error = ?
+     ORDER BY id ASC
+     LIMIT ?`,
+    [claimTag, limit],
+  );
+
+  const counters: CallInsightsProcessCounters = {
+    processed: 0,
+    ready: 0,
+    failed: 0,
+    skipped: 0,
+  };
+  for (const row of rows) {
+    await processCallInsightRow(row, counters);
+  }
+  out.processed = counters.processed;
+  out.ready = counters.ready;
+  out.failed = counters.failed;
+  out.skipped = counters.skipped;
+  return out;
 }
 
 function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
@@ -43137,7 +59454,7 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
 
       if (call_sid) {
         const [existing] = await pool.query<RowDataPacket[]>(
-          `SELECT id FROM conversation_messages
+          `SELECT id, conversation_id, recording_url FROM conversation_messages
            WHERE provider_message_id = ? AND channel = 'call' LIMIT 1`,
           [call_sid],
         );
@@ -43145,14 +59462,54 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
           const durationSec = duration ?? 0;
           const statusLabel = call_status ?? "completed";
           const body = `Voice call — ${durationSec}s (${statusLabel})`;
+          const pendingRec = takePendingRecording(call_sid);
           await pool.query(
             `UPDATE conversation_messages
              SET provider_status = ?,
                  call_duration_sec = COALESCE(?, call_duration_sec),
+                 recording_url = COALESCE(recording_url, ?),
                  body = ?
              WHERE id = ?`,
-            [statusLabel, durationSec || null, body, Number(existing[0].id)],
+            [
+              statusLabel,
+              durationSec || null,
+              pendingRec?.mp3Url ?? null,
+              body,
+              Number(existing[0].id),
+            ],
           );
+          if (pendingRec?.mp3Url && !existing[0].recording_url) {
+            await publishConversationRealtime({
+              type: "call_recording",
+              payload: {
+                conversation_id: Number(existing[0].conversation_id),
+                message_id: Number(existing[0].id),
+                recording_url: pendingRec.mp3Url,
+                call_duration_sec:
+                  pendingRec.durationSec != null
+                    ? pendingRec.durationSec
+                    : durationSec || null,
+              },
+            });
+            await enqueueAndProcessCallInsights(Number(existing[0].id));
+          } else if (!existing[0].recording_url && !pendingRec?.mp3Url) {
+            const pulled = await pullAndAttachTwilioRecording(
+              Number(existing[0].id),
+              [call_sid],
+            );
+            if (pulled?.recordingUrl) {
+              await publishConversationRealtime({
+                type: "call_recording",
+                payload: {
+                  conversation_id: Number(existing[0].conversation_id),
+                  message_id: Number(existing[0].id),
+                  recording_url: pulled.recordingUrl,
+                  call_duration_sec: pulled.durationSec,
+                },
+              });
+              await enqueueAndProcessCallInsights(Number(existing[0].id));
+            }
+          }
           return res.json({ success: true, idempotent: true, updated: true });
         }
       }
@@ -43226,8 +59583,9 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
       const statusLabel = call_status ?? "completed";
       const body = `Voice call — ${durationSec}s (${statusLabel})`;
       const ofgE164 = phones[0] ? String(phones[0].e164) : null;
+      const pendingRec = call_sid ? takePendingRecording(call_sid) : null;
 
-      await insertCallMessage(deps, {
+      const inserted = await insertCallMessage(deps, {
         conversationId,
         direction: dir,
         body,
@@ -43235,11 +59593,49 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
         toAddress: dir === "outbound" ? normalizedPhone : ofgE164,
         providerMessageId: call_sid ?? null,
         providerStatus: statusLabel,
-        callDurationSec: durationSec,
+        callDurationSec:
+          pendingRec?.durationSec != null
+            ? pendingRec.durationSec
+            : durationSec,
+        recordingUrl: pendingRec?.mp3Url ?? null,
         sentByAdminId: adminId,
         bumpUnread: false,
         unknownContactId,
       });
+
+      if (inserted?.id && pendingRec?.mp3Url) {
+        await publishConversationRealtime({
+          type: "call_recording",
+          payload: {
+            conversation_id: conversationId,
+            message_id: inserted.id,
+            recording_url: pendingRec.mp3Url,
+            call_duration_sec:
+              pendingRec.durationSec != null
+                ? pendingRec.durationSec
+                : durationSec || null,
+          },
+        });
+        await enqueueAndProcessCallInsights(inserted.id);
+      } else if (inserted?.id && call_sid) {
+        // Serverless cold-start: in-memory pending buffer may miss across
+        // isolates — pull completed Dial recording from Twilio by CallSid.
+        const pulled = await pullAndAttachTwilioRecording(inserted.id, [
+          call_sid,
+        ]);
+        if (pulled?.recordingUrl) {
+          await publishConversationRealtime({
+            type: "call_recording",
+            payload: {
+              conversation_id: conversationId,
+              message_id: inserted.id,
+              recording_url: pulled.recordingUrl,
+              call_duration_sec: pulled.durationSec,
+            },
+          });
+          await enqueueAndProcessCallInsights(inserted.id);
+        }
+      }
 
       await deps.publishConversationRealtime({
         type: "message",
@@ -43285,7 +59681,7 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
         const adminId = (req as AuthedRequest).auth!.id;
         const { callSid } = req.params as { callSid: string };
         const [rows] = await pool.query<RowDataPacket[]>(
-          `SELECT m.recording_url, m.call_duration_sec,
+          `SELECT m.id, m.recording_url, m.call_duration_sec,
                   c.ofg_number_id, c.assigned_admin_id
            FROM conversation_messages m
            JOIN conversations c ON c.id = m.conversation_id
@@ -43310,51 +59706,19 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
           return res.status(403).json({ success: false, error: "Forbidden" });
         }
         if (!rows[0].recording_url) {
-          if (twilioClient && process.env.TWILIO_ACCOUNT_SID) {
-            try {
-              const recordings = await twilioClient.recordings.list({
-                callSid,
-                limit: 20,
-              });
-              const completed = recordings.find(
-                (r: any) =>
-                  String(r.status || "").toLowerCase() === "completed",
-              );
-              if (completed?.sid) {
-                const recordingUrl = `https://api.twilio.com/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Recordings/${completed.sid}.mp3`;
-                const recordingDuration =
-                  completed.duration != null
-                    ? parseInt(String(completed.duration), 10)
-                    : null;
-                await pool.query(
-                  `UPDATE conversation_messages
-                   SET recording_url = COALESCE(recording_url, ?),
-                       call_duration_sec = COALESCE(call_duration_sec, ?)
-                   WHERE provider_message_id = ? AND channel = 'call'`,
-                  [
-                    recordingUrl,
-                    Number.isFinite(recordingDuration)
-                      ? recordingDuration
-                      : null,
-                    callSid,
-                  ],
-                );
-                return res.json({
-                  success: true,
-                  ready: true,
-                  recording_url: recordingUrl,
-                  recording_duration: Number.isFinite(recordingDuration)
-                    ? recordingDuration
-                    : null,
-                  sid: callSid,
-                });
-              }
-            } catch (twilioErr) {
-              console.warn(
-                `[voice:recording-check] Twilio fallback failed for ${callSid}`,
-                twilioErr,
-              );
-            }
+          const pulled = await pullAndAttachTwilioRecording(
+            Number(rows[0].id),
+            [callSid, `vm_${callSid}`],
+          );
+          if (pulled?.recordingUrl) {
+            await enqueueAndProcessCallInsights(Number(rows[0].id));
+            return res.json({
+              success: true,
+              ready: true,
+              recording_url: pulled.recordingUrl,
+              recording_duration: pulled.durationSec,
+              sid: callSid,
+            });
           }
           return res.status(202).json({
             success: true,
@@ -43505,31 +59869,89 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
   });
 
   // ── POST /api/voice/recording-status ────────────────────────────────────
+  // Dial <record> callbacks always send the parent CallSid. Softphone logs must
+  // store that same SID (see VoiceCallPanel) or this UPDATE matches 0 rows and
+  // the hub never shows an audio player / call insights.
   app.post("/api/voice/recording-status", guard, async (req, res) => {
     try {
-      const { CallSid, RecordingUrl, RecordingDuration, RecordingStatus } =
-        req.body as {
-          CallSid?: string;
-          RecordingUrl?: string;
-          RecordingDuration?: string;
-          RecordingStatus?: string;
-        };
+      const {
+        CallSid,
+        ParentCallSid,
+        RecordingUrl,
+        RecordingDuration,
+        RecordingStatus,
+      } = req.body as {
+        CallSid?: string;
+        ParentCallSid?: string;
+        RecordingUrl?: string;
+        RecordingDuration?: string;
+        RecordingStatus?: string;
+      };
       if (RecordingStatus !== "completed" || !CallSid || !RecordingUrl) {
         return res.sendStatus(204);
       }
       const mp3Url = RecordingUrl.endsWith(".mp3")
         ? RecordingUrl
         : `${RecordingUrl}.mp3`;
-      await pool.query(
-        `UPDATE conversation_messages
-         SET recording_url = ?, call_duration_sec = COALESCE(?, call_duration_sec)
-         WHERE provider_message_id = ? AND channel = 'call'`,
-        [
-          mp3Url,
-          RecordingDuration ? parseInt(RecordingDuration, 10) : null,
-          CallSid,
-        ],
+      const durationSec = RecordingDuration
+        ? parseInt(RecordingDuration, 10)
+        : null;
+      const sidCandidates = Array.from(
+        new Set(
+          [CallSid, ParentCallSid]
+            .map((s) => String(s || "").trim())
+            .filter(Boolean),
+        ),
       );
+
+      let matchedId = 0;
+      let conversationId = 0;
+      for (const sid of sidCandidates) {
+        const [upd] = await pool.query<ResultSetHeader>(
+          `UPDATE conversation_messages
+           SET recording_url = ?,
+               call_duration_sec = COALESCE(?, call_duration_sec)
+           WHERE provider_message_id = ? AND channel = 'call'`,
+          [mp3Url, Number.isFinite(durationSec) ? durationSec : null, sid],
+        );
+        if (Number(upd.affectedRows || 0) > 0) {
+          const [rows] = await pool.query<RowDataPacket[]>(
+            `SELECT id, conversation_id FROM conversation_messages
+             WHERE provider_message_id = ? AND channel = 'call'
+             LIMIT 1`,
+            [sid],
+          );
+          matchedId = Number(rows[0]?.id || 0);
+          conversationId = Number(rows[0]?.conversation_id || 0);
+          break;
+        }
+      }
+
+      if (!matchedId) {
+        for (const sid of sidCandidates) {
+          rememberPendingRecording(
+            sid,
+            mp3Url,
+            Number.isFinite(durationSec) ? durationSec : null,
+          );
+        }
+        console.warn(
+          "[voice:recording-status] no call row yet — buffered for SIDs",
+          sidCandidates.join(","),
+        );
+        return res.sendStatus(204);
+      }
+
+      await publishConversationRealtime({
+        type: "call_recording",
+        payload: {
+          conversation_id: conversationId,
+          message_id: matchedId,
+          recording_url: mp3Url,
+          call_duration_sec: Number.isFinite(durationSec) ? durationSec : null,
+        },
+      });
+      await enqueueAndProcessCallInsights(matchedId);
       return res.sendStatus(204);
     } catch (err) {
       console.error("[voice:recording-status]", err);
@@ -43803,6 +60225,10 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
         unknownContactId,
       });
 
+      if (inserted?.id) {
+        await enqueueAndProcessCallInsights(Number(inserted.id));
+      }
+
       if (assignedAdminId && inserted) {
         await deps.publishConversationRealtime({
           type: "message",
@@ -43885,10 +60311,15 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
       meta.is_voicemail = true;
       meta.voicemail_transcription = TranscriptionText || "";
 
+      const transcript = String(TranscriptionText || "").trim();
       await pool.query(
-        `UPDATE conversation_messages SET metadata_json = ? WHERE id = ?`,
-        [JSON.stringify(meta), rows[0].id],
+        `UPDATE conversation_messages
+         SET metadata_json = ?,
+             call_transcript = COALESCE(NULLIF(?, ''), call_transcript)
+         WHERE id = ?`,
+        [JSON.stringify(meta), transcript.slice(0, 65000), rows[0].id],
       );
+      await enqueueAndProcessCallInsights(Number(rows[0].id));
 
       const calledNumber = String(rows[0].to_address || "");
       const ofg = calledNumber
@@ -44185,6 +60616,7 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
           });
         const body = `Incoming call from ${callerNumber}`;
         const pendingStatus = callSid ? takePendingDialStatus(callSid) : null;
+        const pendingRec = callSid ? takePendingRecording(callSid) : null;
         const inserted = await insertCallMessage(deps, {
           conversationId,
           direction: "inbound",
@@ -44193,10 +60625,24 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
           toAddress: calledNumber || null,
           providerMessageId: callSid,
           providerStatus: pendingStatus || "ringing",
+          callDurationSec: pendingRec?.durationSec ?? null,
+          recordingUrl: pendingRec?.mp3Url ?? null,
           bumpUnread: true,
           unknownContactId,
         });
         if (inserted) {
+          if (pendingRec?.mp3Url) {
+            await publishConversationRealtime({
+              type: "call_recording",
+              payload: {
+                conversation_id: conversationId,
+                message_id: inserted.id,
+                recording_url: pendingRec.mp3Url,
+                call_duration_sec: pendingRec.durationSec,
+              },
+            });
+            await enqueueAndProcessCallInsights(inserted.id);
+          }
           await deps.publishConversationRealtime({
             type: "message",
             adminIds: [assignedAdminId],

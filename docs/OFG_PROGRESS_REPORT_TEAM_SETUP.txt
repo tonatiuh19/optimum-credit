@@ -1,0 +1,101 @@
+OFG PROGRESS REPORT — TEAM SETUP (CRM)
+======================================
+
+CONFIDENTIAL — for internal team use only.
+
+Status: CURRENT (replaces the old Claude.ai Project Knowledge / Claude Project
+setup guides). Progress reports are generated inside Optimum Credit CRM.
+
+
+WHAT CHANGED
+------------
+OLD (do not use for live work):
+  • Claude.ai Project with “Project Knowledge” PDFs
+  • Manual narrative + external PDF layout
+  • Manual upload of a finished report PDF into the case
+
+NEW (use this):
+  • Client panel → Reports → Generate (OFG Progress Report Wizard)
+  • Upload Before + After credit report PDFs (SmartCredit / bureau pulls)
+  • Local extract → staff review → branded 3-page PDF → Publish
+  • Client sees the report in the portal; pipeline advances with the round
+
+
+WHERE TO OPEN THE WIZARD
+------------------------
+1. Pipeline → open the client
+2. Reports tab
+3. Tap Generate
+
+Available when the case is in Docs Ready or any Round stage (not New Client
+while Get Started tasks are still pending).
+
+
+ROUND COMPARE (BEFORE → AFTER)
+------------------------------
+DEFAULT = BASELINE (recommended):
+  Every round’s Before = enrollment / Round 1 Before (day they started)
+  Every round’s After  = latest pull for that round
+  PDF + portal show lifetime progress vs enrollment, plus “this round”
+  when it differs.
+
+OPTIONAL = CHAIN (Reports → Special / extended rounds → Compare mode):
+  Round 1 Before  = enrollment / baseline credit PDF
+  Round 1 After   = report after Round 1 work
+  Round 2 Before  = Round 1 After  (auto-reused when published)
+  … through Round 5 (or max_rounds up to 12)
+
+Leave Baseline on unless you need a mid-program round-to-round story.
+Publish Round N before starting Round N+1 so reuse works.
+
+
+STAFF FLOW (ABOUT 30 SECONDS AFTER PDFs ARE READY)
+--------------------------------------------------
+  Open client → Reports → Generate
+  → pick round
+  → Round 1: upload Before + After
+  → Round 2+ (baseline): leave “reuse enrollment / Round 1 Before” ON; upload After
+  → Round 2+ (chain): leave “reuse prior After” ON; upload After
+  → Run extraction
+  → Sanity-check scores, wins, targets, bureau tags, report dates
+  → Preview branded PDF → Publish
+
+
+WHAT THE CLIENT PDF INCLUDES
+----------------------------
+Branded Optimum Financial Group PDF (logo, navy / gold):
+  Page 1 — Middle score hero, TU / EX / EQ before→after charts,
+           wins (this round + since enrollment when they differ), targets
+  Page 2 — Utilization bars, positive accounts, score-change chart
+  Page 3 — Roadmap / goal gap, file strength, action plan, CROA disclosure
+
+Locale follows the client language (EN / ES) when set on the report.
+
+
+GOLDEN RULES
+------------
+[OK] Compare review screen to the source Before / After PDFs
+[OK] Wins = removed items; Targets = still reporting
+[OK] Fix low-confidence scores and wrong report dates before publish
+[OK] Complete CROA attestation; investigate large unexplained drops first
+[OK] Baseline mode uses enrollment Before on every round (product default)
+
+[NO] Do not use the old Claude Project guide as the live workflow
+[NO] Do not switch to Chain unless ops needs round-to-round only
+[NO] Do not publish if Before/After look swapped
+
+
+IF SOMETHING LOOKS OFF
+----------------------
+  • Wrong Before → uncheck reuse and upload a replacement
+  • Bad extract → re-extract or Start over
+  • Resume drafts from the list at the top of the wizard
+  • Affiliates cannot run this — staff only
+
+
+MORE DETAIL
+-----------
+  docs/OFG_PROGRESS_REPORT_PIPELINE_INSTRUCTIONS.txt
+  docs/OFG_PROGRESS_REPORT_PIPELINE_GUIDE.pdf  (screenshots + same rules)
+
+That’s it: one CRM wizard, one branded client PDF per round.

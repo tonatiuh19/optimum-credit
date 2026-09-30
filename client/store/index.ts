@@ -21,6 +21,8 @@ import adminMcp from "./slices/adminMcpSlice";
 import conversations from "./slices/conversationsSlice";
 import voice from "./slices/voiceSlice";
 import funding from "./slices/fundingSlice";
+import prepaidOnboard from "./slices/prepaidOnboardSlice";
+import contacts from "./slices/contactsSlice";
 
 export const store = configureStore({
   reducer: {
@@ -46,6 +48,8 @@ export const store = configureStore({
     conversations,
     voice,
     funding,
+    prepaidOnboard,
+    contacts,
   },
   middleware: (getDefault) => getDefault({ serializableCheck: false }),
 });

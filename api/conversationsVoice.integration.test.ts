@@ -236,6 +236,78 @@ describe("conversations voice", () => {
     expect(Number(count[0].c)).toBe(1);
   });
 
+  it("recording-status attaches mp3 URL by CallSid (Dial parent)", async () => {
+    const sid = `CArecstat${Date.now()}`;
+    const log = await request(app)
+      .post("/api/voice/log")
+      .set("Authorization", `Bearer ${agentToken}`)
+      .send({
+        phone: "+17659876099",
+        duration: 28,
+        call_status: "completed",
+        call_sid: sid,
+        client_id: clientId,
+        direction: "outbound",
+      });
+    expect(log.status).toBe(200);
+
+    const recUrl = `https://api.twilio.com/2010-04-01/Accounts/ACtest/Recordings/RE${Date.now()}`;
+    const cb = await request(app)
+      .post("/api/voice/recording-status")
+      .type("form")
+      .send({
+        CallSid: sid,
+        RecordingUrl: recUrl,
+        RecordingDuration: "28",
+        RecordingStatus: "completed",
+      });
+    expect(cb.status).toBe(204);
+
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT recording_url, call_duration_sec FROM conversation_messages
+       WHERE provider_message_id = ? AND channel = 'call' LIMIT 1`,
+      [sid],
+    );
+    expect(String(rows[0]?.recording_url || "")).toBe(`${recUrl}.mp3`);
+    expect(Number(rows[0]?.call_duration_sec)).toBe(28);
+  });
+
+  it("recording-status before voice/log buffers URL until CallSid is logged", async () => {
+    const sid = `CArecbuf${Date.now()}`;
+    const recUrl = `https://api.twilio.com/2010-04-01/Accounts/ACtest/Recordings/RE${Date.now()}`;
+    const cb = await request(app)
+      .post("/api/voice/recording-status")
+      .type("form")
+      .send({
+        CallSid: sid,
+        RecordingUrl: recUrl,
+        RecordingDuration: "19",
+        RecordingStatus: "completed",
+      });
+    expect(cb.status).toBe(204);
+
+    const log = await request(app)
+      .post("/api/voice/log")
+      .set("Authorization", `Bearer ${agentToken}`)
+      .send({
+        phone: "+17659876099",
+        duration: 19,
+        call_status: "completed",
+        call_sid: sid,
+        client_id: clientId,
+        direction: "outbound",
+      });
+    expect(log.status).toBe(200);
+
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT recording_url, call_duration_sec FROM conversation_messages
+       WHERE provider_message_id = ? AND channel = 'call' LIMIT 1`,
+      [sid],
+    );
+    expect(String(rows[0]?.recording_url || "")).toBe(`${recUrl}.mp3`);
+    expect(Number(rows[0]?.call_duration_sec)).toBe(19);
+  });
+
   it("inbound voice TwiML rings assigned admin client identity", async () => {
     const [numRows] = await pool.query<RowDataPacket[]>(
       `SELECT e164 FROM admin_phone_numbers WHERE id = ?`,
@@ -257,7 +329,7 @@ describe("conversations voice", () => {
     const xml = String(res.text || "");
     expect(xml).toContain("<Response>");
     expect(xml).toContain(`admin_${agentId}`);
-  });
+  }, 60_000);
 
   it("inbound with forwarding rings cell only when softphone offline", async () => {
     const cell = "+17651234999";
@@ -304,7 +376,7 @@ describe("conversations voice", () => {
     const selfXml = String(self.text || "");
     expect(selfXml).toContain(`admin_${agentId}`);
     expect(selfXml).not.toContain(`>${cell}<`);
-  });
+  }, 60_000);
 
   it("dial-status no-answer creates missed_call in-app notification", async () => {
     const [numRows] = await pool.query<RowDataPacket[]>(

@@ -158,6 +158,10 @@ describe("admin AI tools", () => {
       runId: RUN_ID,
       clientIds: [clientId],
     });
+    await pool.query(
+      `DELETE FROM contacts WHERE last_name = ? OR first_name = 'AiContact'`,
+      [RUN_ID],
+    );
     await pool?.end();
   });
 
@@ -226,7 +230,10 @@ describe("admin AI tools", () => {
     );
     expect(list.ok).toBe(true);
     if (!list.ok) return;
-    expect((list.data as any).reports.length).toBeGreaterThanOrEqual(1);
+    const listData = list.data as any;
+    expect(listData.reports.length).toBeGreaterThanOrEqual(1);
+    expect(Array.isArray(listData.wizard_drafts)).toBe(true);
+    expect(String(listData.guidance || "")).toMatch(/Reports → Generate/i);
 
     const one = await executeAdminAiTool(
       "get_progress_report",
@@ -239,6 +246,68 @@ describe("admin AI tools", () => {
     expect(data.score_after).toBe(620);
     expect(data.summary_excerpt).toContain("Round 1");
     expect(data).not.toHaveProperty("pdf_storage_key");
+    expect(data).toHaveProperty("wizard");
+    expect(String(data.guidance || "")).toMatch(/Reports → Generate/i);
+  }, 30_000);
+
+  it("get_progress_report has_pdf true when only round_report_pdfs row exists", async () => {
+    // Mirror wizard publish: scores on client_round_reports, file in round_report_pdfs only.
+    await pool.query(
+      `UPDATE client_round_reports
+       SET pdf_storage_key = NULL, pdf_file_name = NULL, pdf_enc_iv = NULL, pdf_enc_tag = NULL
+       WHERE client_id = ? AND round_number = 1`,
+      [clientId],
+    );
+    const [repRows] = await pool.query<RowDataPacket[]>(
+      `SELECT id FROM client_round_reports
+       WHERE client_id = ? AND round_number = 1 LIMIT 1`,
+      [clientId],
+    );
+    const roundReportId = Number(repRows[0].id);
+    const [pdfIns] = await pool.query<ResultSetHeader>(
+      `INSERT INTO round_report_pdfs
+         (client_id, round_number, round_report_id, file_name, storage_key, storage_provider)
+       VALUES (?, 1, ?, ?, ?, 'local')`,
+      [
+        clientId,
+        roundReportId,
+        `wizard-only-${RUN_ID}.pdf`,
+        `vitest://wizard-only-${RUN_ID}.pdf`,
+      ],
+    );
+    const pdfId = Number(pdfIns.insertId);
+
+    try {
+      const one = await executeAdminAiTool(
+        "get_progress_report",
+        { case_id: caseId, round: 1 },
+        { adminId },
+      );
+      expect(one.ok).toBe(true);
+      if (!one.ok) return;
+      expect((one.data as any).has_pdf).toBe(true);
+      expect((one.data as any).pdf_id).toBe(pdfId);
+      expect(String((one.data as any).guidance || "")).toMatch(
+        /send_round_report/i,
+      );
+
+      const list = await executeAdminAiTool(
+        "list_progress_reports",
+        { case_id: caseId },
+        { adminId },
+      );
+      expect(list.ok).toBe(true);
+      if (!list.ok) return;
+      const r1 = ((list.data as any).reports as Array<{
+        round: number;
+        has_pdf: boolean;
+        pdf_id: number | null;
+      }>).find((r) => r.round === 1);
+      expect(r1?.has_pdf).toBe(true);
+      expect(r1?.pdf_id).toBe(pdfId);
+    } finally {
+      await pool.query(`DELETE FROM round_report_pdfs WHERE id = ?`, [pdfId]);
+    }
   }, 30_000);
 
   it("search_work_tasks finds fixture task", async () => {
@@ -370,6 +439,379 @@ describe("admin AI tools", () => {
       ]);
     }
   }, 60_000);
+
+  it("create_contact / search / convert_contact dry-run then confirm", async () => {
+    const phone = `555${String(Date.now()).slice(-7)}`;
+    const dry = await executeAdminAiTool(
+      "create_contact",
+      {
+        first_name: "AiContact",
+        last_name: RUN_ID,
+        phone,
+        preferred_language: "en",
+        notes: "address book from test",
+      },
+      { adminId },
+    );
+    expect(dry.ok).toBe(true);
+    if (!dry.ok) return;
+    expect((dry.data as any).dry_run).toBe(true);
+    expect((dry.data as any).ready).toBe(true);
+
+    const noPhrase = await executeAdminAiTool(
+      "create_contact",
+      {
+        first_name: "AiContact",
+        last_name: RUN_ID,
+        phone,
+        preferred_language: "en",
+        confirm: true,
+      },
+      { adminId },
+    );
+    expect(noPhrase.ok).toBe(false);
+
+    const created = await executeAdminAiTool(
+      "create_contact",
+      {
+        first_name: "AiContact",
+        last_name: RUN_ID,
+        phone,
+        preferred_language: "en",
+        notes: "address book from test",
+        confirm: true,
+        confirm_phrase: "CONFIRM",
+      },
+      { adminId },
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const contactId = Number((created.data as any).contact?.id);
+    expect(contactId).toBeGreaterThan(0);
+
+    const found = await executeAdminAiTool(
+      "search_contacts",
+      { q: RUN_ID, limit: 5 },
+      { adminId },
+    );
+    expect(found.ok).toBe(true);
+    if (!found.ok) return;
+    expect(
+      ((found.data as any).contacts || []).some(
+        (c: any) => Number(c.id) === contactId,
+      ),
+    ).toBe(true);
+
+    const got = await executeAdminAiTool(
+      "get_contact",
+      { contact_id: contactId },
+      { adminId },
+    );
+    expect(got.ok).toBe(true);
+    if (!got.ok) return;
+    expect(Number((got.data as any).id)).toBe(contactId);
+
+    const convertDry = await executeAdminAiTool(
+      "convert_contact",
+      { contact_id: contactId },
+      { adminId },
+    );
+    expect(convertDry.ok).toBe(true);
+    if (!convertDry.ok) return;
+    expect((convertDry.data as any).dry_run).toBe(true);
+    expect((convertDry.data as any).ready).toBe(true);
+
+    const converted = await executeAdminAiTool(
+      "convert_contact",
+      {
+        contact_id: contactId,
+        confirm: true,
+        confirm_phrase: "CONFIRM",
+      },
+      { adminId },
+    );
+    expect(converted.ok).toBe(true);
+    if (!converted.ok) return;
+    const clientIdFromContact = Number((converted.data as any).client_id);
+    expect(clientIdFromContact).toBeGreaterThan(0);
+    expect(String((converted.data as any).href)).toContain(
+      `client=${clientIdFromContact}`,
+    );
+
+    const [crows] = await pool.query<RowDataPacket[]>(
+      `SELECT converted_client_id, status, pipeline_stage FROM contacts ct
+       JOIN clients c ON c.id = ct.converted_client_id
+       WHERE ct.id = ? LIMIT 1`,
+      [contactId],
+    );
+    // cleanup contact + prospect client
+    await pool.query(`DELETE FROM clients WHERE id = ?`, [clientIdFromContact]);
+    await pool.query(`DELETE FROM contacts WHERE id = ?`, [contactId]);
+    expect(Number(crows[0]?.converted_client_id)).toBe(clientIdFromContact);
+  }, 60_000);
+
+  it("send_contact_sms dry-run then send + logs contact admin_notes", async () => {
+    const phone = `+1555${String(Date.now()).slice(-7)}`;
+    const [ins] = await pool.query<ResultSetHeader>(
+      `INSERT INTO contacts
+         (first_name, last_name, phone, preferred_language, created_by_admin_id, assigned_admin_id)
+       VALUES ('MsgContact', ?, ?, 'en', ?, ?)`,
+      [RUN_ID, phone, adminId, adminId],
+    );
+    const contactId = Number(ins.insertId);
+
+    let phoneId = 0;
+    let createdPhone = false;
+    const [existingPhones] = await pool.query<RowDataPacket[]>(
+      `SELECT id FROM admin_phone_numbers
+       WHERE assigned_admin_id = ? AND is_active = 1 LIMIT 1`,
+      [adminId],
+    );
+    if (existingPhones[0]) {
+      phoneId = Number(existingPhones[0].id);
+    } else {
+      const e164 = `+1555${String(Date.now() + 1).slice(-7)}`;
+      const [pIns] = await pool.query<ResultSetHeader>(
+        `INSERT INTO admin_phone_numbers
+           (e164, friendly_name, assigned_admin_id, is_active, capabilities_json)
+         VALUES (?, 'AI contact SMS OFG', ?, 1, JSON_OBJECT('sms', TRUE))`,
+        [e164, adminId],
+      );
+      phoneId = Number(pIns.insertId);
+      createdPhone = true;
+    }
+
+    try {
+      const dry = await executeAdminAiTool(
+        "send_contact_sms",
+        {
+          contact_id: contactId,
+          body: `Contact SMS dry ${RUN_ID}`,
+        },
+        { adminId },
+      );
+      expect(dry.ok).toBe(true);
+      if (!dry.ok) return;
+      expect((dry.data as any).dry_run).toBe(true);
+      expect((dry.data as any).ready).toBe(true);
+      expect((dry.data as any).preview?.to).toContain("555");
+
+      const noPhrase = await executeAdminAiTool(
+        "send_contact_sms",
+        {
+          contact_id: contactId,
+          body: `Contact SMS dry ${RUN_ID}`,
+          confirm: true,
+        },
+        { adminId },
+      );
+      expect(noPhrase.ok === false && noPhrase.error).toBe("confirm_required");
+
+      const sent = await executeAdminAiTool(
+        "send_contact_sms",
+        {
+          contact_id: contactId,
+          body: `Contact SMS send ${RUN_ID}`,
+          confirm: true,
+          confirm_phrase: "CONFIRM",
+        },
+        { adminId },
+      );
+      expect(sent.ok).toBe(true);
+      if (!sent.ok) return;
+      expect((sent.data as any).sent).toBe(true);
+      expect((sent.data as any).message_id).toBeGreaterThan(0);
+      expect((sent.data as any).contact_note_appended).toBe(true);
+
+      const [notes] = await pool.query<RowDataPacket[]>(
+        `SELECT admin_notes FROM contacts WHERE id = ? LIMIT 1`,
+        [contactId],
+      );
+      expect(String(notes[0]?.admin_notes || "")).toContain("[SMS");
+      expect(String(notes[0]?.admin_notes || "")).toContain(
+        `Contact SMS send ${RUN_ID}`,
+      );
+    } finally {
+      const [convRows] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM conversations WHERE contact_id = ?`,
+        [contactId],
+      );
+      for (const row of convRows) {
+        await pool.query(
+          `DELETE FROM conversation_messages WHERE conversation_id = ?`,
+          [Number(row.id)],
+        );
+      }
+      await pool.query(`DELETE FROM conversations WHERE contact_id = ?`, [
+        contactId,
+      ]);
+      await pool.query(`DELETE FROM contacts WHERE id = ?`, [contactId]);
+      if (createdPhone && phoneId > 0) {
+        await pool.query(`DELETE FROM admin_phone_numbers WHERE id = ?`, [
+          phoneId,
+        ]);
+      }
+    }
+  }, 60_000);
+
+  it("send_contact_email dry-run then send + logs contact admin_notes", async () => {
+    const email = `contact-msg-${RUN_ID}@example.test`;
+    const [ins] = await pool.query<ResultSetHeader>(
+      `INSERT INTO contacts
+         (first_name, last_name, email, preferred_language, created_by_admin_id, assigned_admin_id)
+       VALUES ('EmailContact', ?, ?, 'en', ?, ?)`,
+      [RUN_ID, email, adminId, adminId],
+    );
+    const contactId = Number(ins.insertId);
+
+    try {
+      const dry = await executeAdminAiTool(
+        "send_contact_email",
+        {
+          contact_id: contactId,
+          subject: `Hello ${RUN_ID}`,
+          body: `Contact email dry ${RUN_ID}`,
+        },
+        { adminId },
+      );
+      expect(dry.ok).toBe(true);
+      if (!dry.ok) return;
+      expect((dry.data as any).dry_run).toBe(true);
+      expect((dry.data as any).ready).toBe(true);
+      expect((dry.data as any).preview?.to).toBe(email);
+
+      const sent = await executeAdminAiTool(
+        "send_contact_email",
+        {
+          contact_id: contactId,
+          subject: `Hello ${RUN_ID}`,
+          body: `Contact email send ${RUN_ID}`,
+          confirm: true,
+          confirm_phrase: "CONFIRM",
+        },
+        { adminId },
+      );
+      expect(sent.ok).toBe(true);
+      if (!sent.ok) return;
+      expect((sent.data as any).sent).toBe(true);
+      expect((sent.data as any).contact_note_appended).toBe(true);
+
+      const [notes] = await pool.query<RowDataPacket[]>(
+        `SELECT admin_notes FROM contacts WHERE id = ? LIMIT 1`,
+        [contactId],
+      );
+      expect(String(notes[0]?.admin_notes || "")).toContain("[EMAIL");
+      expect(String(notes[0]?.admin_notes || "")).toContain(
+        `Contact email send ${RUN_ID}`,
+      );
+    } finally {
+      await pool.query(`DELETE FROM contacts WHERE id = ?`, [contactId]);
+    }
+  }, 60_000);
+
+  it("send_contact_sms / send_contact_email refuse missing phone or email", async () => {
+    const [ins] = await pool.query<ResultSetHeader>(
+      `INSERT INTO contacts
+         (first_name, last_name, email, phone, preferred_language, created_by_admin_id, assigned_admin_id)
+       VALUES ('NoChannel', ?, NULL, NULL, 'en', ?, ?)`,
+      [RUN_ID, adminId, adminId],
+    );
+    const contactId = Number(ins.insertId);
+    try {
+      const noPhone = await executeAdminAiTool(
+        "send_contact_sms",
+        {
+          contact_id: contactId,
+          body: "hi",
+        },
+        { adminId },
+      );
+      expect(noPhone.ok === false && noPhone.error).toBe("no_phone");
+
+      const noEmail = await executeAdminAiTool(
+        "send_contact_email",
+        {
+          contact_id: contactId,
+          subject: "hi",
+          body: "hi",
+        },
+        { adminId },
+      );
+      expect(noEmail.ok === false && noEmail.error).toBe("no_email");
+    } finally {
+      await pool.query(`DELETE FROM contacts WHERE id = ?`, [contactId]);
+    }
+  }, 30_000);
+
+  it("send_contact_sms rejects overlong body and converted/deleted contacts", async () => {
+    const phone = `+1555${String(Date.now()).slice(-7)}`;
+    const [ins] = await pool.query<ResultSetHeader>(
+      `INSERT INTO contacts
+         (first_name, last_name, phone, email, preferred_language, created_by_admin_id, assigned_admin_id)
+       VALUES ('EdgeContact', ?, ?, ?, 'en', ?, ?)`,
+      [RUN_ID, phone, `edge-${RUN_ID}@example.test`, adminId, adminId],
+    );
+    const contactId = Number(ins.insertId);
+    try {
+      const tooLong = await executeAdminAiTool(
+        "send_contact_sms",
+        {
+          contact_id: contactId,
+          body: "x".repeat(1601),
+        },
+        { adminId },
+      );
+      expect(tooLong.ok === false && tooLong.error).toBe("sms_body_too_long");
+
+      await pool.query(
+        `UPDATE contacts SET converted_client_id = ?, converted_at = NOW() WHERE id = ?`,
+        [clientId, contactId],
+      );
+      const convertedSms = await executeAdminAiTool(
+        "send_contact_sms",
+        { contact_id: contactId, body: "hi" },
+        { adminId },
+      );
+      expect(convertedSms.ok === false && convertedSms.error).toBe(
+        "invalid_args",
+      );
+      const convertedEmail = await executeAdminAiTool(
+        "send_contact_email",
+        {
+          contact_id: contactId,
+          subject: "hi",
+          body: "hi",
+        },
+        { adminId },
+      );
+      expect(convertedEmail.ok === false && convertedEmail.error).toBe(
+        "invalid_args",
+      );
+
+      await pool.query(
+        `UPDATE contacts SET converted_client_id = NULL, converted_at = NULL, deleted_at = NOW() WHERE id = ?`,
+        [contactId],
+      );
+      const deletedSms = await executeAdminAiTool(
+        "send_contact_sms",
+        { contact_id: contactId, body: "hi" },
+        { adminId },
+      );
+      expect(deletedSms.ok === false && deletedSms.error).toBe("not_found");
+      const deletedEmail = await executeAdminAiTool(
+        "send_contact_email",
+        {
+          contact_id: contactId,
+          subject: "hi",
+          body: "hi",
+        },
+        { adminId },
+      );
+      expect(deletedEmail.ok === false && deletedEmail.error).toBe("not_found");
+    } finally {
+      await pool.query(`DELETE FROM contacts WHERE id = ?`, [contactId]);
+    }
+  }, 30_000);
 
   it("add_case_note requires confirm then appends", async () => {
     const dry = await executeAdminAiTool(
@@ -506,7 +948,7 @@ describe("admin AI tools", () => {
       expect(String((badLen.data as any).guidance || "")).toMatch(/CRM|truncated|Re-send/i);
     }
 
-    const oversizeB64 = Buffer.alloc(3 * 1024 * 1024 + 64, 0x41).toString(
+    const oversizeB64 = Buffer.alloc(4 * 1024 * 1024 + 64, 0x41).toString(
       "base64",
     );
     const tooBig = await executeAdminAiTool(
@@ -539,6 +981,51 @@ describe("admin AI tools", () => {
     expect(String(docRows[0]?.file_name || "")).toContain(RUN_ID);
     await pool.query(`DELETE FROM client_documents WHERE id = ?`, [docId]);
   }, 90_000);
+
+  it("run_credit_analysis dry-run rejects enrolled client and accepts prospect", async () => {
+    const enrolledDry = await executeAdminAiTool(
+      "run_credit_analysis",
+      {
+        client_id: clientId,
+        file_name: `report-${RUN_ID}.pdf`,
+      },
+      { adminId },
+    );
+    expect(enrolledDry.ok).toBe(true);
+    if (enrolledDry.ok) {
+      expect((enrolledDry.data as any).ready).toBe(false);
+      expect(
+        String((enrolledDry.data as any).validation_errors?.[0] || ""),
+      ).toMatch(/prospect/i);
+    }
+
+    const [p] = await pool.query<ResultSetHeader>(
+      `INSERT INTO clients
+         (email, first_name, last_name, phone, preferred_language, status, pipeline_stage)
+       VALUES (?, 'Prospect', ?, '5550100', 'en', 'prospect', 'prospect')`,
+      [`prospect-${RUN_ID}@example.test`, RUN_ID],
+    );
+    const prospectId = p.insertId;
+
+    const prospectDry = await executeAdminAiTool(
+      "run_credit_analysis",
+      {
+        client_id: prospectId,
+        file_name: `report-${RUN_ID}.pdf`,
+      },
+      { adminId },
+    );
+    expect(prospectDry.ok).toBe(true);
+    if (prospectDry.ok) {
+      expect((prospectDry.data as any).preview?.is_prospect).toBe(true);
+      expect((prospectDry.data as any).missing_fields).toContain("file_base64");
+    }
+
+    await pool.query(`DELETE FROM credit_analyses WHERE client_id = ?`, [
+      prospectId,
+    ]);
+    await pool.query(`DELETE FROM clients WHERE id = ?`, [prospectId]);
+  }, 45_000);
 
   it("send_email dry-run then send + logs EMAIL case note", async () => {
     const dry = await executeAdminAiTool(
@@ -631,6 +1118,7 @@ describe("admin AI tools", () => {
       { adminId },
     );
     expect(missing.ok === false && missing.error).toBe("no_email");
+    expect(String((missing as any).message || "")).toMatch(/update_client/i);
 
     const [cancelledIns] = await pool.query<ResultSetHeader>(
       `INSERT INTO clients (email, first_name, last_name, status, pipeline_stage, preferred_language)
@@ -655,6 +1143,124 @@ describe("admin AI tools", () => {
       noEmailId,
       cancelledId,
     ]);
+  }, 45_000);
+
+  it("send_email dry-run includes attachment_base64 meta without sending", async () => {
+    const pdfBytes = Buffer.from("%PDF-1.4 vitest-attachment");
+    const dry = await executeAdminAiTool(
+      "send_email",
+      {
+        client_id: clientId,
+        subject: `Attach ${RUN_ID}`,
+        body: "Please see the attached PDF.",
+        attachment_base64: pdfBytes.toString("base64"),
+        attachment_filename: `progress-${RUN_ID}.pdf`,
+      },
+      { adminId },
+    );
+    expect(dry.ok).toBe(true);
+    if (!dry.ok) return;
+    expect((dry.data as any).dry_run).toBe(true);
+    expect((dry.data as any).preview?.attachment?.filename).toBe(
+      `progress-${RUN_ID}.pdf`,
+    );
+    expect((dry.data as any).preview?.attachment?.byte_length).toBe(
+      pdfBytes.length,
+    );
+    expect((dry.data as any).preview?.attachment?.source).toBe("base64");
+
+    const both = await executeAdminAiTool(
+      "send_email",
+      {
+        client_id: clientId,
+        subject: `Attach bad ${RUN_ID}`,
+        body: "nope",
+        attachment_base64: pdfBytes.toString("base64"),
+        attachment_filename: "x.pdf",
+        attachment_case_document_id: 1,
+      },
+      { adminId },
+    );
+    expect(both.ok === false && both.error).toBe("invalid_args");
+  }, 45_000);
+
+  it("update_client dry-run then confirm patches email/phone/name/language", async () => {
+    const [ins] = await pool.query<ResultSetHeader>(
+      `INSERT INTO clients
+         (email, first_name, last_name, phone, preferred_language, status, pipeline_stage)
+       VALUES (?, 'OldFirst', 'OldLast', '5551112222', 'en', 'active', 'new_client')`,
+      [`old-${EMAIL}`],
+    );
+    const id = Number(ins.insertId);
+    const newEmail = `new-${EMAIL}`;
+
+    const dry = await executeAdminAiTool(
+      "update_client",
+      {
+        client_id: id,
+        first_name: "NewFirst",
+        last_name: "NewLast",
+        email: newEmail,
+        phone: "5559998888",
+        preferred_language: "es",
+      },
+      { adminId },
+    );
+    expect(dry.ok).toBe(true);
+    if (!dry.ok) return;
+    expect((dry.data as any).dry_run).toBe(true);
+    expect((dry.data as any).preview?.patch?.email).toBe(newEmail);
+    expect((dry.data as any).preview?.patch?.preferred_language).toBe("es");
+
+    const [before] = await pool.query<RowDataPacket[]>(
+      `SELECT email, first_name, preferred_language FROM clients WHERE id = ?`,
+      [id],
+    );
+    expect(String(before[0].email)).toBe(`old-${EMAIL}`);
+    expect(String(before[0].first_name)).toBe("OldFirst");
+
+    const confirmed = await executeAdminAiTool(
+      "update_client",
+      {
+        client_id: id,
+        first_name: "NewFirst",
+        last_name: "NewLast",
+        email: newEmail,
+        phone: "5559998888",
+        preferred_language: "es",
+        confirm: true,
+        confirm_phrase: "CONFIRM",
+      },
+      { adminId },
+    );
+    expect(confirmed.ok).toBe(true);
+    if (!confirmed.ok) return;
+    expect(String((confirmed.data as any).client?.email)).toBe(newEmail);
+    expect(String((confirmed.data as any).client?.first_name)).toBe("NewFirst");
+    expect(String((confirmed.data as any).client?.preferred_language)).toBe(
+      "es",
+    );
+
+    const esOwner = await resolveLanguageOwnerAdminId("es");
+    expect(Number((confirmed.data as any).client?.assigned_admin_id)).toBe(
+      esOwner,
+    );
+
+    const clearBoth = await executeAdminAiTool(
+      "update_client",
+      {
+        client_id: id,
+        email: "",
+        phone: "",
+        confirm: true,
+        confirm_phrase: "CONFIRM",
+      },
+      { adminId },
+    );
+    expect(clearBoth.ok === false && clearBoth.error).toBe("invalid_args");
+    expect(String((clearBoth as any).code || "")).toBe("contact_required");
+
+    await pool.query(`DELETE FROM clients WHERE id = ?`, [id]);
   }, 45_000);
 
   it("send_email to referrer dry-run then send + logs partner and client notes", async () => {
@@ -892,6 +1498,302 @@ describe("admin AI tools", () => {
     expect(ownerRows[0]?.language_owner_for).toBe("es");
   }, 30_000);
 
+  it("create_work_task assigns named staff instead of the language owner", async () => {
+    const enOwnerId = await resolveLanguageOwnerAdminId("en");
+    expect(enOwnerId).toBeTruthy();
+    const [named] = await pool.query<RowDataPacket[]>(
+      `SELECT id, first_name, last_name FROM admins
+       WHERE status = 'active' AND role IN ('super_admin','admin','agent')
+         AND LOWER(first_name) = 'alex' AND LOWER(last_name) = 'gomez'
+       LIMIT 1`,
+    );
+    expect(named[0], "Alex Gomez staff row required").toBeTruthy();
+    const alexId = Number(named[0].id);
+    expect(alexId).not.toBe(Number(enOwnerId));
+
+    const listed = await executeAdminAiTool(
+      "search_admins",
+      { q: "Alex Gomez" },
+      { adminId },
+    );
+    expect(listed.ok).toBe(true);
+    if (!listed.ok) return;
+    const adminsList = ((listed.data as any).admins || []) as Array<{
+      id: number;
+      phone?: string | null;
+      has_phone?: boolean;
+    }>;
+    const ids = adminsList.map((a) => Number(a.id));
+    expect(ids).toContain(alexId);
+    const alexRow = adminsList.find((a) => Number(a.id) === alexId);
+    expect(alexRow).toBeTruthy();
+    expect(typeof alexRow!.has_phone).toBe("boolean");
+    expect("phone" in (alexRow || {})).toBe(true);
+
+    const dry = await executeAdminAiTool(
+      "create_work_task",
+      {
+        title: `AI named alex ${RUN_ID}`,
+        preferred_language: "en",
+        assignee_name: "Alex Gomez",
+      },
+      { adminId },
+    );
+    expect(dry.ok).toBe(true);
+    if (!dry.ok) return;
+    expect(Number((dry.data as any).preview?.assignee?.id)).toBe(alexId);
+
+    const created = await executeAdminAiTool(
+      "create_work_task",
+      {
+        title: `AI named alex ${RUN_ID}`,
+        preferred_language: "en",
+        assignee_name: "Alex Gomez",
+        confirm: true,
+        confirm_phrase: "CONFIRM",
+      },
+      { adminId },
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const taskIdNamed = Number((created.data as any).task_id);
+    expect(Number((created.data as any).assignee?.id)).toBe(alexId);
+    const [row] = await pool.query<RowDataPacket[]>(
+      `SELECT assignee_admin_id FROM admin_work_tasks WHERE id = ? LIMIT 1`,
+      [taskIdNamed],
+    );
+    expect(Number(row[0]?.assignee_admin_id)).toBe(alexId);
+    await pool.query(`DELETE FROM admin_work_tasks WHERE id = ?`, [
+      taskIdNamed,
+    ]);
+  }, 60_000);
+
+  it("create_work_task does not silently fall back when the name is unknown", async () => {
+    const res = await executeAdminAiTool(
+      "create_work_task",
+      {
+        title: `AI unknown staff ${RUN_ID}`,
+        preferred_language: "en",
+        assignee_name: "Not A Real Staffer",
+      },
+      { adminId },
+    );
+    expect(res.ok === false && res.error).toBe("assignee_not_found");
+  }, 30_000);
+
+  it("create_prospect assigns named staff instead of the language owner", async () => {
+    const enOwnerId = await resolveLanguageOwnerAdminId("en");
+    expect(enOwnerId).toBeTruthy();
+    const [named] = await pool.query<RowDataPacket[]>(
+      `SELECT id FROM admins
+       WHERE status = 'active' AND role IN ('super_admin','admin','agent')
+         AND LOWER(first_name) = 'alex' AND LOWER(last_name) = 'gomez'
+       LIMIT 1`,
+    );
+    expect(named[0], "Alex Gomez staff row required").toBeTruthy();
+    const alexId = Number(named[0].id);
+    expect(alexId).not.toBe(Number(enOwnerId));
+
+    const dry = await executeAdminAiTool(
+      "create_prospect",
+      {
+        first_name: "Named",
+        last_name: `Owner ${RUN_ID}`,
+        phone: `555${String(Date.now()).slice(-7)}`.slice(0, 10),
+        preferred_language: "en",
+        assigned_admin_name: "Alex Gomez",
+      },
+      { adminId },
+    );
+    expect(dry.ok).toBe(true);
+    if (!dry.ok) return;
+    expect(Number((dry.data as any).preview?.assigned_admin?.id)).toBe(alexId);
+  }, 30_000);
+
+  it("update_work_task reassigns from language owner to named staff", async () => {
+    const enOwnerId = await resolveLanguageOwnerAdminId("en");
+    expect(enOwnerId).toBeTruthy();
+    const [named] = await pool.query<RowDataPacket[]>(
+      `SELECT id FROM admins
+       WHERE status = 'active' AND role IN ('super_admin','admin','agent')
+         AND LOWER(first_name) = 'alex' AND LOWER(last_name) = 'gomez'
+       LIMIT 1`,
+    );
+    expect(named[0], "Alex Gomez staff row required").toBeTruthy();
+    const alexId = Number(named[0].id);
+
+    const created = await executeAdminAiTool(
+      "create_work_task",
+      {
+        title: `AI reassign ${RUN_ID}`,
+        preferred_language: "en",
+        confirm: true,
+        confirm_phrase: "CONFIRM",
+      },
+      { adminId },
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const taskId = Number((created.data as any).task_id);
+    expect(Number((created.data as any).assignee?.id)).toBe(Number(enOwnerId));
+
+    const dry = await executeAdminAiTool(
+      "update_work_task",
+      {
+        task_id: taskId,
+        assignee_name: "Alex Gomez",
+      },
+      { adminId },
+    );
+    expect(dry.ok).toBe(true);
+    if (!dry.ok) return;
+    expect(Number((dry.data as any).preview?.patch?.assignee_admin_id)).toBe(
+      alexId,
+    );
+
+    const updated = await executeAdminAiTool(
+      "update_work_task",
+      {
+        task_id: taskId,
+        assignee_name: "Alex Gomez",
+        confirm: true,
+        confirm_phrase: "CONFIRM",
+      },
+      { adminId },
+    );
+    expect(updated.ok).toBe(true);
+    if (!updated.ok) return;
+    expect(Number((updated.data as any).assignee?.id)).toBe(alexId);
+    await pool.query(`DELETE FROM admin_work_tasks WHERE id = ?`, [taskId]);
+  }, 60_000);
+
+  it("create_work_task spoken name wins over a leftover language-owner id", async () => {
+    const enOwnerId = await resolveLanguageOwnerAdminId("en");
+    expect(enOwnerId).toBeTruthy();
+    const [named] = await pool.query<RowDataPacket[]>(
+      `SELECT id FROM admins
+       WHERE status = 'active' AND role IN ('super_admin','admin','agent')
+         AND LOWER(first_name) = 'alex' AND LOWER(last_name) = 'gomez'
+       LIMIT 1`,
+    );
+    expect(named[0], "Alex Gomez staff row required").toBeTruthy();
+    const alexId = Number(named[0].id);
+    expect(alexId).not.toBe(Number(enOwnerId));
+
+    const dry = await executeAdminAiTool(
+      "create_work_task",
+      {
+        title: `AI leftover id ${RUN_ID}`,
+        preferred_language: "en",
+        assignee_admin_id: enOwnerId,
+        assignee_name: "Alex Gomez",
+      },
+      { adminId },
+    );
+    expect(dry.ok).toBe(true);
+    if (!dry.ok) return;
+    expect(Number((dry.data as any).preview?.assignee?.id)).toBe(alexId);
+  }, 30_000);
+
+  it("create_work_task refuses an ambiguous last name", async () => {
+    const res = await executeAdminAiTool(
+      "create_work_task",
+      {
+        title: `AI gomez ${RUN_ID}`,
+        preferred_language: "en",
+        assignee_name: "Gomez",
+      },
+      { adminId },
+    );
+    expect(res.ok === false && res.error).toBe("assignee_ambiguous");
+  }, 30_000);
+
+  it("update_client assigned_admin_name overrides language-owner reassignment", async () => {
+    const enOwnerId = await resolveLanguageOwnerAdminId("en");
+    const [named] = await pool.query<RowDataPacket[]>(
+      `SELECT id FROM admins
+       WHERE status = 'active' AND role IN ('super_admin','admin','agent')
+         AND LOWER(first_name) = 'alex' AND LOWER(last_name) = 'gomez'
+       LIMIT 1`,
+    );
+    expect(named[0], "Alex Gomez staff row required").toBeTruthy();
+    const alexId = Number(named[0].id);
+
+    const dry = await executeAdminAiTool(
+      "update_client",
+      {
+        client_id: clientId,
+        preferred_language: "en",
+        assigned_admin_name: "Alex Gomez",
+      },
+      { adminId },
+    );
+    expect(dry.ok).toBe(true);
+    if (!dry.ok) return;
+    expect(Number((dry.data as any).preview?.patch?.assigned_admin_id)).toBe(
+      alexId,
+    );
+    expect(Number((dry.data as any).preview?.patch?.assigned_admin_id)).not.toBe(
+      Number(enOwnerId),
+    );
+  }, 30_000);
+
+  it("send_email to_admin dry-run targets staff instead of the client", async () => {
+    const [named] = await pool.query<RowDataPacket[]>(
+      `SELECT id, email FROM admins
+       WHERE status = 'active' AND role IN ('super_admin','admin','agent')
+         AND LOWER(first_name) = 'alex' AND LOWER(last_name) = 'gomez'
+         AND email IS NOT NULL AND TRIM(email) <> ''
+       LIMIT 1`,
+    );
+    expect(named[0], "Alex Gomez staff row required").toBeTruthy();
+    const dry = await executeAdminAiTool(
+      "send_email",
+      {
+        to_admin_name: "Alex Gomez",
+        subject: `Staff ping ${RUN_ID}`,
+        body: "Please review the pipeline.",
+      },
+      { adminId },
+    );
+    expect(dry.ok).toBe(true);
+    if (!dry.ok) return;
+    expect((dry.data as any).preview?.audience).toBe("staff");
+    expect(String((dry.data as any).preview?.to || "").toLowerCase()).toBe(
+      String(named[0].email).toLowerCase(),
+    );
+    expect((dry.data as any).preview?.will_log_client_note).toBe(false);
+  }, 30_000);
+
+  it("send_sms from_admin dry-run uses that staff OFG line", async () => {
+    await pool.query(`UPDATE clients SET phone = ? WHERE id = ?`, [
+      "+15559876111",
+      clientId,
+    ]);
+    const [phones] = await pool.query<RowDataPacket[]>(
+      `SELECT assigned_admin_id, e164 FROM admin_phone_numbers
+       WHERE is_active = 1 AND assigned_admin_id IS NOT NULL
+         AND assigned_admin_id <> ?
+       ORDER BY id ASC LIMIT 1`,
+      [adminId],
+    );
+    if (!phones[0]) return;
+    const fromAdminId = Number(phones[0].assigned_admin_id);
+    const fromE164 = String(phones[0].e164);
+    const dry = await executeAdminAiTool(
+      "send_sms",
+      {
+        client_id: clientId,
+        body: "From-line check",
+        from_admin_id: fromAdminId,
+      },
+      { adminId },
+    );
+    expect(dry.ok).toBe(true);
+    if (!dry.ok) return;
+    expect((dry.data as any).preview?.from).toBe(fromE164);
+  }, 30_000);
+
   it("write tools enforce missing fields, phone, and confirm gates", async () => {
     const missingLang = await executeAdminAiTool(
       "create_prospect",
@@ -939,9 +1841,11 @@ describe("admin AI tools", () => {
     );
     expect(dupDry.ok).toBe(true);
     if (!dupDry.ok) return;
-    expect((dupDry.data as any).requires_confirm_duplicate).toBe(true);
+    expect((dupDry.data as any).existing).toBe(true);
+    expect((dupDry.data as any).client_id).toBe(clientId);
+    expect((dupDry.data as any).href).toContain(`client=${clientId}`);
 
-    const dupBlocked = await executeAdminAiTool(
+    const dupConfirm = await executeAdminAiTool(
       "create_prospect",
       {
         first_name: "Dup",
@@ -953,8 +1857,11 @@ describe("admin AI tools", () => {
       },
       { adminId },
     );
-    expect(dupBlocked.ok).toBe(false);
-    expect(dupBlocked.ok === false && dupBlocked.error).toBe("duplicate_phone");
+    expect(dupConfirm.ok).toBe(true);
+    if (!dupConfirm.ok) return;
+    expect((dupConfirm.data as any).existing).toBe(true);
+    expect((dupConfirm.data as any).client_id).toBe(clientId);
+    expect((dupConfirm.data as any).created).toBeUndefined();
 
     const noPhrase = await executeAdminAiTool(
       "add_case_note",
@@ -1031,6 +1938,22 @@ describe("admin AI tools", () => {
   }, 30_000);
 
   it("upsert_progress_report dry-run then write", async () => {
+    const missingScores = await executeAdminAiTool(
+      "upsert_progress_report",
+      {
+        case_id: caseId,
+        round: 1,
+        summary_md: `Missing scores ${RUN_ID}`,
+      },
+      { adminId },
+    );
+    expect(missingScores.ok).toBe(true);
+    if (!missingScores.ok) return;
+    expect((missingScores.data as any).ready).toBe(false);
+    const missing = String((missingScores.data as any).missing_fields || []);
+    expect(missing).toMatch(/score_before/);
+    expect(missing).toMatch(/score_after/);
+
     const dry = await executeAdminAiTool(
       "upsert_progress_report",
       {
@@ -1074,6 +1997,8 @@ describe("admin AI tools", () => {
         case_id: caseId,
         round: 1,
         summary_md: `Overwrite attempt ${RUN_ID}`,
+        score_before: 580,
+        score_after: 620,
         confirm: true,
         confirm_phrase: "CONFIRM",
       },
@@ -1081,6 +2006,14 @@ describe("admin AI tools", () => {
     );
     expect(blocked.ok).toBe(false);
     expect(blocked.ok === false && blocked.error).toBe("published_exists");
+    expect(
+      blocked.ok === false && blocked.crm_required?.reason,
+    ).toBe("published_progress_report");
+    expect(
+      String(
+        (blocked.ok === false && blocked.crm_required?.user_message) || "",
+      ),
+    ).toMatch(/Reports → Generate/i);
 
     await pool.query(
       `DELETE FROM client_round_reports WHERE client_id = ? AND round_number = 1`,
@@ -1127,7 +2060,7 @@ describe("admin AI tools", () => {
       0,
     );
     expect(String((warnDry.data as any).preview?.warning || "")).toMatch(
-      /DUPLICATE/i,
+      /open splits|replace_open/i,
     );
 
     const created = await executeAdminAiTool(
@@ -1175,6 +2108,319 @@ describe("admin AI tools", () => {
     await pool.query(`DELETE FROM payments WHERE split_id = ?`, [splitId]);
     await pool.query(`DELETE FROM payment_splits WHERE id = ?`, [splitId]);
   }, 90_000);
+
+  it("upsert_payment_splits status=paid updates matching open row (no twin)", async () => {
+    const due = new Date();
+    due.setDate(due.getDate() - 2);
+    const dueStr = due.toISOString().slice(0, 10);
+    const [seed] = await pool.query<ResultSetHeader>(
+      `INSERT INTO payment_splits
+         (case_id, client_id, label, amount_cents, due_date, status, created_by_admin_id)
+       VALUES (?, ?, ?, 22000, ?, 'pending', ?)`,
+      [caseId, clientId, `Open twin ${RUN_ID}`, dueStr, adminId],
+    );
+    const openId = Number(seed.insertId);
+
+    const paidUpsert = await executeAdminAiTool(
+      "upsert_payment_splits",
+      {
+        case_id: caseId,
+        splits_json: JSON.stringify([
+          {
+            label: `Paid via upsert ${RUN_ID}`,
+            amount_cents: 22000,
+            due_date: dueStr,
+            status: "paid",
+            notes: "matched open",
+          },
+        ]),
+        confirm: true,
+        confirm_phrase: "CONFIRM",
+      },
+      { adminId },
+    );
+    expect(paidUpsert.ok).toBe(true);
+    if (!paidUpsert.ok) return;
+    expect((paidUpsert.data as any).updated_split_ids).toContain(openId);
+    expect((paidUpsert.data as any).split_ids || []).toHaveLength(0);
+
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, status, payments_id FROM payment_splits
+       WHERE case_id = ? AND due_date = ? AND amount_cents = 22000
+       ORDER BY id`,
+      [caseId, dueStr],
+    );
+    expect(rows).toHaveLength(1);
+    expect(Number(rows[0].id)).toBe(openId);
+    expect(String(rows[0].status)).toBe("paid");
+    expect(rows[0].payments_id).toBeTruthy();
+
+    // Second paid upsert must skip — no double ledger
+    const again = await executeAdminAiTool(
+      "upsert_payment_splits",
+      {
+        case_id: caseId,
+        splits_json: JSON.stringify([
+          {
+            label: `Dup paid ${RUN_ID}`,
+            amount_cents: 22000,
+            due_date: dueStr,
+            status: "paid",
+          },
+        ]),
+        confirm: true,
+        confirm_phrase: "CONFIRM",
+      },
+      { adminId },
+    );
+    expect(again.ok).toBe(true);
+    if (!again.ok) return;
+    expect((again.data as any).skipped?.[0]?.action).toBe("skip_already_paid");
+    const [payCount] = await pool.query<RowDataPacket[]>(
+      `SELECT COUNT(*) AS n FROM payments WHERE split_id = ?`,
+      [openId],
+    );
+    expect(Number(payCount[0].n)).toBe(1);
+
+    await pool.query(`DELETE FROM payments WHERE split_id = ?`, [openId]);
+    await pool.query(`DELETE FROM payment_splits WHERE id = ?`, [openId]);
+  }, 90_000);
+
+  it("set_case_payment_plan sets discounted total (replace_open) + case note", async () => {
+    const due = new Date();
+    due.setDate(due.getDate() + 5);
+    const dueStr = due.toISOString().slice(0, 10);
+
+    // Seed a higher open balance so replace_open matters
+    await pool.query(
+      `INSERT INTO payment_splits
+         (case_id, client_id, label, amount_cents, due_date, status, created_by_admin_id)
+       VALUES (?, ?, 'Full package seed', 149700, ?, 'pending', ?)`,
+      [caseId, clientId, dueStr, adminId],
+    );
+
+    const dry = await executeAdminAiTool(
+      "set_case_payment_plan",
+      {
+        case_id: caseId,
+        total_cents: 99700,
+        due_date: dueStr,
+        label: `Zelle deal ${RUN_ID}`,
+        notes: "Agreed Zelle discount",
+        case_note: `Zelle deal $${997} for ${RUN_ID}`,
+        payment_method: "zelle",
+      },
+      { adminId },
+    );
+    expect(dry.ok).toBe(true);
+    if (!dry.ok) return;
+    expect((dry.data as any).ready).toBe(true);
+    expect((dry.data as any).deal?.total_cents).toBe(99700);
+    expect((dry.data as any).deal?.kind).toBe("discounted_payment_plan");
+    expect((dry.data as any).preview?.replace_open).toBe(true);
+
+    const written = await executeAdminAiTool(
+      "set_case_payment_plan",
+      {
+        case_id: caseId,
+        total_cents: 99700,
+        due_date: dueStr,
+        label: `Zelle deal ${RUN_ID}`,
+        notes: "Agreed Zelle discount",
+        case_note: `Zelle deal $997 for ${RUN_ID}`,
+        payment_method: "zelle",
+        confirm: true,
+        confirm_phrase: "CONFIRM",
+      },
+      { adminId },
+    );
+    expect(written.ok).toBe(true);
+    if (!written.ok) return;
+    expect((written.data as any).created).toBe(true);
+    expect((written.data as any).case_note_appended).toBe(true);
+    const splitId = Number((written.data as any).split_ids?.[0]);
+    expect(splitId).toBeGreaterThan(0);
+
+    const [openRows] = await pool.query<RowDataPacket[]>(
+      `SELECT id, amount_cents, status, label FROM payment_splits
+       WHERE case_id = ? AND status IN ('pending','overdue','processing')`,
+      [caseId],
+    );
+    expect(openRows).toHaveLength(1);
+    expect(Number(openRows[0].amount_cents)).toBe(99700);
+
+    const [cancelled] = await pool.query<RowDataPacket[]>(
+      `SELECT COUNT(*) AS n FROM payment_splits
+       WHERE case_id = ? AND status = 'cancelled' AND label = 'Full package seed'`,
+      [caseId],
+    );
+    expect(Number(cancelled[0].n)).toBeGreaterThanOrEqual(1);
+
+    const [notes] = await pool.query<RowDataPacket[]>(
+      `SELECT admin_notes FROM clients WHERE id = ?`,
+      [clientId],
+    );
+    expect(String(notes[0]?.admin_notes || "")).toMatch(/Zelle deal \$997/);
+
+    const installments = await executeAdminAiTool(
+      "list_installments",
+      { case_id: caseId, status: "open" },
+      { adminId },
+    );
+    expect(installments.ok).toBe(true);
+    if (!installments.ok) return;
+    expect(Number((installments.data as any).owed_cents)).toBe(99700);
+
+    await pool.query(`DELETE FROM payment_splits WHERE case_id = ?`, [caseId]);
+  }, 90_000);
+
+  it("create_coupon dry-run then create; list_coupons finds it", async () => {
+    const code = `AI${RUN_ID.replace(/[^a-zA-Z0-9]/g, "").slice(-10)}`.slice(
+      0,
+      20,
+    );
+    const dry = await executeAdminAiTool(
+      "create_coupon",
+      {
+        code,
+        description: `Vitest coupon ${RUN_ID}`,
+        discount_type: "fixed",
+        discount_value: 20000,
+        max_uses: 5,
+      },
+      { adminId },
+    );
+    expect(dry.ok).toBe(true);
+    if (!dry.ok) return;
+    expect((dry.data as any).ready).toBe(true);
+    expect((dry.data as any).preview?.code).toBe(code.toUpperCase());
+
+    const noPhrase = await executeAdminAiTool(
+      "create_coupon",
+      {
+        code,
+        discount_type: "fixed",
+        discount_value: 20000,
+        confirm: true,
+      },
+      { adminId },
+    );
+    expect(noPhrase.ok === false && noPhrase.error).toBe("confirm_required");
+
+    const created = await executeAdminAiTool(
+      "create_coupon",
+      {
+        code,
+        description: `Vitest coupon ${RUN_ID}`,
+        discount_type: "fixed",
+        discount_value: 20000,
+        max_uses: 5,
+        confirm: true,
+        confirm_phrase: "CONFIRM",
+      },
+      { adminId },
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect((created.data as any).created).toBe(true);
+    const couponId = Number((created.data as any).coupon?.id);
+    expect(couponId).toBeGreaterThan(0);
+
+    const listed = await executeAdminAiTool(
+      "list_coupons",
+      { q: code, active_only: true },
+      { adminId },
+    );
+    expect(listed.ok).toBe(true);
+    if (!listed.ok) return;
+    expect(
+      ((listed.data as any).coupons as any[]).some(
+        (c) => Number(c.id) === couponId,
+      ),
+    ).toBe(true);
+
+    const dup = await executeAdminAiTool(
+      "create_coupon",
+      {
+        code,
+        discount_type: "fixed",
+        discount_value: 1000,
+        confirm: true,
+        confirm_phrase: "CONFIRM",
+      },
+      { adminId },
+    );
+    expect(dup.ok === false && dup.error).toBe("duplicate_code");
+
+    await pool.query(`DELETE FROM coupons WHERE id = ?`, [couponId]);
+  }, 60_000);
+
+  it("create_coupon rejects invalid percentage / empty code / bad dates", async () => {
+    const pct = await executeAdminAiTool(
+      "create_coupon",
+      {
+        code: `PCTBAD${RUN_ID.slice(-6)}`,
+        discount_type: "percentage",
+        discount_value: 150,
+        confirm: true,
+        confirm_phrase: "CONFIRM",
+      },
+      { adminId },
+    );
+    expect(pct.ok === false && pct.error).toBe("invalid_args");
+
+    const emptyCode = await executeAdminAiTool(
+      "create_coupon",
+      {
+        code: "!!!",
+        discount_type: "fixed",
+        discount_value: 1000,
+      },
+      { adminId },
+    );
+    expect(emptyCode.ok).toBe(true);
+    if (!emptyCode.ok) return;
+    expect((emptyCode.data as any).ready).toBe(false);
+    expect((emptyCode.data as any).missing_fields).toContain("code");
+
+    const badDate = await executeAdminAiTool(
+      "create_coupon",
+      {
+        code: `DTBAD${RUN_ID.slice(-6)}`,
+        discount_type: "percentage",
+        discount_value: 10,
+        expires_at: "not-a-date",
+        confirm: true,
+        confirm_phrase: "CONFIRM",
+      },
+      { adminId },
+    );
+    expect(badDate.ok === false && badDate.error).toBe("invalid_args");
+
+    const pctOkCode = `PCTOK${RUN_ID.replace(/[^a-zA-Z0-9]/g, "").slice(-8)}`.slice(
+      0,
+      20,
+    );
+    const pctCreated = await executeAdminAiTool(
+      "create_coupon",
+      {
+        code: pctOkCode,
+        discount_type: "percentage",
+        discount_value: 25,
+        confirm: true,
+        confirm_phrase: "CONFIRM",
+      },
+      { adminId },
+    );
+    expect(pctCreated.ok).toBe(true);
+    if (!pctCreated.ok) return;
+    const pctId = Number((pctCreated.data as any).coupon?.id);
+    expect(pctId).toBeGreaterThan(0);
+    expect(String((pctCreated.data as any).coupon?.discount_type)).toBe(
+      "percentage",
+    );
+    await pool.query(`DELETE FROM coupons WHERE id = ?`, [pctId]);
+  }, 60_000);
 
   it("update_payment_split refuses unpay after ledger write", async () => {
     const due = new Date();
@@ -1613,6 +2859,102 @@ describe("admin AI tools", () => {
       }
     }
   }, 90_000);
+
+  it("get_call_insights returns gated flag + ready call resume for client", async () => {
+    const [convIns] = await pool.query<ResultSetHeader>(
+      `INSERT INTO conversations (client_id, channel, status, last_message_at)
+       VALUES (?, 'call', 'open', NOW())`,
+      [clientId],
+    );
+    const conversationId = Number(convIns.insertId);
+    const insights = {
+      locale: "en",
+      summary_bullets: ["Asked about Round 2", `AI call ${RUN_ID}`],
+      sentiment: { label: "hopeful", score: 0.8, feelings: ["optimistic"] },
+      topics: ["Round 2"],
+      action_items: ["Send status SMS"],
+      risk_flags: ["buy_ready"],
+      interesting: ["Closing next month"],
+    };
+    const [msgIns] = await pool.query<ResultSetHeader>(
+      `INSERT INTO conversation_messages
+         (conversation_id, direction, channel, body, provider_status,
+          call_duration_sec, recording_url, metadata_json,
+          call_insights_status, call_transcript, call_insights_json)
+       VALUES (?, 'inbound', 'call', ?, 'completed', 42,
+               'https://api.twilio.com/2010-04-01/Accounts/ACtest/Recordings/REtest.mp3',
+               ?, 'ready', ?, ?)`,
+      [
+        conversationId,
+        `Incoming call ${RUN_ID}`,
+        JSON.stringify({ is_voicemail: false }),
+        `Transcript for ${RUN_ID}`,
+        JSON.stringify(insights),
+      ],
+    );
+    const messageId = Number(msgIns.insertId);
+
+    try {
+      const listed = await executeAdminAiTool(
+        "list_sms",
+        { client_id: clientId, limit: 20 },
+        { adminId },
+      );
+      expect(listed.ok).toBe(true);
+      if (!listed.ok) return;
+      const callRow = ((listed.data as any).messages as any[]).find(
+        (m) => Number(m.id) === messageId,
+      );
+      expect(callRow?.channel).toBe("call");
+      expect(callRow?.call_insights_status).toBe("ready");
+      expect(String(callRow?.insights_summary || "")).toContain("Round 2");
+
+      const got = await executeAdminAiTool(
+        "get_call_insights",
+        { client_id: clientId, message_id: messageId },
+        { adminId },
+      );
+      expect(got.ok).toBe(true);
+      if (!got.ok) return;
+      const data = got.data as any;
+      expect(typeof data.call_insights_enabled).toBe("boolean");
+      expect(data.calls).toHaveLength(1);
+      expect(data.calls[0].message_id).toBe(messageId);
+      expect(data.calls[0].call_insights_status).toBe("ready");
+      expect(data.calls[0].insights?.sentiment?.label).toBe("hopeful");
+      expect(String(data.calls[0].transcript_full || "")).toContain(RUN_ID);
+
+      const missing = await executeAdminAiTool(
+        "get_call_insights",
+        {},
+        { adminId },
+      );
+      expect(missing.ok).toBe(false);
+    } finally {
+      await pool
+        .query(`DELETE FROM conversation_messages WHERE id = ?`, [messageId])
+        .catch(() => {});
+      await pool
+        .query(`DELETE FROM conversations WHERE id = ?`, [conversationId])
+        .catch(() => {});
+    }
+  }, 60_000);
+
+  it("send_sms rejects body over 1600 characters", async () => {
+    const over = await executeAdminAiTool(
+      "send_sms",
+      {
+        client_id: clientId,
+        body: "x".repeat(1601),
+        confirm: true,
+        confirm_phrase: "CONFIRM",
+      },
+      { adminId },
+    );
+    expect(over.ok).toBe(false);
+    if (over.ok) return;
+    expect(over.ok === false && over.error).toBe("sms_body_too_long");
+  }, 30_000);
 
   it("send_sms refuses missing phone and missing OFG number", async () => {
     // Prior send_sms test may have cleaned up a temporary OFG assignment —
@@ -2077,6 +3419,21 @@ describe("admin AI tools", () => {
         expect(refs.some((r) => r.referrer_id === attachReferrerId)).toBe(true);
       }
 
+      // Shared beforeAll splits may be deleted by earlier payment-plan tests —
+      // seed one row so list_installments shape (incl. payment_link) is asserted.
+      const [existingSplits] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM payment_splits WHERE client_id = ? LIMIT 1`,
+        [clientId],
+      );
+      if (!existingSplits[0]) {
+        await pool.query(
+          `INSERT INTO payment_splits
+             (case_id, client_id, label, amount_cents, due_date, status)
+           VALUES (?, ?, 'AI list_installments shape', 5000, CURDATE(), 'pending')`,
+          [caseId, clientId],
+        );
+      }
+
       const installments = await executeAdminAiTool(
         "list_installments",
         { client_id: clientId },
@@ -2088,6 +3445,7 @@ describe("admin AI tools", () => {
           payment_link?: string | null;
         }>;
         expect(Array.isArray(rows)).toBe(true);
+        expect(rows.length).toBeGreaterThan(0);
         expect(rows[0]).toHaveProperty("payment_link");
       }
     } finally {
@@ -2115,4 +3473,109 @@ describe("admin AI tools", () => {
       }
     }
   }, 90_000);
+
+  it("send_round_report dry-run then confirm mints secure PDF link + email", async () => {
+    // Self-contained fixture — earlier tests may DELETE the shared round_1 row.
+    await pool.query(`UPDATE clients SET phone = '5551234567' WHERE id = ?`, [
+      clientId,
+    ]);
+    const [existing] = await pool.query<RowDataPacket[]>(
+      `SELECT id FROM client_round_reports
+       WHERE client_id = ? AND round_number = 1 LIMIT 1`,
+      [clientId],
+    );
+    let roundReportId = existing[0] ? Number(existing[0].id) : 0;
+    if (!roundReportId) {
+      const [ins] = await pool.query<ResultSetHeader>(
+        `INSERT INTO client_round_reports
+           (client_id, case_id, round_number, score_before, score_after,
+            items_removed, items_disputed, summary_md, report_locale)
+         VALUES (?, ?, 1, 580, 620, 3, 5, 'Round 1 for send_round_report', 'en')`,
+        [clientId, caseId],
+      );
+      roundReportId = Number(ins.insertId);
+    }
+
+    const [pdfIns] = await pool.query<ResultSetHeader>(
+      `INSERT INTO round_report_pdfs
+         (client_id, round_number, round_report_id, file_name, storage_key, storage_provider)
+       VALUES (?, 1, ?, ?, ?, 'local')`,
+      [
+        clientId,
+        roundReportId,
+        `R1-${RUN_ID}.pdf`,
+        `vitest://round-${RUN_ID}.pdf`,
+      ],
+    );
+    const pdfId = Number(pdfIns.insertId);
+
+    try {
+      const dry = await executeAdminAiTool(
+        "send_round_report",
+        { client_id: clientId, pdf_id: pdfId, also_sms: false },
+        { adminId },
+      );
+      expect(dry.ok).toBe(true);
+      if (!dry.ok) return;
+      expect((dry.data as any).dry_run).toBe(true);
+      expect((dry.data as any).ready).toBe(true);
+      expect((dry.data as any).preview?.pdf_id).toBe(pdfId);
+      expect((dry.data as any).preview?.email_subject).toMatch(/Round 1/i);
+      expect((dry.data as any).preview?.notify_partners).toBe(true);
+
+      const [tokBefore] = await pool.query<RowDataPacket[]>(
+        `SELECT COUNT(*) AS c FROM round_report_download_tokens WHERE pdf_id = ?`,
+        [pdfId],
+      );
+      expect(Number(tokBefore[0].c)).toBe(0);
+
+      const confirmed = await executeAdminAiTool(
+        "send_round_report",
+        {
+          client_id: clientId,
+          pdf_id: pdfId,
+          also_sms: false,
+          confirm: true,
+          confirm_phrase: "CONFIRM",
+        },
+        { adminId },
+      );
+      expect(confirmed.ok).toBe(true);
+      if (!confirmed.ok) return;
+      expect((confirmed.data as any).email_sent).toBe(true);
+      expect((confirmed.data as any).sms_sent).toBe(false);
+      expect(String((confirmed.data as any).secure_pdf_url || "")).toContain(
+        "/api/public/round-report-pdf/",
+      );
+
+      const [tokAfter] = await pool.query<RowDataPacket[]>(
+        `SELECT COUNT(*) AS c FROM round_report_download_tokens WHERE pdf_id = ?`,
+        [pdfId],
+      );
+      expect(Number(tokAfter[0].c)).toBe(1);
+
+      const listed = await executeAdminAiTool(
+        "list_progress_reports",
+        { case_id: caseId },
+        { adminId },
+      );
+      expect(listed.ok).toBe(true);
+      if (listed.ok) {
+        const reports = (listed.data as any).reports as Array<{
+          id: number;
+          pdf_id: number | null;
+          round: number;
+        }>;
+        const r1 = reports.find((r) => r.round === 1);
+        expect(r1?.id).toBe(roundReportId);
+        expect(r1?.pdf_id).toBe(pdfId);
+      }
+    } finally {
+      await pool.query(
+        `DELETE FROM round_report_download_tokens WHERE pdf_id = ?`,
+        [pdfId],
+      );
+      await pool.query(`DELETE FROM round_report_pdfs WHERE id = ?`, [pdfId]);
+    }
+  }, 60_000);
 });

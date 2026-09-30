@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import AdminPageHeader from "@/components/AdminPageHeader";
 import FieldHint from "@/components/admin/FieldHint";
+import { ContactPhoneActions } from "@/components/admin/ContactPhoneActions";
 import FundingFilterBar, {
   EMPTY_FUNDING_FILTERS,
   countActiveFundingFilters,
@@ -192,7 +193,25 @@ function FundingDetailSheet({
                     <dt className="text-xs text-muted-foreground">
                       {t("adminFunding.fields.phone")}
                     </dt>
-                    <dd>{app.phone || "—"}</dd>
+                    <dd>
+                      {app.phone ? (
+                        <ContactPhoneActions
+                          phone={app.phone}
+                          clientId={
+                            app.client_id != null
+                              ? Number(app.client_id)
+                              : null
+                          }
+                          clientName={
+                            [app.first_name, app.last_name]
+                              .filter(Boolean)
+                              .join(" ") || null
+                          }
+                        />
+                      ) : (
+                        "—"
+                      )}
+                    </dd>
                   </div>
                   <div>
                     <dt className="text-xs text-muted-foreground">

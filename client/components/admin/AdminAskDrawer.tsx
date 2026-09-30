@@ -220,7 +220,7 @@ export function AdminAskFab() {
           "fixed right-0 top-1/2 -translate-y-1/2 z-[60]",
           "flex flex-col items-center gap-2",
           "bg-primary px-2 pt-4 pb-3 rounded-l-2xl",
-          "shadow-xl shadow-primary/30 cursor-pointer select-none",
+          "shadow-md shadow-black/15 cursor-pointer select-none",
           "text-primary-foreground",
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
         ].join(" ")}

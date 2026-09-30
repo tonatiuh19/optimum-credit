@@ -6,7 +6,11 @@ export function uploadOversizeMessage(fileName?: string): string {
   return `${label} exceeds the 4 MB upload limit. Compress the PDF or split into smaller files.`;
 }
 
-export function assertFilesUnderUploadLimit(
+/**
+ * Per-file check only. Use for flows that upload files in separate requests
+ * (e.g. OFG report wizard sequential Before → After).
+ */
+export function assertEachFileUnderUploadLimit(
   files: File[],
 ): { ok: true } | { ok: false; message: string } {
   for (const f of files) {
@@ -14,6 +18,18 @@ export function assertFilesUnderUploadLimit(
       return { ok: false, message: uploadOversizeMessage(f.name) };
     }
   }
+  return { ok: true };
+}
+
+/**
+ * Per-file + combined size in one request (case docs, MMS, etc.).
+ * Report wizard uses assertEachFileUnderUploadLimit + staged Before upload.
+ */
+export function assertFilesUnderUploadLimit(
+  files: File[],
+): { ok: true } | { ok: false; message: string } {
+  const each = assertEachFileUnderUploadLimit(files);
+  if (each.ok === false) return each;
   const total = files.reduce((sum, f) => sum + f.size, 0);
   if (total > VERCEL_SAFE_UPLOAD_MAX_BYTES) {
     return {

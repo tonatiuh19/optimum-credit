@@ -158,6 +158,7 @@ describe("admin notify extra emails", () => {
     expect(off.status).toBe(200);
     expect(off.body.staff.prefs.email.purchase_enrollment).toBe(false);
     expect(off.body.staff.prefs.email.inbound_sms).toBe(false);
+    expect(off.body.staff.prefs.email.morning_digest).toBe(false);
 
     const on = await request(app)
       .put(`/api/admin/admins/${agentId}/notification-prefs`)

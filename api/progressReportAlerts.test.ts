@@ -283,4 +283,16 @@ describe("buildDeterministicProgressAlerts", () => {
     expect(alerts.some((a) => a.type === "closed_still_reporting")).toBe(true);
     expect(alerts.some((a) => a.type === "hard_inquiry_open")).toBe(true);
   });
+
+  it("flags utilization increase of ≥10pp", () => {
+    const alerts = buildDeterministicProgressAlerts({
+      profile: baseProfile,
+      afterPdfText: "ok",
+      afterAccounts: [],
+      utilizationBeforePct: 20,
+      utilizationAfterPct: 35,
+      utilizationIncreaseThresholdPp: 10,
+    });
+    expect(alerts.some((a) => a.type === "utilization_increase")).toBe(true);
+  });
 });

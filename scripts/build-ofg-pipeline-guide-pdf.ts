@@ -195,7 +195,7 @@ async function main() {
     y = drawLines(
       page,
       wrap(
-        "This document shows staff how to build each round's OFG Progress Report in the pipeline. Every round is a before -> after snapshot of the client's credit file. The wizard chains those snapshots so Round N's After becomes Round N+1's Before - the round-to-round story Cesar wants, not enrollment vs latest every time.",
+        "This document shows staff how to build each round's OFG Progress Report in the pipeline. Every round is a before -> after snapshot. DEFAULT compare mode is BASELINE: Round N Before = enrollment / Round 1 Before so clients see progress since they started. Optional CHAIN mode reuses prior After as Before for mid-program round-to-round stories.",
         W - 2 * M,
         9.5,
       ),
@@ -354,7 +354,7 @@ async function main() {
     );
     y -= 10;
 
-    page.drawText(safe("Wizard - reuse prior After as Before"), {
+    page.drawText(safe("Wizard - reuse enrollment Before (baseline)"), {
       x: M,
       y,
       size: 8,
@@ -394,8 +394,8 @@ async function main() {
         "[OK] Check the CROA attestation before publish. Large score drops",
         "     need an extra acknowledgment (usually a mis-read - fix first).",
         "",
-        "[NO] Don't upload enrollment as Before for every round - that breaks",
-        "     the round-to-round story Cesar wants.",
+        "[NO] Don't switch to Chain unless you need round-to-round only",
+        "     (Baseline vs enrollment is the product default).",
         "[NO] Don't publish if Before and After look swapped",
         "     (After date earlier, or scores collapsed for no reason).",
       ],

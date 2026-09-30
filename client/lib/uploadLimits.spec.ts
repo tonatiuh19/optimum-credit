@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  assertEachFileUnderUploadLimit,
   assertFilesUnderUploadLimit,
   VERCEL_SAFE_UPLOAD_MAX_BYTES,
 } from "@/lib/uploadLimits";
@@ -26,12 +27,20 @@ describe("uploadLimits", () => {
     if (r.ok === false) expect(r.message).toMatch(/4 MB/i);
   });
 
-  it("rejects combined oversize batch", () => {
+  it("rejects combined oversize batch in one request", () => {
     const r = assertFilesUnderUploadLimit([
       fakeFile("a.pdf", 3 * 1024 * 1024),
       fakeFile("b.pdf", 2 * 1024 * 1024),
     ]);
     expect(r.ok).toBe(false);
     if (r.ok === false) expect(r.message).toMatch(/Combined|4 MB/i);
+  });
+
+  it("assertEachFileUnderUploadLimit allows two 3 MB files (sequential)", () => {
+    const r = assertEachFileUnderUploadLimit([
+      fakeFile("a.pdf", 3 * 1024 * 1024),
+      fakeFile("b.pdf", 3 * 1024 * 1024),
+    ]);
+    expect(r.ok).toBe(true);
   });
 });

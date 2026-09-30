@@ -49,6 +49,7 @@ const EVENT_ORDER: AdminNotifyEventKey[] = [
   "voicemail",
   "funding_doc_upload",
   "funding_application_created",
+  "get_credit_report_lead",
   "progress_report_alerts",
   "morning_digest",
 ];

@@ -1,5 +1,6 @@
 import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import api, { formatAxiosError } from "@/lib/api";
+import { decodeLiteralUnicodeEscapes } from "@/lib/decodeLiteralUnicodeEscapes";
 import type {
   AdminAiChatContext,
   AdminAiChatMessage,
@@ -93,7 +94,7 @@ const adminAiSlice = createSlice({
       s.sending = false;
       s.messages.push({
         role: "assistant",
-        content: a.payload.reply,
+        content: decodeLiteralUnicodeEscapes(String(a.payload.reply || "")),
         citations: a.payload.citations,
       });
     });

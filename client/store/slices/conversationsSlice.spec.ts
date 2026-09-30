@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import reducer, {
   contactActivityRealtime,
+  callRecordingRealtime,
   fetchConversationContacts,
   fetchConversationTimeline,
   fetchConversationsNavBadge,
+  mapConversationContact,
   mapConversationHubMessage,
+  mapConversationTemplate,
   messageStatusRealtime,
   selectConversationContact,
   setConversationContactStatus,
@@ -262,6 +265,7 @@ describe("conversationsSlice async guards", () => {
         {
           contacts: [baseContact({ unread_count: 99 })],
           pagination: { page: 1, limit: 50, total: 1, totalPages: 1 },
+          append: false,
         },
         "req-contacts",
         { view: "mine" },
@@ -292,7 +296,128 @@ describe("conversationsSlice async guards", () => {
   });
 });
 
+describe("mapConversationContact", () => {
+  it("decodes literal unicode escapes in last_message_preview", () => {
+    const mapped = mapConversationContact(
+      baseContact({
+        last_message_preview: "Hola Marta, solo dando seguimiento \\u2014...",
+      }),
+    );
+    expect(mapped.last_message_preview).toBe(
+      "Hola Marta, solo dando seguimiento —...",
+    );
+  });
+});
+
+describe("fetchConversationContacts append", () => {
+  it("appends unique contacts and updates duplicates in place", () => {
+    let state = reducer(undefined, { type: "@@INIT" });
+    state = {
+      ...state,
+      contacts: [baseContact({ contact_id: 1, display_name: "First" })],
+      contactsPagination: { page: 1, limit: 25, total: 3, totalPages: 2 },
+    };
+    state = reducer(
+      state,
+      fetchConversationContacts.fulfilled(
+        {
+          contacts: [
+            mapConversationContact(
+              baseContact({
+                contact_id: 1,
+                display_name: "First updated",
+                last_message_preview: "Hi \\u2014 there",
+              }),
+            ),
+            mapConversationContact(
+              baseContact({ contact_id: 2, display_name: "Second" }),
+            ),
+          ],
+          pagination: { page: 2, limit: 25, total: 3, totalPages: 2 },
+          append: true,
+        },
+        "req-append",
+        { page: 2, append: true },
+      ),
+    );
+    expect(state.contacts).toHaveLength(2);
+    expect(state.contacts[0].display_name).toBe("First updated");
+    expect(state.contacts[0].last_message_preview).toBe("Hi — there");
+    expect(state.contacts[1].contact_id).toBe(2);
+    expect(state.contactsPagination?.page).toBe(2);
+  });
+
+  it("replaces contacts when append is false", () => {
+    let state = reducer(undefined, { type: "@@INIT" });
+    state = {
+      ...state,
+      contacts: [
+        baseContact({ contact_id: 1 }),
+        baseContact({ contact_id: 2 }),
+      ],
+    };
+    state = reducer(
+      state,
+      fetchConversationContacts.fulfilled(
+        {
+          contacts: [baseContact({ contact_id: 9, display_name: "Only" })],
+          pagination: { page: 1, limit: 25, total: 1, totalPages: 1 },
+          append: false,
+        },
+        "req-replace",
+        { page: 1 },
+      ),
+    );
+    expect(state.contacts).toHaveLength(1);
+    expect(state.contacts[0].contact_id).toBe(9);
+  });
+});
+
+describe("mapConversationTemplate", () => {
+  it("decodes literal unicode escapes in body/subject", () => {
+    const mapped = mapConversationTemplate({
+      id: 1,
+      name: "Follow up",
+      channel: "sms",
+      subject: null,
+      body: "Hola \\u2014 solo dando seguimiento",
+      variables: [],
+      is_active: true,
+      sort_order: 0,
+      created_at: "2026-09-04T00:00:00.000Z",
+      updated_at: "2026-09-04T00:00:00.000Z",
+    });
+    expect(mapped.body).toBe("Hola — solo dando seguimiento");
+  });
+});
+
 describe("mapConversationHubMessage", () => {
+  it("decodes literal unicode escapes in body (LLM double-escape)", () => {
+    const mapped = mapConversationHubMessage({
+      id: 1,
+      direction: "outbound",
+      channel: "sms",
+      body: "Hi Valeria, saw I missed your call \\u2014 I'm in meetings",
+      created_at: "2026-09-04T11:10:00.000Z",
+    });
+    expect(mapped.body).toBe(
+      "Hi Valeria, saw I missed your call — I'm in meetings",
+    );
+  });
+
+  it("expands literal \\n in body (LLM paragraph escapes)", () => {
+    const mapped = mapConversationHubMessage({
+      id: 2,
+      direction: "outbound",
+      channel: "sms",
+      body: "real-time updates.\\n\\nTo give you an accurate price",
+      created_at: "2026-09-12T14:50:00.000Z",
+    });
+    expect(mapped.body).toBe(
+      "real-time updates.\n\nTo give you an accurate price",
+    );
+  });
+
   it("preserves call recording_url and call_duration_sec", () => {
     const mapped = mapConversationHubMessage({
       id: 42,
@@ -317,6 +442,67 @@ describe("mapConversationHubMessage", () => {
     expect(mapped.call_duration_sec).toBe(33);
     expect(mapped.recording_url).toContain("Recordings/RExxx");
     expect(mapped.metadata_json).toEqual({ is_voicemail: true });
+  });
+
+  it("maps call insights fields and decodes transcript escapes", () => {
+    const mapped = mapConversationHubMessage({
+      id: 43,
+      conversation_id: 7,
+      direction: "inbound",
+      channel: "call",
+      body: "Incoming call",
+      call_duration_sec: 60,
+      recording_url: "https://api.twilio.com/Recordings/REyyy",
+      call_insights_status: "ready",
+      call_transcript: "Client said \\u2014 ready for Round 2",
+      call_insights_json: JSON.stringify({
+        locale: "en",
+        summary_bullets: ["Round 2"],
+        sentiment: { label: "hopeful", score: 0.8, feelings: ["optimistic"] },
+        topics: ["Round 2"],
+        action_items: [],
+        risk_flags: [],
+        interesting: [],
+      }),
+      created_at: "2026-09-04T12:00:00.000Z",
+    });
+    expect(mapped.call_insights_status).toBe("ready");
+    expect(mapped.call_transcript).toBe("Client said — ready for Round 2");
+    expect(mapped.call_insights_json?.sentiment?.label).toBe("hopeful");
+    expect(mapped.call_insights_json?.summary_bullets).toEqual(["Round 2"]);
+  });
+
+  it("callRecordingRealtime patches recording_url onto open timeline", () => {
+    let state = reducer(undefined, { type: "@@INIT" });
+    state = {
+      ...state,
+      timeline: {
+        kind: "client",
+        contact: {},
+        messages: [
+          {
+            id: 43,
+            conversation_id: 7,
+            direction: "outbound",
+            channel: "call",
+            body: "Voice call — 40s (completed)",
+            recording_url: null,
+            call_duration_sec: 40,
+            created_at: "2026-09-14T12:00:00.000Z",
+          } as any,
+        ],
+      },
+    };
+    state = reducer(
+      state,
+      callRecordingRealtime({
+        message_id: 43,
+        recording_url: "https://api.twilio.com/Recordings/REnew.mp3",
+        call_duration_sec: 42,
+      }),
+    );
+    expect(state.timeline?.messages[0].recording_url).toContain("REnew");
+    expect(state.timeline?.messages[0].call_duration_sec).toBe(42);
   });
 
   it("maps system close/reopen events", () => {

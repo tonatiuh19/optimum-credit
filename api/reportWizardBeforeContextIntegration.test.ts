@@ -132,8 +132,57 @@ describe("report wizard before-context + authz", () => {
     expect(res.body.context.prior_round).toBe(1);
   });
 
-  it("before-context reuses published prior round after PDF", async () => {
+  it("before-context baseline reuses Round 1 enrollment Before PDF", async () => {
     const { clientId, caseId } = await seedCase("round_2");
+    // default compare mode is baseline
+    const [sessIns] = await pool.query<ResultSetHeader>(
+      `INSERT INTO report_wizard_sessions
+         (case_id, client_id, round_number, status, before_source,
+          options_json, extracted_json, created_by_admin_id, published_at)
+       VALUES (?, ?, 1, 'published', 'enrollment', '{}', ?, ?, NOW())`,
+      [
+        caseId,
+        clientId,
+        JSON.stringify({
+          reportDate: { before: "2026-01-01", after: "2026-02-01" },
+          middleScore: { before: 580, after: 610 },
+        }),
+        adminId,
+      ],
+    );
+    const priorSessionId = sessIns.insertId;
+    sessionIds.push(priorSessionId);
+
+    const [pdfIns] = await pool.query<ResultSetHeader>(
+      `INSERT INTO round_report_source_pdfs
+         (session_id, role, file_name, storage_key, encrypted, enc_iv, enc_tag, uploaded_by_admin_id)
+       VALUES (?, 'before', 'r1-enrollment.pdf', 'https://example.com/fake.enc', 1, ?, ?, ?)`,
+      [priorSessionId, "00".repeat(16), "00".repeat(16), adminId],
+    );
+    await pool.query(
+      `UPDATE report_wizard_sessions SET before_pdf_id = ? WHERE id = ?`,
+      [pdfIns.insertId, priorSessionId],
+    );
+
+    const res = await request(app)
+      .get(`/api/admin/cases/${caseId}/report-wizard/before-context`)
+      .query({ round_number: 2 })
+      .set("Authorization", `Bearer ${adminToken}`)
+      .expect(200);
+    expect(res.body.context.source).toBe("enrollment");
+    expect(res.body.context.can_reuse).toBe(true);
+    expect(res.body.context.prior_session_id).toBe(priorSessionId);
+    expect(res.body.context.file_name).toBe("r1-enrollment.pdf");
+    expect(res.body.context.compare_mode).toBe("baseline");
+    expect(res.body.context.reuse_pdf_role).toBe("before");
+  });
+
+  it("before-context chain mode reuses published prior round after PDF", async () => {
+    const { clientId, caseId } = await seedCase("round_2");
+    await pool.query(
+      `UPDATE credit_repair_cases SET report_compare_mode = 'chain' WHERE id = ?`,
+      [caseId],
+    );
     const [sessIns] = await pool.query<ResultSetHeader>(
       `INSERT INTO report_wizard_sessions
          (case_id, client_id, round_number, status, before_source,
@@ -173,6 +222,7 @@ describe("report wizard before-context + authz", () => {
     expect(res.body.context.prior_session_id).toBe(priorSessionId);
     expect(res.body.context.file_name).toBe("r1-after.pdf");
     expect(res.body.context.report_date_after).toBe("2026-02-01");
+    expect(res.body.context.compare_mode).toBe("chain");
   });
 
   it("rejects reuse_before_session_id from another case", async () => {

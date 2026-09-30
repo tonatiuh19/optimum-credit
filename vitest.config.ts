@@ -24,8 +24,9 @@ export default defineConfig({
           environment: "node",
           env: { VITEST: "true" },
           // TiDB Cloud under parallel integration load is often >5s/request;
-          // default Vitest timeouts flake deploy. Unit tests still finish in ms.
-          testTimeout: 20_000,
+          // multi-request hub/voice tests need headroom beyond 20s or deploy flakes.
+          // Unit tests still finish in ms.
+          testTimeout: 45_000,
           hookTimeout: 90_000,
           // Cap parallel integration files — each opens pools against shared TiDB.
           fileParallelism: 2,

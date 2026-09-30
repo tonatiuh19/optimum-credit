@@ -21,6 +21,10 @@ import {
   updateNotifyExtraEmail,
   updateStaffNotifyPrefs,
 } from "@/store/slices/adminSlice";
+import {
+  ADMIN_NOTIFY_EVENT_KEYS,
+  adminNotifyChannelMasterOn,
+} from "@/lib/adminNotifyPrefs";
 import type {
   AdminNotifyChannel,
   AdminNotifyEventKey,
@@ -40,31 +44,7 @@ const CHANNELS: {
 ];
 
 /** Primary alert types shown in Settings (matches Resend / team emails). */
-const EVENT_ORDER: AdminNotifyEventKey[] = [
-  "purchase_enrollment",
-  "payment_installment",
-  "submission_ready_review",
-  "submission_doc_upload",
-  "submission_info_request",
-  "doc_upload_link",
-  "round_calendar",
-  "work_task_assigned",
-  "work_task_overdue",
-  "inbound_sms",
-  "missed_call",
-  "voicemail",
-  "funding_doc_upload",
-  "funding_application_created",
-  "progress_report_alerts",
-];
-
-function channelMasterOn(
-  staff: AdminNotifyStaffRecipient,
-  channel: AdminNotifyChannel,
-): boolean {
-  const prefs = staff.prefs[channel];
-  return (Object.keys(prefs) as AdminNotifyEventKey[]).some((k) => prefs[k]);
-}
+const EVENT_ORDER: AdminNotifyEventKey[] = [...ADMIN_NOTIFY_EVENT_KEYS];
 
 function extraAllowsEvent(
   row: AdminNotifyExtraEmail,
@@ -261,7 +241,10 @@ export default function NotifyExtraEmailsPanel() {
                     <div className="flex flex-wrap items-center gap-x-4 gap-y-2 shrink-0">
                       {CHANNELS.map(({ key, icon: Icon }) => {
                         const locked = !row.channels?.[key]?.available;
-                        const checked = channelMasterOn(row, key);
+                        const checked = adminNotifyChannelMasterOn(
+                          row.prefs,
+                          key,
+                        );
                         return (
                           <div
                             key={key}
