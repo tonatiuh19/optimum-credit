@@ -4,6 +4,7 @@ import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Provider } from "react-redux";
 import { configureStore } from "@reduxjs/toolkit";
+import { useState } from "react";
 import { renderWithProviders } from "@/test/renderWithProviders";
 import ConvertProspectDialog from "@/components/admin/ConvertProspectDialog";
 import {
@@ -73,6 +74,26 @@ function renderDialog(
   return renderWithProviders(<Provider store={store}>{ui}</Provider>);
 }
 
+/** Like Pipeline: clear prospect after convert/cancel so Dialog unmounts cleanly. */
+function ControlledConvertDialog(props: {
+  initial: Prospect;
+  onConvert: (payload: unknown) => Promise<void>;
+  onConverted?: () => void;
+}) {
+  const [current, setCurrent] = useState<Prospect | null>(props.initial);
+  return (
+    <ConvertProspectDialog
+      prospect={current}
+      onClose={() => setCurrent(null)}
+      onConverted={() => {
+        setCurrent(null);
+        props.onConverted?.();
+      }}
+      onConvert={props.onConvert}
+    />
+  );
+}
+
 describe("buildConvertProspectBody", () => {
   it("maps empty package and trims notes", () => {
     const body = buildConvertProspectBody({
@@ -107,12 +128,10 @@ describe("ConvertProspectDialog", () => {
     const user = userEvent.setup();
     const onConvert = vi.fn().mockResolvedValue(undefined);
     const onConverted = vi.fn();
-    const onClose = vi.fn();
 
     renderDialog(
-      <ConvertProspectDialog
-        prospect={prospect}
-        onClose={onClose}
+      <ControlledConvertDialog
+        initial={prospect}
         onConverted={onConverted}
         onConvert={onConvert}
       />,
@@ -137,16 +156,18 @@ describe("ConvertProspectDialog", () => {
     expect(payload.round_schedule?.send_calendar).toBe(true);
     expect(payload.round_schedule?.round_1_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(onConverted).toHaveBeenCalled();
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("convert-prospect-dialog")).toBeNull();
+    });
   });
 
   it("prefills round schedule when prospect has case_id", async () => {
     const user = userEvent.setup();
     const onConvert = vi.fn().mockResolvedValue(undefined);
     renderDialog(
-      <ConvertProspectDialog
-        prospect={{ ...prospect, case_id: 55 }}
-        onClose={vi.fn()}
-        onConverted={vi.fn()}
+      <ControlledConvertDialog
+        initial={{ ...prospect, case_id: 55 }}
         onConvert={onConvert}
       />,
     );
@@ -163,22 +184,22 @@ describe("ConvertProspectDialog", () => {
     expect(payload.round_schedule?.round_1_date).toBe("2026-09-01");
     expect(payload.round_schedule?.interval_days).toBe(35);
     expect(payload.round_schedule?.send_calendar).toBe(false);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("convert-prospect-dialog")).toBeNull();
+    });
   });
 
   it("cancels without converting", async () => {
     const user = userEvent.setup();
     const onConvert = vi.fn();
-    const onClose = vi.fn();
     renderDialog(
-      <ConvertProspectDialog
-        prospect={prospect}
-        onClose={onClose}
-        onConverted={vi.fn()}
-        onConvert={onConvert}
-      />,
+      <ControlledConvertDialog initial={prospect} onConvert={onConvert} />,
     );
     await user.click(screen.getByTestId("convert-prospect-cancel"));
-    expect(onClose).toHaveBeenCalled();
     expect(onConvert).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(screen.queryByTestId("convert-prospect-dialog")).toBeNull();
+    });
   });
 });

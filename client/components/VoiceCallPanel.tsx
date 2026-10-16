@@ -43,6 +43,8 @@ import { useAppSelector } from "@/store/hooks";
 import { useVoiceDeviceOptional } from "@/contexts/VoiceDeviceContext";
 import { Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { ThreeWayCallControl } from "@/components/ThreeWayCallControl";
+import { resetThreeWay } from "@/store/slices/voiceSlice";
 
 export type CallState =
   | "idle"
@@ -106,6 +108,10 @@ const VoiceCallPanel: React.FC<VoiceCallPanelProps> = ({
     activeCall ? "in-call" : "idle",
   );
   const [duration, setDuration] = useState(0);
+  // Forget any third caller once this call is no longer connected.
+  useEffect(() => {
+    if (callState !== "in-call") dispatch(resetThreeWay());
+  }, [callState, dispatch]);
   const [isMuted, setIsMuted] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [callSid, setCallSid] = useState<string | null>(null);
@@ -1058,6 +1064,9 @@ const VoiceCallPanel: React.FC<VoiceCallPanelProps> = ({
               <Mic className="h-4 w-4" />
             )}
           </Button>
+
+          {/* Add caller (three-way) — only once connected */}
+          {callState === "in-call" && <ThreeWayCallControl callSid={callSid} />}
 
           {/* Hang Up */}
           <Button

@@ -311,6 +311,29 @@ export default function PipelineFilterBar({
 
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-muted-foreground">
+                {t("adminPipeline.leadTemp.filter")}
+              </label>
+              <div className="relative">
+                <select
+                  aria-label={t("adminPipeline.leadTemp.filter")}
+                  value={filters.lead_temperature}
+                  onChange={(e) => setFilter("lead_temperature", e.target.value)}
+                  className={filterSelectClass}
+                  data-testid="filter-lead-temperature"
+                >
+                  <option value="all">{t("adminPipeline.leadTemp.all")}</option>
+                  {(["hot", "warm", "cold"] as const).map((c) => (
+                    <option key={c} value={c}>
+                      {t(`adminPipeline.leadTemp.color.${c}`)}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown className="w-3.5 h-3.5 absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-muted-foreground">
                 {t("adminPipeline.filterClientStatus")}
               </label>
               <div className="relative">
@@ -330,6 +353,7 @@ export default function PipelineFilterBar({
                     "onboarding",
                     "active",
                     "paused",
+                    "blocked",
                     "cancelled",
                   ].map((s) => (
                     <option key={s} value={s}>

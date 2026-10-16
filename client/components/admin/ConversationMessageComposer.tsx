@@ -33,7 +33,7 @@ import type { ConversationSuggestion } from "@/lib/conversationSuggestedReplies"
 import { SMS_MAX_BODY_CHARS, smsSegmentInfo } from "@/lib/smsSegments";
 import { cn } from "@/lib/utils";
 
-type Channel = "sms" | "internal";
+type Channel = "sms" | "internal" | "whatsapp";
 
 export interface ConversationMediaAttachment {
   /** Public URL Twilio + timeline use after upload. */
@@ -123,7 +123,10 @@ export function ConversationMessageComposer({
   }, [openToken]);
 
   const channelTemplates = templates.filter(
-    (tpl) => tpl.is_active && tpl.channel === channel,
+    (tpl) =>
+      tpl.is_active &&
+      (tpl.channel === channel ||
+        (channel === "whatsapp" && tpl.channel === "sms")),
   );
 
   const insertVariable = (key: string) => {

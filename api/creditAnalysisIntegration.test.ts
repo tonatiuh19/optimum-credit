@@ -120,6 +120,25 @@ describe("credit analysis integration", () => {
     expect(get.body.analysis?.id).toBe(post.body.id);
     expect(get.body.analysis?.claude_enhanced).toBe(false);
     expect(get.body.analysis?.analyst?._claude_enhanced).toBeUndefined();
+
+    // Enhancement: the same upload is queued (background) for the enhanced
+    // account-level read, linked to this analysis. Response above unchanged.
+    let queued: number | null = null;
+    for (let i = 0; i < 20 && queued === null; i++) {
+      const [rows] = await pool.query<any[]>(
+        `SELECT id, status, purpose FROM credit_file_extractions
+         WHERE credit_analysis_id = ? LIMIT 1`,
+        [post.body.id],
+      );
+      if (rows[0]) {
+        expect(rows[0].purpose).toBe("analysis");
+        expect(rows[0].status).toBe("queued");
+        queued = Number(rows[0].id);
+      } else {
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    }
+    expect(queued).not.toBeNull();
   }, 60_000);
 
   it("portal POST + GET for prospect", async () => {

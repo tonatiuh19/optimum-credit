@@ -32,6 +32,13 @@
       "dest": "/api/index.ts"
     },
     {
+      "src": "^/e/ofy/s/ofy-chino-1001/?$",
+      "status": 302,
+      "headers": {
+        "Location": "https://www.ofgllc.com/get-credit-report"
+      }
+    },
+    {
       "src": "/(.*\\.(js|css|json|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot))",
       "dest": "/$1"
     },

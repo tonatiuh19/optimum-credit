@@ -24,6 +24,7 @@ import { cleanupIntegrationTestClients, createIntegrationTestPool } from "./test
 
 const RUN_ID = `team-alert-${Date.now()}`;
 const CLIENT_EMAIL = `${RUN_ID}@example.test`;
+const STAFF_EMAIL = `team-alert-staff-${RUN_ID}@example.test`;
 
 let pool: Pool;
 let app: ReturnType<typeof createServer>;
@@ -32,7 +33,6 @@ let adminToken = "";
 let clientId = 0;
 let caseId = 0;
 let clientToken = "";
-let teamAdminEmails: string[] = [];
 let requiredTemplates: { id: number; slug: string; task_type: string }[] = [];
 
 function tinyPng(): Buffer {
@@ -76,39 +76,25 @@ function submissionSubjects(mails: ReturnType<typeof __testGetEmailDryRuns>) {
   );
 }
 
-function expectAllTeamAdminsGot(
-  mails: ReturnType<typeof __testGetEmailDryRuns>,
-) {
-  const recipients = new Set(
-    mails.map((e) => String(e.to || "").trim().toLowerCase()),
-  );
-  const missing = teamAdminEmails.filter(
-    (email) => !recipients.has(String(email).trim().toLowerCase()),
-  );
-  if (missing.length) {
-    throw new Error(
-      `missing alert emails for: ${missing.join(", ")}; got: ${[...recipients].join(", ")}`,
-    );
-  }
+function isFixtureMailbox(email: string): boolean {
+  const e = email.trim().toLowerCase();
+  return e.endsWith("@example.test") || e.endsWith("@affiliate.test");
 }
 
-/** Shared TiDB — other suites may mute events; force defaults so email fans out. */
-async function resetTeamAdminNotifyPrefs() {
-  await pool.query(
-    `UPDATE admins SET notification_prefs_json = NULL
-     WHERE status = 'active'
-       AND role IN ('super_admin','admin','agent')
-       AND email IS NOT NULL AND TRIM(email) <> ''
-       AND email NOT LIKE '%@example.test'`,
-  );
-  const [admins] = await pool.query<RowDataPacket[]>(
-    `SELECT email FROM admins
-     WHERE status = 'active' AND role IN ('super_admin','admin','agent')
-       AND email IS NOT NULL AND TRIM(email) <> ''
-       AND email NOT LIKE '%@example.test'
-     ORDER BY id ASC`,
-  );
-  teamAdminEmails = admins.map((a) => String(a.email));
+/** Fixture staff received the alert, and no real inbox did. */
+function expectFixtureStaffGot(
+  mails: ReturnType<typeof __testGetEmailDryRuns>,
+) {
+  const recipients = mails.map((e) => String(e.to || "").trim().toLowerCase());
+  if (!recipients.includes(STAFF_EMAIL)) {
+    throw new Error(
+      `fixture staff missed alert; got: ${[...new Set(recipients)].join(", ")}`,
+    );
+  }
+  const real = recipients.filter((email) => email && !isFixtureMailbox(email));
+  if (real.length) {
+    throw new Error(`real inboxes were notified: ${[...new Set(real)].join(", ")}`);
+  }
 }
 
 describe("team admin notify — gaps + edges", () => {
@@ -126,21 +112,17 @@ describe("team admin notify — gaps + edges", () => {
     pool = createIntegrationTestPool();
     app = createServer();
 
-    const [admins] = await pool.query<RowDataPacket[]>(
-      `SELECT id, email FROM admins
-       WHERE status = 'active' AND role IN ('super_admin','admin','agent')
-         AND email IS NOT NULL AND TRIM(email) <> ''
-         AND email NOT LIKE '%@example.test'
-       ORDER BY id ASC`,
+    const [staffIns] = await pool.query<ResultSetHeader>(
+      `INSERT INTO admins
+         (email, first_name, last_name, role, status, preferred_language)
+       VALUES (?, 'Team', 'Alert', 'super_admin', 'active', 'en')`,
+      [STAFF_EMAIL],
     );
-    if (!admins[0]) throw new Error("No team admin for tests");
-    adminId = Number(admins[0].id);
-    teamAdminEmails = admins.map((a) => String(a.email));
-    await resetTeamAdminNotifyPrefs();
+    adminId = Number(staffIns.insertId);
     adminToken = await createSession(
       "admin",
       adminId,
-      String(admins[0].email),
+      STAFF_EMAIL,
       "127.0.0.1",
       "vitest-team-alert",
     );
@@ -218,6 +200,12 @@ describe("team admin notify — gaps + edges", () => {
       runId: RUN_ID,
       clientIds: [clientId],
     });
+    if (adminId) {
+      await pool.query(`DELETE FROM admin_sessions WHERE admin_id = ?`, [
+        adminId,
+      ]);
+      await pool.query(`DELETE FROM admins WHERE id = ?`, [adminId]);
+    }
     await pool?.end();
   });
 
@@ -274,7 +262,7 @@ describe("team admin notify — gaps + edges", () => {
 
     const ready = readySubjects(__testGetEmailDryRuns());
     expect(ready.length).toBeGreaterThan(0);
-    expectAllTeamAdminsGot(ready);
+    expectFixtureStaffGot(ready);
 
     // Re-submit last required — still all done → no second ready alert
     __testClearEmailDryRuns();
@@ -357,7 +345,7 @@ describe("team admin notify — gaps + edges", () => {
     }
     const ready = readySubjects(__testGetEmailDryRuns());
     expect(ready.length).toBeGreaterThan(0);
-    expectAllTeamAdminsGot(ready);
+    expectFixtureStaffGot(ready);
   }, 60_000);
 
   it("portal document upload emails team admins", async () => {
@@ -371,7 +359,7 @@ describe("team admin notify — gaps + edges", () => {
 
     const subs = submissionSubjects(__testGetEmailDryRuns());
     expect(subs.length).toBeGreaterThan(0);
-    expectAllTeamAdminsGot(subs);
+    expectFixtureStaffGot(subs);
   }, 60_000);
 
   it("info-request submit emails team admins", async () => {
@@ -407,11 +395,10 @@ describe("team admin notify — gaps + edges", () => {
 
     const subs = submissionSubjects(__testGetEmailDryRuns());
     expect(subs.length).toBeGreaterThan(0);
-    expectAllTeamAdminsGot(subs);
+    expectFixtureStaffGot(subs);
   }, 60_000);
 
   it("manual installment mark-paid emails Payment received", async () => {
-    await resetTeamAdminNotifyPrefs();
     const due = new Date();
     due.setDate(due.getDate() + 10);
     const dueStr = due.toISOString().slice(0, 10);
@@ -437,12 +424,11 @@ describe("team admin notify — gaps + edges", () => {
 
     const paid = paymentReceivedSubjects(__testGetEmailDryRuns());
     expect(paid.length).toBeGreaterThan(0);
-    expectAllTeamAdminsGot(paid);
+    expectFixtureStaffGot(paid);
     expect(purchaseSubjects(__testGetEmailDryRuns()).length).toBe(0);
   }, 120_000);
 
   it("creating an already-paid split emails Payment received", async () => {
-    await resetTeamAdminNotifyPrefs();
     const due = new Date();
     due.setDate(due.getDate() + 12);
     const dueStr = due.toISOString().slice(0, 10);
@@ -462,6 +448,6 @@ describe("team admin notify — gaps + edges", () => {
 
     const paid = paymentReceivedSubjects(__testGetEmailDryRuns());
     expect(paid.length).toBeGreaterThan(0);
-    expectAllTeamAdminsGot(paid);
+    expectFixtureStaffGot(paid);
   }, 120_000);
 });

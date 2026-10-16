@@ -42,6 +42,9 @@
     /* Destructive: Red */
     --destructive: 0 84% 60%;
     --destructive-foreground: 0 0% 100%;
+    /* Caution / in-between states (e.g. Warm prospects) */
+    --warning: 38 92% 50%;
+    --warning-foreground: 0 0% 100%;
 
     /* Muted: Neutral Gray */
     --muted: 240 5% 91%;
@@ -79,6 +82,8 @@
 
     --destructive: 0 84% 60%;
     --destructive-foreground: 0 0% 100%;
+    --warning: 38 92% 55%;
+    --warning-foreground: 222 47% 11%;
 
     --muted: 240 10% 15%;
     --muted-foreground: 240 5% 65%;

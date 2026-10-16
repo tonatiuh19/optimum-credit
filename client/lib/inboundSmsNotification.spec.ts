@@ -19,9 +19,12 @@ const EVENT_KEYS: AdminNotifyEventKey[] = [
   "inbound_sms",
   "missed_call",
   "voicemail",
+  "call_transcript",
   "funding_doc_upload",
   "funding_application_created",
   "get_credit_report_lead",
+  "event_registration",
+  "prospect_temperature",
   "progress_report_alerts",
   "morning_digest",
 ];
@@ -57,6 +60,9 @@ describe("inboundSmsNotification", () => {
     const prefs = allOn();
     expect(shouldPlayAdminNotifyChime("missed_call", prefs, false)).toBe(true);
     expect(shouldPlayAdminNotifyChime("voicemail", prefs, false)).toBe(true);
+    expect(shouldPlayAdminNotifyChime("call_transcript", prefs, false)).toBe(
+      true,
+    );
     expect(shouldPlayAdminNotifyChime("missed_call", prefs, true)).toBe(false);
     prefs.in_app.missed_call = false;
     expect(shouldPlayAdminNotifyChime("missed_call", prefs, false)).toBe(false);

@@ -17,6 +17,7 @@ import {
   CheckCircle2,
   AlertCircle,
   Clock,
+  Ban,
 } from "lucide-react";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
@@ -517,6 +518,10 @@ function StatusBadge({ status }: { status: string }) {
     paused: {
       cls: "bg-muted text-muted-foreground",
       icon: <Minus className="w-3 h-3" />,
+    },
+    blocked: {
+      cls: "bg-destructive/10 text-destructive",
+      icon: <Ban className="w-3 h-3" />,
     },
     onboarding: {
       cls: "bg-primary/10 text-primary",

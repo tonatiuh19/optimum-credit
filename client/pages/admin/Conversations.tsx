@@ -234,7 +234,9 @@ export default function AdminConversations() {
     return `${m}:${String(s).padStart(2, "0")}`;
   };
 
-  const [channel, setChannel] = useState<"sms" | "internal">("sms");
+  const [channel, setChannel] = useState<"sms" | "internal" | "whatsapp">(
+    "sms",
+  );
   const [body, setBody] = useState("");
   const [panelOpen, setPanelOpen] = useState(false);
   const [linkClient, setLinkClient] = useState<AdminClientListItem | null>(
@@ -251,9 +253,9 @@ export default function AdminConversations() {
   const [composeOpen, setComposeOpen] = useState(false);
   const [composeTarget, setComposeTarget] =
     useState<ConversationComposeTarget | null>(null);
-  const [composeChannel, setComposeChannel] = useState<"sms" | "internal">(
-    "sms",
-  );
+  const [composeChannel, setComposeChannel] = useState<
+    "sms" | "internal" | "whatsapp"
+  >("sms");
   const [composeBody, setComposeBody] = useState("");
   const [composeAlsoRecipients, setComposeAlsoRecipients] = useState<
     ComposeAlsoRecipient[]
@@ -292,6 +294,17 @@ export default function AdminConversations() {
   const [hubChannel, setHubChannel] = useState<"sms" | "social">("sms");
   const socialDmMode = authUser?.social_dm_mode || "disabled";
   const socialDmLive = authUser?.social_dm_enabled === true;
+  const whatsappEnabled = authUser?.whatsapp_enabled === true;
+  const threadChannels = (
+    whatsappEnabled
+      ? (["sms", "whatsapp", "internal"] as const)
+      : (["sms", "internal"] as const)
+  ).slice() as Array<"sms" | "internal" | "whatsapp">;
+  const outboundChannels = (
+    whatsappEnabled
+      ? (["sms", "whatsapp"] as const)
+      : (["sms"] as const)
+  ).slice() as Array<"sms" | "internal" | "whatsapp">;
   const [contactsPage, setContactsPage] = useState(1);
   const [contactsLoadingMore, setContactsLoadingMore] = useState(false);
 
@@ -1141,14 +1154,21 @@ export default function AdminConversations() {
         : [];
     setThreadSending(true);
     try {
+    const sendChannel =
+      channel === "internal"
+        ? ("internal" as const)
+        : channel === "whatsapp"
+          ? ("whatsapp" as const)
+          : ("sms" as const);
     const payload =
       activeKind === "client"
         ? {
             client_id: activeId,
-            channel: channel === "internal" ? ("internal" as const) : channel,
+            channel: sendChannel,
             body: filledBody,
             is_internal_note: channel === "internal",
-            ofg_number_id: accessNumbers[0]?.id,
+            ofg_number_id:
+              sendChannel === "whatsapp" ? undefined : accessNumbers[0]?.id,
             media_url: channel === "sms" ? attachment?.url : undefined,
             media_content_type:
               channel === "sms" ? attachment?.content_type : undefined,
@@ -1156,19 +1176,25 @@ export default function AdminConversations() {
         : activeKind === "contact"
           ? {
               contact_id: activeId,
-              channel: "sms" as const,
+              channel: sendChannel === "internal" ? ("sms" as const) : sendChannel,
               body: filledBody,
-              ofg_number_id: accessNumbers[0]?.id,
-              media_url: attachment?.url,
-              media_content_type: attachment?.content_type,
+              ofg_number_id:
+                sendChannel === "whatsapp" ? undefined : accessNumbers[0]?.id,
+              media_url:
+                sendChannel === "sms" ? attachment?.url : undefined,
+              media_content_type:
+                sendChannel === "sms" ? attachment?.content_type : undefined,
             }
           : {
               unknown_contact_id: activeId,
-              channel: "sms" as const,
+              channel: sendChannel === "internal" ? ("sms" as const) : sendChannel,
               body: filledBody,
-              ofg_number_id: accessNumbers[0]?.id,
-              media_url: attachment?.url,
-              media_content_type: attachment?.content_type,
+              ofg_number_id:
+                sendChannel === "whatsapp" ? undefined : accessNumbers[0]?.id,
+              media_url:
+                sendChannel === "sms" ? attachment?.url : undefined,
+              media_content_type:
+                sendChannel === "sms" ? attachment?.content_type : undefined,
             };
     const result = await dispatch(sendHubMessage(payload));
     if (sendHubMessage.fulfilled.match(result)) {
@@ -1285,8 +1311,7 @@ export default function AdminConversations() {
 
   const sendCompose = async () => {
     if (!composeTarget || composeSending) return;
-    const composeSms =
-      composeTarget.kind === "phone" || composeChannel === "sms";
+    const composeSms = composeChannel === "sms";
     if (!composeBody.trim() && !(composeSms && composeAttachment)) return;
     if (
       composeSms &&
@@ -1319,13 +1344,21 @@ export default function AdminConversations() {
         );
         return;
       }
+      const phoneChannel =
+        composeChannel === "whatsapp" ? ("whatsapp" as const) : ("sms" as const);
       const result = await dispatch(
         startConversationOutbound({
           phone: composeTarget.phone,
           body: filledBody,
-          ofg_number_id: accessNumbers[0]?.id,
-          media_url: composeAttachment?.url,
-          media_content_type: composeAttachment?.content_type,
+          channel: phoneChannel,
+          ofg_number_id:
+            phoneChannel === "whatsapp" ? undefined : accessNumbers[0]?.id,
+          media_url:
+            phoneChannel === "sms" ? composeAttachment?.url : undefined,
+          media_content_type:
+            phoneChannel === "sms"
+              ? composeAttachment?.content_type
+              : undefined,
         }),
       );
       if (startConversationOutbound.fulfilled.match(result)) {
@@ -1373,14 +1406,21 @@ export default function AdminConversations() {
         );
         return;
       }
+      const contactChannel =
+        composeChannel === "whatsapp" ? ("whatsapp" as const) : ("sms" as const);
       const result = await dispatch(
         sendHubMessage({
           contact_id: contact.id,
-          channel: "sms",
+          channel: contactChannel,
           body: filledBody,
-          ofg_number_id: accessNumbers[0]?.id,
-          media_url: composeAttachment?.url,
-          media_content_type: composeAttachment?.content_type,
+          ofg_number_id:
+            contactChannel === "whatsapp" ? undefined : accessNumbers[0]?.id,
+          media_url:
+            contactChannel === "sms" ? composeAttachment?.url : undefined,
+          media_content_type:
+            contactChannel === "sms"
+              ? composeAttachment?.content_type
+              : undefined,
         }),
       );
       if (sendHubMessage.fulfilled.match(result)) {
@@ -1423,10 +1463,16 @@ export default function AdminConversations() {
     const result = await dispatch(
       sendHubMessage({
         client_id: client.id,
-        channel: composeChannel === "internal" ? "internal" : composeChannel,
+        channel:
+          composeChannel === "internal"
+            ? "internal"
+            : composeChannel === "whatsapp"
+              ? "whatsapp"
+              : "sms",
         body: filledBody,
         is_internal_note: composeChannel === "internal",
-        ofg_number_id: accessNumbers[0]?.id,
+        ofg_number_id:
+          composeChannel === "whatsapp" ? undefined : accessNumbers[0]?.id,
         media_url:
           composeChannel === "sms" ? composeAttachment?.url : undefined,
         media_content_type:
@@ -1508,6 +1554,27 @@ export default function AdminConversations() {
       openContact("client", clientId);
     }
   };
+
+  // Thread opens on the newest message. On new messages, follow only when the
+  // reader is already near the bottom (don't yank them out of older history).
+  const threadScrollRef = useRef<HTMLDivElement | null>(null);
+  const threadStickRef = useRef(true);
+  const threadKey = `${activeKind ?? ""}:${activeId ?? ""}`;
+  const threadLastKeyRef = useRef("");
+  const threadMessageCount = timeline?.messages?.length ?? 0;
+  useEffect(() => {
+    const el = threadScrollRef.current;
+    if (!el || threadMessageCount === 0 || timelineLoading) return;
+    const opened = threadLastKeyRef.current !== threadKey;
+    if (opened || threadStickRef.current) {
+      threadLastKeyRef.current = threadKey;
+      threadStickRef.current = true;
+      // After layout (images / audio players can change height).
+      requestAnimationFrame(() => {
+        el.scrollTop = el.scrollHeight;
+      });
+    }
+  }, [threadKey, threadMessageCount, timelineLoading]);
 
   if (accessLoading || accessEnabled === null) {
   return (
@@ -2308,6 +2375,12 @@ export default function AdminConversations() {
               </div>
 
               <div
+                ref={threadScrollRef}
+                onScroll={(e) => {
+                  const el = e.currentTarget;
+                  threadStickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+                }}
+                data-testid="conversation-thread-scroll"
                 className={cn(
                   "flex-1 min-h-0 overflow-y-auto p-4 space-y-2",
                   timelineRefreshing && messages.length > 0 && "opacity-60 transition-opacity",
@@ -2376,7 +2449,9 @@ export default function AdminConversations() {
                               ? t("conversations.channels.call")
                               : m.channel === "internal"
                                 ? t("conversations.channels.internal")
-                                : t("conversations.channels.sms")}
+                                : m.channel === "whatsapp"
+                                  ? t("conversations.channels.whatsapp")
+                                  : t("conversations.channels.sms")}
                             {m.sent_by_admin_name
                               ? ` · ${m.sent_by_admin_name}`
                               : ""}
@@ -2503,16 +2578,8 @@ export default function AdminConversations() {
                   <ConversationMessageComposer
                     collapsible
                     collapseResetKey={`${activeKind}-${activeId}`}
-                    channel={
-                      activeKind === "unknown" || activeKind === "contact"
-                        ? "sms"
-                        : channel
-                    }
-                    onChannelChange={
-                      activeKind === "unknown" || activeKind === "contact"
-                        ? () => {}
-                        : setChannel
-                    }
+                    channel={channel}
+                    onChannelChange={setChannel}
                     body={body}
                     onBodyChange={setBody}
                     templates={templates}
@@ -2536,9 +2603,9 @@ export default function AdminConversations() {
                     onSuggestAi={loadAiSuggestions}
                     aiSuggestionsLoading={aiSuggestionsLoading}
                     allowedChannels={
-                      activeKind === "unknown" || activeKind === "contact"
-                        ? ["sms"]
-                        : undefined
+                      activeKind === "client"
+                        ? threadChannels
+                        : outboundChannels
                     }
                     onSend={() => void send()}
                   />
@@ -2636,23 +2703,12 @@ export default function AdminConversations() {
                 </div>
               )}
               <ConversationMessageComposer
-                channel={
-                  composeTarget.kind === "phone" ||
-                  composeTarget.kind === "contact"
-                    ? "sms"
-                    : composeChannel
-                }
-                onChannelChange={
-                  composeTarget.kind === "phone" ||
-                  composeTarget.kind === "contact"
-                    ? () => {}
-                    : setComposeChannel
-                }
+                channel={composeChannel}
+                onChannelChange={setComposeChannel}
                 allowedChannels={
-                  composeTarget.kind === "phone" ||
-                  composeTarget.kind === "contact"
-                    ? ["sms"]
-                    : undefined
+                  composeTarget.kind === "client"
+                    ? threadChannels
+                    : outboundChannels
                 }
                 body={composeBody}
                 onBodyChange={setComposeBody}

@@ -11,12 +11,9 @@ import {
   extractAllScores,
   extractReportDate,
   middleScore,
+  progressReportV2PdfFromReview,
   toPdfSafeText,
 } from "./index";
-import {
-  generateOfgProgressReportPdf,
-  toPdfSafeText as toPdfSafeTextModule,
-} from "./ofgProgressReportPdf";
 
 function expectScores(
   text: string,
@@ -460,7 +457,7 @@ BRIAN A AVELAR BRIAN AVELAR BRIAN A AVELAR
 });
 
 describe("progress report PDF — WinAnsi / control-char matrix", () => {
-  it("toPdfSafeText is consistent between api/index and ofgProgressReportPdf", () => {
+  it("toPdfSafeText yields WinAnsi-safe single-line text", () => {
     const samples = [
       "Credit Card\tNegative",
       "A → B — C • D",
@@ -470,7 +467,9 @@ describe("progress report PDF — WinAnsi / control-char matrix", () => {
       "\u0000null\u0008byte",
     ];
     for (const s of samples) {
-      expect(toPdfSafeText(s)).toBe(toPdfSafeTextModule(s));
+      const out = toPdfSafeText(s);
+      expect(out).not.toMatch(/[\t\r\n]/);
+      expect(out).toMatch(/^[\x20-\x7E\xA0-\xFF]*$/);
     }
   });
 
@@ -549,17 +548,14 @@ describe("progress report PDF — WinAnsi / control-char matrix", () => {
       locale: "en",
     };
 
-    const { buffer } = await generateOfgProgressReportPdf(
-      data,
-      "Brian_WinAnsi_matrix.pdf",
-    );
+    const buffer = await progressReportV2PdfFromReview(data, 2);
     expect(buffer.length).toBeGreaterThan(2000);
     const pdf = await PDFDocument.load(buffer);
     expect(pdf.getPageCount()).toBe(3);
   });
 
   it("Spanish locale PDF with accents still builds", async () => {
-    const { buffer } = await generateOfgProgressReportPdf(
+    const buffer = await progressReportV2PdfFromReview(
       {
         client: { firstName: "José", lastName: "García" },
         reportDate: { before: "2026-01-01", after: "2026-06-01" },
@@ -606,9 +602,15 @@ describe("progress report PDF — WinAnsi / control-char matrix", () => {
         croaDisclosure: "Divulgación CROA — resultados varían.",
         locale: "es",
       },
-      "Jose_es_matrix.pdf",
+      2,
     );
     const pdf = await PDFDocument.load(buffer);
     expect(pdf.getPageCount()).toBe(3);
+    await import("pdf-parse/worker").catch(() => undefined);
+    const { PDFParse } = await import("pdf-parse");
+    const text = (await new PDFParse({ data: buffer }).getText()).text.replace(/\s+/g, " ");
+    // Spanish v2 labels + CROA in Spanish.
+    expect(text).toContain("INFORME DE PROGRESO DE CREDITO");
+    expect(text).toContain("Ley de Organizaciones de Reparacion de Credito (CROA)");
   });
 });

@@ -33,6 +33,7 @@ const WRITE_TOOLS = new Set([
   "convert_contact",
   "send_contact_sms",
   "send_contact_email",
+  "send_contact_whatsapp",
   "create_work_task",
   "update_work_task",
   "add_case_note",
@@ -41,6 +42,8 @@ const WRITE_TOOLS = new Set([
   "send_email",
   "send_round_report",
   "send_sms",
+  "send_whatsapp",
+  "send_wa",
   "update_pipeline_stage",
   "convert_prospect",
   "update_client",
@@ -57,6 +60,8 @@ const WRITE_TOOLS = new Set([
   "update_referrer",
   "attach_referrer",
   "send_text",
+  "list_whatsapp",
+  "update_lead_signals",
 ]);
 
 /** Convert API JSON Schema → Zod so MCP advertises real args per tool. */

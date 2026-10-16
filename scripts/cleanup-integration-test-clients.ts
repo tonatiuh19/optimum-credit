@@ -70,6 +70,11 @@ async function main() {
             OR friendly_name LIKE 'AI tools OFG%'`,
       ],
       [
+        "contacts test emails",
+        `SELECT COUNT(*) AS c FROM contacts
+         WHERE email LIKE '%@example.test' OR email LIKE '%@affiliate.test'`,
+      ],
+      [
         "admins @example.test",
         `SELECT COUNT(*) AS c FROM admins WHERE email LIKE '%@example.test'`,
       ],

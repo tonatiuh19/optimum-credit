@@ -54,6 +54,11 @@ export interface AdminUser {
   social_dm_enabled?: boolean;
   /** Scaffold status for Social DM UI (locked / coming soon vs live). */
   social_dm_mode?: "disabled" | "needs_credentials" | "ready" | "live";
+  /**
+   * WhatsApp (360dialog) for this admin — César assignee when
+   * WHATSAPP_360DIALOG_ENABLED + D360_API_KEY and profile/(env) match.
+   */
+  whatsapp_enabled?: boolean;
 }
 
 /** One turn in Admin AI Ask (client ↔ API). */
@@ -101,9 +106,12 @@ export type AdminNotifyEventKey =
   | "inbound_sms"
   | "missed_call"
   | "voicemail"
+  | "call_transcript"
   | "funding_doc_upload"
   | "funding_application_created"
   | "get_credit_report_lead"
+  | "event_registration"
+  | "prospect_temperature"
   | "progress_report_alerts"
   | "morning_digest";
 
@@ -163,6 +171,7 @@ export type ClientStatus =
   | "onboarding"
   | "active"
   | "paused"
+  | "blocked"
   | "cancelled";
 
 // ============================================================
@@ -463,7 +472,7 @@ export interface ConversationContactHubItem {
   status: "open" | "snoozed" | "closed" | "archived";
   assigned_admin_id?: number | null;
   assigned_admin_name?: string | null;
-  channels: Array<"sms" | "email" | "call" | "internal">;
+  channels: Array<"sms" | "email" | "call" | "internal" | "whatsapp">;
   /** Primary conversation id for deep links (latest active thread) */
   primary_conversation_id?: number | null;
   client_id?: number | null;
@@ -580,6 +589,11 @@ export interface AdminClientListItem {
   phone?: string | null;
   pipeline_stage: PipelineStage;
   pipeline_stage_changed_at?: string | null;
+  /**
+   * Real round for `round_5` clients: 5, or 6–12 in an extended program
+   * (from published reports + case max_rounds). Null for other stages.
+   */
+  effective_round?: number | null;
   status: ClientStatus;
   created_at: string;
   package_name?: string | null;
@@ -1214,7 +1228,8 @@ export type ReminderFlowTriggerEvent =
   | "round_4_complete"
   | "round_5_complete"
   | "round_extended_complete"
-  | "completed";
+  | "completed"
+  | "event_registered";
 
 export type ReportCompareMode = "baseline" | "chain";
 
@@ -2267,6 +2282,33 @@ export interface Prospect {
   case_id?: number | null;
   case_number?: string | null;
   created_at: string;
+  /** Traffic light (semáforo): hot / warm / cold — prospects only. */
+  lead_temperature?: LeadTemperatureColor | null;
+  /** Comma-separated reason codes (see LeadTemperatureReason). */
+  lead_temperature_reasons?: string | null;
+  lead_temperature_at?: string | null;
+  analysis_reviewed_at?: string | null;
+  call_scheduled_at?: string | null;
+}
+
+export type LeadTemperatureColor = "hot" | "warm" | "cold";
+export type LeadTemperatureReason =
+  | "analysis_reviewed"
+  | "call_scheduled"
+  | "payment_started"
+  | "monitoring_login"
+  | "documents_uploaded"
+  | "recent_reply"
+  | "has_credit_report"
+  | "no_reply_14d";
+
+/** POST /api/admin/clients/:id/lead-signals */
+export interface LeadSignalsResponse {
+  lead_temperature: LeadTemperatureColor | null;
+  lead_temperature_reasons: LeadTemperatureReason[];
+  lead_temperature_at: string | null;
+  analysis_reviewed_at: string | null;
+  call_scheduled_at: string | null;
 }
 
 export interface ConvertProspectPayload {
@@ -2278,6 +2320,8 @@ export interface ConvertProspectPayload {
 
 export interface AdminPipelineQuery {
   search?: string;
+  /** Prospect traffic light filter (prospect column only). */
+  lead_temperature?: LeadTemperatureColor;
   language?: string;
   billing?: string;
   package_id?: string;
@@ -2399,4 +2443,232 @@ export interface CreditAnalysisResult {
   claude_enhanced?: boolean;
   /** True when email_opt_in was set but no valid client email was on file. */
   email_skipped_no_address?: boolean;
+}
+
+// ============================================================
+// EVENT MARKETING (CRM section)
+// ============================================================
+export type EventSeriesKind = "in_person" | "online" | "hybrid";
+export type EventSessionStatus = "scheduled" | "cancelled" | "completed";
+export type EventFormFieldType =
+  | "text"
+  | "email"
+  | "phone"
+  | "textarea"
+  | "select"
+  | "checkbox"
+  | "language";
+export type EventQrSource = "company" | "session";
+
+export interface EventCompany {
+  id: number;
+  slug: string;
+  name: string;
+  name_es: string | null;
+  label_slug: string;
+  is_active: boolean;
+  sort_order: number;
+  welcome_heading_en: string;
+  welcome_heading_es: string;
+  welcome_body_en: string;
+  welcome_body_es: string;
+  offer_free_report: boolean;
+  offer_comic: boolean;
+  class_link_url: string | null;
+  class_schedule_note_en: string | null;
+  class_schedule_note_es: string | null;
+  email_subject_en: string;
+  email_subject_es: string;
+  email_body_en: string;
+  email_body_es: string;
+  sms_body_en: string;
+  sms_body_es: string;
+  public_url?: string;
+  registration_count?: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface EventSeries {
+  id: number;
+  company_id: number;
+  slug: string;
+  name_en: string;
+  name_es: string;
+  kind: EventSeriesKind;
+  is_active: boolean;
+  sort_order: number;
+}
+
+export interface EventSession {
+  id: number;
+  company_id: number;
+  series_id: number;
+  short_code: string;
+  title_en: string;
+  title_es: string;
+  starts_at: string;
+  ends_at: string | null;
+  location_en: string | null;
+  location_es: string | null;
+  capacity: number | null;
+  status: EventSessionStatus;
+  registration_count?: number;
+  public_url?: string;
+  series_name_en?: string;
+  series_name_es?: string;
+}
+
+export interface EventFormField {
+  id: number;
+  company_id: number;
+  field_key: string;
+  label_en: string;
+  label_es: string;
+  field_type: EventFormFieldType;
+  options_json: string[] | null;
+  is_required: boolean;
+  is_system: boolean;
+  is_active: boolean;
+  sort_order: number;
+}
+
+export interface EventRegistration {
+  id: number;
+  client_id: number;
+  company_id: number;
+  series_id: number | null;
+  session_id: number | null;
+  answers_json: Record<string, unknown> | null;
+  source_qr: EventQrSource;
+  checked_in_at: string | null;
+  created_at: string;
+  first_name?: string;
+  last_name?: string;
+  email?: string;
+  phone?: string;
+  session_title_en?: string | null;
+}
+
+export interface EventCompanyDetail {
+  company: EventCompany;
+  series: EventSeries[];
+  sessions: EventSession[];
+  form_fields: EventFormField[];
+  registrations: EventRegistration[];
+}
+
+export interface PublicEventLandingResponse {
+  companies: Array<{
+    id: number;
+    slug: string;
+    name: string;
+    name_es: string | null;
+    sort_order: number;
+  }>;
+  company: EventCompany;
+  series: EventSeries[];
+  sessions: EventSession[];
+  form_fields: EventFormField[];
+  next_session_id: number | null;
+  selected_session_id: number | null;
+  mfsn_url: string;
+}
+
+export interface PublicEventRegisterRequest {
+  company_slug: string;
+  session_id?: number | null;
+  source_qr?: EventQrSource;
+  answers: Record<string, unknown>;
+}
+
+export interface PublicEventRegisterResponse {
+  ok: true;
+  client_id: number;
+  registration_id: number;
+  event_kind: string;
+  mfsn_url: string;
+  email_sent: boolean;
+  sms_sent: boolean;
+}
+
+/** POST /api/admin/clients/:id/notes */
+export interface AdminClientNoteResponse {
+  ok: true;
+  admin_notes: string | null;
+}
+
+/** POST /api/admin/clients/:id/pause — paused=false resumes. */
+export interface AdminClientPauseResponse {
+  ok: true;
+  status: string;
+  admin_notes: string | null;
+}
+
+/** POST /api/admin/credit-files (202) — upload queued for Claude extraction. */
+export interface CreditFileUploadResponse {
+  id: number;
+  status: "queued";
+  /** Recognized layout for the text cross-check; "unknown" is still accepted. */
+  provider: string;
+  /** Pages printed as images (PDF text check; 0 for images/unknown). */
+  image_pages: number;
+  total_pages: number;
+}
+
+/** GET /api/admin/credit-files/:id — job status + extracted credit file. */
+export interface CreditFileExtractionResponse {
+  id: number;
+  client_id: number | null;
+  case_id: number | null;
+  purpose: "analysis" | "progress_before" | "progress_after" | "other";
+  file_name: string;
+  mime_type: string;
+  provider: string;
+  status: "queued" | "submitted" | "ready" | "failed";
+  model: string | null;
+  /** CreditFile (api/creditFile.ts) once ready. */
+  credit_file: Record<string, unknown> | null;
+  issues: Array<{ severity: "error" | "warning"; code: string; message: string }>;
+  confidence: number | null;
+  image_pages: number | null;
+  total_pages: number | null;
+  error_message: string | null;
+  created_at: string;
+  submitted_at: string | null;
+  completed_at: string | null;
+}
+
+/** GET /api/admin/credit-analyses/:id/enhanced-status */
+export interface CreditAnalysisEnhancedStatusResponse {
+  /** null = no enhanced read for this analysis (keep today's PDF). */
+  status: "queued" | "submitted" | "ready" | "failed" | null;
+  /** Agent context for the analysis PDF (escrow + lender score). */
+  context?: CreditAnalysisLenderContext;
+}
+
+/**
+ * Agent context for the enhanced Credit Analysis: escrow flag (null = auto-
+ * detect a mortgage pull in the last 45 days) and the lender's own score.
+ */
+export interface CreditAnalysisLenderContext {
+  escrow: boolean | null;
+  lender_score_model: string | null;
+  lender_score: number | null;
+  lender_target_score: number | null;
+}
+
+/** PATCH /api/admin/credit-analyses/:id/context */
+export type CreditAnalysisLenderContextUpdate = Partial<CreditAnalysisLenderContext>;
+
+/** Three-way calls ("Add caller") — GET /api/voice/three-way/presets */
+export interface ThreeWayPresetsResponse {
+  presets: Array<{ label: string; number: string }>;
+}
+
+/** POST /api/voice/three-way/start */
+export interface ThreeWayStartResponse {
+  session_id: number;
+  status: "active";
+  third_party: { label: string | null; number: string };
 }

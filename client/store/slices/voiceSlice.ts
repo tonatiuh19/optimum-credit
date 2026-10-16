@@ -1,6 +1,7 @@
 import { createSlice, createAsyncThunk, PayloadAction } from "@reduxjs/toolkit";
 import api, { formatAxiosError } from "@/lib/api";
 import type { RootState } from "../index";
+import type { ThreeWayPresetsResponse, ThreeWayStartResponse } from "@shared/api";
 
 function authHeaders(getState: () => unknown) {
   const token = (getState() as RootState).adminAuth.token;
@@ -275,6 +276,82 @@ export const fixCallSetup = createAsyncThunk(
   },
 );
 
+// ── Three-way calls ("Add caller") ───────────────────────────────────────────
+
+export const fetchThreeWayPresets = createAsyncThunk<
+  ThreeWayPresetsResponse["presets"],
+  void,
+  { rejectValue: string }
+>("voice/threeWayPresets", async (_, { getState, rejectWithValue }) => {
+  try {
+    const { data } = await api.get<ThreeWayPresetsResponse>("/voice/three-way/presets", {
+      headers: authHeaders(getState),
+    });
+    return data.presets;
+  } catch (error: unknown) {
+    return rejectWithValue(formatAxiosError(error, "Could not load quick numbers"));
+  }
+});
+
+export const startThreeWayCall = createAsyncThunk<
+  ThreeWayStartResponse,
+  { callSid: string; to: string; label?: string | null },
+  { rejectValue: string }
+>("voice/threeWayStart", async ({ callSid, to, label }, { getState, rejectWithValue }) => {
+  try {
+    const { data } = await api.post<ThreeWayStartResponse>(
+      "/voice/three-way/start",
+      { call_sid: callSid, to, label: label ?? null },
+      { headers: authHeaders(getState) },
+    );
+    return data;
+  } catch (error: unknown) {
+    return rejectWithValue(formatAxiosError(error, "Could not add the caller"));
+  }
+});
+
+export const sendThreeWayDigits = createAsyncThunk<
+  true,
+  { sessionId: number; digits: string },
+  { rejectValue: string }
+>("voice/threeWayDigits", async ({ sessionId, digits }, { getState, rejectWithValue }) => {
+  try {
+    await api.post(
+      "/voice/three-way/digits",
+      { session_id: sessionId, digits },
+      { headers: authHeaders(getState) },
+    );
+    return true;
+  } catch (error: unknown) {
+    return rejectWithValue(formatAxiosError(error, "Could not send the digits"));
+  }
+});
+
+export const removeThreeWayCaller = createAsyncThunk<
+  true,
+  { sessionId: number },
+  { rejectValue: string }
+>("voice/threeWayRemove", async ({ sessionId }, { getState, rejectWithValue }) => {
+  try {
+    await api.post(
+      "/voice/three-way/remove",
+      { session_id: sessionId },
+      { headers: authHeaders(getState) },
+    );
+    return true;
+  } catch (error: unknown) {
+    return rejectWithValue(formatAxiosError(error, "Could not remove the caller"));
+  }
+});
+
+export interface ThreeWayState {
+  sessionId: number | null;
+  label: string | null;
+  number: string | null;
+  status: "idle" | "adding" | "active" | "removing";
+  error: string | null;
+}
+
 export type DeviceStatus = "idle" | "connecting" | "registered" | "error";
 
 export interface OutboundCallTarget {
@@ -287,7 +364,17 @@ interface VoiceState {
   isAvailable: boolean;
   deviceStatus: DeviceStatus;
   outboundCall: OutboundCallTarget | null;
+  threeWayPresets: ThreeWayPresetsResponse["presets"];
+  threeWay: ThreeWayState;
 }
+
+const IDLE_THREE_WAY: ThreeWayState = {
+  sessionId: null,
+  label: null,
+  number: null,
+  status: "idle",
+  error: null,
+};
 
 const stored = localStorage.getItem("voice_available");
 
@@ -295,6 +382,8 @@ const initialState: VoiceState = {
   isAvailable: stored === null ? true : stored === "true",
   deviceStatus: "idle",
   outboundCall: null,
+  threeWayPresets: [],
+  threeWay: IDLE_THREE_WAY,
 };
 
 const voiceSlice = createSlice({
@@ -328,6 +417,46 @@ const voiceSlice = createSlice({
     endOutboundCall(state) {
       state.outboundCall = null;
     },
+    /** Call ended / panel closed: forget the third caller. */
+    resetThreeWay(state) {
+      state.threeWay = IDLE_THREE_WAY;
+    },
+  },
+  extraReducers: (b) => {
+    b.addCase(fetchThreeWayPresets.fulfilled, (s, a) => {
+      s.threeWayPresets = a.payload;
+    });
+    b.addCase(startThreeWayCall.pending, (s, a) => {
+      s.threeWay = {
+        sessionId: null,
+        label: a.meta.arg.label ?? null,
+        number: a.meta.arg.to,
+        status: "adding",
+        error: null,
+      };
+    });
+    b.addCase(startThreeWayCall.fulfilled, (s, a) => {
+      s.threeWay = {
+        sessionId: a.payload.session_id,
+        label: a.payload.third_party.label,
+        number: a.payload.third_party.number,
+        status: "active",
+        error: null,
+      };
+    });
+    b.addCase(startThreeWayCall.rejected, (s, a) => {
+      s.threeWay = { ...IDLE_THREE_WAY, error: a.payload ?? "Could not add the caller" };
+    });
+    b.addCase(removeThreeWayCaller.pending, (s) => {
+      s.threeWay.status = "removing";
+    });
+    b.addCase(removeThreeWayCaller.fulfilled, (s) => {
+      s.threeWay = IDLE_THREE_WAY;
+    });
+    b.addCase(removeThreeWayCaller.rejected, (s, a) => {
+      s.threeWay.status = "active";
+      s.threeWay.error = a.payload ?? "Could not remove the caller";
+    });
   },
 });
 
@@ -337,5 +466,6 @@ export const {
   startOutboundCall,
   resolveOutboundCallName,
   endOutboundCall,
+  resetThreeWay,
 } = voiceSlice.actions;
 export default voiceSlice.reducer;

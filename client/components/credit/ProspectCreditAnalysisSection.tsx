@@ -187,6 +187,7 @@ export default function ProspectCreditAnalysisSection({
         result={result}
         showRegisterCta={false}
         clientName={displayName || undefined}
+        staffEnhancedPdf={variant === "admin"}
       />
     );
   }
@@ -198,6 +199,7 @@ export default function ProspectCreditAnalysisSection({
         onStartOver={handleStartOver}
         showRegisterCta={false}
         clientName={displayName || undefined}
+        staffEnhancedPdf={variant === "admin"}
       />
     );
   }

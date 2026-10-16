@@ -14,7 +14,7 @@ async function main() {
     throw new Error("Unset VITEST so Resend actually sends");
   }
 
-  const to = process.argv[2] || "axgoomez@gmail.com";
+  const to = process.argv[2] || "alex@disruptinglabs.com";
   const forceResend = process.argv.includes("--force-resend");
   const app = createServer();
   const res = await request(app)

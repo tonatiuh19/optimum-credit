@@ -34,13 +34,13 @@ OAuth callbacks we allow for Claude:
 | `list_clients_owing` | “Which clients owe money / are overdue?” |
 | `list_installments` | “Show installments for case CR-…” |
 | `list_payments` | “Payment history for Jane” |
-| `get_client` / `list_case_documents` | Profile + `referrers[]` + `funding_applications[]` (dual CR+funding) + docs status |
+| `get_client` / `list_case_documents` | Profile + `referrers[]` + `funding_applications[]` (dual CR+funding) + docs status. `required_checklist` counts staff uploads **and** onboarding-portal uploads (`onboarding_uploads[]`) |
 | `search_clients` | CR clients **and** `funding_applications` (funding-only intakes) |
 | `search_contacts` / `get_contact` | CRM Contacts address book (not pipeline); active/unconverted only |
 | `list_funding_applications` / `get_funding_application` | Funding board search + one app + docs uploaded |
 | `funding_pipeline_summary` | Funding column counts (use instead of CR `pipeline_summary`) |
 | `list_round_schedule` | Round calendar dates |
-| `list_progress_reports` / `get_progress_report` | Published rounds + Wizard drafts/confidence; hand off PDF publish to CRM Reports → Generate. Special clients may use rounds 6–12 (`max_rounds` on case — set in CRM Reports, not MCP) |
+| `list_progress_reports` / `get_progress_report` | Published rounds + Wizard drafts/confidence; hand off PDF publish to CRM Reports → Generate. Special clients may use rounds 6–12 (`max_rounds` on case — set in CRM Reports, not MCP). Each round has `last_sent_at` + `deliveries[]` (client SMS / client email / partner email, status per send; logged from Oct 2026) |
 | (+ existing search/pipeline/reports/tasks) | |
 
 Each tool advertises its own JSON Schema over MCP (not a shared stub). MCP sets `readOnlyHint: true` so Claude dry-runs are not blocked by UI approval; **writes still require** `confirm=true` + `confirm_phrase: "CONFIRM"` in the tool args (API-enforced).
@@ -61,7 +61,7 @@ Claude must collect fields, call with `confirm=false` (preview), show the user, 
 | `send_contact_email` | Email a CRM Contact by `contact_id`; branded Resend mailer; logs `[EMAIL …]` on `contacts.admin_notes`; dry-run then confirm; no portal upload links |
 | `add_case_note` | OFG `client_id` (not HubSpot) + note; dry-run is safe preview (does not email — use `send_email`) |
 | `upload_case_document` | Attach ID/SSN/utility/PDF to client file via `file_base64` + `doc_type`; dry-run then confirm; JPEG/PNG/HEIC/PDF ~4MB max; returns `source_sha256` / `integrity_ok`; optional `expected_byte_length` / `expected_sha256`. On refuse: `crm_required` with `user_message` + `crm_href` (finish in CRM) |
-| `run_credit_analysis` | Free pre-sale analysis for **prospects** — `client_id` + credit-report PDF via `file_base64`; no enrolled case required; dry-run then confirm; optional `client_goal`, `text_language`, `email_opt_in` |
+| `run_credit_analysis` | Free pre-sale analysis for **prospects** — `client_id` + credit-report PDF via `source_credit_analysis_id` (re-run a PDF already uploaded in OFG — preferred; full 3-bureau PDFs get cut off in base64) or `file_base64`; optional `escrow` (true = hold banner + loan inquiries excluded + no client email) and lender `lender_score_model` / `lender_score` / `lender_target_score`; no enrolled case required; dry-run then confirm; optional `client_goal`, `text_language`, `email_opt_in` |
 | `create_funding_application` | Funding board intake; `funding_type` + name + (email **or** phone), or `client_id` for dual; dry-run then confirm |
 | `update_funding_status` | Move funding card status (not converted) |
 | `convert_funding_application` | Funding → CR prospect (`status=prospect` + `funding_convert` label) |
@@ -73,15 +73,25 @@ Claude must collect fields, call with `confirm=false` (preview), show the user, 
 | `update_client` | Patch contact fields: `email` / `phone` / `first_name` / `last_name` / `preferred_language` / `assigned_admin_*`. Named staff owner wins over language-owner reassignment. Dry-run then confirm. Does **not** change status/pipeline (use `update_client_status` / convert / stage tools) |
 | `send_sms` | body (max **1600** chars; rejects `sms_body_too_long` if over) → Twilio SMS. Default From = MCP-connected admin’s OFG number; override with `from_admin_id` / `from_admin_name` / `from_phone_number_id`. To = **client** (`client_id`), **referrer** (`referrer_id`), or **staff** (`to_admin_*`); logs Conversations hub + SMS case note for clients; returns `message_id`, Twilio SID, `provider_status`, `sent_at` for HubSpot; closed threads reopen on confirm. For address-book Contacts use `send_contact_sms` |
 | `send_text` | **Alias for `send_sms`** (ATLAS texting spec) — same dry-run → confirm flow; accepts `body` or `message` |
-| `list_sms` | Read recent SMS/call hub messages for a client (use before replying); call rows include `call_insights_status` + short `insights_summary` when ready |
-| `get_call_insights` | Claude call/voicemail resume — sentiment, feelings, topics, action items, risk flags, transcript (`message_id` optional) |
+| `send_whatsapp` | body (max **4096** chars) → 360dialog WhatsApp. Requires `WHATSAPP_360DIALOG_ENABLED` + `D360_API_KEY` and MCP-connected admin = WA assignee (César). Same audiences as `send_sms` (client / referrer / staff); logs Conversations `channel=whatsapp` + WhatsApp case note; session-window text only. For Contacts use `send_contact_whatsapp` |
+| `send_wa` | **Alias for `send_whatsapp`** |
+| `send_contact_whatsapp` | WhatsApp to CRM Contact (address book); dry-run → confirm; hub + `contacts.admin_notes` |
+| `list_sms` | Read recent SMS/call/WhatsApp hub messages for a client (optional `channel` filter); call rows include `call_insights_status` + short `insights_summary` when ready |
+| `list_whatsapp` | WhatsApp-only timeline for a client (shortcut for `list_sms` with `channel=whatsapp`) |
+| `get_call_insights` | Claude call/voicemail resume — sentiment, feelings, topics, action items, risk flags, transcript. Pass `client_id`, `contact_id` (CRM contact), or just `message_id` (from `list_sms` / `list_inbox`) |
+| `update_lead_signals` | Record "analysis reviewed with Cesar" and/or the next scheduled call for a prospect (both turn it Hot) — dry-run then confirm |
+| `get_enhanced_report_status` | Enhanced account-level report reads for a client (analysis + progress Before/After): queued / ready / failed, confidence, issues |
+| `list_prospects_by_temperature` | Prospect traffic light (semáforo): prospects + web leads ordered Hot → Warm → Cold with reasons and scheduled call — ATLAS uses it to plan the day's calls |
+| `list_inbox` | Inbox across **all** threads (no `client_id`): newest inbound SMS / WhatsApp / calls from clients, contacts and unknown numbers, with the OFG line; `since_hours`, `channel`, `unread_only`, `mine` |
+| `list_outbound_messages` | Outbox / send log across all clients: hub SMS + WhatsApp with live delivery status, plus logged emails (progress reports to client + partner, `send_email`). Filters `since_hours`, `channel`, `kind` (`round_report`, `staff_email`, …), `client_id` |
+| `list_admin_notifications` | Internal staff alerts (e.g. "Progress report alerts R#", overdue tasks) for the acting admin; super_admin may pass `admin_id` |
 | `get_texts` | **Alias for `list_sms`** — inbound + outbound conversation history per client |
 | `get_conversation` | **Alias for `list_sms` / `get_texts`** — same read endpoint; ATLAS spec name |
 | `list_ofg_phone_numbers` | Verify which OFG Twilio business numbers are active/assigned to the connected admin (`all=true` for super_admin); includes `twilio_configured` and `acting_admin_from` |
 | `update_pipeline_stage` | stage move (not prospect→new_client — use `preview_convert_prospect` then `convert_prospect`); `cancelled` ok for lost leads; fires reminder/CRC/referrer hooks |
 | `preview_convert_prospect` | **Safe read-only** convert preview (use this first — avoids Claude “No approval received”) |
 | `convert_prospect` | After preview: `confirm=true` + `CONFIRM` → New Client / onboarding (tasks yes, welcome email no) |
-| `update_client_status` | `cancelled` / `paused` / `active` / etc. (not `prospect`) |
+| `update_client_status` | `cancelled` / `paused` / `blocked` / `active` / etc. (not `prospect`). `paused` + `blocked` stop all automated client messages; `blocked` also locks portal login — always pass `notes` with the reason |
 | `upsert_progress_report` | **Staff notes only** — requires `score_before` + `score_after` (300–850; never invent). Does **not** upload Before/After PDFs or publish the branded client PDF (use CRM **Reports → Generate**). Portal only shows Wizard-published PDFs. Overwriting a published PDF/wizard row returns `crm_required` / `published_exists` unless `replace_published=true` after explicit user approval |
 | `set_case_payment_plan` | **Preferred for discounted Zelle/cash deals** — `total_cents` + optional `installments_json`; defaults `replace_open=true` so OFG balance = agreed total (not coupon codes). Optional `mark_paid` + `payment_method` + `case_note` |
 | `upsert_payment_splits` | `splits_json`; `status=paid` updates matching open row by due+amount (no pending twin); skips if already paid; optional `send_payment_link`; `replace_open=true` on HubSpot backfill |

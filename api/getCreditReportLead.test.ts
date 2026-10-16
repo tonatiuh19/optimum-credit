@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   getCreditReportEventKind,
   getCreditReportEventLabelSlug,
+  getCreditReportEventMeta,
   getCreditReportLabelSlugs,
   laCalendarDateYmd,
   GOLF_TOURNAMENT_LABEL_SLUG,
   LAS_VEGAS_EVENT_LABEL_SLUG,
+  OFY_EVENT_LABEL_SLUG,
   GET_CREDIT_REPORT_SOURCE_LABEL,
   MFSN_FREE_SNAPSHOT_URL,
   GET_CREDIT_REPORT_SMS_FROM_E164,
@@ -60,7 +62,17 @@ describe("getCreditReportLead event tags", () => {
     expect(getCreditReportEventKind("2026-09-15")).toBe("vegas");
   });
 
-  it("adds no event tag before/after those days", () => {
+  it("tags OFY Family Fun Night on 2026-10-01 LA (Chino)", () => {
+    expect(getCreditReportEventLabelSlug("2026-10-01")).toBe(OFY_EVENT_LABEL_SLUG);
+    expect(getCreditReportEventKind("2026-10-01")).toBe("ofy");
+    expect(getCreditReportLabelSlugs("2026-10-01")).toEqual([
+      GET_CREDIT_REPORT_SOURCE_LABEL,
+      OFY_EVENT_LABEL_SLUG,
+    ]);
+    expect(getCreditReportEventMeta("2026-10-01")?.detailEn).toMatch(/Schaefer/i);
+  });
+
+  it("adds no event tag on non-event days", () => {
     expect(getCreditReportEventLabelSlug("2026-09-13")).toBeNull();
     expect(getCreditReportEventLabelSlug("2026-09-16")).toBeNull();
     expect(getCreditReportLabelSlugs("2026-09-13")).toEqual([
@@ -74,9 +86,13 @@ describe("getCreditReportLead event tags", () => {
     );
     expect(indexEventKind("2026-09-14")).toBe("golf");
     expect(indexEventKind("2026-09-15")).toBe("vegas");
+    expect(indexEventKind("2026-10-01")).toBe("ofy");
     expect(indexEventKind("2026-09-12")).toBeNull();
     expect(indexLabelSlugs("2026-09-14")).toEqual(
       getCreditReportLabelSlugs("2026-09-14"),
+    );
+    expect(indexLabelSlugs("2026-10-01")).toEqual(
+      getCreditReportLabelSlugs("2026-10-01"),
     );
   });
 });
@@ -122,6 +138,13 @@ describe("get-credit-report welcome templates", () => {
       eventKind: "vegas",
     });
     expect(vegasEs.subject.toLowerCase()).toMatch(/vegas/);
+    const ofy = tplGetCreditReportWelcome({
+      firstName: "Sam",
+      mfsnUrl: MFSN_FREE_SNAPSHOT_URL,
+      lang: "en",
+      eventKind: "ofy",
+    });
+    expect(ofy.subject.toLowerCase()).toMatch(/youth|ofy|family/);
     expect(
       smsGetCreditReportWelcome({
         firstName: "Sam",
@@ -130,6 +153,14 @@ describe("get-credit-report welcome templates", () => {
         eventKind: "golf",
       }).toLowerCase(),
     ).toMatch(/golf/);
+    expect(
+      smsGetCreditReportWelcome({
+        firstName: "Sam",
+        shortUrl: "https://www.ofgllc.com/go/free-score",
+        lang: "en",
+        eventKind: "ofy",
+      }).toLowerCase(),
+    ).toMatch(/ofy|family/);
   });
 
   it("documents César default From constant for prospect SMS only", () => {

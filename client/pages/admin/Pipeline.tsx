@@ -47,6 +47,8 @@ import {
 } from "@/components/ui/select";
 import { ClientSearchPicker } from "@/components/ui/client-search-picker";
 import { LangBadge } from "@/components/ui/lang-badge";
+import { ClientHoldBadge } from "@/components/admin/ClientHoldBadge";
+import { LeadTemperatureBadge } from "@/components/admin/LeadTemperatureBadge";
 import { LabelChips } from "@/components/admin/LabelChips";
 import FieldHint from "@/components/admin/FieldHint";
 import {
@@ -260,6 +262,7 @@ function KanbanCard({
                 {client.first_name} {client.last_name}
               </span>
               <LangBadge lang={client.preferred_language} />
+              <ClientHoldBadge status={client.client_status} />
             </div>
             <div className="text-[11px] text-muted-foreground truncate mt-0.5 flex items-center gap-1.5 flex-wrap">
               <span className="truncate">
@@ -442,6 +445,7 @@ function ProspectKanbanCard({
                 {prospect.first_name} {prospect.last_name}
               </span>
               <LangBadge lang={prospect.preferred_language} />
+              <LeadTemperatureBadge temperature={prospect.lead_temperature} />
             </div>
             <div className="text-[11px] text-muted-foreground truncate mt-0.5">
               {prospect.email || prospect.phone || "—"}

@@ -299,7 +299,7 @@ export const sendHubMessage = createAsyncThunk(
       client_id?: number;
       unknown_contact_id?: number;
       contact_id?: number;
-      channel: "sms" | "internal";
+      channel: "sms" | "internal" | "whatsapp";
       body: string;
       subject?: string;
       is_internal_note?: boolean;
@@ -342,7 +342,7 @@ export const startConversationOutbound = createAsyncThunk(
       ofg_number_id?: number;
       media_url?: string;
       media_content_type?: string;
-      channel?: "sms" | "internal";
+      channel?: "sms" | "internal" | "whatsapp";
       is_internal_note?: boolean;
     },
     { rejectWithValue },

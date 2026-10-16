@@ -159,7 +159,9 @@ describe("extended rounds — HTTP integration", () => {
       publishedRounds: 5,
       maxRounds: 5,
     });
-    const target = ymdOffset(10);
+    // Near-term target so dashboard upcoming_rounds (capped list) still includes it
+    // when other active cases have nearer schedule dates.
+    const target = ymdOffset(1);
 
     const res = await request(app)
       .patch(`/api/admin/cases/${caseId}/extended-rounds`)
@@ -214,7 +216,7 @@ describe("extended rounds — HTTP integration", () => {
       .set("Authorization", `Bearer ${adminToken}`);
     expect(cal.status).toBe(200);
     const ext = (cal.body.round_events as any[]).find(
-      (e) => e.case_id === caseId && e.kind === "extended",
+      (e) => Number(e.case_id) === caseId && e.kind === "extended",
     );
     expect(ext).toBeTruthy();
     expect(ext.id).toBe(`${caseId}-extended-target`);
@@ -226,7 +228,7 @@ describe("extended rounds — HTTP integration", () => {
       .set("Authorization", `Bearer ${adminToken}`);
     expect(dash.status).toBe(200);
     const dashHit = (dash.body.upcoming_rounds as any[]).find(
-      (r) => r.case_id === caseId && r.kind === "extended",
+      (r) => Number(r.case_id) === caseId && r.kind === "extended",
     );
     expect(dashHit).toBeTruthy();
     expect(dashHit.id).toBe(`${caseId}-extended-target`);
@@ -274,4 +276,38 @@ describe("extended rounds — HTTP integration", () => {
     expect(baseline.status).toBe(200);
     expect(baseline.body.case.report_compare_mode).toBe("baseline");
   }, 30_000);
+
+  it("clients list stage filter: Round 5 vs Round 6 / Round 6+", async () => {
+    const r5 = await seedCompletedCase({ publishedRounds: 4, maxRounds: 5 });
+    const r6 = await seedCompletedCase({ publishedRounds: 5, maxRounds: 8 });
+    const r7 = await seedCompletedCase({ publishedRounds: 6, maxRounds: 8 });
+    await pool.query(`UPDATE clients SET pipeline_stage = 'round_5' WHERE id IN (?)`, [
+      [r5.clientId, r6.clientId, r7.clientId],
+    ]);
+    const ids = async (stage: string) => {
+      const res = await request(app)
+        .get("/api/admin/clients")
+        .query({ stage, search: RUN_ID, limit: 100 })
+        .set("Authorization", `Bearer ${adminToken}`);
+      expect(res.status).toBe(200);
+      const mine = [r5.clientId, r6.clientId, r7.clientId];
+      return (res.body.clients as { id: number }[]).map((c) => c.id).filter((id) => mine.includes(id));
+    };
+    const five = await ids("round_5");
+    expect(five).toContain(r5.clientId);
+    expect(five).not.toContain(r6.clientId);
+    expect(await ids("round_6")).toEqual([r6.clientId]);
+    expect(await ids("round_7")).toEqual([r7.clientId]);
+    const plus = await ids("round_6_plus");
+    expect(plus.sort()).toEqual([r6.clientId, r7.clientId].sort());
+    expect(await ids("completed")).not.toContain(r6.clientId);
+    // The list returns the real round for the Stage badge.
+    const all = await request(app)
+      .get("/api/admin/clients")
+      .query({ stage: "round_6_plus", search: RUN_ID, limit: 100 })
+      .set("Authorization", `Bearer ${adminToken}`);
+    const byId = new Map((all.body.clients as { id: number; effective_round: number }[]).map((c) => [c.id, c.effective_round]));
+    expect(byId.get(r6.clientId)).toBe(6);
+    expect(byId.get(r7.clientId)).toBe(7);
+  }, 60_000);
 });

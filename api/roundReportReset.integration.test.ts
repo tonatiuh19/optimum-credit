@@ -24,7 +24,6 @@ let pool: Pool;
 let app: ReturnType<typeof createServer>;
 let adminId = 0;
 let adminToken = "";
-let agentToken = "";
 const clientIds: number[] = [];
 
 async function seedClientWithRounds(opts: {
@@ -152,21 +151,6 @@ describe("round report reset", () => {
       "127.0.0.1",
       "vitest-round-reset",
     );
-
-    const [agents] = await pool.query<RowDataPacket[]>(
-      `SELECT id, email FROM admins
-       WHERE status = 'active' AND role = 'agent'
-       ORDER BY id ASC LIMIT 1`,
-    );
-    if (agents[0]) {
-      agentToken = await createSession(
-        "admin",
-        Number(agents[0].id),
-        String(agents[0].email),
-        "127.0.0.1",
-        "vitest-round-reset-agent",
-      );
-    }
   }, 60_000);
 
   afterAll(async () => {
@@ -402,19 +386,39 @@ describe("round report reset", () => {
   });
 
   it("agent role cannot reset (403)", async () => {
-    if (!agentToken) return; // skip when no agent fixture in DB
+    const agentEmail = `rrreset-agent-${RUN_ID}@example.test`;
+    const [agentIns] = await pool.query<ResultSetHeader>(
+      `INSERT INTO admins
+         (email, first_name, last_name, role, status, preferred_language)
+       VALUES (?, 'Reset', 'Agent', 'agent', 'active', 'en')`,
+      [agentEmail],
+    );
+    const agentId = Number(agentIns.insertId);
+    try {
+      const token = await createSession(
+        "admin",
+        agentId,
+        agentEmail,
+        "127.0.0.1",
+        "vitest-round-reset-agent",
+      );
+      const seeded = await seedClientWithRounds({
+        stage: "round_2",
+        rounds: [1],
+        history: [{ from: "docs_ready", to: "round_2", round: 1 }],
+      });
 
-    const seeded = await seedClientWithRounds({
-      stage: "round_2",
-      rounds: [1],
-      history: [{ from: "docs_ready", to: "round_2", round: 1 }],
-    });
-
-    await request(app)
-      .post(`/api/admin/clients/${seeded.clientId}/round-reports/1/reset`)
-      .set("Authorization", `Bearer ${agentToken}`)
-      .send({ confirm: false })
-      .expect(403);
+      await request(app)
+        .post(`/api/admin/clients/${seeded.clientId}/round-reports/1/reset`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ confirm: false })
+        .expect(403);
+    } finally {
+      await pool.query(`DELETE FROM admin_sessions WHERE admin_id = ?`, [
+        agentId,
+      ]);
+      await pool.query(`DELETE FROM admins WHERE id = ?`, [agentId]);
+    }
   });
 
   it("legacy PDF DELETE returns 410 pointing to Reset Round", async () => {

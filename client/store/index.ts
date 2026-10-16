@@ -23,6 +23,7 @@ import voice from "./slices/voiceSlice";
 import funding from "./slices/fundingSlice";
 import prepaidOnboard from "./slices/prepaidOnboardSlice";
 import contacts from "./slices/contactsSlice";
+import eventMarketing from "./slices/eventMarketingSlice";
 
 export const store = configureStore({
   reducer: {
@@ -50,6 +51,7 @@ export const store = configureStore({
     funding,
     prepaidOnboard,
     contacts,
+    eventMarketing,
   },
   middleware: (getDefault) => getDefault({ serializableCheck: false }),
 });

@@ -37,6 +37,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { Resend } from "resend";
 import twilio from "twilio";
+import { waitUntil } from "@vercel/functions";
 import {
   PDFDocument,
   StandardFonts,
@@ -46,6 +47,10 @@ import {
   type PDFImage,
 } from "pdf-lib";
 import type {
+  CreditAnalysisEnhancedStatusResponse,
+  CreditAnalysisLenderContext,
+  CreditAnalysisLenderContextUpdate,
+  LeadSignalsResponse,
   OfGReportData,
   OfGReportWizardOptions,
   InfoRequestFieldDef,
@@ -67,7 +72,8 @@ import type {
 // INLINED HELPERS (Vercel serverless — do NOT runtime-import sibling api/*.ts)
 // Unit tests import from ./progressReportAlerts, ./ofgReportClaudeEnhance,
 // ./adminMorningDigest, ./creditAnalysisClaudeEnhance, ./creditAnalysisEngine,
-// ./callInsights, ./mfsnClient, ./ofgProgressReportPdf, ./clientReminderSms directly.
+// ./callInsights, ./mfsnClient, ./clientReminderSms,
+// ./eventMarketing directly.
 // Keep those files in sync when editing below.
 // Deploy gate: `npm run check:api-inline` (also in deploy:prod pre-checks).
 // ============================================================================
@@ -5070,7 +5076,7 @@ Rules:
 - Prefer concise, actionable answers. Use light Markdown (bold, lists, links). Avoid raw HTML.
 - When relevant, mention admin deep links as paths (e.g. /admin/pipeline, /admin/my-tasks).
 
-WRITE TOOLS (create_prospect, create_contact, update_contact, convert_contact, send_contact_sms, send_contact_email, create_work_task, update_work_task, add_case_note, upload_case_document, run_credit_analysis, send_email, send_round_report, send_sms, update_pipeline_stage, convert_prospect, update_client, update_client_status, upsert_progress_report, set_case_payment_plan, upsert_payment_splits, update_payment_split, create_coupon) — guided intake:
+WRITE TOOLS (create_prospect, create_contact, update_contact, convert_contact, send_contact_sms, send_contact_whatsapp, send_contact_email, create_work_task, update_work_task, add_case_note, upload_case_document, run_credit_analysis, send_email, send_round_report, send_sms, send_whatsapp, update_pipeline_stage, convert_prospect, update_client, update_client_status, upsert_progress_report, set_case_payment_plan, upsert_payment_splits, update_payment_split, create_coupon) — guided intake:
 - NEVER call a write tool with confirm=true until you have collected every required field from the user and they explicitly approve the preview.
 - Always call the write tool first with confirm=false (or omit confirm) to get a dry-run preview + missing_fields / duplicates. For prospect→client, prefer preview_convert_prospect (read-only) instead of convert_prospect dry-run.
 - Show the preview to the user in plain language and ask them to confirm.
@@ -5083,7 +5089,12 @@ WRITE TOOLS (create_prospect, create_contact, update_contact, convert_contact, s
 - Resend a published Round PDF (secure download link): use send_round_report (dry-run then confirm). Mints /api/public/round-report-pdf/:token, sends tplRoundComplete branded email (PDF attach + secure CTA) and optional twin SMS (same copy as publish). Prefer pdf_id / round_report_id / round_number from list_progress_reports or get_progress_report (has_pdf/pdf_id). Defaults include notify_partners=true (email linked referral partners with the PDF). Do NOT hand-roll URLs with send_email + send_sms. If has_pdf is false, tell staff to publish via CRM Reports → Generate — do not invent a PDF.
 - Collections: list_installments first. Discounted Zelle/cash deals (offline, no checkout code) → set_case_payment_plan so OFG balance = agreed total. Checkout promo codes for /register → create_coupon (list with list_coupons). Mark received money with update_payment_split(status=paid) or mark_paid on the plan.
 - Email: use send_email (after confirm) via the platform mailer (Resend) for CLIENTS (client_id), REFERRERS (referrer_id), or STAFF (to_admin_id / to_admin_name from search_admins). For CRM Contacts address-book people, use send_contact_email with contact_id instead. Client emails auto EMAIL case note; include_doc_upload_link mints a portal upload link (client-only). Referrer emails log on the partner record; pass client_id too to also stamp the client's file. Optional attachment: attachment_case_document_id, attachment_round_report_id, or attachment_base64+attachment_filename (one PDF/file, ~4MB max). If send_email returns no_email, call update_client to set email first. For Round progress PDFs with secure link + SMS, prefer send_round_report over send_email.
-- SMS: use send_sms or send_text (aliases; after confirm) via Twilio. Default From is the MCP-connected admin's assigned OFG number. When the user wants a different staff line (e.g. Lecca or Angel), pass from_admin_id / from_admin_name (search_admins) or from_phone_number_id from list_ofg_phone_numbers all=true. To SMS a staff member, pass to_admin_id / to_admin_name. CLIENTS use client_id; REFERRERS use referrer_id. For CRM Contacts, use send_contact_sms with contact_id (same from_admin_* override). Use list_sms, get_texts, or get_conversation to read recent SMS/call timeline before replying to a client. For call/voicemail Claude resumes (sentiment, feelings, action items, transcript), use get_call_insights. list_ofg_phone_numbers verifies which OFG business numbers are live. Inbound client replies auto-log to the case file. Do NOT charge cards.
+- Inbox / outbox / alerts: list_inbox shows new inbound SMS, WhatsApp and calls across ALL lines (no client_id needed); list_outbound_messages is the send log (SMS/WhatsApp with delivery status + progress-report and send_email emails); list_admin_notifications reads staff alerts (round 6+ audit, call-forwarding failures, prospect traffic light, overdue tasks). For calls with CRM contacts or unknown callers use get_call_insights with contact_id or message_id.
+- Prospect traffic light (semáforo): list_prospects_by_temperature orders prospects Hot → Warm → Cold to plan calls (Hot = close today; Warm = review the analysis and book with Cesar; Cold = automatic follow-up only). pipeline_summary includes prospect_traffic_light counts; get_client shows lead_temperature + reasons. When a call with a prospect is booked or the analysis was reviewed with Cesar, record it with update_lead_signals (dry-run then confirm) — it turns them Hot.
+- Client status: paused = temporary hold, blocked = stopped for a problem; BOTH stop all automated client messages (staff sends still work) and blocked also locks portal login. get_client notes_excerpt shows the NEWEST notes (reason for pause/block is usually there).
+- Enhanced reports: get_enhanced_report_status shows the account-level reads behind a client's credit analysis and progress reports (queued / ready / failed, confidence, issues).
+- SMS: use send_sms or send_text (aliases; after confirm) via Twilio. Default From is the MCP-connected admin's assigned OFG number. When the user wants a different staff line (e.g. Lecca or Angel), pass from_admin_id / from_admin_name (search_admins) or from_phone_number_id from list_ofg_phone_numbers all=true. To SMS a staff member, pass to_admin_id / to_admin_name. CLIENTS use client_id; REFERRERS use referrer_id. For CRM Contacts, use send_contact_sms with contact_id (same from_admin_* override). Use list_sms, get_texts, or get_conversation to read recent SMS/call timeline before replying to a client. For a call or voicemail transcript, use get_call_insights (transcript_full). Insights summaries are paused. list_ofg_phone_numbers verifies which OFG business numbers are live. Inbound client replies auto-log to the case file. Do NOT charge cards.
+- WhatsApp (360dialog): use send_whatsapp / send_wa (after confirm) when WHATSAPP_360DIALOG_ENABLED + D360_API_KEY and the MCP-connected admin is the WA assignee (César). Same audiences as SMS (client_id / referrer_id / to_admin_*). For CRM Contacts use send_contact_whatsapp. Use list_whatsapp (or list_sms — channel field includes whatsapp) before replying. Session-window text only in v1 (no template send). Does not use Twilio OFG From lines.
 - Documents: when a user shares an ID/SSN/utility bill/PDF in chat, use upload_case_document (dry-run then confirm) to attach it to the client's OFG file. Use list_case_documents to see what's already on file. Pick doc_type (id_front, id_back, ssn_card, proof_of_address, other). JPEG/PNG/HEIC/PDF only; max ~4MB. Pass expected_byte_length (and ideally expected_sha256) from the source file; refuse if integrity_ok is false.
 - Pre-sale credit analysis (prospect leads, no enrolled case): use run_credit_analysis with client_id + credit-report PDF (dry-run then confirm). Same output as /credit-analysis Agent mode. Does NOT require convert or an active case (unlike upload_case_document).
 - CRM HANDOFF: If a tool result includes crm_required: true (or error=\"crm_required\"), STOP retrying that action via MCP. Immediately tell the staff the exact user_message and share the crm_href path. Do not invent alternate MCP workarounds for size limits, Report Wizard PDF generation, document deletes, or other CRM-only flows.
@@ -5121,10 +5132,11 @@ const ADMIN_AI_WALL_MS = 50_000;
 const ADMIN_AI_HTTP_TIMEOUT_MS = 40_000;
 const ADMIN_AI_TOOL_RESULT_MAX = 12_000;
 
-/** ATLAS spec aliases — canonical handlers are send_sms / list_sms. */
+/** ATLAS spec aliases — canonical handlers are send_sms / list_sms / send_whatsapp. */
 function resolveAdminAiToolName(name: string): string {
   if (name === "send_text") return "send_sms";
   if (name === "get_texts" || name === "get_conversation") return "list_sms";
+  if (name === "send_wa") return "send_whatsapp";
   return name;
 }
 
@@ -5356,6 +5368,35 @@ const ADMIN_AI_TOOLS: Array<{
           type: "integer",
           description:
             "admin_phone_numbers.id from list_ofg_phone_numbers (all=true)",
+        },
+        confirm: {
+          type: "boolean",
+          description:
+            "false/omit = dry-run preview; true = send after approval",
+        },
+        confirm_phrase: {
+          type: "string",
+          description: "Required with confirm=true. Must be exactly CONFIRM",
+        },
+      },
+      required: ["contact_id", "body"],
+    },
+  },
+  {
+    name: "send_contact_whatsapp",
+    description:
+      'Send a WhatsApp text via 360dialog to a CRM Contact (address book — NOT a pipeline client). ALWAYS dry-run first with confirm=false; only confirm=true with confirm_phrase="CONFIRM" after approval. Requires WHATSAPP_360DIALOG_ENABLED + D360_API_KEY and the MCP-connected admin to be the WA assignee (César). contact_id from search_contacts. Logs Conversations hub channel=whatsapp + appends [WhatsApp …] to contacts.admin_notes. Session-window text only (no template send in v1). Do NOT use send_whatsapp for contacts (send_whatsapp is client/referrer/staff). Does not send SMS (use send_contact_sms).',
+    input_schema: {
+      type: "object",
+      properties: {
+        contact_id: {
+          type: "integer",
+          description: "contacts.id from search_contacts (not clients.id)",
+        },
+        body: {
+          type: "string",
+          description:
+            "WhatsApp text body (plain text). Max 4096 characters.",
         },
         confirm: {
           type: "boolean",
@@ -5766,7 +5807,7 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "list_case_documents",
     description:
-      "List document uploads for a case/client (types, review status — no file bytes).",
+      "List document uploads for a case/client (types, review status — no file bytes). required_checklist counts both staff/case uploads (documents) and onboarding-portal uploads (onboarding_uploads).",
     input_schema: {
       type: "object",
       properties: {
@@ -6127,8 +6168,21 @@ const ADMIN_AI_TOOLS: Array<{
         file_base64: {
           type: "string",
           description:
-            "PDF bytes as base64 (optionally data:application/pdf;base64,...). Omit on dry-run to validate client only.",
+            "PDF bytes as base64 (optionally data:application/pdf;base64,...). Omit on dry-run to validate client only. Large 3-bureau PDFs get cut off in base64 — prefer source_credit_analysis_id.",
         },
+        source_credit_analysis_id: {
+          type: "integer",
+          description:
+            "Re-run on the credit report PDF already uploaded for an earlier analysis of this client (the analysis id shown in OFG / get_enhanced_report_status). Use instead of file_base64 — no size limit, nothing to paste. file_name is optional then.",
+        },
+        escrow: {
+          type: "boolean",
+          description:
+            "true = client is in escrow on a mortgage (hold banner, loan inquiries excluded, NO client email). Omit to auto-detect a mortgage pull in the last 45 days.",
+        },
+        lender_score_model: { type: "string", description: "Lender's score model, e.g. FICO (mortgage)" },
+        lender_score: { type: "integer", description: "Lender's middle score (e.g. FICO 630)" },
+        lender_target_score: { type: "integer", description: "Score the lender needs (e.g. 660)" },
         client_goal: { type: "string" },
         text_language: { type: "string", enum: ["en", "es"] },
         notes: { type: "string" },
@@ -6151,7 +6205,7 @@ const ADMIN_AI_TOOLS: Array<{
           description: "Required with confirm=true. Must be exactly CONFIRM",
         },
       },
-      required: ["client_id", "file_name"],
+      required: ["client_id"],
     },
   },
   {
@@ -6354,13 +6408,19 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "list_sms",
     description:
-      "Read recent SMS/MMS/call timeline messages for a client from the Conversations hub (inbound + outbound). Use before drafting a reply with send_sms. Returns message id, direction, channel, body preview, provider_status, timestamps. Call rows include call_insights_status and a short insights_summary when Claude call insights are ready — use get_call_insights for full transcript/sentiment/actions. client_id from search_clients (not HubSpot).",
+      "Read recent SMS/MMS/call/WhatsApp timeline messages for a client from the Conversations hub (inbound + outbound). Use before drafting a reply with send_sms or send_whatsapp. Returns message id, direction, channel, body preview, provider_status, timestamps. Optional channel filter (sms|whatsapp|call|internal). Call rows include call_insights_status. Use get_call_insights for the full transcript. client_id from search_clients (not HubSpot).",
     input_schema: {
       type: "object",
       properties: {
         client_id: { type: "integer" },
         case_id: { type: "integer" },
         case_number: { type: "string" },
+        channel: {
+          type: "string",
+          enum: ["sms", "whatsapp", "call", "internal"],
+          description:
+            "Optional filter. Omit for all channels. Use list_whatsapp as a shortcut for channel=whatsapp.",
+        },
         limit: {
           type: "integer",
           description: "Max messages (1–50, default 20)",
@@ -6370,13 +6430,132 @@ const ADMIN_AI_TOOLS: Array<{
     },
   },
   {
-    name: "get_call_insights",
+    name: "update_lead_signals",
     description:
-      "Read Claude call/voicemail insights for a client (summary bullets, sentiment/feelings, topics, action items, risk flags, full transcript). Prefer message_id from list_sms when known; otherwise returns the latest ready call insights (or pending/failed status). Requires Conversations call recordings + CALL_INSIGHTS_ENABLED pipeline. client_id from search_clients.",
+      'Prospect traffic light: record that the credit analysis was reviewed with Cesar and/or the next scheduled call (both make the prospect Hot). ALWAYS dry-run first (confirm=false shows the change); then confirm=true with confirm_phrase="CONFIRM". Pass call_scheduled_at as ISO date-time, or null to clear; analysis_reviewed true/false.',
     input_schema: {
       type: "object",
       properties: {
         client_id: { type: "integer" },
+        analysis_reviewed: { type: "boolean" },
+        call_scheduled_at: { type: ["string", "null"], description: "ISO 8601 date-time, or null to clear" },
+        confirm: { type: "boolean" },
+        confirm_phrase: { type: "string" },
+      },
+      required: ["client_id"],
+    },
+  },
+  {
+    name: "get_enhanced_report_status",
+    description:
+      "Status of the enhanced (account-level) credit report reads for a client: free-analysis enhanced PDF and Progress Report Before/After reads — queued / submitted / ready / failed, confidence, cross-check issues, and whether the enhanced PDF is available. Read-only.",
+    input_schema: {
+      type: "object",
+      properties: {
+        client_id: { type: "integer" },
+        limit: { type: "integer", description: "Max rows (1–20, default 10)" },
+      },
+      required: ["client_id"],
+    },
+  },
+  {
+    name: "list_prospects_by_temperature",
+    description:
+      "Prospect traffic light (semáforo) for planning the day's calls: prospects and web leads ordered Hot → Warm → Cold, with reasons (analysis reviewed, call scheduled, payment started, monitoring login, documents, replied in 14 days, has credit report) and the scheduled call time. Hot = close today; Warm = call to review the analysis and book with Cesar; Cold = automatic follow-up only. Read-only.",
+    input_schema: {
+      type: "object",
+      properties: {
+        color: { type: "string", enum: ["hot", "warm", "cold", "all"] },
+        language: { type: "string", enum: ["en", "es"] },
+        limit: { type: "integer", description: "Max rows (1–50, default 30)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "list_inbox",
+    description:
+      "Inbox across ALL threads (no client_id needed): newest inbound SMS, WhatsApp and calls/voicemails from clients, CRM contacts and unknown numbers. Each row names who it is from (client_id / contact_id / unknown phone), the OFG line it arrived on, and the message_id (use get_call_insights with message_id for call transcripts). Defaults: last 24h, all channels, all lines. mine=true limits to lines assigned to the acting admin.",
+    input_schema: {
+      type: "object",
+      properties: {
+        since_hours: {
+          type: "integer",
+          description: "Look-back window in hours (1–168, default 24)",
+        },
+        channel: { type: "string", enum: ["sms", "whatsapp", "call", "all"] },
+        unread_only: {
+          type: "boolean",
+          description: "Only threads that still have unread messages",
+        },
+        mine: {
+          type: "boolean",
+          description: "Only OFG lines assigned to the acting admin",
+        },
+        limit: { type: "integer", description: "Max rows (1–50, default 30)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "list_outbound_messages",
+    description:
+      "Outbox / send log across ALL clients (no client_id needed): SMS and WhatsApp sent from the Conversations hub (with live delivery status) plus logged emails (progress reports to clients and partners, send_email). Rows: sent_at, channel, recipient (client/partner/admin/contact), to, client name, kind (round_report, staff_email, flow:…), preview, status (queued/sent/delivered/undelivered/failed) and error. Filters: since_hours, channel, kind, client_id. Emails are logged from Oct 2026 on; auth/login emails are never logged.",
+    input_schema: {
+      type: "object",
+      properties: {
+        since_hours: {
+          type: "integer",
+          description: "Look-back window in hours (1–720, default 48)",
+        },
+        channel: { type: "string", enum: ["sms", "whatsapp", "email", "all"] },
+        kind: {
+          type: "string",
+          description: "Optional exact kind, e.g. round_report or staff_email",
+        },
+        client_id: { type: "integer", description: "Optional single client" },
+        limit: { type: "integer", description: "Max rows (1–50, default 30)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "list_admin_notifications",
+    description:
+      "Internal staff alerts the platform sent (in-app copy of the alert emails/SMS), e.g. 'Progress report alerts R# — client', overdue tasks, new inbound SMS, payments. Defaults to the acting admin's alerts from the last 72h. super_admin may pass admin_id for another staff member.",
+    input_schema: {
+      type: "object",
+      properties: {
+        since_hours: {
+          type: "integer",
+          description: "Look-back window in hours (1–720, default 72)",
+        },
+        event_key: {
+          type: "string",
+          description: "Optional filter, e.g. progress_report_alerts",
+        },
+        unread_only: { type: "boolean" },
+        admin_id: {
+          type: "integer",
+          description: "super_admin only: read another admin's alerts",
+        },
+        limit: { type: "integer", description: "Max rows (1–50, default 30)" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "get_call_insights",
+    description:
+      "Read the transcript of a call or voicemail with a client, a CRM contact, or an unknown caller. Returns transcript_full when status is ready, plus pending/failed status when it is not. Pass client_id (search_clients), contact_id (search_contacts), or just message_id (from list_sms / list_inbox). Without message_id returns the latest call rows.",
+    input_schema: {
+      type: "object",
+      properties: {
+        client_id: { type: "integer" },
+        contact_id: {
+          type: "integer",
+          description: "CRM contacts.id — calls with a saved contact (no client_id)",
+        },
         case_id: { type: "integer" },
         case_number: { type: "string" },
         message_id: {
@@ -6479,7 +6658,93 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "get_conversation",
     description:
-      "Alias for list_sms / get_texts — read recent inbound + outbound SMS/MMS/call timeline for a client from the Conversations hub (ATLAS texting spec). Same as get_texts; use before drafting a reply with send_text/send_sms.",
+      "Alias for list_sms / get_texts — read recent inbound + outbound SMS/MMS/call/WhatsApp timeline for a client from the Conversations hub (ATLAS texting spec). Same as get_texts; use before drafting a reply with send_text/send_sms/send_whatsapp.",
+    input_schema: {
+      type: "object",
+      properties: {
+        client_id: { type: "integer" },
+        case_id: { type: "integer" },
+        case_number: { type: "string" },
+        limit: {
+          type: "integer",
+          description: "Max messages (1–50, default 20)",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "send_whatsapp",
+    description:
+      'Send a WhatsApp text via 360dialog (César WA Business) to a CLIENT, REFERRER, or staff. ALWAYS dry-run first with confirm=false; only confirm=true with confirm_phrase="CONFIRM" after the user approves the exact To/body. Requires WHATSAPP_360DIALOG_ENABLED + D360_API_KEY and the MCP-connected admin to be the WA assignee. Client: client_id from search_clients; logs Conversations hub channel=whatsapp + WhatsApp case note; returns message_id / provider_message_id / provider_status. Referrer: referrer_id; staff: to_admin_*. Session-window text only (no template send in v1). For CRM Contacts use send_contact_whatsapp. Does not send SMS (use send_sms).',
+    input_schema: {
+      type: "object",
+      properties: {
+        client_id: {
+          type: "integer",
+          description:
+            "OFG clients.id from search_clients. Required for client WhatsApp; optional with referrer_id to also stamp the client's file.",
+        },
+        case_id: { type: "integer" },
+        case_number: { type: "string" },
+        referrer_id: {
+          type: "integer",
+          description:
+            "OFG referrers.id. When set, WhatsApp goes to the referrer phone (not the client).",
+        },
+        to_admin_id: {
+          type: "integer",
+          description:
+            "Staff admins.id from search_admins. When set, WhatsApp goes to that staff member.",
+        },
+        to_admin_name: {
+          type: "string",
+          description: "Staff name to WhatsApp (e.g. Alex Gomez)",
+        },
+        to_admin_email: { type: "string" },
+        body: {
+          type: "string",
+          description:
+            "WhatsApp text body (plain text). Max 4096 characters. Use real line breaks.",
+        },
+        confirm: {
+          type: "boolean",
+          description:
+            "false/omit = dry-run preview; true = send after approval",
+        },
+        confirm_phrase: {
+          type: "string",
+          description: "Required with confirm=true. Must be exactly CONFIRM",
+        },
+      },
+      required: ["body"],
+    },
+  },
+  {
+    name: "send_wa",
+    description:
+      'Alias for send_whatsapp — send WhatsApp via 360dialog. ALWAYS dry-run first with confirm=false; confirm=true + confirm_phrase="CONFIRM" to send.',
+    input_schema: {
+      type: "object",
+      properties: {
+        client_id: { type: "integer" },
+        case_id: { type: "integer" },
+        case_number: { type: "string" },
+        referrer_id: { type: "integer" },
+        to_admin_id: { type: "integer" },
+        to_admin_name: { type: "string" },
+        to_admin_email: { type: "string" },
+        body: { type: "string" },
+        confirm: { type: "boolean" },
+        confirm_phrase: { type: "string" },
+      },
+      required: ["body"],
+    },
+  },
+  {
+    name: "list_whatsapp",
+    description:
+      "Read recent WhatsApp timeline messages for a client from the Conversations hub (inbound + outbound, channel=whatsapp). Use before drafting a reply with send_whatsapp. client_id from search_clients (not HubSpot).",
     input_schema: {
       type: "object",
       properties: {
@@ -6586,7 +6851,7 @@ const ADMIN_AI_TOOLS: Array<{
   {
     name: "update_client_status",
     description:
-      'Update clients.status. ALWAYS dry-run first. Unconverted leads (no enrolled case): only prospect, paused, or cancelled — never pending_payment/onboarding/active (those require convert_prospect first, which creates the case). Do NOT use pending_payment or active to mean "paid/still a lead". Prefer convert_prospect when moving a lead to paying. cancelled = closed/lost. Cannot set prospect after they have an enrolled case.',
+      'Update clients.status. ALWAYS dry-run first. Unconverted leads (no enrolled case): only prospect, paused, blocked, or cancelled — never pending_payment/onboarding/active (those require convert_prospect first, which creates the case). Do NOT use pending_payment or active to mean "paid/still a lead". Prefer convert_prospect when moving a lead to paying. cancelled = closed/lost. Cannot set prospect after they have an enrolled case. paused = temporary hold; blocked = stopped for a problem (payment, invalid login, monitoring error). Both stop ALL automated client messages (flows, reminders, payment nudges); blocked also locks portal login. Always pass notes with the reason.',
     input_schema: {
       type: "object",
       properties: {
@@ -6601,6 +6866,7 @@ const ADMIN_AI_TOOLS: Array<{
             "onboarding",
             "active",
             "paused",
+            "blocked",
             "cancelled",
           ],
         },
@@ -6938,6 +7204,50 @@ function adminAiClampLimit(raw: unknown, fallback = 10): number {
   const n = Number(raw);
   if (!Number.isFinite(n)) return fallback;
   return Math.min(20, Math.max(1, Math.floor(n)));
+}
+
+function adminAiClampLimitMax(
+  raw: unknown,
+  fallback: number,
+  max: number,
+): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(1, Math.floor(n)));
+}
+
+function adminAiClampHours(raw: unknown, fallback: number, max: number): number {
+  return adminAiClampLimitMax(raw, fallback, max);
+}
+
+function adminAiBool(raw: unknown): boolean {
+  return raw === true || raw === "true" || raw === 1 || raw === "1";
+}
+
+/** Who an inbox row is from: client, CRM contact, or unknown number. */
+function adminAiInboxSender(r: RowDataPacket): Record<string, unknown> {
+  if (r.client_id) {
+    return {
+      type: "client",
+      client_id: Number(r.client_id),
+      name: String(r.client_name || "").trim() || null,
+      address: r.from_address || null,
+    };
+  }
+  if (r.contact_id) {
+    return {
+      type: "contact",
+      contact_id: Number(r.contact_id),
+      name: String(r.contact_name || "").trim() || null,
+      address: r.from_address || null,
+    };
+  }
+  return {
+    type: "unknown",
+    unknown_contact_id: r.unknown_contact_id ? Number(r.unknown_contact_id) : null,
+    name: r.unknown_name || null,
+    address: r.unknown_phone || r.from_address || null,
+  };
 }
 
 function adminAiTruncateJson(value: unknown): string {
@@ -7616,6 +7926,4670 @@ function adminOnProspectBoard(row: {
   return status === "prospect" || stage === "prospect";
 }
 
+/**
+ * Progress-report sends per round from outbound_message_log (client SMS/email,
+ * partner email). SMS status is the live Twilio status on the thread row.
+ * Only covers sends after the log shipped (Oct 2026).
+ */
+async function loadRoundReportDeliveries(
+  clientId: number,
+  roundNumber?: number | null,
+): Promise<Map<number, Array<Record<string, unknown>>>> {
+  const params: any[] = [clientId];
+  let roundSql = "";
+  if (roundNumber != null) {
+    roundSql = " AND l.round_number = ?";
+    params.push(roundNumber);
+  }
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT l.round_number, l.channel, l.recipient_type, l.to_address,
+            l.status, l.error_message, l.created_at,
+            m.provider_status AS sms_delivery_status,
+            m.error_message AS sms_delivery_error
+     FROM outbound_message_log l
+     LEFT JOIN conversation_messages m ON m.id = l.conversation_message_id
+     WHERE l.client_id = ? AND l.kind = 'round_report'
+       AND l.round_number IS NOT NULL${roundSql}
+     ORDER BY l.created_at DESC, l.id DESC
+     LIMIT 200`,
+    params,
+  );
+  const byRound = new Map<number, Array<Record<string, unknown>>>();
+  for (const r of rows) {
+    const rn = Number(r.round_number);
+    const list = byRound.get(rn) ?? [];
+    const failed = r.status === "failed";
+    list.push({
+      sent_at: r.created_at,
+      channel: r.channel,
+      recipient: r.recipient_type,
+      to: r.to_address,
+      status: failed
+        ? "failed"
+        : r.channel === "sms"
+          ? String(r.sms_delivery_status || "queued")
+          : "sent",
+      error: failed
+        ? r.error_message
+        : r.channel === "sms"
+          ? r.sms_delivery_error || null
+          : null,
+    });
+    byRound.set(rn, list);
+  }
+  return byRound;
+}
+
+// ── BEGIN inlined credit file engine (generated — do not edit) ──
+/**
+ * OFG Credit File engine — Phase 1: provider parsers → structured CreditFile.
+ *
+ * Turns extracted credit-report text into account-level data (every tradeline
+ * per bureau, inquiries, scores) so the free Credit Analysis and the Progress
+ * Report can share one model (analysis = 1 file, progress = Before vs After).
+ *
+ * Pure + deterministic (no I/O). Production entry remains `api/index.ts`
+ * (no runtime sibling imports on Vercel) — inline + add a sync test when wired.
+ *
+ * Supported layouts:
+ *  - SmartCredit 3B ("Ultra 4K 3B Report" print view) — ~93% of uploads
+ *  - Equifax "Three Bureau Credit Report" (numbered sections) — see parseEquifax3B
+ */
+
+type Bureau = "TU" | "EX" | "EQ";
+const BUREAUS: Bureau[] = ["TU", "EX", "EQ"];
+
+type CreditFileProvider = "smartcredit" | "equifax_3b" | "unknown";
+
+/** Normalized per-bureau tradeline fields (null = not reported by that bureau). */
+interface BureauTradeline {
+  accountNumber: string | null;
+  highBalance: number | null;
+  lastVerified: string | null;
+  dateLastActivity: string | null;
+  dateReported: string | null;
+  dateOpened: string | null;
+  balance: number | null;
+  closedDate: string | null;
+  accountRating: string | null;
+  description: string | null;
+  disputeStatus: string | null;
+  creditorType: string | null;
+  accountStatus: string | null;
+  paymentStatus: string | null;
+  remarks: string | null;
+  paymentAmount: number | null;
+  lastPayment: string | null;
+  termLength: string | null;
+  pastDue: number | null;
+  accountType: string | null;
+  paymentFrequency: string | null;
+  creditLimit: number | null;
+  late30: number | null;
+  late60: number | null;
+  late90: number | null;
+  /**
+   * Non-OK payment-grid cells "MM/YYYY:30" (30/60/90/120/150/CO/C/R/F/B).
+   * Optional: only Claude extraction fills it.
+   */
+  gridMarks?: string[];
+}
+
+type AccountSection =
+  | "revolving"
+  | "installment"
+  | "mortgage"
+  | "collection"
+  | "other"
+  | "unknown";
+
+interface CreditAccount {
+  /** Creditor name as printed (e.g. "APPLE CARD/GS BANK USA"). */
+  creditor: string;
+  /** Masked number from the header (e.g. "110001****"). */
+  mask: string | null;
+  section: AccountSection;
+  /** Header status line (Open / Closed / Paid …). */
+  headerStatus: string | null;
+  bureaus: Partial<Record<Bureau, BureauTradeline>>;
+  /** False when field/value alignment checks failed — staff should verify. */
+  confident: boolean;
+}
+
+interface CreditInquiry {
+  date: string;
+  creditor: string;
+  bureau: Bureau;
+  /** SmartCredit groups inquiries by whether a matching account exists. */
+  matchedAccount: boolean | null;
+}
+
+/** Personal-info difference between bureaus (never carries SSN digits). */
+interface IdentityFlag {
+  bureau: Bureau;
+  field: "name" | "ssn" | "dob" | "address";
+  detail: string;
+}
+
+interface CreditFile {
+  provider: CreditFileProvider;
+  reportDate: string | null;
+  scores: Record<Bureau, number | null>;
+  /** Rating printed next to each score ("Good", "Very Good" …), if any. */
+  scoreRatings?: Record<Bureau, string | null>;
+  identityFlags?: IdentityFlag[];
+  accounts: CreditAccount[];
+  inquiries: CreditInquiry[];
+  publicRecordsReported: boolean | null;
+  /** Pages with no extractable text (printed as images). */
+  imagePages: number;
+  totalPages: number;
+  /** 0–1: share of pages with readable text (text-skeleton coverage). */
+  confidence: number;
+  warnings: string[];
+}
+
+// ── shared helpers ──────────────────────────────────────────────────────────
+
+const EMPTY_CELL = /^(——|—|–+|-+|N\/A|NONE REPORTED)?$/i;
+
+function cellText(raw: string | undefined | null): string | null {
+  const t = String(raw ?? "")
+    .replace(/®/g, "")
+    .trim();
+  return EMPTY_CELL.test(t) ? null : t;
+}
+
+function parseMoney(raw: string | null | undefined): number | null {
+  const t = cellText(raw);
+  if (!t) return null;
+  const m = t.replace(/,/g, "").match(/^-?\$?\s*(-?\d+(?:\.\d+)?)$/);
+  return m ? Number(m[1]) : null;
+}
+
+function emptyTradeline(): BureauTradeline {
+  return {
+    accountNumber: null,
+    highBalance: null,
+    lastVerified: null,
+    dateLastActivity: null,
+    dateReported: null,
+    dateOpened: null,
+    balance: null,
+    closedDate: null,
+    accountRating: null,
+    description: null,
+    disputeStatus: null,
+    creditorType: null,
+    accountStatus: null,
+    paymentStatus: null,
+    remarks: null,
+    paymentAmount: null,
+    lastPayment: null,
+    termLength: null,
+    pastDue: null,
+    accountType: null,
+    paymentFrequency: null,
+    creditLimit: null,
+    late30: null,
+    late60: null,
+    late90: null,
+  };
+}
+
+function detectCreditFileProvider(text: string): CreditFileProvider {
+  if (/smartcredit\.com|Ultra 4K 3B Report/i.test(text)) return "smartcredit";
+  if (/Three Bureau Credit Report powered by Equifax/i.test(text)) {
+    return "equifax_3b";
+  }
+  return "unknown";
+}
+
+function parseCreditFile(text: string): CreditFile {
+  const provider = detectCreditFileProvider(text);
+  if (provider === "smartcredit") return parseSmartCredit(text);
+  return {
+    provider,
+    reportDate: null,
+    scores: { TU: null, EX: null, EQ: null },
+    accounts: [],
+    inquiries: [],
+    publicRecordsReported: null,
+    imagePages: 0,
+    totalPages: 0,
+    confidence: 0,
+    warnings: [`No account-level parser for provider "${provider}" yet`],
+  };
+}
+
+// ── SmartCredit 3B ──────────────────────────────────────────────────────────
+
+/** SmartCredit field label → BureauTradeline key + value kind. */
+const SC_LABELS: Record<
+  string,
+  { key: keyof BureauTradeline; kind: "text" | "money" | "date" }
+> = {
+  "Account Number": { key: "accountNumber", kind: "text" },
+  "High Balance": { key: "highBalance", kind: "money" },
+  "Last Verified": { key: "lastVerified", kind: "date" },
+  "Date of Last Activity": { key: "dateLastActivity", kind: "date" },
+  "Date Reported": { key: "dateReported", kind: "date" },
+  "Date Opened": { key: "dateOpened", kind: "date" },
+  "Balance Owed": { key: "balance", kind: "money" },
+  "Closed Date": { key: "closedDate", kind: "date" },
+  "Account Rating": { key: "accountRating", kind: "text" },
+  "Account Description": { key: "description", kind: "text" },
+  "Dispute Status": { key: "disputeStatus", kind: "text" },
+  "Creditor Type": { key: "creditorType", kind: "text" },
+  "Account Status": { key: "accountStatus", kind: "text" },
+  "Payment Status": { key: "paymentStatus", kind: "text" },
+  "Creditor Remarks": { key: "remarks", kind: "text" },
+  "Payment Amount": { key: "paymentAmount", kind: "money" },
+  "Last Payment": { key: "lastPayment", kind: "date" },
+  "Term Length": { key: "termLength", kind: "text" },
+  "Past Due Amount": { key: "pastDue", kind: "money" },
+  "Account Type": { key: "accountType", kind: "text" },
+  "Payment Frequency": { key: "paymentFrequency", kind: "text" },
+  "Credit Limit": { key: "creditLimit", kind: "money" },
+  Utilization: { key: "creditLimit", kind: "text" }, // derived — skipped below
+};
+
+const SC_SECTION: Record<string, AccountSection> = {
+  "Revolving Accounts": "revolving",
+  "Installment Accounts": "installment",
+  "Mortgage Accounts": "mortgage",
+  "Collections Accounts": "collection",
+  "Other Accounts": "other",
+  "Unknown Accounts": "unknown",
+};
+
+/** Status lines printed between the creditor header and its labels. */
+const SC_STATUS_LINE =
+  /^(Open|Closed|Paid|Negative|Derogatory|Collection|Charge.?off|Transferred|Unknown|In Dispute|Closed On\b|Last Payment:|\d+% Credit Utilization)/i;
+
+function isScNoise(line: string): boolean {
+  const t = line.trim();
+  return (
+    !t ||
+    /^®(\s*\t?\s*®)*$/.test(t) ||
+    /^-- \d+ of \d+ --$/.test(t) ||
+    /smartcredit\.com/i.test(t) ||
+    /Ultra 4K 3B Report/i.test(t) ||
+    /^\d{1,2}\/\d{1,2}\/\d{2},? \d{1,2}:\d{2}/.test(t)
+  );
+}
+
+/** Three tab-separated bureau cells (TU, EX, EQ). */
+function splitScValueRow(line: string): string[] | null {
+  if (!line.includes("\t")) return null;
+  const cells = line.split("\t").map((c) => c.trim());
+  if (cells.length !== 3) return null;
+  if (cells.some((c) => /®|^TransUnion|^Experian|^Equifax/.test(c))) {
+    return null;
+  }
+  if (/^\d{1,2}\/\d{1,2}\/\d{2},? \d/.test(cells[0])) return null; // page footer
+  return cells;
+}
+
+const SC_DAYS_LATE =
+  /TransUnion\s+30:\s*(\S+)\s+60:\s*(\S+)\s+90:\s*(\S+)\s*\t?\s*Experian\s*\t?\s*30:\s*(\S+)\s+60:\s*(\S+)\s+90:\s*(\S+)\s*\t?\s*Equifax\s*\t?\s*30:\s*(\S+)\s+60:\s*(\S+)\s+90:\s*(\S+)/;
+
+function lateCount(raw: string): number | null {
+  return /^\d+$/.test(raw) ? Number(raw) : null;
+}
+
+/** "APPLE CARD/GS BANK USA 110001****" → name + mask. */
+function splitScHeader(line: string): { creditor: string; mask: string | null } {
+  const m = line.trim().match(/^(.*?)\s+([0-9X*]*\*{2,}[0-9X*]*)$/i);
+  return m
+    ? { creditor: m[1].trim(), mask: m[2] }
+    : { creditor: line.trim(), mask: null };
+}
+
+function parseSmartCredit(text: string): CreditFile {
+  const lines = text.split(/\r?\n/);
+  const warnings: string[] = [];
+
+  // Scores: first row of three 3-digit numbers (or ——).
+  const scores: Record<Bureau, number | null> = { TU: null, EX: null, EQ: null };
+  for (const line of lines) {
+    const cells = line.split(/\t|\s{2,}|\s(?=\d{3}\b|——)/).map((c) => c.trim()).filter(Boolean);
+    if (
+      cells.length === 3 &&
+      cells.every((c) => /^\d{3}$/.test(c) || /^—+$/.test(c)) &&
+      cells.some((c) => /^\d{3}$/.test(c))
+    ) {
+      BUREAUS.forEach((b, i) => {
+        const n = Number(cells[i]);
+        scores[b] = n >= 300 && n <= 850 ? n : null;
+      });
+      break;
+    }
+  }
+
+  // Report date: first MM/DD/YYYY ×3 row after "Credit Report Date".
+  let reportDate: string | null = null;
+  const dateRow = lines.find((l) => {
+    const c = splitScValueRow(l);
+    return !!c && c.every((x) => /^\d{2}\/\d{2}\/\d{4}$/.test(x));
+  });
+  if (dateRow) reportDate = splitScValueRow(dateRow)![0];
+
+  // Account region: first section header → public-records section.
+  const start = lines.findIndex((l) => SC_SECTION[l.trim()] !== undefined);
+  let end = lines.findIndex(
+    (l, i) =>
+      i > start &&
+      l.trim() === "Public Records" &&
+      /overview of your public records/i.test(lines[i + 1] || ""),
+  );
+  if (end < 0) end = lines.length;
+
+  // De-noised view (drops page footers / ® markers) so a header at the bottom
+  // of one page still sees its labels at the top of the next.
+  const region = lines
+    .slice(Math.max(start, 0), end)
+    .map((l) => l.trim())
+    .filter((t) => !isScNoise(t));
+
+  const accounts: CreditAccount[] = [];
+  const daysLate: string[][] = [];
+  let section: AccountSection = "unknown";
+  for (let i = 0; i < region.length; i++) {
+    const t = region[i];
+    if (SC_SECTION[t]) {
+      section = SC_SECTION[t];
+      continue;
+    }
+    const late = t.match(SC_DAYS_LATE);
+    if (late) {
+      daysLate.push(late.slice(1));
+      continue;
+    }
+    // Header: creditor line, 1–4 status lines, then the "Account Number" label.
+    const anIdx = region
+      .slice(i + 1, i + 6)
+      .findIndex((l) => l === "Account Number");
+    if (
+      anIdx >= 1 &&
+      !t.includes("\t") &&
+      !SC_LABELS[t] &&
+      region.slice(i + 1, i + 1 + anIdx).every((l) => SC_STATUS_LINE.test(l))
+    ) {
+      const { creditor, mask } = splitScHeader(t);
+      accounts.push({
+        creditor,
+        mask,
+        section,
+        headerStatus: region.slice(i + 1, i + 1 + anIdx).join(" · "),
+        bureaus: {},
+        // Field values are not aligned from text (page splits make it
+        // unreliable) — Claude extraction fills them; this is the skeleton.
+        confident: true,
+      });
+      i += anIdx + 1; // skip status lines + this header's "Account Number"
+      continue;
+    }
+    // Labels with no readable header: the creditor line was on an image page.
+    if (t === "Account Number") {
+      accounts.push({
+        creditor: "(unreadable — header on image page)",
+        mask: null,
+        section,
+        headerStatus: null,
+        bureaus: {},
+        confident: false,
+      });
+    }
+  }
+  // "Days Late" rows print once per account, in account order.
+  if (daysLate.length === accounts.length) {
+    accounts.forEach((account, idx) => {
+      const late = daysLate[idx];
+      BUREAUS.forEach((b, bi) => {
+        const l30 = lateCount(late[bi * 3]);
+        const l60 = lateCount(late[bi * 3 + 1]);
+        const l90 = lateCount(late[bi * 3 + 2]);
+        if (l30 === null && l60 === null && l90 === null) return;
+        account.bureaus[b] = {
+          ...emptyTradeline(),
+          late30: l30,
+          late60: l60,
+          late90: l90,
+        };
+      });
+    });
+  } else {
+    warnings.push(
+      `SmartCredit days-late rows (${daysLate.length}) ≠ accounts (${accounts.length})`,
+    );
+  }
+
+  // Image-only pages: text pages vs total pages (accounts may be missing).
+  const pageMarkers = text.match(/^-- \d+ of (\d+) --$/gm) || [];
+  const totalPages = pageMarkers.length;
+  // Chunks before each "-- n of N --" marker (drop the trailing remainder).
+  const pageTexts = text.split(/^-- \d+ of \d+ --$/m).slice(0, totalPages);
+  const imagePages = pageTexts.filter(
+    (pt) =>
+      pt
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter((l) => !isScNoise(l)).length <= 3,
+  ).length;
+  const textOnlyPages = Math.max(0, Math.min(totalPages, imagePages));
+
+  // Inquiries: date / creditor / bureau triples after "Inquiries N".
+  const inquiries: CreditInquiry[] = [];
+  const inqStart = lines.findIndex((l) => /^Inquiries \d+$/.test(l.trim()));
+  if (inqStart >= 0) {
+    let matched: boolean | null = null;
+    for (let i = inqStart + 1; i < lines.length; i++) {
+      const t = lines[i].trim();
+      if (/^Creditor Contacts\b/.test(t)) break;
+      if (/have matching accounts/i.test(t)) matched = true;
+      if (/no matching account/i.test(t)) matched = false;
+      if (
+        /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(t) &&
+        /^(TransUnion|Experian|Equifax)$/.test((lines[i + 2] || "").trim())
+      ) {
+        const bureauName = lines[i + 2].trim();
+        inquiries.push({
+          date: t,
+          creditor: lines[i + 1].trim(),
+          bureau:
+            bureauName === "TransUnion" ? "TU" : bureauName === "Experian" ? "EX" : "EQ",
+          matchedAccount: matched,
+        });
+        i += 2;
+      }
+    }
+  }
+
+  const prIdx = end < lines.length ? end : -1;
+  const publicRecordsReported =
+    prIdx >= 0
+      ? !/^None Reported$/i.test(
+          lines
+            .slice(prIdx + 1, prIdx + 6)
+            .map((l) => l.trim())
+            .find((l) => /^None Reported$/i.test(l)) || "",
+        )
+      : null;
+
+  if (accounts.length === 0) warnings.push("SmartCredit: no accounts found");
+  if (textOnlyPages > 0) {
+    warnings.push(
+      `${textOnlyPages} of ${totalPages} page(s) have no text (printed as images) — accounts on those pages are not in the text`,
+    );
+  }
+  return {
+    provider: "smartcredit",
+    reportDate,
+    scores,
+    accounts,
+    inquiries,
+    publicRecordsReported,
+    imagePages: textOnlyPages,
+    totalPages,
+    confidence:
+      totalPages > 0 ? (totalPages - textOnlyPages) / totalPages : accounts.length ? 1 : 0,
+    warnings,
+  };
+}
+
+/**
+ * OFG Credit File engine — Claude extraction (lean fields) + cross-check.
+ *
+ * Claude reads the credit-report PDF (incl. pages printed as images — ~77% of
+ * SmartCredit uploads) and returns account-level data through structured
+ * outputs (JSON schema). Only the fields the Analysis / Progress reports use
+ * are requested: output size drives latency, so lean = faster + cheaper.
+ *
+ * Runs as a background job (Message Batches via the queue cron) because a
+ * full report takes ~1–3 min, over the 60s Vercel function limit.
+ *
+ * Pure (no I/O). Production entry remains api/index.ts (inline + sync test
+ * when wired). The text parser (creditFile.ts) supplies the cross-check.
+ */
+
+const BUREAU_KEYS = { TU: "transunion", EX: "experian", EQ: "equifax" } as const;
+
+const NULLABLE_STRING = { type: ["string", "null"] } as const;
+const NULLABLE_NUMBER = { type: ["number", "null"] } as const;
+const NULLABLE_INT = { type: ["integer", "null"] } as const;
+
+/** Lean per-bureau fields (null when that bureau does not report the account). */
+const BUREAU_TRADELINE_SCHEMA = {
+  type: ["object", "null"],
+  additionalProperties: false,
+  properties: {
+    date_opened: { ...NULLABLE_STRING, description: "MM/DD/YYYY or MM/YYYY" },
+    date_last_activity: NULLABLE_STRING,
+    balance: NULLABLE_NUMBER,
+    credit_limit: { ...NULLABLE_NUMBER, description: "Credit limit, or original/high amount for loans" },
+    past_due: NULLABLE_NUMBER,
+    account_type: { ...NULLABLE_STRING, description: "e.g. Credit Card, Auto Loan, Collection, Installment" },
+    account_status: { ...NULLABLE_STRING, description: "Open / Closed / Paid / Derogatory …" },
+    payment_status: { ...NULLABLE_STRING, description: "Current, Late 30 Days, Charge-off, Collection …" },
+    remarks: { ...NULLABLE_STRING, description: "Creditor remarks verbatim, incl. any dispute notation" },
+    dispute_status: { ...NULLABLE_STRING, description: "Dispute Status field verbatim" },
+    late_30: NULLABLE_INT,
+    late_60: NULLABLE_INT,
+    late_90: NULLABLE_INT,
+    closed_date: { ...NULLABLE_STRING, description: "Closed date if this bureau prints one" },
+    payment_grid_lates: {
+      type: "array",
+      items: { type: "string" },
+      description: 'Every NON-OK cell of this bureau\'s payment-history grid as "MM/YYYY:CODE" (CODE = 30, 60, 90, 120, 150, CO, C, R, F, B). Empty when all cells are OK/blank.',
+    },
+  },
+  required: [
+    "date_opened",
+    "date_last_activity",
+    "balance",
+    "credit_limit",
+    "past_due",
+    "account_type",
+    "account_status",
+    "payment_status",
+    "remarks",
+    "dispute_status",
+    "late_30",
+    "late_60",
+    "late_90",
+    "closed_date",
+    "payment_grid_lates",
+  ],
+} as const;
+
+/** JSON schema for structured outputs (output_config.format). */
+const CREDIT_FILE_EXTRACTION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    report_date: { ...NULLABLE_STRING, description: "Report pull date MM/DD/YYYY" },
+    scores: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        transunion: NULLABLE_INT,
+        experian: NULLABLE_INT,
+        equifax: NULLABLE_INT,
+      },
+      required: ["transunion", "experian", "equifax"],
+    },
+    score_model: { ...NULLABLE_STRING, description: "e.g. VantageScore 3.0" },
+    score_ratings: {
+      type: "object",
+      additionalProperties: false,
+      description: "Rating word printed next to each score (e.g. Fair, Good, Very Good, Excellent); null if none printed",
+      properties: {
+        transunion: NULLABLE_STRING,
+        experian: NULLABLE_STRING,
+        equifax: NULLABLE_STRING,
+      },
+      required: ["transunion", "experian", "equifax"],
+    },
+    identity_variations: {
+      type: "array",
+      description:
+        "Personal-information differences between bureaus (name variations, SSN not matching the other bureaus, date of birth, address). NEVER include SSN digits.",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          bureau: { type: "string", enum: ["transunion", "experian", "equifax"] },
+          field: { type: "string", enum: ["name", "ssn", "dob", "address"] },
+          detail: { type: "string", description: "Short description, no SSN digits" },
+        },
+        required: ["bureau", "field", "detail"],
+      },
+    },
+    accounts: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          creditor: { type: "string" },
+          original_creditor: NULLABLE_STRING,
+          account_mask: NULLABLE_STRING,
+          section: {
+            type: "string",
+            enum: ["revolving", "installment", "mortgage", "collection", "other", "unknown"],
+          },
+          transunion: BUREAU_TRADELINE_SCHEMA,
+          experian: BUREAU_TRADELINE_SCHEMA,
+          equifax: BUREAU_TRADELINE_SCHEMA,
+        },
+        required: [
+          "creditor",
+          "original_creditor",
+          "account_mask",
+          "section",
+          "transunion",
+          "experian",
+          "equifax",
+        ],
+      },
+    },
+    inquiries: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          date: { type: "string" },
+          creditor: { type: "string" },
+          bureau: { type: "string", enum: ["transunion", "experian", "equifax"] },
+        },
+        required: ["date", "creditor", "bureau"],
+      },
+    },
+    public_records_count: NULLABLE_INT,
+    unreadable_pages: {
+      type: "array",
+      items: { type: "integer" },
+      description: "1-based page numbers you could not read",
+    },
+  },
+  required: [
+    "report_date",
+    "scores",
+    "score_model",
+    "score_ratings",
+    "identity_variations",
+    "accounts",
+    "inquiries",
+    "public_records_count",
+    "unreadable_pages",
+  ],
+} as const;
+
+const CREDIT_FILE_EXTRACTION_PROMPT = `You are reading a consumer credit report (any provider: SmartCredit, IdentityIQ, MyFreeScoreNow, a bureau report, a scan or a photo). It may cover one, two or three bureaus (TransUnion, Experian, Equifax). Some pages may be images — read them too.
+Extract EVERY tradeline account (open, closed, paid, collections, charge-offs) exactly as printed. One entry per account; put each bureau's values under transunion / experian / equifax, or null when that bureau does not report the account.
+Rules:
+- Copy values verbatim; never infer, estimate, or fill missing values. Use null for "——", "--", blank, or not reported.
+- Money as plain numbers (no $ or commas). Dates as printed (MM/DD/YYYY or MM/YYYY).
+- late_30 / late_60 / late_90 are the "Days Late" counts for that bureau.
+- remarks: creditor remarks verbatim (keep dispute notations such as "Consumer disputes", "disputed, meets FCRA requirements").
+- payment_grid_lates: read each bureau's payment-history grid; list every late/derogatory cell as "MM/YYYY:CODE". This catches lates the Status field and Days Late summary miss.
+- score_ratings: the rating word the report prints for each score (do not compute one).
+- identity_variations: compare names, SSN, date of birth and addresses across bureaus; list each bureau whose data differs. Never write SSN digits — say e.g. "SSN differs from Experian/TransUnion".
+- Inquiries: every hard inquiry listed, one entry per bureau.
+- List any page you could not read in unreadable_pages.`;
+
+/**
+ * Messages API params for one report (use as Batches `params`).
+ * `model` comes from ANTHROPIC_MODEL (caller resolves the default).
+ */
+/** Credit-report upload types Claude can read (any provider). */
+const CREDIT_FILE_MEDIA_TYPES = [
+  "application/pdf",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+] as const;
+type CreditFileMediaType = (typeof CREDIT_FILE_MEDIA_TYPES)[number];
+
+function isSupportedCreditFileMediaType(
+  mime: string,
+): mime is CreditFileMediaType {
+  return (CREDIT_FILE_MEDIA_TYPES as readonly string[]).includes(mime);
+}
+
+function buildCreditFileExtractionParams(opts: {
+  /** Base64 file bytes (PDF or image). */
+  fileBase64?: string;
+  /** @deprecated use fileBase64 */
+  pdfBase64?: string;
+  mediaType?: CreditFileMediaType;
+  model: string;
+  maxTokens?: number;
+}): Record<string, unknown> {
+  const data = opts.fileBase64 ?? opts.pdfBase64 ?? "";
+  const mediaType = opts.mediaType ?? "application/pdf";
+  const fileBlock =
+    mediaType === "application/pdf"
+      ? {
+          type: "document",
+          source: { type: "base64", media_type: mediaType, data },
+        }
+      : { type: "image", source: { type: "base64", media_type: mediaType, data } };
+  return {
+    model: opts.model,
+    max_tokens: opts.maxTokens ?? 32000,
+    output_config: {
+      format: { type: "json_schema", schema: CREDIT_FILE_EXTRACTION_SCHEMA },
+    },
+    messages: [
+      {
+        role: "user",
+        content: [fileBlock, { type: "text", text: CREDIT_FILE_EXTRACTION_PROMPT }],
+      },
+    ],
+  };
+}
+
+function num(v: unknown): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  const n = typeof v === "number" ? v : Number(String(v).replace(/[$,\s]/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+
+function str(v: unknown): string | null {
+  const t = v === null || v === undefined ? "" : String(v).trim();
+  return !t || /^(——|—|--|-|N\/A)$/i.test(t) ? null : t;
+}
+
+function toTradeline(raw: any): BureauTradeline | null {
+  if (!raw || typeof raw !== "object") return null;
+  return {
+    accountNumber: null,
+    highBalance: null,
+    lastVerified: null,
+    dateLastActivity: str(raw.date_last_activity),
+    dateReported: null,
+    dateOpened: str(raw.date_opened),
+    balance: num(raw.balance),
+    accountRating: null,
+    description: null,
+    disputeStatus: str(raw.dispute_status),
+    creditorType: null,
+    accountStatus: str(raw.account_status),
+    paymentStatus: str(raw.payment_status),
+    remarks: str(raw.remarks),
+    paymentAmount: null,
+    lastPayment: null,
+    termLength: null,
+    pastDue: num(raw.past_due),
+    accountType: str(raw.account_type),
+    paymentFrequency: null,
+    creditLimit: num(raw.credit_limit),
+    late30: num(raw.late_30),
+    late60: num(raw.late_60),
+    late90: num(raw.late_90),
+    closedDate: str(raw.closed_date),
+    gridMarks: Array.isArray(raw.payment_grid_lates)
+      ? raw.payment_grid_lates.map((x: unknown) => String(x).trim()).filter(Boolean).slice(0, 120)
+      : [],
+  };
+}
+
+const SECTIONS: AccountSection[] = [
+  "revolving",
+  "installment",
+  "mortgage",
+  "collection",
+  "other",
+  "unknown",
+];
+
+/**
+ * Structured-output JSON (string or parsed) → CreditFile. Throws on
+ * non-JSON so the job can be marked failed instead of saving an empty file.
+ */
+function parseCreditFileExtraction(
+  raw: string | Record<string, unknown>,
+  provider: CreditFileProvider,
+): CreditFile & { scoreModel: string | null; unreadablePages: number[] } {
+  const data: any = typeof raw === "string" ? JSON.parse(raw) : raw;
+  const accounts: CreditAccount[] = (Array.isArray(data?.accounts) ? data.accounts : [])
+    .filter((a: any) => a && str(a.creditor))
+    .map((a: any) => {
+      const bureaus: Partial<Record<Bureau, BureauTradeline>> = {};
+      for (const b of BUREAUS) {
+        const tl = toTradeline(a[BUREAU_KEYS[b]]);
+        if (tl) bureaus[b] = tl;
+      }
+      const section = SECTIONS.includes(a.section) ? a.section : "unknown";
+      return {
+        creditor: str(a.creditor)!,
+        mask: str(a.account_mask),
+        section,
+        headerStatus: str(a.original_creditor)
+          ? `Original creditor: ${str(a.original_creditor)}`
+          : null,
+        bureaus,
+        confident: Object.keys(bureaus).length > 0,
+      } satisfies CreditAccount;
+    });
+  const inquiries: CreditInquiry[] = (Array.isArray(data?.inquiries) ? data.inquiries : [])
+    .filter((q: any) => q && str(q.date) && str(q.creditor))
+    .map((q: any) => ({
+      date: str(q.date)!,
+      creditor: str(q.creditor)!,
+      bureau: (q.bureau === "transunion" ? "TU" : q.bureau === "experian" ? "EX" : "EQ") as Bureau,
+      matchedAccount: null,
+    }));
+  const scoreOf = (v: unknown) => {
+    const n = num(v);
+    return n !== null && n >= 300 && n <= 850 ? n : null;
+  };
+  const unreadablePages: number[] = Array.isArray(data?.unreadable_pages)
+    ? data.unreadable_pages.filter((n: unknown) => Number.isInteger(n))
+    : [];
+  const pr = num(data?.public_records_count);
+  return {
+    provider,
+    reportDate: str(data?.report_date),
+    scores: {
+      TU: scoreOf(data?.scores?.transunion),
+      EX: scoreOf(data?.scores?.experian),
+      EQ: scoreOf(data?.scores?.equifax),
+    },
+    accounts,
+    inquiries,
+    publicRecordsReported: pr === null ? null : pr > 0,
+    imagePages: 0,
+    totalPages: 0,
+    confidence: 1,
+    warnings: unreadablePages.length
+      ? [`Claude could not read page(s): ${unreadablePages.join(", ")}`]
+      : [],
+    scoreModel: str(data?.score_model),
+    scoreRatings: {
+      TU: str(data?.score_ratings?.transunion),
+      EX: str(data?.score_ratings?.experian),
+      EQ: str(data?.score_ratings?.equifax),
+    },
+    identityFlags: (Array.isArray(data?.identity_variations) ? data.identity_variations : [])
+      .filter((v: any) => v && ["name", "ssn", "dob", "address"].includes(v.field))
+      .map((v: any) => ({
+        bureau: (v.bureau === "transunion" ? "TU" : v.bureau === "experian" ? "EX" : "EQ") as Bureau,
+        field: v.field,
+        // Defense in depth: strip any digit run that could be an SSN.
+        detail: String(v.detail || "").replace(/\d{3,}[-\s]?\d*/g, "•••").slice(0, 160),
+      })),
+    unreadablePages,
+  };
+}
+
+interface CrossCheckIssue {
+  severity: "error" | "warning";
+  code:
+    | "score_mismatch"
+    | "account_count_mismatch"
+    | "missing_account"
+    | "inquiry_count_mismatch"
+    | "unreadable_pages";
+  message: string;
+}
+
+function normCreditor(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+/**
+ * Compare Claude's extraction with the text-parser skeleton (scores, account
+ * headers, inquiries — which are reliable where the PDF has text). Issues are
+ * shown to staff on the review screen; errors lower confidence.
+ */
+function crossCheckCreditFile(
+  extracted: CreditFile & { unreadablePages?: number[] },
+  skeleton: CreditFile,
+): { issues: CrossCheckIssue[]; confidence: number } {
+  const issues: CrossCheckIssue[] = [];
+  for (const b of BUREAUS) {
+    const a = extracted.scores[b];
+    const s = skeleton.scores[b];
+    if (a !== null && s !== null && a !== s) {
+      issues.push({
+        severity: "error",
+        code: "score_mismatch",
+        message: `${b} score: extracted ${a}, report text says ${s}`,
+      });
+    }
+  }
+  // Text skeleton sees every account when no account pages are images.
+  const textSeesAll = skeleton.imagePages === 0 && skeleton.accounts.length > 0;
+  if (textSeesAll && extracted.accounts.length !== skeleton.accounts.length) {
+    issues.push({
+      severity: "error",
+      code: "account_count_mismatch",
+      message: `Extracted ${extracted.accounts.length} accounts; report lists ${skeleton.accounts.length}`,
+    });
+  } else if (extracted.accounts.length < skeleton.accounts.length) {
+    issues.push({
+      severity: "error",
+      code: "account_count_mismatch",
+      message: `Extracted ${extracted.accounts.length} accounts but the readable text alone shows ${skeleton.accounts.length}`,
+    });
+  }
+  const extractedNames = extracted.accounts.map((a) => normCreditor(a.creditor));
+  for (const acct of skeleton.accounts) {
+    if (!acct.confident) continue; // header was on an image page
+    const key = normCreditor(acct.creditor);
+    if (key && !extractedNames.some((n) => n === key || n.includes(key) || key.includes(n))) {
+      issues.push({
+        severity: "warning",
+        code: "missing_account",
+        message: `"${acct.creditor}" appears in the report text but was not extracted`,
+      });
+    }
+  }
+  if (
+    skeleton.inquiries.length > 0 &&
+    extracted.inquiries.length !== skeleton.inquiries.length
+  ) {
+    issues.push({
+      severity: "warning",
+      code: "inquiry_count_mismatch",
+      message: `Extracted ${extracted.inquiries.length} inquiries; report lists ${skeleton.inquiries.length}`,
+    });
+  }
+  if (extracted.unreadablePages?.length) {
+    issues.push({
+      severity: "warning",
+      code: "unreadable_pages",
+      message: `Unreadable page(s): ${extracted.unreadablePages.join(", ")}`,
+    });
+  }
+  const errors = issues.filter((i) => i.severity === "error").length;
+  const warnings = issues.length - errors;
+  const confidence = Math.max(0, 1 - errors * 0.3 - warnings * 0.05);
+  return { issues, confidence: Math.round(confidence * 100) / 100 };
+}
+
+/**
+ * OFG Credit Analysis — Phase 2 rules: CreditFile (account-level) → analysis
+ * data for the branded Analysis PDF (same pipeline idea as the Progress
+ * Report: structured data → deterministic rules → PDF → staff review).
+ *
+ * Everything here is computed from extracted accounts; nothing is invented.
+ * Projections are labelled estimates. Pure (no I/O); inlined into api/index.ts
+ * via scripts/inline-credit-file-engine.mjs.
+ */
+
+type AnalysisRound = 1 | 2 | 3 | 4;
+type NegativeKind =
+  | "collection"
+  | "charge_off"
+  | "late"
+  | "repossession"
+  | "public_record"
+  | "derogatory";
+
+interface AnalysisNegative {
+  creditor: string;
+  originalCreditor: string | null;
+  kind: NegativeKind;
+  bureaus: Bureau[];
+  balance: number | null;
+  opened: string | null;
+  status: string;
+  /** Cross-bureau reporting conflicts (Round 3 angles). */
+  inconsistencies: string[];
+  round: AnalysisRound;
+  /** Consumer-dispute remark while Dispute Status says not disputed. */
+  hold: boolean;
+  holdReason: string | null;
+  legalBasis: string;
+  /** Rough points if removed (estimate). */
+  liftEstimate: number;
+}
+
+interface AnalysisInquiry {
+  creditor: string;
+  bureau: Bureau;
+  date: string;
+  /** Two years after the inquiry date. */
+  agesOff: string | null;
+  action: "dispute" | "ages_off" | "permissible";
+  /** Why it is not a target (permissible purpose / active loan pull). */
+  excludedReason?: "matches_account" | "active_loan" | null;
+  /** Same-day / back-to-back shopping cluster id (Round 1 grouping). */
+  clusterId?: number | null;
+}
+
+/** Round 1 inquiry cluster (same-day / 2-day shopping burst). */
+interface InquiryCluster {
+  id: number;
+  from: string;
+  to: string;
+  count: number;
+  perBureau: Record<Bureau, number>;
+  /** Over 12 months old: minimal score weight. */
+  older12m: boolean;
+}
+
+/** Positive account reported inconsistently: Round 3 accuracy UPDATE, never a deletion. */
+interface AccuracyUpdate {
+  creditor: string;
+  type: string | null;
+  bureaus: Bureau[];
+  inconsistencies: string[];
+}
+
+interface TradelineRecommendation {
+  /** IH-1 / IH-2 codes or a primary line; never cardholder names. */
+  code: "IH-1" | "IH-2" | "primary";
+  price: number | null;
+  impact: string;
+  bureaus: Bureau[];
+  timing: "now" | "after_closing";
+}
+
+/** Active mortgage / loan in progress: disputes and new credit wait. */
+interface EscrowStatus {
+  active: boolean;
+  source: "agent" | "mortgage_pull" | null;
+  /** Loan pulls excluded from Round 1. */
+  loanInquiries: Array<{ creditor: string; bureau: Bureau; date: string }>;
+}
+
+/** Lender's own score (usually FICO) entered by the agent. */
+interface LenderScore {
+  model: string | null;
+  score: number | null;
+  target: number | null;
+}
+
+interface CreditAnalysisOptions {
+  /** Agent flag: true = in escrow, false = not, null/undefined = auto-detect. */
+  escrow?: boolean | null;
+  lender?: LenderScore | null;
+}
+
+interface BureauOverview {
+  reported: boolean;
+  score: number | null;
+  totalAccounts: number;
+  positive: number;
+  negative: number;
+  hardInquiries: number;
+  revolvingLimit: number;
+  revolvingBalance: number;
+  utilizationPct: number | null;
+  totalBalances: number;
+  avgAgeMonths: number | null;
+  oldest: { creditor: string; opened: string } | null;
+}
+
+interface UtilizationRow {
+  account: string;
+  limit: number;
+  balance: number;
+  pctUsed: number;
+  payTo30: number;
+  payTo10: number;
+  authorizedUser: boolean;
+  /** Closed card still carrying a balance (counted in "incl. closed" total). */
+  closed?: boolean;
+  /** Derogatory account: never show payoff targets. */
+  derogatory?: boolean;
+}
+
+interface ProjectionMilestone {
+  key: "current" | "round1" | "round2" | "round3" | "round4";
+  scores: Record<Bureau, number | null>;
+}
+
+interface FileStrengthFactor {
+  key: "revolving" | "installment" | "mortgage" | "age" | "derogatory";
+  current: number;
+  postRepair: number;
+}
+
+interface CreditAnalysisData {
+  reportDate: string | null;
+  scoreModel: string | null;
+  scores: Record<Bureau, number | null>;
+  overview: Record<Bureau, BureauOverview>;
+  /** Bureaus with no score and no tradelines (freeze / not pulled). */
+  missingBureaus: Bureau[];
+  negatives: AnalysisNegative[];
+  inquiries: AnalysisInquiry[];
+  positives: Array<{
+    creditor: string;
+    type: string | null;
+    bureaus: Bureau[];
+    opened: string | null;
+    limit: number | null;
+    balance: number | null;
+    status: string | null;
+  }>;
+  utilization: UtilizationRow[];
+  utilizationOverall: { all: number | null; ownCardsOnly: number | null; inclClosed: number | null };
+  projections: ProjectionMilestone[];
+  fileStrength: { factors: FileStrengthFactor[]; current: number; postRepair: number };
+  programTier: ProgramTier;
+  totalDerogatoryBalance: number;
+  warnings: string[];
+  /** Rating printed on the report per bureau (null = not printed). */
+  scoreRatings: Record<Bureau, string | null>;
+  escrow: EscrowStatus;
+  lender: LenderScore | null;
+  inquiryClusters: InquiryCluster[];
+  /** Round 3 accuracy updates on positive accounts (not deletions). */
+  accuracyUpdates: AccuracyUpdate[];
+  identityFlags: IdentityFlag[];
+  tradelines: TradelineRecommendation[];
+}
+
+type ProgramTier = "standard" | "complex";
+
+/** Same triggers as creditAnalysisEngine.classifyProgramTier (Complex program). */
+const COMPLEX_PROGRAM_HINT =
+  /\b(bankrupt|repossession|repossessed|\brepo\b|foreclos|tax\s*lien|irs\b|sba\b|student\s*loan|navient|sallie mae|dept\.?\s*of\s*education|medical|hospital|clinic)/i;
+
+/** Same scale as creditAnalysisEngine.estimateDisputeScoreLift (estimate). */
+function negativeLiftEstimate(kind: NegativeKind, hay: string): number {
+  if (kind === "public_record" || kind === "repossession") return 45;
+  if (kind === "charge_off") return 35;
+  if (kind === "collection") return 28;
+  if (kind === "late") return /90|120|150/.test(hay) ? 22 : 12;
+  return 10;
+}
+
+// ── field helpers ───────────────────────────────────────────────────────────
+
+const NEG_TEXT =
+  /collection|charge.?off|charged off|repossess|foreclos|bankrupt|delinquen|past due|late\s*\d|late payment|\d{2,3}\s*days?\s*(late|past)|derogatory|written off/i;
+const COLLECTION_TEXT =
+  /collection|placed for collection|purchased|debt buyer|\b(lvnv|midland|portfolio recovery|jefferson capital|cavalry|resurgent|ic system|enhanced recovery)\b/i;
+const DISPUTE_REMARK = /disput/i;
+const ACTIVE_DISPUTE = /currently (in )?disput|in dispute|under dispute/i;
+const AU_TEXT = /authorized user|\bAU\b/i;
+
+/** "MM/DD/YYYY" | "MM/YYYY" | "M/D/YYYY" → Date (UTC) or null. */
+function parseReportDate(raw: string | null | undefined): Date | null {
+  const t = String(raw || "").trim();
+  let m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (m) return new Date(Date.UTC(Number(m[3]), Number(m[1]) - 1, Number(m[2])));
+  m = t.match(/^(\d{1,2})\/(\d{4})$/);
+  if (m) return new Date(Date.UTC(Number(m[2]), Number(m[1]) - 1, 1));
+  m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2})$/);
+  if (m) return new Date(Date.UTC(2000 + Number(m[3]), Number(m[1]) - 1, Number(m[2])));
+  return null;
+}
+
+function fmtDate(d: Date): string {
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  return `${mm}/${dd}/${d.getUTCFullYear()}`;
+}
+
+function monthsBetween(a: Date, b: Date): number {
+  return (
+    (b.getUTCFullYear() - a.getUTCFullYear()) * 12 + (b.getUTCMonth() - a.getUTCMonth())
+  );
+}
+
+function tradelineText(tl: BureauTradeline): string {
+  return [tl.paymentStatus, tl.accountStatus, tl.remarks, tl.accountType]
+    .filter(Boolean)
+    .join(" ");
+}
+
+/** Remarks that make an account negative on their own (spec: comments rule). */
+const NEG_REMARK = /past due|charged? off|closed by (the )?credit grantor|canceled by credit grantor|collection|repossess/i;
+
+function isClosedTradeline(tl: BureauTradeline, account: CreditAccount): boolean {
+  return (
+    !!tl.closedDate ||
+    /closed|paid/i.test(tl.accountStatus || "") ||
+    /^closed\b/i.test(account.headerStatus || "")
+  );
+}
+
+/**
+ * Negative if ANY is true for this bureau: status/payment text is derogatory;
+ * Days Late counts or payment-grid cells show a late (30/60/90/120/150/CO/C/
+ * R/F/B); past due > $0; remarks say past due / charged off / closed by credit
+ * grantor / collection / repossession; balance over limit on a closed card.
+ */
+function isNegativeTradeline(tl: BureauTradeline, account: CreditAccount): boolean {
+  if (account.section === "collection") return true;
+  if (NEG_TEXT.test(tradelineText(tl))) return true;
+  if ((tl.late30 ?? 0) + (tl.late60 ?? 0) + (tl.late90 ?? 0) > 0) return true;
+  if ((tl.gridMarks ?? []).length > 0) return true;
+  if ((tl.pastDue ?? 0) > 0) return true;
+  if (NEG_REMARK.test(tl.remarks || "")) return true;
+  return (
+    isClosedTradeline(tl, account) &&
+    tl.creditLimit !== null &&
+    tl.creditLimit > 0 &&
+    (tl.balance ?? 0) > tl.creditLimit
+  );
+}
+
+/** Latest grid late "MM/YYYY:30" → { when, code }. */
+function latestGridMark(tls: BureauTradeline[]): { when: string; code: string } | null {
+  let best: { when: string; code: string; t: number } | null = null;
+  for (const tl of tls) {
+    for (const m of tl.gridMarks ?? []) {
+      const [when, code] = m.split(":");
+      const d = parseReportDate(when);
+      if (d && (!best || d.getTime() > best.t)) best = { when, code: code || "", t: d.getTime() };
+    }
+  }
+  return best ? { when: best.when, code: best.code } : null;
+}
+
+function negativeKind(account: CreditAccount, tls: BureauTradeline[]): NegativeKind {
+  const hay = `${account.creditor} ${account.headerStatus || ""} ${tls.map(tradelineText).join(" ")}`;
+  if (/bankrupt|judgment|lien/i.test(hay)) return "public_record";
+  if (/repossess|foreclos/i.test(hay)) return "repossession";
+  if (account.section === "collection" || COLLECTION_TEXT.test(hay)) return "collection";
+  if (/charge.?off|charged off|written off/i.test(hay)) return "charge_off";
+  if (
+    /late|delinquen|past due|\d{2,3}\s*days/i.test(hay) ||
+    tls.some((t) => (t.late30 ?? 0) + (t.late60 ?? 0) + (t.late90 ?? 0) > 0 || (t.pastDue ?? 0) > 0) ||
+    tls.some((t) => (t.gridMarks ?? []).some((m) => /:(30|60|90|120|150)$/.test(m)))
+  ) {
+    return "late";
+  }
+  return "derogatory";
+}
+
+function distinct<T>(vals: T[]): T[] {
+  return [...new Set(vals)];
+}
+
+/** Cross-bureau conflicts on the same account (FCRA §611/§623 angles). */
+function findInconsistencies(
+  bureaus: Partial<Record<Bureau, BureauTradeline>>,
+): string[] {
+  const entries = BUREAUS.filter((b) => bureaus[b]).map((b) => [b, bureaus[b]!] as const);
+  if (entries.length < 2) return [];
+  const out: string[] = [];
+  const diff = <K extends keyof BureauTradeline>(
+    key: K,
+    label: string,
+    same: (a: BureauTradeline[K], b: BureauTradeline[K]) => boolean = (a, b) => a === b,
+  ) => {
+    const vals = entries.filter(([, t]) => t[key] !== null && t[key] !== undefined);
+    if (vals.length < 2) return;
+    const first = vals[0][1][key];
+    if (vals.some(([, t]) => !same(t[key], first))) {
+      out.push(`${label}: ${vals.map(([b, t]) => `${b} ${String(t[key])}`).join(" vs ")}`);
+    }
+  };
+  diff("dateOpened", "Date opened", (a, b) => {
+    const da = parseReportDate(a as string);
+    const db = parseReportDate(b as string);
+    return !!da && !!db && Math.abs(monthsBetween(da, db)) < 1;
+  });
+  diff("balance", "Balance", (a, b) => Math.abs(Number(a) - Number(b)) <= 1);
+  diff("dateLastActivity", "Last activity", (a, b) => {
+    const da = parseReportDate(a as string);
+    const db = parseReportDate(b as string);
+    return !!da && !!db && Math.abs(monthsBetween(da, db)) <= 1;
+  });
+  diff("paymentStatus", "Payment status", (a, b) =>
+    String(a).toLowerCase() === String(b).toLowerCase(),
+  );
+  // Open on one bureau, closed / paid on another.
+  const openClosed = entries
+    .filter(([, t]) => t.accountStatus)
+    .map(([b, t]) => [b, /closed|paid/i.test(t.accountStatus!) ? "Closed" : /open/i.test(t.accountStatus!) ? "Open" : null] as const)
+    .filter(([, v]) => v !== null);
+  if (openClosed.length >= 2 && distinct(openClosed.map(([, v]) => v)).length > 1) {
+    out.push(`Status: ${openClosed.map(([b, v]) => `${b} ${v}`).join(" vs ")}`);
+  }
+  // Closed date reported by some bureaus only.
+  const withClosed = entries.filter(([, t]) => t.closedDate).map(([b]) => b);
+  if (withClosed.length > 0 && withClosed.length < entries.length) {
+    const without = entries.map(([b]) => b).filter((b) => !withClosed.includes(b));
+    out.push(`Closed date: reported by ${withClosed.join("/")}, not by ${without.join("/")}`);
+  }
+  // Status says late while that bureau's own payment summary shows no lates.
+  for (const [b, t] of entries) {
+    const statusLate = /late|past due|delinquen/i.test(`${t.paymentStatus || ""} ${t.accountStatus || ""}`);
+    const summaryClean =
+      t.late30 === 0 && (t.late60 ?? 0) === 0 && (t.late90 ?? 0) === 0 && (t.gridMarks ?? []).length === 0;
+    if (statusLate && summaryClean) {
+      out.push(`${b}: status "${t.paymentStatus || t.accountStatus}" but payment history shows no lates`);
+    }
+  }
+  const lateKey = (t: BureauTradeline) =>
+    `${t.late30 ?? "–"}/${t.late60 ?? "–"}/${t.late90 ?? "–"}`;
+  const withLates = entries.filter(([, t]) => t.late30 !== null || t.late60 !== null || t.late90 !== null);
+  if (withLates.length >= 2 && distinct(withLates.map(([, t]) => lateKey(t))).length > 1) {
+    out.push(`Late counts (30/60/90): ${withLates.map(([b, t]) => `${b} ${lateKey(t)}`).join(" vs ")}`);
+  }
+  return out;
+}
+
+const LEGAL_BASIS: Record<AnalysisRound, string> = {
+  1: "FCRA §604, §611",
+  2: "FDCPA §809, FCRA §611",
+  3: "FCRA §611, §623",
+  4: "FCRA §611, §623",
+};
+
+function assignRound(kind: NegativeKind, inconsistencies: string[]): AnalysisRound {
+  if (kind === "collection") return 2;
+  if (inconsistencies.length > 0) return 3;
+  return 4;
+}
+
+// ── main builder ────────────────────────────────────────────────────────────
+
+/** Tradeline prices (IH codes only — never cardholder names). */
+const TRADELINE_PRICES: Record<"IH-1" | "IH-2", number> = { "IH-1": 800, "IH-2": 800 };
+
+/** Mortgage / loan-underwriting pulls (Credco, CoreLogic, Xactus, Factual Data …). */
+const MORTGAGE_PULL =
+  /credco|corelogic|core logic|xactus|factual data|informative research|mortgage|home loan|home lending|cbc\b|meridian ?link|kroll factual|advantage plus|equifax mortgage/i;
+/** Days back from the report date that a mortgage pull means "active loan". */
+const ESCROW_WINDOW_DAYS = 45;
+
+function alnum(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function daysBetween(a: Date, b: Date): number {
+  return Math.round((b.getTime() - a.getTime()) / 86_400_000);
+}
+
+/** Inquiry creditor ~ account creditor (shared 3+ char prefix: "BCI FIN" ~ "BCION"). */
+function inquiryMatchesCreditor(inquiry: string, creditor: string): boolean {
+  const q = alnum(inquiry);
+  const c = alnum(creditor);
+  if (q.length < 3 || c.length < 3) return false;
+  return q.includes(c) || c.includes(q) || q.slice(0, 3) === c.slice(0, 3);
+}
+
+/** Bands from the spec: unknown / missing data always scores 0, never full points. */
+function fileStrengthFactors(opts: {
+  openRevolving: number;
+  ownUtil: number | null;
+  openInstallment: number;
+  installmentClean: boolean;
+  mortgageOpen: boolean;
+  avgAgeMonths: number | null;
+  negatives: number;
+}): Record<FileStrengthFactor["key"], number> {
+  const { openRevolving: n, ownUtil } = opts;
+  const revolving =
+    n === 0
+      ? 0
+      : n === 1
+        ? 8
+        : n === 2
+          ? 12 + (ownUtil !== null && ownUtil < 10 ? 2 : 0)
+          : 16 + (ownUtil !== null && ownUtil < 30 ? 2 : 0) + (ownUtil !== null && ownUtil < 10 ? 2 : 0);
+  const installment =
+    opts.openInstallment === 0
+      ? 0
+      : opts.openInstallment === 1
+        ? opts.installmentClean ? 12 : 8
+        : opts.installmentClean
+          ? Math.min(20, 18 + (opts.openInstallment >= 3 ? 2 : 0))
+          : 14;
+  const mortgage = opts.mortgageOpen ? 18 : 0;
+  const m = opts.avgAgeMonths;
+  const age =
+    m === null
+      ? 0
+      : m < 24
+        ? Math.floor((m / 24) * 6)
+        : m < 60
+          ? Math.min(14, 8 + 2 * Math.floor((m - 24) / 12))
+          : Math.min(20, 16 + 2 * Math.floor((m - 60) / 24));
+  const derogatory =
+    opts.negatives === 0 ? 18 : opts.negatives === 1 ? 12 : opts.negatives === 2 ? 10 : Math.max(0, 6 - (opts.negatives - 3) * 2);
+  return { revolving, installment, mortgage, age, derogatory };
+}
+
+function buildCreditAnalysis(
+  file: CreditFile & { scoreModel?: string | null },
+  options: CreditAnalysisOptions = {},
+): CreditAnalysisData {
+  const reportDate = parseReportDate(file.reportDate) ?? new Date();
+  const warnings = [...file.warnings];
+
+  const negatives: AnalysisNegative[] = [];
+  const positives: CreditAnalysisData["positives"] = [];
+  const accuracyUpdates: AccuracyUpdate[] = [];
+  const utilization: UtilizationRow[] = [];
+
+  for (const account of file.accounts) {
+    const reporting = BUREAUS.filter((b) => account.bureaus[b]);
+    const tls = reporting.map((b) => account.bureaus[b]!);
+    if (tls.length === 0) continue;
+    const negBureaus = reporting.filter((b) => isNegativeTradeline(account.bureaus[b]!, account));
+    const pick = <K extends keyof BureauTradeline>(k: K) =>
+      tls.map((t) => t[k]).find((v) => v !== null && v !== undefined) ?? null;
+    const balance = pick("balance") as number | null;
+    const opened = pick("dateOpened") as string | null;
+    const original = account.headerStatus?.startsWith("Original creditor: ")
+      ? account.headerStatus.slice("Original creditor: ".length)
+      : null;
+    const inconsistencies = findInconsistencies(account.bureaus);
+
+    if (negBureaus.length > 0) {
+      const kind = negativeKind(account, tls);
+      const missing = BUREAUS.filter((b) => !reporting.includes(b) && (file.scores[b] !== null || file.accounts.some((a) => a.bureaus[b])));
+      if (missing.length) inconsistencies.push(`Not reported to ${missing.join("/")}`);
+      const remarkDispute = tls.some(
+        (t) => DISPUTE_REMARK.test(t.remarks || "") && !ACTIVE_DISPUTE.test(t.disputeStatus || ""),
+      );
+      // Round 2 = third-party / resold collections only; an original creditor
+      // reporting its own account as a collection goes to Round 3.
+      const thirdParty = kind === "collection" && (account.section === "collection" || !!original || COLLECTION_TEXT.test(account.creditor));
+      const round: AnalysisRound = thirdParty
+        ? 2
+        : kind === "collection" || inconsistencies.some((x) => !x.startsWith("Not reported"))
+          ? 3
+          : 4;
+      const grid = latestGridMark(tls);
+      const statusText =
+        (pick("paymentStatus") as string | null) || (pick("accountStatus") as string | null) || kind;
+      const limit = pick("creditLimit") as number | null;
+      const detail = [
+        grid ? `${statusText} (${grid.when})` : statusText,
+        tls.some((t) => (t.pastDue ?? 0) > 0) ? `$${Math.max(...tls.map((t) => t.pastDue ?? 0))} past due` : null,
+        limit && balance !== null && balance > limit ? `$${balance} balance on $${limit} limit` : null,
+        tls.some((t) => /closed by (the )?credit grantor|canceled by credit grantor/i.test(t.remarks || "")) ? "closed by credit grantor" : null,
+      ]
+        .filter(Boolean)
+        .join(", ");
+      negatives.push({
+        creditor: account.creditor,
+        originalCreditor: original,
+        kind,
+        bureaus: negBureaus,
+        balance,
+        opened,
+        status: detail,
+        inconsistencies,
+        round,
+        hold: remarkDispute,
+        holdReason: remarkDispute ? "Consumer-dispute remark on file — confirm no open dispute, remove the notation, then file" : null,
+        legalBasis: LEGAL_BASIS[round],
+        liftEstimate: negativeLiftEstimate(kind, tls.map(tradelineText).join(" ")),
+      });
+    } else {
+      positives.push({
+        creditor: account.creditor,
+        type: pick("accountType") as string | null,
+        bureaus: reporting,
+        opened,
+        limit: pick("creditLimit") as number | null,
+        balance,
+        status: (pick("accountStatus") as string | null) || (pick("paymentStatus") as string | null),
+      });
+      // Positive account reported differently across bureaus: accuracy UPDATE only.
+      if (inconsistencies.length) {
+        accuracyUpdates.push({
+          creditor: account.creditor,
+          type: pick("accountType") as string | null,
+          bureaus: reporting,
+          inconsistencies,
+        });
+      }
+    }
+
+    const closed = tls.every((t) => isClosedTradeline(t, account));
+    const open = !closed && (tls.some((t) => /open/i.test(t.accountStatus || "")) || /^open\b/i.test(account.headerStatus || "") || !tls.some((t) => t.accountStatus));
+    const limit = pick("creditLimit") as number | null;
+    const bal = Math.max(0, balance ?? 0);
+    if (account.section === "revolving" && limit && limit > 0 && (open || bal > 0)) {
+      const derogatory = negBureaus.length > 0;
+      utilization.push({
+        account: account.creditor,
+        limit,
+        balance: bal,
+        pctUsed: Math.round((bal / limit) * 1000) / 10,
+        payTo30: Math.max(0, Math.floor(limit * 0.3)),
+        payTo10: Math.max(0, Math.floor(limit * 0.1)),
+        authorizedUser: tls.some((t) => AU_TEXT.test(`${t.remarks || ""} ${t.accountType || ""}`)),
+        closed: !open || undefined,
+        derogatory: derogatory || undefined,
+      });
+    }
+  }
+
+  // Per-bureau overview.
+  const overview = {} as Record<Bureau, BureauOverview>;
+  for (const b of BUREAUS) {
+    const accts = file.accounts.filter((a) => a.bureaus[b]);
+    const neg = negatives.filter((n) => n.bureaus.includes(b)).length;
+    const revolving = accts.filter((a) => a.section === "revolving");
+    const openRev = revolving.filter((a) => !isClosedTradeline(a.bureaus[b]!, a));
+    const revLimit = openRev.reduce((s, a) => s + (a.bureaus[b]!.creditLimit ?? 0), 0);
+    const revBal = openRev.reduce((s, a) => s + Math.max(0, a.bureaus[b]!.balance ?? 0), 0);
+    const opens = accts
+      .map((a) => ({ a, d: parseReportDate(a.bureaus[b]!.dateOpened) }))
+      .filter((x): x is { a: CreditAccount; d: Date } => !!x.d);
+    const ages = opens.map((x) => monthsBetween(x.d, reportDate)).filter((m) => m >= 0);
+    const oldest = opens.sort((x, y) => x.d.getTime() - y.d.getTime())[0];
+    overview[b] = {
+      reported: accts.length > 0 || file.scores[b] !== null,
+      score: file.scores[b],
+      totalAccounts: accts.length,
+      positive: accts.length - neg,
+      negative: neg,
+      hardInquiries: file.inquiries.filter((q) => q.bureau === b).length,
+      revolvingLimit: revLimit,
+      revolvingBalance: revBal,
+      utilizationPct: revLimit > 0 ? Math.round((revBal / revLimit) * 1000) / 10 : null,
+      totalBalances: accts.reduce((s, a) => s + Math.max(0, a.bureaus[b]!.balance ?? 0), 0),
+      avgAgeMonths: ages.length ? Math.round(ages.reduce((s, m) => s + m, 0) / ages.length) : null,
+      oldest: oldest ? { creditor: oldest.a.creditor, opened: oldest.a.bureaus[b]!.dateOpened! } : null,
+    };
+  }
+  const missingBureaus = BUREAUS.filter((b) => !overview[b].reported);
+  if (missingBureaus.length) {
+    warnings.push(
+      `${missingBureaus.join(", ")} returned no score and no accounts — likely a security freeze or the bureau was not pulled`,
+    );
+  }
+
+  // Escrow / active loan: agent flag, or a mortgage pull in the last 45 days.
+  const recentMortgagePulls = file.inquiries.filter((q) => {
+    const d = parseReportDate(q.date);
+    return !!d && MORTGAGE_PULL.test(q.creditor) && daysBetween(d, reportDate) <= ESCROW_WINDOW_DAYS && daysBetween(d, reportDate) >= -1;
+  });
+  const escrowActive = options.escrow === true || (options.escrow !== false && recentMortgagePulls.length > 0);
+  const loanPullDates = recentMortgagePulls.map((q) => parseReportDate(q.date)!.getTime());
+  const isLoanPull = (q: CreditInquiry): boolean => {
+    if (!escrowActive) return false;
+    const d = parseReportDate(q.date);
+    if (!d || daysBetween(d, reportDate) > ESCROW_WINDOW_DAYS) return false;
+    // The mortgage pull itself, or the lender pulling within 3 days of it.
+    return MORTGAGE_PULL.test(q.creditor) || loanPullDates.some((t) => Math.abs(t - d.getTime()) <= 3 * 86_400_000);
+  };
+
+  // Inquiries: excluded (permissible purpose / active loan), ages off, or Round 1 target.
+  const inquiries: AnalysisInquiry[] = file.inquiries.map((q: CreditInquiry) => {
+    const d = parseReportDate(q.date);
+    const agesOffDate = d ? new Date(Date.UTC(d.getUTCFullYear() + 2, d.getUTCMonth(), d.getUTCDate())) : null;
+    const daysLeft = agesOffDate ? (agesOffDate.getTime() - reportDate.getTime()) / 86_400_000 : null;
+    const matched =
+      q.matchedAccount === true ||
+      file.accounts.some((a) => {
+        if (!inquiryMatchesCreditor(q.creditor, a.creditor)) return false;
+        const opened = BUREAUS.map((b) => parseReportDate(a.bureaus[b]?.dateOpened)).find(Boolean);
+        // Opened within ~2 months after the pull → the pull created this account
+        // (open dates are often month-only: "12/2024" reads as the 1st).
+        return !d || !opened || (daysBetween(d, opened) >= -31 && daysBetween(d, opened) <= 75);
+      });
+    const loan = isLoanPull(q);
+    return {
+      creditor: q.creditor,
+      bureau: q.bureau,
+      date: q.date,
+      agesOff: agesOffDate ? fmtDate(agesOffDate) : null,
+      action: loan || matched ? "permissible" : daysLeft !== null && daysLeft <= 90 ? "ages_off" : "dispute",
+      excludedReason: loan ? "active_loan" : matched ? "matches_account" : null,
+      clusterId: null,
+    };
+  });
+
+  // Round 1 clusters: back-to-back shopping bursts (pulls ≤2 days apart, 3+).
+  const targets = inquiries
+    .map((q, idx) => ({ q, idx, d: parseReportDate(q.date) }))
+    .filter((x): x is { q: AnalysisInquiry; idx: number; d: Date } => !!x.d && x.q.action !== "permissible")
+    .sort((a, b) => a.d.getTime() - b.d.getTime());
+  const inquiryClusters: InquiryCluster[] = [];
+  let group: typeof targets = [];
+  const flush = () => {
+    if (group.length >= 3) {
+      const id = inquiryClusters.length + 1;
+      const perBureau = { TU: 0, EX: 0, EQ: 0 } as Record<Bureau, number>;
+      for (const g of group) {
+        perBureau[g.q.bureau] += 1;
+        inquiries[g.idx].clusterId = id;
+      }
+      inquiryClusters.push({
+        id,
+        from: fmtDate(group[0].d),
+        to: fmtDate(group[group.length - 1].d),
+        count: group.length,
+        perBureau,
+        older12m: daysBetween(group[group.length - 1].d, reportDate) > 365,
+      });
+    }
+    group = [];
+  };
+  for (const t of targets) {
+    if (group.length && daysBetween(group[group.length - 1].d, t.d) > 2) flush();
+    group.push(t);
+  }
+  flush();
+
+  // Utilization: open cards (own / all) and a second total incl. closed cards with balances.
+  const openRows = utilization.filter((u) => !u.closed);
+  const sum = (rows: UtilizationRow[], k: "limit" | "balance") => rows.reduce((s, r) => s + r[k], 0);
+  const pct = (rows: UtilizationRow[]) =>
+    sum(rows, "limit") > 0 ? Math.round((sum(rows, "balance") / sum(rows, "limit")) * 1000) / 10 : null;
+  const utilizationOverall = {
+    all: pct(openRows),
+    ownCardsOnly: pct(openRows.filter((u) => !u.authorizedUser)),
+    inclClosed: utilization.some((u) => u.closed) ? pct(utilization) : null,
+  };
+
+  // Tradelines (IH codes only). Thin / high-utilization revolving profile.
+  const openRevolving = openRows.length;
+  const ownUtil = utilizationOverall.ownCardsOnly ?? utilizationOverall.all;
+  const timing: TradelineRecommendation["timing"] = escrowActive ? "after_closing" : "now";
+  const tradelines: TradelineRecommendation[] =
+    openRevolving < 3 || (ownUtil ?? 0) > 30
+      ? [
+          { code: "IH-1", price: TRADELINE_PRICES["IH-1"], impact: "+15 to +35 pts (est.)", bureaus: [...BUREAUS], timing },
+          { code: "IH-2", price: TRADELINE_PRICES["IH-2"], impact: "+10 to +20 pts (est.)", bureaus: ["EQ", "TU"], timing },
+          { code: "primary", price: null, impact: "Builds own revolving depth over 6-12 months", bureaus: [...BUREAUS], timing },
+        ]
+      : [];
+
+  // Projections per bureau, per round (estimates; only bureaus reporting an item move).
+  // When ONE item is what holds some bureaus below one that does not report
+  // it, its removal is worth ~30% of that gap (e.g. EX 644 / EQ 666 vs TU 752).
+  const gapLift = (n: AnalysisNegative, b: Bureau): number | null => {
+    const others = BUREAUS.filter((x) => !n.bureaus.includes(x) && file.scores[x] !== null);
+    const mine = file.scores[b];
+    if (!others.length || mine === null) return null;
+    const otherNegs = negatives.filter((m) => m !== n && m.bureaus.includes(b)).length;
+    if (otherNegs > 0) return null;
+    const gap = Math.max(...others.map((x) => file.scores[x]!)) - mine;
+    return gap >= 40 ? Math.min(45, Math.round(gap * 0.3)) : null;
+  };
+  const realized = (b: Bureau, rounds: AnalysisRound[]) =>
+    Math.round(
+      negatives
+        .filter((n) => !n.hold && rounds.includes(n.round) && n.bureaus.includes(b))
+        .reduce((s, n) => s + (gapLift(n, b) ?? n.liftEstimate * 0.6), 0),
+    );
+  const r1Lift = (b: Bureau) =>
+    Math.min(
+      15,
+      inquiries
+        .filter((q) => q.bureau === b && q.action !== "permissible")
+        .reduce((s, q) => {
+          const d = parseReportDate(q.date);
+          return s + (d && daysBetween(d, reportDate) <= 365 ? 3 : 1);
+        }, 0),
+    );
+  const auLift = tradelines.length ? 15 : 0;
+  const project = (extra: (b: Bureau) => number) =>
+    Object.fromEntries(
+      BUREAUS.map((b) => [b, file.scores[b] === null ? null : Math.min(850, file.scores[b]! + extra(b))]),
+    ) as Record<Bureau, number | null>;
+  const hasCollections = negatives.some((n) => n.round === 2);
+  const projections: ProjectionMilestone[] = [
+    { key: "current", scores: project(() => 0) },
+    { key: "round1", scores: project((b) => r1Lift(b)) },
+    ...(hasCollections ? [{ key: "round2" as const, scores: project((b) => r1Lift(b) + realized(b, [2])) }] : []),
+    { key: "round3", scores: project((b) => r1Lift(b) + realized(b, [2, 3])) },
+    { key: "round4", scores: project((b) => r1Lift(b) + realized(b, [2, 3, 4]) + auLift) },
+  ];
+
+  // File strength: 5 categories × 20, counted data only (unknown = 0).
+  const openInstallments = file.accounts.filter(
+    (a) => a.section === "installment" && BUREAUS.some((b) => a.bureaus[b] && !isClosedTradeline(a.bureaus[b]!, a)),
+  );
+  const installmentClean = openInstallments.every((a) => !negatives.some((n) => n.creditor === a.creditor));
+  const mortgageOpen = file.accounts.some(
+    (a) => a.section === "mortgage" && BUREAUS.some((b) => a.bureaus[b] && !isClosedTradeline(a.bureaus[b]!, a)),
+  );
+  const ages = BUREAUS.map((b) => overview[b].avgAgeMonths).filter((m): m is number => m !== null);
+  const avgAge = ages.length ? Math.min(...ages) : null;
+  const disputable = negatives.filter((n) => !n.hold).length;
+  const now = fileStrengthFactors({
+    openRevolving,
+    ownUtil: ownUtil ?? null,
+    openInstallment: openInstallments.length,
+    installmentClean,
+    mortgageOpen,
+    avgAgeMonths: avgAge,
+    negatives: negatives.length,
+  });
+  const post = fileStrengthFactors({
+    openRevolving: openRevolving + (tradelines.length ? 1 : 0),
+    ownUtil: tradelines.length ? 2 : ownUtil ?? null,
+    openInstallment: openInstallments.length,
+    installmentClean: true,
+    // The escrow loan reports after closing.
+    mortgageOpen: mortgageOpen || escrowActive,
+    avgAgeMonths: avgAge,
+    negatives: negatives.length - disputable,
+  });
+  const factors: FileStrengthFactor[] = (["revolving", "installment", "mortgage", "age", "derogatory"] as const).map((key) => ({
+    key,
+    current: now[key],
+    postRepair: Math.max(now[key], key === "mortgage" && escrowActive ? 20 : post[key]),
+  }));
+
+  // Program tier: Complex only on a COUNTED trigger (never by default / headings).
+  const programTier: ProgramTier =
+    negatives.some((n) => n.kind === "public_record" || n.kind === "repossession") ||
+    file.publicRecordsReported === true ||
+    COMPLEX_PROGRAM_HINT.test(negatives.map((n) => `${n.creditor} ${n.originalCreditor || ""} ${n.status}`).join(" "))
+      ? "complex"
+      : "standard";
+
+  return {
+    reportDate: file.reportDate,
+    scoreModel: file.scoreModel ?? null,
+    scores: file.scores,
+    overview,
+    missingBureaus,
+    negatives: negatives.sort((a, b) => a.round - b.round || (a.opened || "").localeCompare(b.opened || "")),
+    inquiries,
+    positives,
+    utilization: utilization.sort((a, b) => Number(!!a.closed) - Number(!!b.closed) || b.pctUsed - a.pctUsed),
+    utilizationOverall,
+    projections,
+    fileStrength: {
+      factors,
+      current: factors.reduce((s, f) => s + f.current, 0),
+      postRepair: factors.reduce((s, f) => s + f.postRepair, 0),
+    },
+    programTier,
+    totalDerogatoryBalance: negatives.reduce((s, n) => s + Math.max(0, n.balance ?? 0), 0),
+    warnings,
+    scoreRatings: file.scoreRatings ?? { TU: null, EX: null, EQ: null },
+    escrow: {
+      active: escrowActive,
+      source: options.escrow === true ? "agent" : escrowActive ? "mortgage_pull" : null,
+      loanInquiries: file.inquiries.filter(isLoanPull).map((q) => ({ creditor: q.creditor, bureau: q.bureau, date: q.date })),
+    },
+    lender: options.lender ?? null,
+    inquiryClusters,
+    accuracyUpdates,
+    identityFlags: file.identityFlags ?? [],
+    tradelines,
+  };
+}
+
+/**
+ * OFG Progress Report enhancement — Before vs After credit files (account
+ * level). Feeds the appended "account detail" pages of the existing Progress
+ * Report PDF (Michelle sample): summary tiles, REMOVED / PARTIAL per account
+ * with balances, what is still reporting, what moved the score.
+ *
+ * Pure; inlined into api/index.ts by scripts/inline-credit-file-engine.mjs.
+ */
+
+interface ProgressRemovedItem {
+  creditor: string;
+  kind: AnalysisNegative["kind"];
+  balance: number | null;
+  /** Bureaus that no longer report it (of the ones that did before). */
+  removedFrom: Bureau[];
+  /** Bureaus still reporting it in the After file. */
+  stillOn: Bureau[];
+  status: "REMOVED" | "PARTIAL";
+  impact: "HIGH" | "MEDIUM";
+}
+
+interface ProgressFactor {
+  code: "deleted" | "limits_up" | "util_down" | "util_up" | "new_inquiries" | "new_negative";
+  effect: "positive" | "holding_back";
+  /** Values for the localized sentence (counts, %, $, creditor). */
+  values: Record<string, string | number>;
+}
+
+interface ProgressEnhancement {
+  beforeDate: string | null;
+  afterDate: string | null;
+  scoreModel: string | null;
+  scores: Record<Bureau, { before: number | null; after: number | null }>;
+  /** Accounts fully deleted from every bureau that reported them. */
+  deletedCount: number;
+  /** Negative account × bureau listings, before → after. */
+  listings: { before: number; after: number };
+  balanceRemoved: number;
+  removed: ProgressRemovedItem[];
+  stillReporting: AnalysisNegative[];
+  newNegatives: AnalysisNegative[];
+  utilization: { before: number | null; after: number | null };
+  revolvingLimit: { before: number; after: number };
+  newInquiries: number;
+  factors: ProgressFactor[];
+  after: CreditAnalysisData;
+}
+
+function key(creditor: string): string {
+  return creditor.toLowerCase().replace(/\b(llc|inc|corp|co|na|bank)\b/g, "").replace(/[^a-z0-9]/g, "").slice(0, 24);
+}
+
+function sameAccount(a: string, b: string): boolean {
+  const ka = key(a);
+  const kb = key(b);
+  if (!ka || !kb) return false;
+  return ka === kb || (ka.length >= 5 && kb.length >= 5 && (ka.startsWith(kb) || kb.startsWith(ka)));
+}
+
+function listings(a: CreditAnalysisData): number {
+  return a.negatives.reduce((s, n) => s + n.bureaus.length, 0);
+}
+
+/** Compare Before (enrollment / prior round) with After (this round). */
+function diffCreditFiles(
+  beforeFile: CreditFile & { scoreModel?: string | null },
+  afterFile: CreditFile & { scoreModel?: string | null },
+): ProgressEnhancement {
+  const before = buildCreditAnalysis(beforeFile);
+  const after = buildCreditAnalysis(afterFile);
+
+  // One-to-one matching: the same creditor can report several accounts (e.g.
+  // two Midland collections); each After account matches at most one Before
+  // account, closest balance first.
+  const matchOf = new Map<AnalysisNegative, AnalysisNegative>();
+  const used = new Set<AnalysisNegative>();
+  const pairs: { b: AnalysisNegative; a: AnalysisNegative; gap: number }[] = [];
+  for (const b of before.negatives) {
+    for (const a of after.negatives) {
+      if (sameAccount(a.creditor, b.creditor) && a.kind === b.kind) {
+        pairs.push({ b, a, gap: Math.abs((a.balance ?? 0) - (b.balance ?? 0)) });
+      }
+    }
+  }
+  pairs.sort((x, y) => x.gap - y.gap);
+  for (const { b, a } of pairs) {
+    if (matchOf.has(b) || used.has(a)) continue;
+    matchOf.set(b, a);
+    used.add(a);
+  }
+
+  const removed: ProgressRemovedItem[] = [];
+  for (const b of before.negatives) {
+    const match = matchOf.get(b);
+    const stillOn = match ? b.bureaus.filter((x) => match.bureaus.includes(x)) : [];
+    const removedFrom = b.bureaus.filter((x) => !stillOn.includes(x));
+    if (removedFrom.length === 0) continue;
+    removed.push({
+      creditor: b.creditor,
+      kind: b.kind,
+      balance: b.balance,
+      removedFrom,
+      stillOn,
+      status: stillOn.length === 0 ? "REMOVED" : "PARTIAL",
+      impact:
+        b.kind === "collection" || b.kind === "charge_off" || b.kind === "repossession" || b.kind === "public_record"
+          ? "HIGH"
+          : "MEDIUM",
+    });
+  }
+  const newNegatives = after.negatives.filter((a) => !used.has(a));
+  const stillReporting = after.negatives.filter((a) => !newNegatives.includes(a));
+  const fully = removed.filter((r) => r.status === "REMOVED");
+  const balanceRemoved = fully.reduce((s, r) => s + Math.max(0, r.balance ?? 0), 0);
+
+  const revLimit = (a: CreditAnalysisData) => Math.max(...BUREAUS.map((b) => a.overview[b].revolvingLimit));
+  const factors: ProgressFactor[] = [];
+  if (removed.length) {
+    factors.push({
+      code: "deleted",
+      effect: "positive",
+      values: { deleted: fully.length, partial: removed.length - fully.length },
+    });
+  }
+  const limitGain = revLimit(after) - revLimit(before);
+  if (limitGain > 0) {
+    factors.push({ code: "limits_up", effect: "positive", values: { amount: Math.round(limitGain) } });
+  }
+  const utilB = before.utilizationOverall.all;
+  const utilA = after.utilizationOverall.all;
+  if (utilB !== null && utilA !== null && utilA < utilB - 5) {
+    factors.push({ code: "util_down", effect: "positive", values: { from: utilB, to: utilA } });
+  } else if (utilB !== null && utilA !== null && utilA > utilB + 5) {
+    factors.push({ code: "util_up", effect: "holding_back", values: { from: utilB, to: utilA } });
+  }
+  const newInquiries = Math.max(0, afterFile.inquiries.length - beforeFile.inquiries.length);
+  if (newInquiries > 0) {
+    factors.push({ code: "new_inquiries", effect: "holding_back", values: { count: newInquiries } });
+  }
+  for (const n of newNegatives) {
+    factors.push({
+      code: "new_negative",
+      effect: "holding_back",
+      values: { creditor: n.creditor, kind: n.kind, bureaus: n.bureaus.join("/") },
+    });
+  }
+
+  return {
+    beforeDate: beforeFile.reportDate,
+    afterDate: afterFile.reportDate,
+    scoreModel: afterFile.scoreModel ?? beforeFile.scoreModel ?? null,
+    scores: Object.fromEntries(
+      BUREAUS.map((b) => [b, { before: beforeFile.scores[b], after: afterFile.scores[b] }]),
+    ) as ProgressEnhancement["scores"],
+    deletedCount: fully.length,
+    listings: { before: listings(before), after: listings(after) },
+    balanceRemoved,
+    removed,
+    stillReporting,
+    newNegatives,
+    utilization: { before: utilB, after: utilA },
+    revolvingLimit: { before: revLimit(before), after: revLimit(after) },
+    newInquiries,
+    factors,
+    after,
+  };
+}
+
+/**
+ * OFG Credit Analysis PDF (Phase 2) — branded, multi-page, built from
+ * CreditAnalysisData (api/creditAnalysisFromFile.ts). Same brand as the
+ * Progress Report (navy header + gold rule, logo, footer) with a flowing
+ * layout (auto page breaks) so any file size renders cleanly.
+ *
+ * Pure: logo bytes are passed in. Inlined into api/index.ts by
+ * scripts/inline-credit-file-engine.mjs (no sibling runtime imports).
+ */
+
+/** Brand palette (namespaced — api/index.ts already has NAVY/GOLD consts). */
+const OFG_PDF = {
+  navy: rgb(0.051, 0.122, 0.235),
+  gold: rgb(0.788, 0.659, 0.298),
+  text: rgb(0.2, 0.22, 0.26),
+  muted: rgb(0.45, 0.47, 0.52),
+  light: rgb(0.973, 0.976, 0.98),
+  border: rgb(0.886, 0.91, 0.941),
+  white: rgb(1, 1, 1),
+  green: rgb(0.09, 0.64, 0.29),
+  red: rgb(0.86, 0.15, 0.15),
+  amber: rgb(0.85, 0.55, 0.13),
+  goldTint: rgb(0.99, 0.97, 0.9),
+  redTint: rgb(0.995, 0.94, 0.94),
+};
+
+interface CreditAnalysisPdfOptions {
+  clientName: string;
+  lang: "en" | "es";
+  logoPng?: Uint8Array | null;
+  /** Program prices / links shown in the recommendation box. */
+  program: { standardPrice: string; complexPrice: string; enrollUrl: string; phone: string; site: string };
+}
+
+type Labels = ReturnType<typeof analysisLabels>;
+
+function analysisLabels(lang: "en" | "es") {
+  const es = lang === "es";
+  return {
+    lang,
+    originalCreditor: es ? "acreedor orig." : "orig.",
+    title: es ? "Analisis de Credito" : "Credit Analysis Report",
+    reportDate: es ? "Fecha del reporte" : "Report date",
+    s1: es ? "1. Puntajes actuales y resumen del archivo" : "1. Current Scores + File Overview",
+    s2: es ? "2. Cuentas negativas - orden de disputa" : "2. Negative Accounts - Dispute Priority",
+    s3: es ? "3. Desglose completo de cuentas" : "3. Complete Account Breakdown",
+    s4: es ? "4. Proyeccion de puntaje y lineas comerciales" : "4. Projected Score Progression + Tradelines",
+    s5: es ? "5. Plan de accion y fortaleza del archivo" : "5. Personalized Action Plan + File Strength",
+    scoreSnapshot: es ? "PUNTAJES" : "SCORE SNAPSHOT",
+    fileOverview: es ? "RESUMEN DEL ARCHIVO" : "FILE OVERVIEW",
+    bureau: es ? "Buro" : "Bureau",
+    score: es ? "Puntaje" : "Score",
+    rating: es ? "Calificacion" : "Rating",
+    notReported: es ? "Sin datos" : "Not reported",
+    metric: es ? "Metrica" : "Metric",
+    totalAccounts: es ? "Cuentas totales" : "Total accounts",
+    positive: es ? "Positivas / al corriente" : "Positive / in good standing",
+    negative: es ? "Negativas" : "Negative",
+    inquiries: es ? "Consultas (2 anos)" : "Hard inquiries (2 years)",
+    utilization: es ? "Utilizacion revolvente" : "Revolving utilization",
+    avgAge: es ? "Antiguedad promedio" : "Average account age",
+    oldest: es ? "Cuenta mas antigua" : "Oldest account",
+    revLimit: es ? "Limite revolvente total" : "Total open revolving limit",
+    balances: es ? "Saldos reportados" : "Total balances reported",
+    flagged: es ? "ALERTA" : "FLAGGED",
+    missingBureau: (b: string) =>
+      es
+        ? `${b} no devolvio datos: no hay puntaje, cuentas ni consultas. Normalmente es un congelamiento o el buro no se consulto. Levante el congelamiento y saque un reporte de 3 buros antes de disputar.`
+        : `${b} returned no data: no score, tradelines or inquiries. This usually means a security freeze or the bureau was not pulled. Lift any freeze and pull a fresh 3-bureau report before filing disputes.`,
+    keyObs: es ? "OBSERVACIONES CLAVE" : "KEY OBSERVATIONS",
+    roundIntro: es
+      ? "Ordenado de mas facil a mas dificil. Rondas de 30 dias; solo se disputa informacion inexacta o no verificable."
+      : "Ordered easiest to hardest to remove. Rounds run on 30-day cycles; only inaccurate or unverifiable reporting is disputed.",
+    roundTitle: (r: AnalysisRound) =>
+      ({
+        1: es ? "RONDA 1 - CONSULTAS" : "ROUND 1 - INQUIRIES",
+        2: es ? "RONDA 2 - COBRANZAS DE TERCEROS" : "ROUND 2 - THIRD-PARTY COLLECTIONS",
+        3: es ? "RONDA 3 - INCONSISTENCIAS ENTRE BUROS" : "ROUND 3 - BUREAU INCONSISTENCIES",
+        4: es ? "RONDA 4 - CARGOS A PERDIDA / ATRASOS" : "ROUND 4 - CHARGE-OFFS + LATE PAYMENTS",
+      })[r],
+    hold: es ? "EN ESPERA - NOTA DE DISPUTA DEL CONSUMIDOR" : "ON HOLD - CONSUMER-DISPUTE REMARK ON FILE",
+    holdNote: es
+      ? "Estas cuentas muestran 'no disputada' pero las observaciones aun tienen una nota de disputa. Confirme que no hay disputa abierta, pida retirar la nota y luego dispute en la ronda indicada."
+      : "These accounts show 'not disputed' while the remarks still carry a dispute notation. Confirm no dispute is open, request removal of the stale notation, then file in the round shown.",
+    creditor: es ? "Acreedor" : "Creditor",
+    type: es ? "Tipo" : "Type",
+    bureaus: es ? "Buros" : "Bureaus",
+    detail: es ? "Detalle" : "Detail",
+    date: es ? "Fecha" : "Date",
+    milestoneHeader: es ? "Etapa" : "Milestone",
+    impact: es ? "Impacto estimado" : "Expected impact",
+    legal: es ? "Base legal" : "Legal basis",
+    noTargets: es ? "Sin objetivos en esta ronda." : "No targets in this round.",
+    inquiryAgesOff: (d: string) => (es ? `Se elimina sola el ${d}. No se disputa.` : `Ages off on its own ${d}. No dispute needed.`),
+    inquiryPermissible: es ? "Vinculada a una cuenta abierta (proposito permitido). No es objetivo." : "Tied to an opened account (permissible purpose). Not a target.",
+    inquiryDispute: es ? "Sin cuenta relacionada - disputar." : "No matching account - dispute.",
+    negativesTable: es ? "SECCION A - CUENTAS NEGATIVAS" : "SECTION A - NEGATIVE / DEROGATORY ACCOUNTS",
+    positivesTable: es ? "SECCION B - CUENTAS POSITIVAS" : "SECTION B - POSITIVE ACCOUNTS",
+    utilTable: es ? "SECCION C - UTILIZACION" : "SECTION C - UTILIZATION BREAKDOWN",
+    opened: es ? "Apertura" : "Opened",
+    balance: es ? "Saldo" : "Balance",
+    status: es ? "Estado" : "Status",
+    priority: es ? "Ronda" : "Round",
+    limit: es ? "Limite" : "Limit",
+    used: es ? "% usado" : "% Used",
+    to30: es ? "Saldo para 30%" : "Balance for 30%",
+    to10: es ? "Saldo para 10%" : "Balance for 10%",
+    orLess: es ? "o menos" : "or less",
+    alreadyOk: es ? "Ya esta bien" : "Already OK",
+    totalDerog: (v: string) => (es ? `Saldo total negativo: ${v}.` : `Total derogatory balances: ${v}.`),
+    utilNote: es
+      ? "Utilizacion = saldo / limite x 100. Mas de 30% resta puntos; menos de 10% da el maximo beneficio. Cada tarjeta cuenta por separado ademas del total."
+      : "Utilization = Balance / Credit Limit x 100. Over 30% costs points; under 10% earns the maximum benefit. Scoring models weigh each card individually as well as the total.",
+    projTitle: es ? "PROGRESION ESTIMADA POR RONDA" : "ESTIMATED SCORE PROGRESSION BY ROUND",
+    projNote: es
+      ? "Las proyecciones son estimaciones basadas en las cuentas de este reporte. Los resultados reales varian."
+      : "Projections are estimates based on the items in this report. Actual results vary by bureau response and how the file is maintained.",
+    milestone: (k: ProjectionMilestone["key"], escrow: boolean) =>
+      ({
+        current: es ? "Actual" : "Current",
+        round1: escrow
+          ? es ? "Despues del cierre + Ronda 1 (consultas)" : "After closing + Round 1 (inquiries)"
+          : es ? "Ronda 1 - Consultas" : "Round 1 - Inquiries",
+        round2: es ? "Ronda 2 - Cobranzas" : "Round 2 - Collections",
+        round3: es ? "Ronda 3 - Exactitud entre buros" : "Round 3 - Bureau accuracy",
+        round4: es ? "Ronda 4 + linea AU" : "Round 4 + AU tradeline",
+      })[k],
+    tradelineTitle: es ? "RECOMENDACION DE LINEAS COMERCIALES" : "TRADELINE RECOMMENDATION",
+    tlPrimary: es ? "Linea revolvente primaria (banco)" : "Primary revolving line (major bank)",
+    tlAu: es ? "Linea AU (usuario autorizado) antigua y de alto limite" : "Aged, high-limit AU tradeline",
+    tlPrimaryImpact: es ? "+15-25 pts con historial puntual" : "+15-25 pts as on-time history builds",
+    tlAuImpact: es ? "+20-40 pts (estimado)" : "+20-40 pts (estimated)",
+    actionTitle: es ? "PLAN DE ACCION" : "ACTION PLAN",
+    strengthTitle: es ? "FORTALEZA DEL ARCHIVO" : "FILE STRENGTH SCORE",
+    factor: es ? "Factor (20 pts c/u)" : "Factor (20 pts each)",
+    current: es ? "Actual" : "Current",
+    post: es ? "Despues" : "Post-repair",
+    factorName: (k: string) =>
+      ({
+        revolving: es ? "Cuentas revolventes abiertas" : "Open revolving accounts",
+        installment: es ? "Mezcla de prestamos" : "Installment mix",
+        mortgage: es ? "Hipoteca" : "Mortgage account",
+        age: es ? "Antiguedad" : "Account age",
+        derogatory: es ? "Cuentas negativas" : "Derogatory items",
+      })[k] ?? k,
+    total: es ? "TOTAL" : "TOTAL",
+    programTitle: es ? "PROGRAMA RECOMENDADO" : "RECOMMENDED PROGRAM",
+    programName: (t: string, price: string) =>
+      t === "complex" ? (es ? `Reparacion Compleja - ${price}` : `Complex Repair - ${price}`) : es ? `Reparacion Estandar - ${price}` : `Standard Repair - ${price}`,
+    enroll: es ? "Inscribase" : "Enroll",
+    croaTitle: es ? "DIVULGACION CROA" : "CROA DISCLOSURE",
+    croa: es
+      ? "Optimum Financial Group presta servicios de reparacion de credito conforme a la Ley de Organizaciones de Reparacion de Credito (CROA), 15 U.S.C. \u00a71679 y ss. No garantizamos mejoras especificas de puntaje. Los resultados varian segun la persona. Este analisis se basa en la informacion proporcionada y no constituye asesoria legal."
+      : "Optimum Financial Group provides credit repair services in compliance with the Credit Repair Organizations Act (CROA), 15 U.S.C. \u00a71679 et seq. We do not guarantee specific score improvements. Results vary by individual. This analysis is based on information provided and does not constitute legal advice.",
+    escrowTitle: es ? "ESCROW ACTIVO - DISPUTAS EN ESPERA HASTA EL CIERRE" : "ACTIVE ESCROW - DISPUTE FILING ON HOLD UNTIL CLOSING",
+    escrowBody: (pulls: string) =>
+      es
+        ? `El cliente esta en escrow de una hipoteca.${pulls ? ` Las consultas ${pulls} son la solicitud activa del prestamo y NO son objetivos de disputa.` : ""} No se presentan disputas, cuentas nuevas ni lineas comerciales hasta despues del cierre: las notas de disputa pueden provocar revision del suscriptor. Los prestamistas usan modelos FICO hipotecarios, por lo que sus puntajes seran distintos a los VantageScore de este reporte.`
+        : `Client is currently in escrow on a mortgage.${pulls ? ` The ${pulls} inquiries are the active loan pull and are NOT dispute targets.` : ""} No disputes, new accounts or tradelines until after closing - dispute remarks on tradelines can trigger underwriting review. Lenders use FICO mortgage models, so the lender's scores will differ from the VantageScore figures above.`,
+    lenderTitle: es ? "PUNTAJE DEL PRESTAMISTA" : "LENDER SCORE",
+    lenderBody: (model: string, score: string, target: string) =>
+      es
+        ? `El prestamista usa ${model}: puntaje medio actual ${score}${target ? `; necesita ${target}` : ""}. Los puntajes de este reporte son de otro modelo y no se comparan uno a uno.`
+        : `The lender uses ${model}: current middle score ${score}${target ? `; needs ${target}` : ""}. The scores in this report come from a different model and do not compare one-to-one.`,
+    posNeg: es ? "Positivas / negativas" : "Positive / Negative",
+    utilOpen: es ? "Utilizacion (tarjetas abiertas)" : "Revolving utilization (open cards)",
+    utilInclClosed: es ? "Utilizacion incl. tarjetas cerradas con saldo" : "Utilization incl. closed cards with balances",
+    pubColl: es ? "Registros publicos / cobranzas" : "Public records / Collections",
+    cluster: (from: string, to: string, n: number) =>
+      es ? `Grupo de consultas ${from}${to !== from ? ` - ${to}` : ""} (${n} consultas)` : `${from}${to !== from ? ` - ${to}` : ""} inquiry cluster (${n} inquiries)`,
+    clusterNote: (older: boolean) =>
+      es
+        ? `Mismo dia / dias seguidos con varios prestamistas.${older ? " Mas de 12 meses (peso minimo)." : ""} Disputar las que sigan sin proposito permitido.`
+        : `Same-day / back-to-back pulls across lenders.${older ? " Over 12 months old (minimal score weight)." : ""} Dispute any still reporting with no permissible purpose.`,
+    excluded: es ? "Excluida" : "Excluded",
+    excludedMatch: es ? "Coincide con una cuenta abierta - proposito permitido. No es objetivo." : "Matches an opened account - permissible purpose. Not a target.",
+    excludedLoan: es ? "Solicitud de hipoteca activa - proposito permitido. No es objetivo." : "Active mortgage application - permissible purpose. Not a target.",
+    noneOnFile: es ? "Nada en el archivo." : "None on file.",
+    noCollections: es ? "Ningun buro reporta cuentas en cobranza." : "No collection accounts reported by any bureau.",
+    identityItem: es ? "Datos personales" : "Personal info",
+    identityAction: es ? "Corregir para que coincida con la identificacion verificada." : "Correct to match verified ID.",
+    updateItem: (type: string) => (es ? `${type} (positiva)` : `${type} (positive)`),
+    updateNote: es ? "Solo actualizacion de exactitud - NO es objetivo de eliminacion." : "Accuracy update only - NOT a deletion target.",
+    fallbackNote: es
+      ? "Si la Ronda 3 vuelve 'verificada', escalar con disputa directa al proveedor sobre la exactitud del historial de pagos y el saldo."
+      : "If Round 3 returns 'verified', escalate with a direct furnisher dispute challenging payment-history accuracy and balance reporting.",
+    fileAfterClosing: es ? "La presentacion empieza despues del cierre." : "Filing begins after closing.",
+    closedRound: (r: number) => (es ? `Cuenta cerrada - Ronda ${r}` : `Closed account - Round ${r}`),
+    totalOpen: es ? "Total (tarjetas abiertas)" : "Total (open cards)",
+    totalInclClosed: es ? "Total incl. cerradas" : "Total incl. closed",
+    tlLevel: es ? "Nivel" : "Level",
+    tlPrice: es ? "Precio" : "Price",
+    tlTiming: es ? "Cuando" : "Timing",
+    tlNow: es ? "Ahora" : "Now",
+    tlAfterClosing: es ? "Despues del cierre" : "After closing",
+    tlType: (code: string) =>
+      code === "primary" ? (es ? "Linea primaria (Chase / Navy Federal)" : "Primary line (Chase / Navy Federal)") : es ? "Linea AU" : "AU tradeline",
+    tlWhyTitle: es ? "POR QUE FUNCIONA PARA ESTE ARCHIVO" : "WHY THIS WORKS FOR THIS FILE",
+    confidential: es
+      ? "Confidencial - preparado para el cliente nombrado. Las proyecciones son estimaciones."
+      : "Confidential - prepared for the named client. Projections are estimates, not guarantees.",
+    page: (n: number) => (es ? `Pagina ${n}` : `Page ${n}`),
+    years: (m: number) => (es ? `${Math.floor(m / 12)} a ${m % 12} m` : `${Math.floor(m / 12)} yrs ${m % 12} mo`),
+    kind: (k: string) =>
+      ({
+        collection: es ? "Cobranza" : "Collection",
+        charge_off: es ? "Cargo a perdida" : "Charge-off",
+        late: es ? "Pagos atrasados" : "Late payments",
+        repossession: es ? "Reposesion" : "Repossession",
+        public_record: es ? "Registro publico" : "Public record",
+        derogatory: es ? "Negativa" : "Derogatory",
+      })[k] ?? k,
+  };
+}
+
+const BUREAU_NAME: Record<Bureau, string> = { TU: "TransUnion", EX: "Experian", EQ: "Equifax" };
+
+/** WinAnsi-safe text (Helvetica standard font). */
+function pdfSafe(input: string): string {
+  return String(input ?? "")
+    .replace(/[–—―]/g, "-")
+    .replace(/[‘’]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/…/g, "...")
+    .replace(/[\t\r\n]+/g, " ")
+    .replace(/[^\x20-\x7E\xA0-\xFF]/g, "")
+    .replace(/ {2,}/g, " ")
+    .trim();
+}
+
+function pdfMoney(n: number | null | undefined): string {
+  return n === null || n === undefined ? "--" : `$${Math.round(n).toLocaleString("en-US")}`;
+}
+
+function scoreRating(s: number, es: boolean): string {
+  if (s >= 740) return es ? "Excelente" : "Excellent";
+  if (s >= 670) return es ? "Bueno" : "Good";
+  if (s >= 580) return es ? "Regular" : "Fair";
+  return es ? "Bajo" : "Poor";
+}
+
+/** Flowing page writer: header/footer per page, auto page breaks. */
+class PageFlow {
+  page!: PDFPage;
+  y = 0;
+  pageNo = 0;
+  readonly W = 612;
+  readonly H = 792;
+  readonly M = 40;
+  readonly contentW = 612 - 80;
+  readonly bottom = 64;
+
+  constructor(
+    private pdf: PDFDocument,
+    readonly font: PDFFont,
+    readonly bold: PDFFont,
+    private logo: PDFImage | null,
+    private headerTitle: string,
+    private headerSub: string,
+    private L: Labels,
+    private footerLine: string,
+    private pageLabel: (n: number) => string = (n) => L.page(n),
+  ) {
+    this.newPage();
+  }
+
+  newPage() {
+    this.page = this.pdf.addPage([this.W, this.H]);
+    this.pageNo++;
+    const p = this.page;
+    p.drawRectangle({ x: 0, y: this.H - 72, width: this.W, height: 72, color: OFG_PDF.navy });
+    p.drawRectangle({ x: 0, y: this.H - 75, width: this.W, height: 3, color: OFG_PDF.gold });
+    let tx = this.M;
+    if (this.logo) {
+      const h = 38;
+      const w = (this.logo.width / this.logo.height) * h;
+      p.drawImage(this.logo, { x: this.M, y: this.H - 72 + 17, width: w, height: h });
+      tx = this.M + w + 16;
+    }
+    this.text(this.headerTitle, tx, this.H - 34, 12, { font: this.bold, color: OFG_PDF.white });
+    this.text(this.headerSub, tx, this.H - 50, 8.5, { color: rgb(0.85, 0.87, 0.92) });
+    p.drawRectangle({ x: 0, y: 0, width: this.W, height: 40, color: OFG_PDF.light });
+    this.text(this.footerLine, this.M, 24, 7.5, { color: OFG_PDF.muted });
+    this.text(this.L.confidential, this.M, 13, 7, { color: OFG_PDF.muted });
+    const pl = this.pageLabel(this.pageNo);
+    this.text(pl, this.W - this.M - this.font.widthOfTextAtSize(pl, 7.5), 24, 7.5, { color: OFG_PDF.muted });
+    this.y = this.H - 96;
+  }
+
+  ensure(h: number) {
+    if (this.y - h < this.bottom) this.newPage();
+  }
+
+  text(
+    s: string,
+    x: number,
+    y: number,
+    size: number,
+    o: { font?: PDFFont; color?: ReturnType<typeof rgb>; maxWidth?: number } = {},
+  ) {
+    const f = o.font ?? this.font;
+    let t = pdfSafe(s);
+    if (o.maxWidth) while (t.length > 1 && f.widthOfTextAtSize(t, size) > o.maxWidth) t = t.slice(0, -2) + ".";
+    this.page.drawText(t, { x, y, size, font: f, color: o.color ?? OFG_PDF.text });
+  }
+
+  wrap(s: string, size: number, maxW: number, f: PDFFont = this.font): string[] {
+    const words = pdfSafe(s).split(" ").filter(Boolean);
+    const lines: string[] = [];
+    let cur = "";
+    for (const w of words) {
+      const t = cur ? `${cur} ${w}` : w;
+      if (f.widthOfTextAtSize(t, size) > maxW && cur) {
+        lines.push(cur);
+        cur = w;
+      } else cur = t;
+    }
+    if (cur) lines.push(cur);
+    return lines.length ? lines : [""];
+  }
+
+  section(title: string) {
+    this.ensure(40);
+    this.y -= 6;
+    this.text(title, this.M, this.y, 13, { font: this.bold, color: OFG_PDF.navy });
+    this.page.drawRectangle({ x: this.M, y: this.y - 6, width: 46, height: 2, color: OFG_PDF.gold });
+    this.y -= 22;
+  }
+
+  subhead(title: string) {
+    this.ensure(30);
+    this.text(title, this.M, this.y, 8.5, { font: this.bold, color: OFG_PDF.muted });
+    this.y -= 13;
+  }
+
+  paragraph(s: string, size = 8.5, color = OFG_PDF.text) {
+    for (const line of this.wrap(s, size, this.contentW)) {
+      this.ensure(size + 4);
+      this.text(line, this.M, this.y, size, { color });
+      this.y -= size + 3.5;
+    }
+    this.y -= 4;
+  }
+
+  bullet(s: string) {
+    const lines = this.wrap(s, 8.5, this.contentW - 12);
+    lines.forEach((line, i) => {
+      this.ensure(12);
+      if (i === 0) this.page.drawCircle({ x: this.M + 3, y: this.y + 3, size: 1.6, color: OFG_PDF.gold });
+      this.text(line, this.M + 12, this.y, 8.5);
+      this.y -= 12;
+    });
+    this.y -= 2;
+  }
+
+  callout(title: string, body: string, tone: "warn" | "info" = "info") {
+    const lines = this.wrap(body, 8.5, this.contentW - 20);
+    const h = 22 + lines.length * 12;
+    this.ensure(h + 6);
+    const top = this.y + 8;
+    this.page.drawRectangle({
+      x: this.M,
+      y: top - h,
+      width: this.contentW,
+      height: h,
+      color: tone === "warn" ? OFG_PDF.redTint : OFG_PDF.goldTint,
+      borderColor: tone === "warn" ? OFG_PDF.red : OFG_PDF.gold,
+      borderWidth: 0.8,
+    });
+    this.text(title, this.M + 10, top - 14, 8.5, { font: this.bold, color: tone === "warn" ? OFG_PDF.red : OFG_PDF.navy });
+    let yy = top - 27;
+    for (const line of lines) {
+      this.text(line, this.M + 10, yy, 8.5);
+      yy -= 12;
+    }
+    this.y = top - h - 10;
+  }
+
+  /** Table with wrapped cells; widths are fractions of content width. */
+  table(headers: string[], rows: string[][], widths: number[], o: { size?: number } = {}) {
+    const size = o.size ?? 7.8;
+    const colW = widths.map((w) => w * this.contentW);
+    const drawHeader = () => {
+      this.ensure(18);
+      this.page.drawRectangle({ x: this.M, y: this.y - 5, width: this.contentW, height: 16, color: OFG_PDF.navy });
+      let x = this.M + 4;
+      headers.forEach((h, i) => {
+        this.text(h, x, this.y, size, { font: this.bold, color: OFG_PDF.white, maxWidth: colW[i] - 6 });
+        x += colW[i];
+      });
+      this.y -= 16;
+    };
+    drawHeader();
+    rows.forEach((row, ri) => {
+      const cells = row.map((c, i) => this.wrap(c, size, colW[i] - 8));
+      const h = Math.max(...cells.map((c) => c.length)) * (size + 3) + 6;
+      if (this.y - h < this.bottom) {
+        this.newPage();
+        drawHeader();
+      }
+      if (ri % 2 === 1) {
+        this.page.drawRectangle({ x: this.M, y: this.y - h + size + 1, width: this.contentW, height: h, color: OFG_PDF.light });
+      }
+      let x = this.M + 4;
+      cells.forEach((lines, i) => {
+        let yy = this.y;
+        for (const line of lines) {
+          this.text(line, x, yy, size);
+          yy -= size + 3;
+        }
+        x += colW[i];
+      });
+      this.y -= h;
+    });
+    this.y -= 8;
+  }
+
+  scoreBar(label: string, score: number | null, extra: string) {
+    this.ensure(18);
+    this.text(label, this.M, this.y, 8.5, { font: this.bold });
+    const bx = this.M + 140;
+    const bw = 220;
+    this.page.drawRectangle({ x: bx, y: this.y - 1, width: bw, height: 8, color: OFG_PDF.border });
+    if (score !== null) {
+      const pct = Math.min(1, Math.max(0, (score - 300) / 550));
+      const color = score >= 670 ? OFG_PDF.green : score >= 580 ? OFG_PDF.amber : OFG_PDF.red;
+      this.page.drawRectangle({ x: bx, y: this.y - 1, width: bw * pct, height: 8, color });
+    }
+    this.text(extra, bx + bw + 12, this.y, 8.5, { color: OFG_PDF.muted });
+    this.y -= 16;
+  }
+}
+
+/** Spanish labels for the rule-generated inconsistency prefixes. */
+const INCONSISTENCY_ES: Array<[RegExp, string]> = [
+  [/^Date opened:/, "Fecha de apertura:"],
+  [/^Balance:/, "Saldo:"],
+  [/^Last activity:/, "Ultima actividad:"],
+  [/^Payment status:/, "Estado de pago:"],
+  [/^Late counts \(30\/60\/90\):/, "Atrasos (30/60/90):"],
+];
+
+function negativeDetail(n: AnalysisNegative, L: Labels): string {
+  const parts = [n.status];
+  if (n.originalCreditor) parts.push(`${L.originalCreditor} ${n.originalCreditor}`);
+  if (n.inconsistencies.length) {
+    parts.push(
+      n.inconsistencies
+        .map((i) =>
+          L.lang === "es"
+            ? INCONSISTENCY_ES.reduce((acc, [re, es]) => acc.replace(re, es), i).replace(/ vs /g, " vs ")
+            : i,
+        )
+        .join("; "),
+    );
+  }
+  return `${parts.join(" - ")}${n.balance !== null ? ` (${pdfMoney(n.balance)})` : ""}`;
+}
+
+async function generateOfgCreditAnalysisPdf(
+  data: CreditAnalysisData,
+  opts: CreditAnalysisPdfOptions,
+): Promise<Buffer> {
+  const L = analysisLabels(opts.lang);
+  const es = opts.lang === "es";
+  const pdf = await PDFDocument.create();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  let logo: PDFImage | null = null;
+  if (opts.logoPng) {
+    try {
+      logo = await pdf.embedPng(opts.logoPng);
+    } catch {
+      logo = null;
+    }
+  }
+  const sub = `${opts.clientName}  |  ${L.reportDate}: ${data.reportDate ?? "--"}${data.scoreModel ? `  |  ${data.scoreModel}` : ""}`;
+  const f = new PageFlow(pdf, font, bold, logo, `${L.title}`, sub, L, `Optimum Financial Group  |  ${opts.program.phone}  |  ${opts.program.site}`);
+  const active = BUREAUS.filter((b) => !data.missingBureaus.includes(b));
+
+  // ── 1. Scores + overview ────────────────────────────────────────────────
+  f.section(L.s1);
+  f.subhead(L.scoreSnapshot);
+  for (const b of BUREAUS) {
+    const s = data.scores[b];
+    // The rating PRINTED on the report wins; computed band only as a fallback.
+    const rating = data.scoreRatings?.[b] || (s === null ? "" : scoreRating(s, es));
+    f.scoreBar(BUREAU_NAME[b], s, s === null ? L.notReported : `${s}  ${rating}`);
+  }
+  f.y -= 4;
+  if (data.escrow?.active) {
+    const pulls = [...new Set((data.escrow.loanInquiries ?? []).map((q) => `${q.date} ${q.creditor}`))].join(", ");
+    f.callout(L.escrowTitle, L.escrowBody(pulls), "warn");
+  }
+  if (data.lender && data.lender.score) {
+    f.callout(
+      L.lenderTitle,
+      L.lenderBody(data.lender.model || "FICO", String(data.lender.score), data.lender.target ? String(data.lender.target) : ""),
+    );
+  }
+  f.subhead(L.fileOverview);
+  const ov = (fn: (b: Bureau) => string) => BUREAUS.map((b) => (data.overview[b].reported ? fn(b) : "--"));
+  const collections = (b: Bureau) => data.negatives.filter((n) => n.kind === "collection" && n.bureaus.includes(b)).length;
+  const publicRecords = (b: Bureau) => data.negatives.filter((n) => n.kind === "public_record" && n.bureaus.includes(b)).length;
+  const closedWithBalance = data.utilization.filter((u) => u.closed);
+  f.table(
+    [L.metric, ...BUREAUS.map((b) => BUREAU_NAME[b])],
+    [
+      [L.totalAccounts, ...ov((b) => String(data.overview[b].totalAccounts))],
+      [L.posNeg, ...ov((b) => `${data.overview[b].positive} / ${data.overview[b].negative}`)],
+      [L.inquiries, ...ov((b) => String(data.overview[b].hardInquiries))],
+      [
+        L.utilOpen,
+        ...ov((b) => {
+          const o = data.overview[b];
+          return o.utilizationPct === null ? "--" : `${o.utilizationPct}%`;
+        }),
+      ],
+      ...(closedWithBalance.length
+        ? [
+            [
+              L.utilInclClosed,
+              ...ov((b) => {
+                const o = data.overview[b];
+                // Closed cards still carrying a balance on THIS bureau.
+                const extra = data.negatives
+                  .filter((n) => n.bureaus.includes(b))
+                  .map((n) => closedWithBalance.find((u) => u.account === n.creditor))
+                  .filter((u): u is NonNullable<typeof u> => !!u);
+                if (!extra.length) return "N/A";
+                const lim = o.revolvingLimit + extra.reduce((s, u) => s + u.limit, 0);
+                const bal = o.revolvingBalance + extra.reduce((s, u) => s + u.balance, 0);
+                return lim > 0 ? `${Math.round((bal / lim) * 100)}%` : "--";
+              }),
+            ],
+          ]
+        : []),
+      [L.avgAge, ...ov((b) => (data.overview[b].avgAgeMonths === null ? "--" : L.years(data.overview[b].avgAgeMonths!)))],
+      [L.oldest, ...ov((b) => (data.overview[b].oldest ? data.overview[b].oldest!.opened : "--"))],
+      [L.pubColl, ...ov((b) => `${publicRecords(b)} / ${collections(b)}`)],
+      [L.revLimit, ...ov((b) => pdfMoney(data.overview[b].revolvingLimit))],
+    ],
+    [0.31, 0.23, 0.23, 0.23],
+  );
+  for (const b of data.missingBureaus) {
+    f.callout(`${L.flagged} - ${BUREAU_NAME[b].toUpperCase()}`, L.missingBureau(BUREAU_NAME[b]), "warn");
+  }
+  f.subhead(L.keyObs);
+  for (const obs of keyObservations(data, es)) f.bullet(obs);
+
+  // ── 2. Dispute plan (Round 1 → 4, easiest first) ────────────────────────
+  f.ensure(180);
+  f.section(L.s2);
+  f.paragraph(`${L.roundIntro}${data.escrow?.active ? ` ${L.fileAfterClosing}` : ""}`, 8.5, OFG_PDF.muted);
+
+  // Round 1: clusters, standalone targets, then exclusions with the reason.
+  f.subhead(L.roundTitle(1));
+  const r1Rows: string[][] = [];
+  for (const c of data.inquiryClusters ?? []) {
+    r1Rows.push([
+      L.cluster(c.from, c.to, c.count),
+      BUREAUS.filter((b) => c.perBureau[b]).map((b) => `${b} ${c.perBureau[b]}`).join(" / "),
+      L.clusterNote(c.older12m),
+      LEGAL_ROUND1,
+    ]);
+  }
+  for (const q of data.inquiries.filter((x) => !x.clusterId && x.action !== "permissible")) {
+    r1Rows.push([
+      `${q.creditor} (${q.date})`,
+      q.bureau,
+      q.action === "ages_off" ? L.inquiryAgesOff(q.agesOff ?? "--") : L.inquiryDispute,
+      q.action === "ages_off" ? "--" : LEGAL_ROUND1,
+    ]);
+  }
+  const excludedSeen = new Set<string>();
+  for (const q of data.inquiries.filter((x) => x.action === "permissible")) {
+    const k = `${q.creditor}|${q.date}`;
+    if (excludedSeen.has(k)) continue;
+    excludedSeen.add(k);
+    const bureaus = data.inquiries.filter((x) => x.creditor === q.creditor && x.date === q.date).map((x) => x.bureau);
+    r1Rows.push([
+      `${L.excluded}: ${q.creditor} (${q.date})`,
+      bureaus.join(" / "),
+      q.excludedReason === "active_loan" ? L.excludedLoan : L.excludedMatch,
+      "--",
+    ]);
+  }
+  if (r1Rows.length) f.table([L.creditor, L.bureaus, L.detail, L.legal], r1Rows, [0.3, 0.14, 0.4, 0.16]);
+  else f.paragraph(L.noneOnFile, 8.5, OFG_PDF.muted);
+
+  // Round 2: third-party collections only.
+  f.subhead(L.roundTitle(2));
+  const r2 = data.negatives.filter((n) => n.round === 2 && !n.hold);
+  if (r2.length) {
+    f.table(
+      [L.creditor, L.type, L.bureaus, L.detail, L.legal],
+      r2.map((n) => [n.creditor, L.kind(n.kind), n.bureaus.join(", "), negativeDetail(n, L), n.legalBasis]),
+      [0.22, 0.13, 0.1, 0.38, 0.17],
+    );
+  } else f.paragraph(`${L.noneOnFile} ${L.noCollections}`, 8.5, OFG_PDF.muted);
+
+  // Round 3: inconsistencies + personal info + positive-account accuracy updates.
+  f.subhead(L.roundTitle(3));
+  const r3: string[][] = data.negatives
+    .filter((n) => n.round === 3 && !n.hold)
+    .map((n) => [n.creditor, L.kind(n.kind), n.bureaus.join(", "), negativeDetail(n, L), n.legalBasis]);
+  const idByBureau = new Map<Bureau, string[]>();
+  for (const flag of data.identityFlags ?? []) {
+    idByBureau.set(flag.bureau, [...(idByBureau.get(flag.bureau) ?? []), flag.detail]);
+  }
+  for (const [b, details] of idByBureau) {
+    r3.push([`${BUREAU_NAME[b]} ${L.identityItem.toLowerCase()}`, L.identityItem, b, `${details.join("; ")}. ${L.identityAction}`, "FCRA §611"]);
+  }
+  for (const u of data.accuracyUpdates ?? []) {
+    r3.push([u.creditor, L.updateItem(u.type ?? L.type), u.bureaus.join(", "), `${u.inconsistencies.join("; ")}. ${L.updateNote}`, "FCRA §611, §623"]);
+  }
+  if (r3.length) f.table([L.creditor, L.type, L.bureaus, L.detail, L.legal], r3, [0.22, 0.13, 0.1, 0.38, 0.17]);
+  else f.paragraph(L.noneOnFile, 8.5, OFG_PDF.muted);
+
+  // Round 4: charge-offs / original-creditor derogatories + fallback for Round 3.
+  f.subhead(L.roundTitle(4));
+  const r4 = data.negatives.filter((n) => n.round === 4 && !n.hold);
+  const fallback = data.negatives.filter((n) => n.round === 3 && !n.hold);
+  const r4Rows = [
+    ...r4.map((n) => [n.creditor, L.kind(n.kind), n.bureaus.join(", "), negativeDetail(n, L), n.legalBasis]),
+    ...fallback.map((n) => [n.creditor, L.kind(n.kind), n.bureaus.join(", "), L.fallbackNote, "FCRA §611, §623"]),
+  ];
+  if (r4Rows.length) f.table([L.creditor, L.type, L.bureaus, L.detail, L.legal], r4Rows, [0.22, 0.13, 0.1, 0.38, 0.17]);
+  else f.paragraph(L.noneOnFile, 8.5, OFG_PDF.muted);
+
+  const held = data.negatives.filter((n) => n.hold);
+  if (held.length) {
+    f.subhead(L.hold);
+    f.table(
+      [L.creditor, L.type, L.bureaus, L.detail, L.priority],
+      held.map((n) => [n.creditor, L.kind(n.kind), n.bureaus.join(", "), negativeDetail(n, L), `R${n.round}`]),
+      [0.24, 0.13, 0.1, 0.43, 0.1],
+    );
+    f.paragraph(L.holdNote, 7.8, OFG_PDF.muted);
+  }
+
+  // ── 3. Account tables ───────────────────────────────────────────────────
+  f.ensure(180);
+  f.section(L.s3);
+  f.subhead(L.negativesTable);
+  const openedTime = (d: string | null) => parseReportDate(d)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+  const oldestFirst = [...data.negatives].sort((a, b) => openedTime(a.opened) - openedTime(b.opened));
+  const negRows = oldestFirst.map((n) => [
+    n.opened ?? "--",
+    n.creditor,
+    L.kind(n.kind),
+    n.bureaus.join(", "),
+    negativeDetail(n, L),
+    n.hold ? `HOLD > R${n.round}` : n.round === 3 ? "R3 / R4" : `R${n.round}`,
+  ]);
+  if (negRows.length) f.table([L.opened, L.creditor, L.type, L.bureaus, L.status, L.priority], negRows, [0.1, 0.2, 0.13, 0.1, 0.35, 0.12]);
+  else f.paragraph(L.noneOnFile, 8.5, OFG_PDF.muted);
+  f.subhead(L.positivesTable);
+  f.table(
+    [L.creditor, L.type, L.bureaus, L.opened, L.limit, L.balance, L.status],
+    data.positives.map((p) => [p.creditor, p.type ?? "--", p.bureaus.join(", "), p.opened ?? "--", pdfMoney(p.limit), pdfMoney(p.balance), p.status ?? "--"]),
+    [0.25, 0.14, 0.11, 0.11, 0.12, 0.12, 0.15],
+  );
+  f.subhead(L.utilTable);
+  const target = (u: (typeof data.utilization)[number], cap: number) =>
+    u.derogatory ? L.closedRound(data.negatives.find((n) => n.creditor === u.account)?.round ?? 3) : u.balance <= cap ? L.alreadyOk : `${pdfMoney(cap)} ${L.orLess}`;
+  const uRows = data.utilization.map((u) => [
+    `${u.account}${u.authorizedUser ? " (AU)" : ""}${u.closed ? (es ? " (cerrada)" : " (closed)") : ""}`,
+    pdfMoney(u.limit),
+    pdfMoney(u.balance),
+    `${u.pctUsed}%`,
+    target(u, u.payTo30),
+    target(u, u.payTo10),
+  ]);
+  const totals = (rows: typeof data.utilization) => {
+    const lim = rows.reduce((s, u) => s + u.limit, 0);
+    const bal = rows.reduce((s, u) => s + u.balance, 0);
+    return [pdfMoney(lim), pdfMoney(bal), lim > 0 ? `${Math.round((bal / lim) * 1000) / 10}%` : "--", `${pdfMoney(Math.floor(lim * 0.3))} ${L.orLess}`, `${pdfMoney(Math.floor(lim * 0.1))} ${L.orLess}`];
+  };
+  const openU = data.utilization.filter((u) => !u.closed);
+  if (openU.length) uRows.push([L.totalOpen, ...totals(openU)]);
+  if (openU.length !== data.utilization.length) uRows.push([L.totalInclClosed, ...totals(data.utilization)]);
+  if (uRows.length) f.table([L.creditor, L.limit, L.balance, L.used, L.to30, L.to10], uRows, [0.3, 0.12, 0.12, 0.1, 0.18, 0.18]);
+  f.paragraph(L.utilNote, 7.8, OFG_PDF.muted);
+
+  // ── 4. Projections + tradelines ─────────────────────────────────────────
+  f.ensure(180);
+  f.section(L.s4);
+  f.subhead(L.projTitle);
+  f.paragraph(L.projNote, 7.8, OFG_PDF.muted);
+  f.table(
+    [L.milestoneHeader, ...active.map((b) => BUREAU_NAME[b])],
+    data.projections.map((p) => [
+      L.milestone(p.key, !!data.escrow?.active),
+      ...active.map((b) => {
+        const v = p.scores[b];
+        return v === null ? "--" : p.key === "current" ? String(v) : `${v}+`;
+      }),
+    ]),
+    [0.4, ...active.map(() => 0.6 / Math.max(1, active.length))],
+  );
+  if (data.tradelines?.length) {
+    f.subhead(L.tradelineTitle);
+    f.table(
+      [L.type, L.tlLevel, L.impact, L.bureaus, L.tlTiming],
+      data.tradelines.map((t) => [
+        L.tlType(t.code),
+        t.code === "primary" ? "--" : `${t.code}${t.price ? ` (${pdfMoney(t.price)})` : ""}`,
+        t.impact,
+        t.bureaus.join(", "),
+        t.timing === "after_closing" ? L.tlAfterClosing : L.tlNow,
+      ]),
+      [0.26, 0.15, 0.3, 0.13, 0.16],
+    );
+    f.subhead(L.tlWhyTitle);
+    f.paragraph(tradelineWhy(data, es));
+  }
+
+  // ── 5. Action plan + file strength + program ────────────────────────────
+  f.ensure(180);
+  f.section(L.s5);
+  f.subhead(L.actionTitle);
+  actionPlan(data, es).forEach((step, i) => f.bullet(`${i + 1}. ${step}`));
+  f.subhead(L.strengthTitle);
+  f.table(
+    [L.factor, L.current, L.post],
+    [
+      ...data.fileStrength.factors.map((x) => [L.factorName(x.key), `${x.current} / 20`, `${x.postRepair} / 20`]),
+      [L.total, `${data.fileStrength.current} / 100`, `${data.fileStrength.postRepair} / 100`],
+    ],
+    [0.5, 0.25, 0.25],
+  );
+  f.callout(
+    L.programTitle,
+    `${L.programName(data.programTier, data.programTier === "complex" ? opts.program.complexPrice : opts.program.standardPrice)}. ${L.enroll}: ${opts.program.enrollUrl}  |  ${opts.program.phone}`,
+  );
+  f.callout(L.croaTitle, L.croa);
+
+  return Buffer.from(await pdf.save());
+}
+
+const LEGAL_ROUND1 = "FCRA §604, §611";
+
+/** "Why this works" paragraph tied to this file's numbers. */
+function tradelineWhy(data: CreditAnalysisData, es: boolean): string {
+  const openCards = data.utilization.filter((u) => !u.closed).length;
+  const late = data.negatives.find((n) => n.kind === "late");
+  const parts: string[] = [];
+  parts.push(
+    es
+      ? `El archivo tiene ${openCards} ${openCards === 1 ? "tarjeta abierta" : "tarjetas abiertas"}${data.utilizationOverall.all !== null ? ` al ${data.utilizationOverall.all}% de utilizacion` : ""}.`
+      : `This file has ${openCards} open ${openCards === 1 ? "card" : "cards"}${data.utilizationOverall.all !== null ? ` at ${data.utilizationOverall.all}% utilization` : ""}.`,
+  );
+  if (late) {
+    parts.push(
+      es
+        ? `Con un perfil revolvente delgado, el atraso de ${late.creditor} pesa mucho; una linea AU antigua y de alto limite agrega historial limpio y diluye ese atraso.`
+        : `With a thin revolving profile, the ${late.creditor} late carries outsized weight; a seasoned, high-limit AU line adds clean revolving history and dilutes it.`,
+    );
+  } else {
+    parts.push(
+      es
+        ? "Una linea AU antigua y de alto limite multiplica el credito disponible y estabiliza la utilizacion."
+        : "A seasoned, high-limit AU line multiplies available credit and stabilizes utilization.",
+    );
+  }
+  if (data.escrow?.active) {
+    parts.push(
+      es
+        ? "No se agregan cuentas ni lineas durante el escrow: cualquier cambio puede afectar la suscripcion."
+        : "No new accounts or tradelines during escrow - any change to the file can disrupt underwriting.",
+    );
+  }
+  return parts.join(" ");
+}
+
+/** Data-driven observations (no free text from the model). */
+function keyObservations(data: CreditAnalysisData, es: boolean): string[] {
+  const out: string[] = [];
+  const active = BUREAUS.filter((b) => !data.missingBureaus.includes(b));
+  if (data.negatives.length) {
+    for (const n of data.negatives.slice(0, 3)) {
+      const missing = active.filter((b) => !n.bureaus.includes(b));
+      out.push(
+        es
+          ? `${n.creditor}: ${n.status} en ${n.bureaus.join(", ")}${missing.length ? ` (no reportado a ${missing.join(", ")})` : ""}.`
+          : `${n.creditor}: ${n.status} on ${n.bureaus.join(", ")}${missing.length ? ` (not reported to ${missing.join(", ")})` : ""}.`,
+      );
+    }
+    if (data.negatives.length > 3) {
+      out.push(es ? `${data.negatives.length - 3} cuentas negativas mas en la Seccion 3.` : `${data.negatives.length - 3} more derogatory accounts in Section 3.`);
+    }
+  } else {
+    out.push(es ? "No se encontraron cuentas negativas." : "No derogatory tradelines found.");
+  }
+  // Score gap between bureaus explained by where an item reports.
+  const scored = active.filter((b) => data.scores[b] !== null);
+  if (scored.length >= 2 && data.negatives.length) {
+    const hi = scored.reduce((a, b) => (data.scores[a]! >= data.scores[b]! ? a : b));
+    const lo = scored.filter((b) => b !== hi && data.scores[hi]! - data.scores[b]! >= 40);
+    const cause = data.negatives.find((n) => !n.bureaus.includes(hi) && lo.every((b) => n.bureaus.includes(b)));
+    if (lo.length && cause) {
+      out.push(
+        es
+          ? `${cause.creditor} explica que ${lo.join("/")} esten por debajo de ${hi}, que no lo reporta.`
+          : `${cause.creditor} is the item holding ${lo.join("/")} below ${hi}, which does not report it.`,
+      );
+    }
+  }
+  for (const c of data.inquiryClusters ?? []) {
+    out.push(
+      es
+        ? `Grupo de ${c.count} consultas de compra (${c.from}).`
+        : `${c.count}-inquiry shopping cluster (${c.from}${c.to !== c.from ? ` - ${c.to}` : ""}).`,
+    );
+  }
+  if ((data.identityFlags ?? []).length) {
+    const bs = [...new Set(data.identityFlags.map((x) => x.bureau))];
+    out.push(es ? `Variacion de datos personales en ${bs.join(", ")}.` : `Personal-information variation on ${bs.join(", ")}.`);
+  }
+  for (const u of data.accuracyUpdates ?? []) {
+    out.push(es ? `${u.creditor} se reporta distinto entre buros (actualizar, no eliminar).` : `${u.creditor} reports inconsistently across bureaus (update, not a deletion).`);
+  }
+  const own = data.utilizationOverall.ownCardsOnly;
+  if (own !== null && own > 30) {
+    out.push(es ? `Sus tarjetas propias estan al ${own}% de utilizacion.` : `Own cards are at ${own}% utilization.`);
+  }
+  const held = data.negatives.filter((n) => n.hold).length;
+  if (held) {
+    out.push(
+      es
+        ? `${held} ${held === 1 ? "cuenta tiene" : "cuentas tienen"} nota de disputa del consumidor; ${held === 1 ? "queda" : "quedan"} EN ESPERA hasta confirmar y retirar la nota.`
+        : `${held} ${held === 1 ? "negative carries a consumer-dispute remark and is" : "negatives carry consumer-dispute remarks and are"} placed on HOLD until the notation is cleared.`,
+    );
+  }
+  return out.slice(0, 6);
+}
+
+/** Ordered, data-driven action plan: max 6 steps naming the real items. */
+function actionPlan(data: CreditAnalysisData, es: boolean): string[] {
+  const steps: string[] = [];
+  const names = (rows: Array<{ creditor: string }>) => [...new Set(rows.map((r) => r.creditor))].join(", ");
+  if (data.escrow?.active) {
+    steps.push(
+      es
+        ? "Proteger el cierre: sin disputas, cuentas nuevas ni lineas durante el escrow. Coordinar con el oficial de prestamos cualquier rescore."
+        : "Protect the closing. No disputes, new accounts, or tradelines while in escrow. Coordinate with the loan officer on any lender-side rescore.",
+    );
+    steps.push(
+      es
+        ? "Reporte nuevo de 3 buros despues del cierre para confirmar estados y ver la nueva hipoteca."
+        : "Fresh 3-bureau pull after closing to confirm current statuses and see the new mortgage reporting.",
+    );
+  }
+  if (data.missingBureaus.length) {
+    steps.push(
+      es
+        ? `Complete el reporte de 3 buros: levante cualquier congelamiento en ${data.missingBureaus.join(", ")} y saque un reporte nuevo.`
+        : `Complete the 3-bureau pull: lift any freeze on ${data.missingBureaus.join(", ")} and pull a fresh report.`,
+    );
+  }
+  const held = data.negatives.filter((n) => n.hold);
+  if (held.length) {
+    steps.push(es ? `Retire las notas de disputa en ${names(held)}.` : `Clear the hold items: confirm no open disputes and remove the notations on ${names(held)}.`);
+  }
+  const r1 = (data.inquiryClusters ?? []).length + data.inquiries.filter((q) => !q.clusterId && q.action === "dispute").length;
+  if (r1) {
+    const c = data.inquiryClusters?.[0];
+    steps.push(
+      es
+        ? `Ronda 1 - Consultas: disputar ${c ? `el grupo de ${c.from}` : "las consultas"} que siga sin proposito permitido.`
+        : `Round 1 - Inquiries: dispute ${c ? `the ${c.from} cluster inquiries` : "the inquiries"} still reporting without permissible purpose.`,
+    );
+  }
+  const r2 = data.negatives.filter((n) => n.round === 2 && !n.hold);
+  if (r2.length) steps.push(es ? `Ronda 2 - Cobranzas: ${names(r2)}.` : `Round 2 - Collections: ${names(r2)}.`);
+  const r3 = data.negatives.filter((n) => n.round === 3 && !n.hold);
+  const r3Extra = [
+    ...((data.identityFlags ?? []).length ? [es ? "datos personales" : "personal-info variations"] : []),
+    ...(data.accuracyUpdates ?? []).map((u) => (es ? `actualizar ${u.creditor}` : `update ${u.creditor}`)),
+  ];
+  if (r3.length || r3Extra.length) {
+    const what = [...(r3.length ? [es ? `inconsistencias de ${names(r3)}` : `${names(r3)} cross-bureau inconsistencies`] : []), ...r3Extra].join("; ");
+    steps.push(es ? `Ronda 3 - Exactitud: ${what}.` : `Round 3 - Accuracy: dispute ${what}.`);
+  }
+  const r4 = data.negatives.filter((n) => n.round === 4 && !n.hold);
+  if (r4.length || r3.length) {
+    steps.push(
+      es
+        ? `Ronda 4 - Escalar: ${names([...r4, ...r3])} con el proveedor si vuelven verificadas.`
+        : `Round 4 - Escalation: ${names([...r4, ...r3])} directly with the furnisher if verified.`,
+    );
+  }
+  const cards = data.utilization.filter((u) => !u.closed && !u.derogatory && !u.authorizedUser);
+  const tl = data.tradelines?.find((t) => t.code === "IH-1");
+  if (tl || cards.length) {
+    const top = cards.sort((a, b) => b.pctUsed - a.pctUsed)[0];
+    steps.push(
+      es
+        ? `Dar profundidad: ${tl ? "linea AU IH-1 y una linea primaria" : "mantener balances bajos"}${top ? `; mantener ${top.account} en ${pdfMoney(top.payTo10)} o menos` : ""}.`
+        : `Build depth: ${tl ? "place the IH-1 AU tradeline and add a primary revolving line" : "keep balances low"}${top ? `; keep ${top.account} at or below ${pdfMoney(top.payTo10)}` : ""}.`,
+    );
+  }
+  if (steps.length < 6) {
+    steps.push(
+      es
+        ? "Mantenga todos los pagos a tiempo y evite nuevas solicitudes de credito durante el programa."
+        : "Keep every account paid on time and avoid new credit applications during the program.",
+    );
+  }
+  return steps.slice(0, 6);
+}
+
+// ── Progress Report enhancement pages (appended to the existing PDF) ──────
+
+function progressLabels(lang: "en" | "es") {
+  const es = lang === "es";
+  return {
+    title: es ? "Informe de Progreso - Detalle por cuenta" : "Progress Report - Account Detail",
+    detailPage: (n: number) => (es ? `Detalle ${n}` : `Account detail ${n}`),
+    section: es ? "Resultados cuenta por cuenta" : "Account-by-account results",
+    tilesDeleted: es ? "cuentas negativas eliminadas de todos los buros" : "negative accounts deleted from every bureau",
+    tilesListings: es ? "registros negativos (TU+EX+EQ)" : "derogatory listings (TU+EX+EQ combined)",
+    tilesBalance: es ? "en saldos de cobranzas / cargos a perdida eliminados" : "in collection / charge-off balances removed",
+    scores: es ? "PUNTAJES" : "SCORES",
+    bureau: es ? "Buro" : "Bureau",
+    start: es ? "Inicio" : "Start",
+    current: es ? "Actual" : "Current",
+    change: es ? "Cambio" : "Points gained",
+    removedTitle: es ? "LO QUE SALIO DE SU REPORTE" : "WHAT CAME OFF YOUR REPORT",
+    stillTitle: es ? "LO QUE SIGUE EN SU REPORTE (PROXIMOS OBJETIVOS)" : "WHAT IS STILL ON YOUR REPORT (NEXT TARGETS)",
+    movedTitle: es ? "QUE MOVIO SU PUNTAJE" : "WHAT MOVED YOUR SCORE",
+    item: es ? "Cuenta" : "Item",
+    bureaus: es ? "Buros" : "Bureaus",
+    impact: es ? "Impacto" : "Impact",
+    status: es ? "Estado" : "Status",
+    detail: es ? "Detalle" : "Detail",
+    round: es ? "Ronda" : "Round",
+    factor: es ? "Factor" : "Factor",
+    effect: es ? "Efecto" : "Effect",
+    positive: es ? "POSITIVO" : "POSITIVE",
+    holding: es ? "LO FRENA" : "HOLDING BACK",
+    removed: es ? "ELIMINADA" : "REMOVED",
+    partial: es ? "PARCIAL" : "PARTIAL",
+    stillOn: (b: string) => (es ? `sigue en ${b}` : `still on ${b}`),
+    none: es ? "Nada que mostrar." : "Nothing to show.",
+    high: es ? "ALTO" : "HIGH",
+    medium: es ? "MEDIO" : "MEDIUM",
+    kind: (k: string) =>
+      ({
+        collection: es ? "cobranza" : "collection",
+        charge_off: es ? "cargo a perdida" : "charge-off",
+        late: es ? "pagos atrasados" : "late payments",
+        repossession: es ? "reposesion" : "repossession",
+        public_record: es ? "registro publico" : "public record",
+        derogatory: es ? "negativa" : "derogatory",
+      })[k] ?? k,
+    factorText: (f: ProgressEnhancement["factors"][number]): string => {
+      const v = f.values;
+      switch (f.code) {
+        case "deleted":
+          return es
+            ? `${v.deleted} cuenta(s) negativa(s) eliminada(s)${Number(v.partial) ? `, ${v.partial} corregida(s) parcialmente` : ""}`
+            : `${v.deleted} negative account(s) deleted${Number(v.partial) ? `, ${v.partial} partially corrected` : ""}`;
+        case "limits_up":
+          return es
+            ? `Limites revolventes +$${Number(v.amount).toLocaleString("en-US")}`
+            : `Revolving limits up $${Number(v.amount).toLocaleString("en-US")}`;
+        case "util_down":
+          return es ? `Utilizacion bajo de ${v.from}% a ${v.to}%` : `Utilization down from ${v.from}% to ${v.to}%`;
+        case "util_up":
+          return es ? `Utilizacion subio de ${v.from}% a ${v.to}%` : `Utilization up from ${v.from}% to ${v.to}%`;
+        case "new_inquiries":
+          return es ? `${v.count} consulta(s) nueva(s)` : `${v.count} new hard inquir${Number(v.count) === 1 ? "y" : "ies"}`;
+        case "new_negative":
+          return es
+            ? `Nueva cuenta negativa: ${v.creditor} (${v.bureaus})`
+            : `New negative: ${v.creditor} (${v.bureaus})`;
+        default:
+          return "";
+      }
+    },
+  };
+}
+
+/**
+ * Account-detail pages appended to the existing Progress Report PDF. Returns
+ * a standalone PDF; the caller copies its pages onto the end of today's PDF.
+ */
+async function generateProgressEnhancementPdf(
+  enh: ProgressEnhancement,
+  opts: { clientName: string; lang: "en" | "es"; logoPng?: Uint8Array | null; phone: string; site: string },
+): Promise<Buffer> {
+  const P = progressLabels(opts.lang);
+  const L = analysisLabels(opts.lang);
+  const pdf = await PDFDocument.create();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  let logo: PDFImage | null = null;
+  if (opts.logoPng) {
+    try {
+      logo = await pdf.embedPng(opts.logoPng);
+    } catch {
+      logo = null;
+    }
+  }
+  const sub = `${opts.clientName}  |  ${enh.beforeDate ?? "--"} -> ${enh.afterDate ?? "--"}${enh.scoreModel ? `  |  ${enh.scoreModel}` : ""}`;
+  const f = new PageFlow(pdf, font, bold, logo, P.title, sub, L, `Optimum Financial Group  |  ${opts.phone}  |  ${opts.site}`, P.detailPage);
+
+  f.section(P.section);
+  // Summary tiles.
+  const tiles = [
+    [String(enh.deletedCount), P.tilesDeleted],
+    [`${enh.listings.before} -> ${enh.listings.after}`, P.tilesListings],
+    [pdfMoney(enh.balanceRemoved), P.tilesBalance],
+  ];
+  const tw = (f.contentW - 16) / 3;
+  f.ensure(64);
+  tiles.forEach(([big, small], i) => {
+    const x = f.M + i * (tw + 8);
+    f.page.drawRectangle({ x, y: f.y - 44, width: tw, height: 56, color: OFG_PDF.light, borderColor: OFG_PDF.border, borderWidth: 0.8 });
+    f.page.drawRectangle({ x, y: f.y + 10, width: tw, height: 2, color: OFG_PDF.gold });
+    f.text(big, x + 10, f.y - 10, 16, { font: f.bold, color: OFG_PDF.navy, maxWidth: tw - 20 });
+    f.wrap(small, 7.5, tw - 20).slice(0, 2).forEach((line, li) => {
+      f.text(line, x + 10, f.y - 25 - li * 9, 7.5, { color: OFG_PDF.muted });
+    });
+  });
+  f.y -= 62;
+
+  f.subhead(P.scores);
+  f.table(
+    [P.bureau, P.start, P.current, P.change],
+    BUREAUS.filter((b) => enh.scores[b].before !== null || enh.scores[b].after !== null).map((b) => {
+      const { before, after } = enh.scores[b];
+      const d = before !== null && after !== null ? after - before : null;
+      return [BUREAU_NAME[b], before === null ? "--" : String(before), after === null ? "--" : String(after), d === null ? "--" : `${d >= 0 ? "+" : ""}${d}`];
+    }),
+    [0.34, 0.22, 0.22, 0.22],
+  );
+
+  f.subhead(P.removedTitle);
+  if (enh.removed.length) {
+    f.table(
+      [P.item, P.bureaus, P.impact, P.status],
+      enh.removed.map((r) => [
+        `${r.creditor} - ${P.kind(r.kind)}${r.balance !== null ? `, ${pdfMoney(r.balance)}` : ""}`,
+        r.removedFrom.join(" / "),
+        r.impact === "HIGH" ? P.high : P.medium,
+        r.status === "REMOVED" ? P.removed : `${P.partial} (${P.stillOn(r.stillOn.join("/"))})`,
+      ]),
+      [0.46, 0.16, 0.12, 0.26],
+    );
+  } else {
+    f.paragraph(P.none, 8.5, OFG_PDF.muted);
+  }
+
+  f.subhead(P.stillTitle);
+  const still = [...enh.stillReporting, ...enh.newNegatives];
+  if (still.length) {
+    f.table(
+      [P.item, P.bureaus, P.detail, P.round],
+      still.map((n) => [
+        `${n.creditor} - ${P.kind(n.kind)}`,
+        n.bureaus.join(" / "),
+        `${n.status}${n.balance !== null ? `, ${pdfMoney(n.balance)}` : ""}`,
+        n.hold ? `HOLD > R${n.round}` : `R${n.round}`,
+      ]),
+      [0.36, 0.16, 0.36, 0.12],
+    );
+  } else {
+    f.paragraph(P.none, 8.5, OFG_PDF.muted);
+  }
+
+  if (enh.factors.length) {
+    f.subhead(P.movedTitle);
+    f.table(
+      [P.factor, P.effect],
+      enh.factors.map((x) => [P.factorText(x), x.effect === "positive" ? P.positive : P.holding]),
+      [0.75, 0.25],
+    );
+  }
+  return Buffer.from(await pdf.save());
+}
+
+/**
+ * OFG prospect traffic light (semáforo) — pure rules (Cesar, Oct 14 2026;
+ * replaces task 3030556). Prospects / web leads only.
+ *
+ *  hot  (Caliente): analysis reviewed with Cesar, a call is scheduled, or the
+ *                   prospect started registration (payment, monitoring login,
+ *                   documents).
+ *  warm (Tibio):    replied in the last 14 days, or has a credit report /
+ *                   analysis — but not hot.
+ *  cold (Frío):     no reply in 14+ days and no credit report.
+ *
+ * Production entry stays api/index.ts (inlined; sync test).
+ */
+
+type LeadTemperature = "hot" | "warm" | "cold";
+
+type LeadReason =
+  | "analysis_reviewed"
+  | "call_scheduled"
+  | "payment_started"
+  | "monitoring_login"
+  | "documents_uploaded"
+  | "recent_reply"
+  | "has_credit_report"
+  | "no_reply_14d";
+
+interface LeadSignals {
+  now: Date;
+  lastInboundAt: Date | null;
+  hasCreditReport: boolean;
+  analysisReviewedAt: Date | null;
+  callScheduledAt: Date | null;
+  paymentStarted: boolean;
+  monitoringLogin: boolean;
+  documentsUploaded: boolean;
+}
+
+const LEAD_REPLY_WINDOW_DAYS = 14;
+/** A scheduled call keeps the prospect hot until 2 days after its time. */
+const LEAD_CALL_GRACE_DAYS = 2;
+const LEAD_HOT_STALE_DAYS = 3;
+
+const DAY = 86_400_000;
+
+function computeLeadTemperature(s: LeadSignals): {
+  temperature: LeadTemperature;
+  reasons: LeadReason[];
+} {
+  const hot: LeadReason[] = [];
+  if (s.analysisReviewedAt) hot.push("analysis_reviewed");
+  if (s.callScheduledAt && s.callScheduledAt.getTime() >= s.now.getTime() - LEAD_CALL_GRACE_DAYS * DAY) {
+    hot.push("call_scheduled");
+  }
+  if (s.paymentStarted) hot.push("payment_started");
+  if (s.monitoringLogin) hot.push("monitoring_login");
+  if (s.documentsUploaded) hot.push("documents_uploaded");
+  if (hot.length) return { temperature: "hot", reasons: hot };
+
+  const warm: LeadReason[] = [];
+  if (s.lastInboundAt && s.now.getTime() - s.lastInboundAt.getTime() < LEAD_REPLY_WINDOW_DAYS * DAY) {
+    warm.push("recent_reply");
+  }
+  if (s.hasCreditReport) warm.push("has_credit_report");
+  if (warm.length) return { temperature: "warm", reasons: warm };
+
+  return { temperature: "cold", reasons: ["no_reply_14d"] };
+}
+
+const RANK: Record<LeadTemperature, number> = { cold: 0, warm: 1, hot: 2 };
+
+/** True when the color moved up (cold→warm, warm→hot, cold→hot). */
+function isLeadTemperatureUpgrade(
+  prev: LeadTemperature | null | undefined,
+  next: LeadTemperature,
+): boolean {
+  return !!prev && RANK[next] > RANK[prev];
+}
+
+/** Hot with no movement (message either way / change) for 3+ days. */
+function isHotLeadStale(opts: {
+  temperature: LeadTemperature | null;
+  lastMovementAt: Date | null;
+  lastAlertAt: Date | null;
+  now: Date;
+}): boolean {
+  if (opts.temperature !== "hot" || !opts.lastMovementAt) return false;
+  if (opts.now.getTime() - opts.lastMovementAt.getTime() < LEAD_HOT_STALE_DAYS * DAY) return false;
+  // One alert per stale stretch: re-alert only after new movement.
+  return !opts.lastAlertAt || opts.lastAlertAt.getTime() < opts.lastMovementAt.getTime();
+}
+
+/** "Analysis reviewed" auto-detect: a 5+ minute call after the analysis. */
+const LEAD_REVIEW_CALL_MIN_SEC = 300;
+
+/**
+ * OFG Progress Report v2 (Cesar spec, Oct 15 2026) — diff engine, formulas,
+ * validation layer and the 3-page PDF.
+ *
+ *  - Account matching BEFORE↔AFTER: account number + open month (fallback:
+ *    creditor fuzzy + open month + limit). Never creditor name alone.
+ *  - Honest attribution: only deletions / corrected history are wins.
+ *    Client payments, re-reports, aged-off inquiries are labeled separately.
+ *  - Validation never stops generation; it raises review flags that gate
+ *    delivery (language-owner approval).
+ *
+ * Pure (no I/O). Inlined into api/index.ts by scripts/inline-credit-file-engine.mjs.
+ */
+
+// ── types ───────────────────────────────────────────────────────────────────
+
+type Pv2Priority = "HIGH" | "MEDIUM" | "LOW";
+
+interface Pv2Win {
+  item: string;
+  bureaus: Bureau[];
+  impact: Pv2Priority;
+  status: "REMOVED" | "PARTIAL";
+  /** Bureaus where it still reports (PARTIAL). */
+  remainsOn: Bureau[];
+  kind: "account" | "history" | "inquiry";
+}
+
+interface Pv2Target {
+  item: string;
+  bureaus: Bureau[];
+  detail: string;
+  priority: Pv2Priority;
+  lift: number;
+}
+
+interface Pv2UtilRow {
+  account: string;
+  /** Bureau the row's numbers come from (totals use the overall bureau only). */
+  bureau: Bureau;
+  limit: number;
+  baseline: number | null;
+  current: number;
+  pct: number;
+  payTo30: number;
+  payTo10: number;
+}
+
+interface Pv2Diff {
+  beforeDate: string | null;
+  afterDate: string | null;
+  wins: Pv2Win[];
+  /** Client actions (payments / cures) — not dispute results. */
+  clientActions: string[];
+  targets: Pv2Target[];
+  utilization: Pv2UtilRow[];
+  utilizationOverall: { before: number | null; after: number | null; bureau: Bureau | null };
+  utilizationNotes: string[];
+  positives: string[];
+  positivesFlags: { history: boolean; noCollections: boolean };
+  /** Internal only (case notes, never the client PDF). */
+  internal: string[];
+  counts: { beforeAccounts: number; afterAccounts: number; beforeInquiries: number; afterInquiries: number };
+  /** Open derogatory on AFTER (for file strength / caps). */
+  after: { openDerogatory: number; derogatory: number; lates24m: boolean; olderLates: boolean; publicRecord: boolean; openRevolving: number };
+}
+
+// ── helpers ─────────────────────────────────────────────────────────────────
+
+function pv2Alnum(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function pv2MaskDigits(mask: string | null): string {
+  return String(mask || "").replace(/[^0-9]/g, "");
+}
+
+function pv2OpenedMonth(a: CreditAccount): string | null {
+  for (const b of BUREAUS) {
+    const d = parseReportDate(a.bureaus[b]?.dateOpened);
+    if (d) return `${d.getUTCFullYear()}-${d.getUTCMonth() + 1}`;
+  }
+  return null;
+}
+
+function pv2Limit(a: CreditAccount): number | null {
+  for (const b of BUREAUS) {
+    const v = a.bureaus[b]?.creditLimit ?? a.bureaus[b]?.highBalance;
+    if (v) return v;
+  }
+  return null;
+}
+
+function pv2CreditorSimilar(x: string, y: string): boolean {
+  const a = pv2Alnum(x).replace(/(llc|inc|corp|co|na|bank)$/g, "");
+  const b = pv2Alnum(y).replace(/(llc|inc|corp|co|na|bank)$/g, "");
+  if (!a || !b) return false;
+  return a === b || (Math.min(a.length, b.length) >= 4 && (a.includes(b) || b.includes(a)));
+}
+
+/** BEFORE↔AFTER account match: mask + open month; fallback creditor + month + limit. */
+function pv2MatchAccounts(before: CreditAccount[], after: CreditAccount[]): Map<CreditAccount, CreditAccount> {
+  const out = new Map<CreditAccount, CreditAccount>();
+  const used = new Set<CreditAccount>();
+  const tryMatch = (pred: (b: CreditAccount, a: CreditAccount) => boolean) => {
+    for (const b of before) {
+      if (out.has(b)) continue;
+      const a = after.find((x) => !used.has(x) && pred(b, x));
+      if (a) {
+        out.set(b, a);
+        used.add(a);
+      }
+    }
+  };
+  // 1) account number (shared 4+ leading digits) + same open month.
+  tryMatch((b, a) => {
+    const mb = pv2MaskDigits(b.mask);
+    const ma = pv2MaskDigits(a.mask);
+    const n = Math.min(mb.length, ma.length);
+    return n >= 4 && mb.slice(0, n) === ma.slice(0, n) && pv2OpenedMonth(b) === pv2OpenedMonth(a) && pv2OpenedMonth(b) !== null;
+  });
+  // 2) creditor fuzzy + open month + limit / high balance.
+  tryMatch((b, a) => {
+    const lb = pv2Limit(b);
+    const la = pv2Limit(a);
+    return (
+      pv2CreditorSimilar(b.creditor, a.creditor) &&
+      pv2OpenedMonth(b) !== null &&
+      pv2OpenedMonth(b) === pv2OpenedMonth(a) &&
+      (lb === null || la === null || Math.abs(lb - la) <= 1 || pv2Alnum(b.creditor) === pv2Alnum(a.creditor))
+    );
+  });
+  return out;
+}
+
+const pv2Lates = (t: BureauTradeline | undefined) => (t ? (t.late30 ?? 0) + (t.late60 ?? 0) + (t.late90 ?? 0) + (t.gridMarks?.length ?? 0) : 0);
+
+function pv2LateDetail(a: CreditAccount): string {
+  const parts: string[] = [];
+  for (const b of BUREAUS) {
+    const t = a.bureaus[b];
+    if (!t || !(t.late30 || t.late60 || t.late90)) continue;
+    const seg = [t.late30 ? `${t.late30}x30` : "", t.late60 ? `${t.late60}x60` : "", t.late90 ? `${t.late90}x90` : ""].filter(Boolean).join(", ");
+    parts.push(`${b} ${seg}`);
+  }
+  return parts.join("; ");
+}
+
+function pv2Priority(kind: string): Pv2Priority {
+  return kind === "charge_off" || kind === "collection" || kind === "repossession" || kind === "public_record" ? "HIGH" : kind === "late" ? "MEDIUM" : "LOW";
+}
+
+const pv2Money = (n: number) => `$${Math.round(n).toLocaleString("en-US")}`;
+
+// ── client-facing text (EN / ES) ────────────────────────────────────────────
+
+type Pv2Lang = "en" | "es";
+
+function pv2T(lang: Pv2Lang) {
+  const es = lang === "es";
+  const kindName = (k: string) =>
+    es
+      ? ({ charge_off: "Cargo a perdida", collection: "Cobranza", late: "Pagos atrasados", repossession: "Reposesion", public_record: "Registro publico" } as Record<string, string>)[k] ?? "Negativa"
+      : ({ charge_off: "Charge-off", collection: "Collection", late: "Late payments", repossession: "Repossession", public_record: "Public record" } as Record<string, string>)[k] ?? "Derogatory";
+  return {
+    winSuffix: (k: string) =>
+      k === "late" ? (es ? " - pago atrasado" : " - late payment") : k === "charge_off" ? (es ? " - cargo a perdida" : " - charge-off") : k === "collection" ? (es ? " - cobranza" : " - collection") : "",
+    inquiries: (names: string) => (es ? `Consultas de credito (${names})` : `Hard inquiries (${names})`),
+    clientAction: (creditor: string, was: string | null, pd: string | null, closedPaid: boolean) =>
+      es
+        ? `${creditor} paso de ${was ? was.toLowerCase() : "pago vencido"}${pd ? ` (${pd} vencido)` : ""} a ${closedPaid ? "cerrada y pagada" : "al corriente"} con $0 vencido`
+        : `${creditor} went from ${was ? was.toLowerCase() : "past due"}${pd ? ` (${pd} past due)` : ""} to ${closedPaid ? "closed paid" : "Current"} with $0 past due`,
+    kindName,
+    chargedOff: (m: string) => (es ? `${m} cargado a perdida` : `${m} charged off`),
+    inCollection: (m: string) => (es ? `${m} en cobranza` : `${m} in collection`),
+    pastDue: (m: string) => (es ? `${m} vencido` : `${m} past due`),
+    nowCurrent: es ? "ya al corriente" : "now current",
+    limitChanged: (acct: string, up: boolean, from: string, to: string) =>
+      es ? `El limite de ${acct} ${up ? "subio" : "bajo"} de ${from} a ${to} desde la linea base.` : `${acct} limit ${up ? "increased" : "decreased"} from ${from} to ${to} since baseline.`,
+    notReporting: (m: string, acct: string, bureaus: string) =>
+      es ? `La linea de ${m} de ${acct} no se esta reportando en ${bureaus}.` : `The ${m} ${acct} line is not currently reporting on ${bureaus}.`,
+    noCollections: es ? "Sin cobranzas, registros publicos ni bancarrotas en ningun buro." : "No collections, public records, or bankruptcies on any bureau.",
+    historySince: (y: number, c: string) => (es ? `Historial de credito desde ${y} (${c}).` : `Credit history dating back to ${y} (${c}).`),
+    paidLoans: (n: number) => (es ? `${n} ${n === 1 ? "prestamo cerrado y pagado" : "prestamos cerrados y pagados"} segun lo acordado.` : `${n} installment ${n === 1 ? "loan" : "loans"} closed paid as agreed.`),
+    totalLimits: (m: string, zero: string) =>
+      es ? `Cerca de ${m} en limites revolventes abiertos${zero ? `, incluyendo lineas en $0 en ${zero}` : ""}.` : `About ${m} in open revolving limits${zero ? `, including $0-balance lines at ${zero}` : ""}.`,
+    allCurrent: es ? "Todas las cuentas abiertas se reportan al corriente." : "All open accounts are reporting Current.",
+  };
+}
+
+// ── diff engine ─────────────────────────────────────────────────────────────
+
+function pv2Diff(before: CreditFile, after: CreditFile, lang: Pv2Lang = "en"): Pv2Diff {
+  const T = pv2T(lang);
+  const afterDate = parseReportDate(after.reportDate);
+  const matches = pv2MatchAccounts(before.accounts, after.accounts);
+  const matchedAfter = new Set(matches.values());
+  const wins: Pv2Win[] = [];
+  const clientActions: string[] = [];
+  const internal: string[] = [];
+  const negBureaus = (a: CreditAccount) => BUREAUS.filter((b) => a.bureaus[b] && isNegativeTradeline(a.bureaus[b]!, a));
+
+  // Unmatched AFTER accounts (candidates for re-reports).
+  const unmatchedAfter = after.accounts.filter((a) => !matchedAfter.has(a));
+
+  for (const b of before.accounts) {
+    const nb = negBureaus(b);
+    if (!nb.length) continue;
+    const a = matches.get(b);
+    const kind = negativeKind(b, nb.map((x) => b.bureaus[x]!));
+    const deletedOn = nb.filter((x) => !a?.bureaus[x]);
+    const stillNeg = a ? nb.filter((x) => a.bureaus[x] && isNegativeTradeline(a.bureaus[x]!, a)) : [];
+    const cleanedOn = a ? nb.filter((x) => a.bureaus[x] && !stillNeg.includes(x)) : [];
+
+    // Re-report: "removed" here, but an unmatched AFTER account with the same
+    // open month + limit appeared (new name / number). Not a win.
+    if (deletedOn.length) {
+      const re = unmatchedAfter.find((x) => pv2OpenedMonth(x) === pv2OpenedMonth(b) && pv2OpenedMonth(b) !== null && pv2Limit(x) !== null && pv2Limit(x) === pv2Limit(b) && deletedOn.some((d) => x.bureaus[d]));
+      if (re) {
+        internal.push(`Re-report (not a win): ${b.creditor} on ${deletedOn.filter((d) => re.bureaus[d]).join("/")} re-reported as ${re.creditor}`);
+        deletedOn.splice(0, deletedOn.length, ...deletedOn.filter((d) => !re.bureaus[d]));
+      }
+    }
+
+    // No longer negative on a bureau BECAUSE the late history was corrected
+    // (a dispute result). Only a payment bringing it current is NOT a win.
+    const historyCorrected = cleanedOn.filter(
+      (x) =>
+        pv2Lates(a!.bureaus[x]) < pv2Lates(b.bureaus[x]) ||
+        (pv2Lates(b.bureaus[x]) === 0 && (b.bureaus[x]!.pastDue ?? 0) === 0 && !/past due|late/i.test(`${a!.bureaus[x]!.paymentStatus || ""}`)),
+    );
+
+    const removedOn = [...deletedOn, ...historyCorrected];
+    if (removedOn.length) {
+      const remainsOn = nb.filter((x) => !removedOn.includes(x));
+      const label = b.creditor + T.winSuffix(kind);
+      wins.push({
+        item: label,
+        bureaus: removedOn,
+        impact: remainsOn.length ? "MEDIUM" : pv2Priority(kind) === "LOW" ? "MEDIUM" : "HIGH",
+        status: remainsOn.length ? "PARTIAL" : "REMOVED",
+        remainsOn,
+        kind: deletedOn.length ? "account" : "history",
+      });
+    }
+  }
+
+  // Client-action cures (any matched account): past due → $0, late status →
+  // Current, or closed paid. Labeled separately — never a dispute win.
+  for (const [b, a] of matches) {
+    const cureOn = BUREAUS.filter((x) => {
+      const tb = b.bureaus[x];
+      const ta = a.bureaus[x];
+      if (!tb || !ta) return false;
+      const wasPastDue = (tb.pastDue ?? 0) > 0 || /past due|late/i.test(tb.paymentStatus || "");
+      const nowOk = (ta.pastDue ?? 0) === 0 && !/past due|late/i.test(ta.paymentStatus || "");
+      return wasPastDue && nowOk;
+    });
+    if (!cureOn.length) continue;
+    const pd = Math.max(...cureOn.map((x) => b.bureaus[x]!.pastDue ?? 0));
+    const lateWas = cureOn.map((x) => b.bureaus[x]!.paymentStatus).find((s) => s && /late/i.test(s));
+    const closedPaid = cureOn.some((x) => isClosedTradeline(a.bureaus[x]!, a));
+    clientActions.push(T.clientAction(a.creditor, lateWas ?? null, pd > 0 ? pv2Money(pd) : null, closedPaid));
+  }
+
+  // Late counts that went UP on an existing account (internal flag).
+  for (const [b, a] of matches) {
+    for (const x of BUREAUS) {
+      if (a.bureaus[x] && b.bureaus[x] && pv2Lates(a.bureaus[x]) > pv2Lates(b.bureaus[x])) {
+        internal.push(`${x} late count +${pv2Lates(a.bureaus[x]) - pv2Lates(b.bureaus[x])} on ${a.creditor}`);
+      }
+    }
+  }
+
+  // Inquiries: removed (< 24 months before AFTER date) = win; older = aged off.
+  const qKey = (q: { creditor: string; bureau: Bureau; date: string }) => `${pv2Alnum(q.creditor)}|${q.bureau}|${q.date}`;
+  const afterQ = new Set(after.inquiries.map(qKey));
+  const beforeQ = new Set(before.inquiries.map(qKey));
+  const removedQ = before.inquiries.filter((q) => !afterQ.has(qKey(q)));
+  const inquiryWins = removedQ.filter((q) => {
+    const d = parseReportDate(q.date);
+    return !d || !afterDate || afterDate.getTime() - d.getTime() < 730 * 86_400_000;
+  });
+  const agedOff = removedQ.filter((q) => !inquiryWins.includes(q));
+  if (agedOff.length) internal.push(`Aged off (not a win): ${agedOff.map((q) => `${q.creditor} ${q.bureau}`).join(", ")}`);
+  if (inquiryWins.length) {
+    const per = BUREAUS.map((b) => [b, inquiryWins.filter((q) => q.bureau === b).length] as const).filter(([, n]) => n > 0);
+    const names = [...new Set(inquiryWins.map((q) => q.creditor))];
+    wins.push({
+      item: T.inquiries(`${names.slice(0, 5).join(", ")}${names.length > 5 ? ", ..." : ""}`),
+      bureaus: per.map(([b]) => b),
+      impact: "LOW",
+      status: "REMOVED",
+      remainsOn: [],
+      kind: "inquiry",
+    });
+    // Per-bureau counts kept in the item text for the client.
+    wins[wins.length - 1].item += ` - ${per.map(([b, n]) => `${b} x${n}`).join(" / ")}`;
+  }
+  const newQ = after.inquiries.filter((q) => !beforeQ.has(qKey(q)));
+  if (newQ.length) internal.push(`New inquiries: ${newQ.map((q) => `${q.creditor} ${q.bureau} ${q.date}`).join(", ")}`);
+
+  // Targets: every remaining negative on AFTER.
+  const targets: Pv2Target[] = [];
+  for (const a of after.accounts) {
+    const na = negBureaus(a);
+    if (!na.length) continue;
+    const tls = na.map((x) => a.bureaus[x]!);
+    const kind = negativeKind(a, tls);
+    const amount = Math.max(...tls.map((t) => (kind === "charge_off" || kind === "collection" ? t.balance ?? 0 : t.pastDue ?? 0)));
+    const isNew = ![...matches.values()].includes(a);
+    if (isNew) internal.push(`New negative: ${a.creditor} (${na.join("/")})`);
+    const detail = [
+      kind === "charge_off" && amount ? T.chargedOff(pv2Money(amount)) : kind === "collection" && amount ? T.inCollection(pv2Money(amount)) : "",
+      pv2LateDetail(a),
+      kind !== "charge_off" && kind !== "collection" && amount ? T.pastDue(pv2Money(amount)) : "",
+      tls.some((t) => /current/i.test(t.paymentStatus || "")) && pv2LateDetail(a) ? T.nowCurrent : "",
+    ]
+      .filter(Boolean)
+      .join("; ");
+    targets.push({
+      item: `${a.creditor} - ${T.kindName(kind)}`,
+      bureaus: na,
+      detail: detail || (tls[0].paymentStatus ?? ""),
+      priority: pv2Priority(kind),
+      lift: negativeLiftEstimate(kind, tls.map((t) => `${t.paymentStatus || ""} ${t.remarks || ""}`).join(" ")),
+    });
+  }
+  targets.sort((x, y) => ["HIGH", "MEDIUM", "LOW"].indexOf(x.priority) - ["HIGH", "MEDIUM", "LOW"].indexOf(y.priority));
+
+  // Utilization: every OPEN revolving AFTER account with a limit; one bureau
+  // per row (TU, then EX, then EQ), baseline from the matched BEFORE account.
+  const utilization: Pv2UtilRow[] = [];
+  const utilizationNotes: string[] = [];
+  const revOpen = after.accounts.filter((a) => a.section === "revolving" && BUREAUS.some((b) => a.bureaus[b] && !isClosedTradeline(a.bureaus[b]!, a)));
+  for (const a of revOpen) {
+    const b = BUREAUS.find((x) => a.bureaus[x]?.creditLimit);
+    if (!b) continue;
+    const t = a.bureaus[b]!;
+    const limit = t.creditLimit!;
+    const cur = Math.max(0, t.balance ?? 0);
+    const prior = [...matches.entries()].find(([, v]) => v === a)?.[0];
+    const baseline = prior?.bureaus[b]?.balance ?? null;
+    const priorLimit = prior?.bureaus[b]?.creditLimit ?? null;
+    if (priorLimit && priorLimit !== limit) {
+      utilizationNotes.push(T.limitChanged(a.creditor, limit > priorLimit, pv2Money(priorLimit), pv2Money(limit)));
+    }
+    const missing = BUREAUS.filter((x) => (after.scores[x] !== null) && !a.bureaus[x]);
+    if (missing.length && limit >= 5000) {
+      utilizationNotes.push(T.notReporting(pv2Money(limit), a.creditor, missing.join("/")));
+    }
+    utilization.push({
+      account: a.creditor,
+      bureau: b,
+      limit,
+      baseline,
+      current: cur,
+      pct: Math.round((cur / limit) * 100),
+      payTo30: Math.floor(limit * 0.3),
+      payTo10: Math.floor(limit * 0.1),
+    });
+  }
+  utilization.sort((x, y) => y.pct - x.pct);
+  const overallFor = (f: CreditFile, b: Bureau) => {
+    const rev = f.accounts.filter((a) => a.section === "revolving" && a.bureaus[b] && !isClosedTradeline(a.bureaus[b]!, a) && (a.bureaus[b]!.creditLimit ?? 0) > 0);
+    const lim = rev.reduce((s, a) => s + a.bureaus[b]!.creditLimit!, 0);
+    const bal = rev.reduce((s, a) => s + Math.max(0, a.bureaus[b]!.balance ?? 0), 0);
+    return lim > 0 ? Math.round((bal / lim) * 100) : null;
+  };
+  const uBureau = BUREAUS.find((b) => overallFor(after, b) !== null) ?? null;
+  const utilizationOverall = {
+    bureau: uBureau,
+    before: uBureau ? overallFor(before, uBureau) : null,
+    after: uBureau ? overallFor(after, uBureau) : null,
+  };
+
+  // What is working in your favor (data-built bullets only).
+  const positives: string[] = [];
+  const afterNeg = after.accounts.filter((a) => negBureaus(a).length);
+  const hasColl = afterNeg.some((a) => negativeKind(a, negBureaus(a).map((x) => a.bureaus[x]!)) === "collection");
+  if (!hasColl && after.publicRecordsReported !== true) positives.push(T.noCollections);
+  const opens = after.accounts
+    .map((a) => ({ a, d: BUREAUS.map((b) => parseReportDate(a.bureaus[b]?.dateOpened)).find(Boolean) }))
+    .filter((x): x is { a: CreditAccount; d: Date } => !!x.d)
+    .sort((x, y) => x.d.getTime() - y.d.getTime());
+  if (opens.length) positives.push(T.historySince(opens[0].d.getUTCFullYear(), opens[0].a.creditor));
+  const paidLoans = after.accounts.filter(
+    (a) => a.section === "installment" && !negBureaus(a).length && BUREAUS.some((b) => a.bureaus[b] && isClosedTradeline(a.bureaus[b]!, a)),
+  );
+  if (paidLoans.length) positives.push(T.paidLoans(paidLoans.length));
+  const totalLimit = utilization.reduce((s, u) => s + u.limit, 0);
+  const zeroLines = utilization.filter((u) => u.current === 0);
+  if (totalLimit > 0) {
+    positives.push(T.totalLimits(pv2Money(totalLimit), zeroLines.slice(0, 3).map((u) => `${u.account} (${pv2Money(u.limit)})`).join(", ")));
+  }
+  const openAccts = after.accounts.filter((a) => BUREAUS.some((b) => a.bureaus[b] && !isClosedTradeline(a.bureaus[b]!, a)));
+  if (openAccts.length && openAccts.every((a) => !negBureaus(a).length)) positives.push(T.allCurrent);
+
+  const now = afterDate ?? new Date();
+  const lateWhen = (a: CreditAccount) =>
+    BUREAUS.flatMap((b) => (a.bureaus[b]?.gridMarks ?? []).map((m) => parseReportDate(m.split(":")[0]))).filter((d): d is Date => !!d);
+  const lateDates = afterNeg.flatMap(lateWhen);
+  const recentCut = now.getTime() - 730 * 86_400_000;
+  const anyLates = afterNeg.some((a) => negBureaus(a).some((b) => pv2Lates(a.bureaus[b]) > 0 || /late/i.test(a.bureaus[b]!.paymentStatus || "")));
+  return {
+    beforeDate: before.reportDate,
+    afterDate: after.reportDate,
+    wins,
+    clientActions,
+    targets,
+    utilization,
+    utilizationOverall,
+    utilizationNotes: [...new Set(utilizationNotes)],
+    positives: positives.slice(0, 5),
+    positivesFlags: { history: opens.length > 0, noCollections: !hasColl && after.publicRecordsReported !== true },
+    internal,
+    counts: {
+      beforeAccounts: before.accounts.length,
+      afterAccounts: after.accounts.length,
+      beforeInquiries: before.inquiries.length,
+      afterInquiries: after.inquiries.length,
+    },
+    after: {
+      openDerogatory: afterNeg.filter((a) => {
+        const k = negativeKind(a, negBureaus(a).map((x) => a.bureaus[x]!));
+        return (k === "charge_off" || k === "collection") && BUREAUS.some((b) => a.bureaus[b] && !/paid|settled/i.test(a.bureaus[b]!.accountStatus || ""));
+      }).length,
+      derogatory: afterNeg.length,
+      lates24m: lateDates.some((d) => d.getTime() >= recentCut) || (anyLates && !lateDates.length),
+      olderLates: lateDates.some((d) => d.getTime() < recentCut),
+      publicRecord: after.publicRecordsReported === true,
+      openRevolving: utilization.length,
+    },
+  };
+}
+
+// ── formulas ────────────────────────────────────────────────────────────────
+
+function pv2MiddleScore(s: Record<Bureau, number | null>): number | null {
+  const v = BUREAUS.map((b) => s[b]).filter((n): n is number => n !== null).sort((a, b) => a - b);
+  if (!v.length) return null;
+  return v.length === 3 ? v[1] : v.length === 2 ? Math.round((v[0] + v[1]) / 2) : v[0];
+}
+
+/** "[=========== ]" 20 chars, ASCII only. */
+function pv2AsciiBar(score: number | null): string {
+  if (score === null) return `[${" ".repeat(20)}]`;
+  const n = Math.max(0, Math.min(20, Math.round(((score - 300) / 550) * 20)));
+  return `[${"=".repeat(n)}${" ".repeat(20 - n)}]`;
+}
+
+/**
+ * File strength 0-100: start 100 and subtract; caps for open derogatories /
+ * high utilization. Unknown utilization never adds points.
+ */
+function pv2FileStrength(opts: {
+  openChargeOffsOrCollections: number;
+  lates24m: boolean;
+  olderLates: boolean;
+  overallUtil: number | null;
+  publicRecord: boolean;
+  openRevolving: number;
+  anyDerogatory: boolean;
+}): number {
+  let s = 100;
+  s -= Math.min(30, opts.openChargeOffsOrCollections * 15);
+  if (opts.lates24m) s -= 10;
+  else if (opts.olderLates) s -= 5;
+  const u = opts.overallUtil;
+  if (u !== null) s -= u > 80 ? 25 : u >= 50 ? 15 : u >= 30 ? 8 : 0;
+  if (opts.publicRecord) s -= 20;
+  if (opts.openRevolving < 3) s -= 10;
+  if (opts.openChargeOffsOrCollections > 0 || (u !== null && u > 50)) s = Math.min(s, 70);
+  if (opts.anyDerogatory) s = Math.min(s, 85);
+  return Math.max(0, Math.min(100, s));
+}
+
+/** Projected goal RANGE (never one number; always > current; max 850). */
+function pv2GoalRange(current: number, remainingLift: number, overallUtil: number | null): { low: number; high: number } {
+  const [uLow, uHigh] = overallUtil === null ? [0, 0] : overallUtil > 50 ? [15, 25] : overallUtil >= 30 ? [8, 15] : [0, 5];
+  const low = Math.min(850, current + Math.max(5, Math.round(remainingLift * 0.35) + uLow));
+  const high = Math.min(850, Math.max(low + 10, current + Math.round(remainingLift * 0.6) + uHigh));
+  return { low: Math.min(low, 849), high: Math.max(Math.min(high, 850), Math.min(low, 849) + 1) };
+}
+
+// ── validation layer ────────────────────────────────────────────────────────
+
+interface Pv2Flag {
+  code:
+    | "parse_failure"
+    | "same_pull"
+    | "chronology_swapped"
+    | "unverified_movement"
+    | "round_mismatch"
+    | "file_strength_cap"
+    | "goal_not_above_current"
+    | "pay_to_order"
+    | "no_negatives_contradiction"
+    | "text_hygiene"
+    | "internal_note";
+  message: string;
+}
+
+const UI_LABEL_JUNK = /current address|order an update now|currently using across|previous addresses|consumer statement/i;
+
+function pv2Validate(input: {
+  diff: Pv2Diff | null;
+  beforeHash?: string | null;
+  afterHash?: string | null;
+  scoresBefore: Record<Bureau, number | null>;
+  scoresAfter: Record<Bureau, number | null>;
+  clientText: string[];
+  fileStrength: number;
+  goal: { low: number; high: number } | null;
+  utilization: Array<{ payTo30: number; payTo10: number }>;
+}): Pv2Flag[] {
+  const flags: Pv2Flag[] = [];
+  const d = input.diff;
+  if (!d) {
+    flags.push({ code: "parse_failure", message: "Account-level read not available for both pulls — wins/targets come from text parsing; verify against the PDFs." });
+  } else {
+    if (!d.counts.beforeAccounts || !d.counts.afterAccounts) {
+      flags.push({ code: "parse_failure", message: `Parse failure: ${d.counts.beforeAccounts} accounts BEFORE / ${d.counts.afterAccounts} AFTER.` });
+    }
+    if (d.beforeDate && d.beforeDate === d.afterDate) flags.push({ code: "same_pull", message: `BEFORE and AFTER have the same report date (${d.afterDate}).` });
+    const bd = parseReportDate(d.beforeDate);
+    const ad = parseReportDate(d.afterDate);
+    if (bd && ad && bd.getTime() > ad.getTime()) flags.push({ code: "chronology_swapped", message: "BEFORE is newer than AFTER — swapped." });
+    for (const n of d.internal) flags.push({ code: "internal_note", message: n });
+    const mb = pv2MiddleScore(input.scoresBefore);
+    const ma = pv2MiddleScore(input.scoresAfter);
+    if (mb !== null && ma !== null && Math.abs(ma - mb) >= 10 && !d.wins.length && !d.clientActions.length && (d.utilizationOverall.before ?? 0) === (d.utilizationOverall.after ?? 0)) {
+      flags.push({ code: "unverified_movement", message: `Middle score moved ${mb} -> ${ma} with no visible driver — verify before delivery.` });
+    }
+    if (d.targets.length && input.clientText.some((t) => /no negatives|no negative items|none detected/i.test(t))) {
+      flags.push({ code: "no_negatives_contradiction", message: "Text says no negatives while the AFTER pull has negative accounts." });
+    }
+  }
+  if (input.beforeHash && input.beforeHash === input.afterHash) flags.push({ code: "same_pull", message: "BEFORE and AFTER are the same file." });
+  if (input.goal && input.goal.low <= (pv2MiddleScore(input.scoresAfter) ?? 0)) flags.push({ code: "goal_not_above_current", message: "Projected goal is not above the current middle score." });
+  if (input.utilization.some((u) => u.payTo10 > u.payTo30)) flags.push({ code: "pay_to_order", message: "Pay to 10% target is above the 30% target." });
+  if (input.clientText.some((t) => UI_LABEL_JUNK.test(t))) flags.push({ code: "text_hygiene", message: "Report-UI labels found in client text." });
+  return flags;
+}
+
+/** PDF + plan labels (EN / ES). Spanish version is approved by the ES owner. */
+function pv2L(lang: Pv2Lang) {
+  const es = lang === "es";
+  return {
+    brand: "OPTIMUM FINANCIAL GROUP",
+    title: es ? "INFORME DE PROGRESO DE CREDITO" : "CREDIT PROGRESS REPORT",
+    preparedFor: (n: string, b: string, c: string) => (es ? `Preparado para: ${n}  |  Base ${b}  |  Actual ${c}` : `Prepared for: ${n}  |  Baseline ${b}  |  Current ${c}`),
+    page: (n: number) => (es ? `Pagina ${n} de 3` : `Page ${n} of 3`),
+    scoreProgress: es ? "Su progreso de puntaje" : "Your Score Progress",
+    intro: (first: string, base: string, allUp: boolean, scoreText: string) =>
+      es
+        ? `${first}, asi esta su archivo desde su base del ${base}. ${allUp ? "Todos los buros subieron, y su" : "Su"} puntaje medio ${scoreText}.`
+        : `${first}, here is where your file stands since your ${base} baseline. ${allUp ? "Every bureau moved up, and your" : "Your"} middle score ${scoreText}.`,
+    climbed: (b: number, a: number) => (es ? `subio de ${b} a ${a}` : `climbed from ${b} to ${a}`),
+    isNow: (a: number, b: number) => (es ? `es ${a} (base ${b})` : `is ${a} (baseline ${b})`),
+    shownBelow: es ? "se muestra abajo" : "is shown below",
+    bureau: es ? "Buro" : "Bureau",
+    baseline: (d: string) => (es ? `Base (${d})` : `Baseline (${d})`),
+    current: (d: string) => (es ? `Actual (${d})` : `Current (${d})`),
+    gained: es ? "Puntos ganados" : "Points Gained",
+    middle: es ? "Puntaje medio" : "Middle Score",
+    pts: "pts",
+    cameOff: es ? "Lo que salio de su reporte" : "What Came Off Your Report",
+    itemRemoved: es ? "Elemento eliminado" : "Item Removed",
+    bureaus: es ? "Buros" : "Bureaus",
+    impact: es ? "Impacto" : "Impact",
+    status: es ? "Estado" : "Status",
+    impactText: (imp: string, kind: string, partialN: number) =>
+      `${es ? ({ HIGH: "ALTO", MEDIUM: "MEDIO", LOW: "BAJO" } as Record<string, string>)[imp] : imp} - ${
+        kind === "inquiry"
+          ? es ? "consultas eliminadas" : "inquiries deleted"
+          : partialN
+            ? es ? `corregido en ${partialN} ${partialN === 1 ? "buro" : "buros"}` : `corrected on ${partialN} ${partialN === 1 ? "bureau" : "bureaus"}`
+            : kind === "history"
+              ? es ? "historial de atrasos corregido" : "late history corrected"
+              : es ? "cuenta negativa eliminada" : "negative account removed"
+      }`,
+    removed: es ? "ELIMINADO" : "REMOVED",
+    partial: (remains: string) => (es ? `GANANCIA PARCIAL (queda en ${remains})` : `PARTIAL WIN (${remains} remains)`),
+    progressToo: es ? "Su progreso tambien" : "Your progress too",
+    progressTooBody: (items: string) =>
+      es
+        ? `${items}. Estas fueron acciones suyas, no disputas, y son parte de este cambio de puntaje.`
+        : `${items}. These were your actions, not disputes, and they are part of this score change.`,
+    stillOn: (r: number) => (es ? `Lo que sigue en su reporte (objetivos de la Ronda ${r})` : `What Is Still On Your Report (Round ${r} Targets)`),
+    item: es ? "Elemento" : "Item",
+    detail: es ? "Detalle" : "Detail",
+    priority: es ? "Prioridad" : "Priority",
+    prio: (p: string) => (es ? ({ HIGH: "ALTA", MEDIUM: "MEDIA", LOW: "BAJA" } as Record<string, string>)[p] ?? p : p),
+    noTargets: es ? "No quedan cuentas negativas en el reporte actual." : "No negative accounts remain on the current pull.",
+    utilTitle: es ? "Utilizacion de credito" : "Credit Utilization",
+    utilIntro: (b: number | null, a: number | null, bureau: string) =>
+      `${es ? "La utilizacion es cuanto usa de sus limites de credito. Menos de 30% es bueno; menos de 10% da el mayor beneficio." : "Utilization is how much of your credit limits you are using. Under 30% is good; under 10% gives the maximum boost."}${
+        b !== null && a !== null
+          ? es
+            ? ` Su utilizacion total ${a <= b ? "mejoro" : "cambio"} de ${b}% a ${a}% (${bureau}).`
+            : ` Your overall utilization ${a <= b ? "improved" : "moved"} from ${b}% to ${a}% (${bureau}).`
+          : ""
+      }`,
+    account: es ? "Cuenta" : "Account",
+    limit: es ? "Limite" : "Limit",
+    baseBal: es ? "Saldo base" : "Baseline Bal.",
+    curBal: es ? "Saldo actual" : "Current Bal.",
+    used: es ? "% usado" : "% Used",
+    payTo30h: es ? "Pagar a 30%" : "Pay to 30%",
+    payTo10h: es ? "Pagar a 10%" : "Pay to 10%",
+    band: (p: number) => (p > 50 ? (es ? "ALTO" : "HIGH") : p >= 30 ? (es ? "REGULAR" : "FAIR") : es ? "BIEN" : "GOOD"),
+    payTo: (m: string) => (es ? `Pagar a ${m}` : `Pay to ${m}`),
+    alreadyOk: es ? "Ya esta bien" : "Already OK",
+    totalRevolving: (b: string) => (es ? `Total revolvente${b ? ` (${b})` : ""}` : `Total revolving${b ? ` (${b})` : ""}`),
+    noUtil: es ? "No hay cuentas revolventes abiertas con limite en el reporte actual." : "No open revolving accounts with a credit limit on the current pull.",
+    working: es ? "Lo que trabaja a su favor" : "What Is Working in Your Favor",
+    actionNeeded: es ? "Accion necesaria" : "Action Needed",
+    roadmap: es ? "Su ruta" : "Your Roadmap",
+    roundsDone: (r: number) => (r > 1 ? (es ? `RONDAS 1-${r - 1} COMPLETAS` : `ROUNDS 1-${r - 1} COMPLETE`) : es ? "INSCRIPCION COMPLETA" : "ENROLLMENT COMPLETE"),
+    removedCount: (n: number) => (n ? (es ? `${n} ${n === 1 ? "elemento eliminado o corregido" : "elementos eliminados o corregidos"}` : `${n} ${n === 1 ? "item" : "items"} removed or corrected`) : es ? "Base establecida" : "Baseline set"),
+    roundActive: (r: number) => (es ? `RONDA ${r} ACTIVA` : `ROUND ${r} ACTIVE`),
+    nextTargets: es ? "Siguientes objetivos" : "Next targets",
+    utilization: es ? "UTILIZACION" : "UTILIZATION",
+    bringUnder: (names: string) => (es ? `Bajar ${names} a < 30%` : `Bring ${names} < 30%`),
+    keepUnder: es ? "Mantener saldos bajo 30%" : "Keep balances under 30%",
+    scoreGoal: es ? "META DE PUNTAJE" : "SCORE GOAL",
+    projected: (l: number, h: number) => (es ? `${l}-${h} proyectado` : `${l}-${h} projected`),
+    done: es ? "HECHO" : "DONE",
+    inProgress: es ? "EN PROCESO" : "IN PROGRESS",
+    clientAction: es ? "ACCION DEL CLIENTE" : "CLIENT ACTION",
+    target: es ? "META" : "TARGET",
+    currentRow: es ? "Actual" : "Current",
+    goalRow: es ? "Meta proyectada" : "Projected goal",
+    goalVal: (l: number, h: number) => (es ? `${l}-${h} (proyectado)` : `${l}-${h} (projected)`),
+    gapRow: es ? "Diferencia restante" : "Gap remaining",
+    points: es ? "puntos" : "points",
+    plan: es ? "Su plan de accion personalizado" : "Your Personalized Action Plan",
+    step: (n: number) => (es ? `Paso ${n}` : `Step ${n}`),
+    strength: es ? "Fortaleza del archivo" : "File Strength Score",
+    strengthBar: es ? "FORTALEZA" : "FILE STRENGTH",
+    questions: (ph: string, site: string) => (es ? `Preguntas? Llamenos al ${ph} o visite ${site}.` : `Questions? Call us at ${ph} or visit ${site}.`),
+    croaTitle: es ? "DIVULGACION CROA" : "CROA DISCLOSURE",
+    croa: es
+      ? "Optimum Financial Group presta servicios de reparacion de credito conforme a la Ley de Organizaciones de Reparacion de Credito (CROA), 15 U.S.C. §1679 y ss. No garantizamos mejoras especificas de puntaje. Los resultados varian segun la persona. Los puntajes proyectados son estimaciones, no garantias."
+      : "Optimum Financial Group provides credit repair services in compliance with the Credit Repair Organizations Act (CROA), 15 U.S.C. §1679 et seq. We do not guarantee specific score improvements. Results vary by individual. Projected scores are estimates, not guarantees.",
+    actionUtil: (top: string, pct: number, cur: string, lim: string, more: string) =>
+      es
+        ? `La utilizacion es la palanca mas grande en sus manos. ${top} al ${pct}% (${cur} de ${lim}) es lo que mas baja su puntaje${more ? `, seguido de ${more}` : ""}. Bajar los saldos a menos de 30% en el proximo estado de cuenta puede sumar puntos proyectados ademas del trabajo de disputas.`
+        : `Utilization is the biggest lever still in your hands. ${top} at ${pct}% (${cur} of ${lim}) is the largest score suppressor on your file${more ? `, followed by ${more}` : ""}. Bringing balances under 30% on the next statement cycle can add projected points on top of the dispute work.`,
+    keepCurrent: es ? "Mantenga todas las cuentas al corriente: un nuevo atraso podria deshacer este progreso." : "Keep every account current - one new late payment could undo this progress.",
+    planOfg: (r: number, names: string) => (es ? `Nuestro equipo (Ronda ${r}): estamos disputando ${names || "los elementos restantes de su archivo"}.` : `Our team (Round ${r}): we are actively disputing ${names || "the remaining items on your file"}.`),
+    planClient: (names: string) =>
+      names
+        ? es ? `Su parte (utilizacion): baje ${names}, buscando menos de 30% en cada tarjeta.` : `Your part (utilization): lower ${names}, aiming for under 30% on each card.`
+        : es ? "Su parte: mantenga los saldos de tarjetas bajo 30% (bajo 10% es mejor)." : "Your part: keep card balances under 30% (under 10% is best).",
+    planProtect: (r: number) => (es ? `Proteja sus logros: mantenga todo al corriente y evite nuevas solicitudes de credito mientras la Ronda ${r} esta en proceso.` : `Protect your gains: keep every account current and avoid new credit applications while Round ${r} is in progress.`),
+    planTimeline: (r: number) => (es ? `Tiempo: los resultados de la Ronda ${r} se esperan en 30-60 dias. Los cambios de utilizacion se ven en el siguiente estado de cuenta.` : `Timeline: Round ${r} results are expected within 30-60 days. Utilization changes show up on the next statement cycle.`),
+    planNext: (r: number) => (es ? `Proxima revision: sacaremos un reporte nuevo de 3 buros al cerrar la Ronda ${r} y le enviaremos su siguiente informe.` : `Next check-in: we will pull a fresh 3-bureau report when Round ${r} closes and send your next progress report.`),
+    then: es ? ", luego " : ", then ",
+    strengthNote: (strengths: string, growth: string) =>
+      `${strengths ? (es ? `Su archivo tiene una base solida: ${strengths}. ` : `Your file has a solid foundation: ${strengths}. `) : ""}${
+        growth ? (es ? `El espacio restante para crecer esta en ${growth}.` : `The remaining room to grow is in ${growth}.`) : es ? "Mantenga saldos bajos y pagos a tiempo para seguir creciendo." : "Keep balances low and payments on time to build on it."
+      }`,
+    sHistory: es ? "historial de credito" : "credit history",
+    sNoColl: es ? "sin cobranzas ni registros publicos" : "no collections or public records",
+    sLimits: es ? "limites altos" : "high limits",
+    gUtil: es ? "la utilizacion revolvente" : "revolving utilization",
+  };
+}
+
+// ── PDF (exactly 3 pages, letter) ───────────────────────────────────────────
+
+interface Pv2PdfData {
+  lang: Pv2Lang;
+  clientFirstName: string;
+  clientName: string;
+  baselineDate: string;
+  currentDate: string;
+  round: number;
+  scores: Record<Bureau, { before: number | null; after: number | null }>;
+  wins: Pv2Win[];
+  clientActions: string[];
+  targets: Pv2Target[];
+  utilization: Pv2UtilRow[];
+  utilizationOverall: { before: number | null; after: number | null; bureau: Bureau | null };
+  utilizationNotes: string[];
+  positives: string[];
+  actionNeeded: string[];
+  goal: { low: number; high: number };
+  fileStrength: number;
+  fileStrengthNote: string;
+  plan: string[];
+  phone: string;
+  site: string;
+}
+
+const PV2 = {
+  navy: rgb(0.051, 0.122, 0.235),
+  gold: rgb(0.788, 0.659, 0.298),
+  text: rgb(0.16, 0.18, 0.22),
+  muted: rgb(0.42, 0.45, 0.5),
+  light: rgb(0.965, 0.97, 0.978),
+  white: rgb(1, 1, 1),
+  green: rgb(0.09, 0.55, 0.3),
+  goldTint: rgb(0.99, 0.97, 0.9),
+};
+
+const BUREAU_FULL: Record<Bureau, string> = { TU: "TransUnion", EX: "Experian", EQ: "Equifax" };
+
+function pv2Safe(s: string): string {
+  return String(s ?? "")
+    .replace(/[–—―]/g, "-")
+    .replace(/[‘’]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/[•·]/g, "-")
+    .replace(/[\t\r\n]+/g, " ")
+    .replace(/[^\x20-\x7E\xA0-\xFF]/g, "")
+    .replace(/ {2,}/g, " ")
+    .trim();
+}
+
+class Pv2Page {
+  y: number;
+  readonly M = 40;
+  readonly W = 612;
+  readonly CW = 612 - 80;
+  constructor(
+    readonly page: PDFPage,
+    readonly font: PDFFont,
+    readonly bold: PDFFont,
+    readonly mono: PDFFont,
+  ) {
+    this.y = 792 - 104;
+  }
+  text(s: string, x: number, y: number, size: number, f: PDFFont = this.font, color = PV2.text, maxW?: number) {
+    let t = pv2Safe(s);
+    if (maxW) while (t.length > 1 && f.widthOfTextAtSize(t, size) > maxW) t = t.slice(0, -2) + ".";
+    this.page.drawText(t, { x, y, size, font: f, color });
+  }
+  wrap(s: string, size: number, maxW: number, f: PDFFont = this.font): string[] {
+    const out: string[] = [];
+    let cur = "";
+    for (const w of pv2Safe(s).split(" ").filter(Boolean)) {
+      const t = cur ? `${cur} ${w}` : w;
+      if (f.widthOfTextAtSize(t, size) > maxW && cur) {
+        out.push(cur);
+        cur = w;
+      } else cur = t;
+    }
+    if (cur) out.push(cur);
+    return out.length ? out : [""];
+  }
+  heading(s: string) {
+    this.y -= 4;
+    this.text(s, this.M, this.y, 13, this.bold, PV2.navy);
+    this.page.drawRectangle({ x: this.M, y: this.y - 6, width: 46, height: 2, color: PV2.gold });
+    this.y -= 22;
+  }
+  para(s: string, size = 9, color = PV2.text, f: PDFFont = this.font) {
+    for (const l of this.wrap(s, size, this.CW, f)) {
+      this.text(l, this.M, this.y, size, f, color);
+      this.y -= size + 3.5;
+    }
+    this.y -= 4;
+  }
+  table(headers: string[], rows: string[][], widths: number[], size = 8, boldLast = false) {
+    const colW = widths.map((w) => w * this.CW);
+    this.page.drawRectangle({ x: this.M, y: this.y - 5, width: this.CW, height: 16, color: PV2.navy });
+    let x = this.M + 4;
+    headers.forEach((h, i) => {
+      this.text(h, x, this.y, size, this.bold, PV2.white, colW[i] - 6);
+      x += colW[i];
+    });
+    this.y -= 16;
+    rows.forEach((row, ri) => {
+      const cells = row.map((c, i) => this.wrap(c, size, colW[i] - 8));
+      const h = Math.max(...cells.map((c) => c.length)) * (size + 3) + 6;
+      if (ri % 2 === 1) this.page.drawRectangle({ x: this.M, y: this.y - h + size + 1, width: this.CW, height: h, color: PV2.light });
+      let xx = this.M + 4;
+      cells.forEach((lines, i) => {
+        let yy = this.y;
+        for (const l of lines) {
+          this.text(l, xx, yy, size, boldLast && ri === rows.length - 1 ? this.bold : this.font);
+          yy -= size + 3;
+        }
+        xx += colW[i];
+      });
+      this.y -= h;
+    });
+    this.y -= 8;
+  }
+  callout(title: string, body: string) {
+    const lines = this.wrap(body, 8.8, this.CW - 20);
+    const h = 22 + lines.length * 12;
+    const top = this.y + 8;
+    this.page.drawRectangle({ x: this.M, y: top - h, width: this.CW, height: h, color: PV2.goldTint, borderColor: PV2.gold, borderWidth: 0.8 });
+    this.text(title, this.M + 10, top - 14, 9, this.bold, PV2.navy);
+    let yy = top - 27;
+    for (const l of lines) {
+      this.text(l, this.M + 10, yy, 8.8);
+      yy -= 12;
+    }
+    this.y = top - h - 10;
+  }
+}
+
+/** Rows that fit the remaining page height (keeps the report at 3 pages). */
+function pv2Fit<T>(rows: T[], perRow: number, room: number): T[] {
+  return rows.slice(0, Math.max(1, Math.floor(room / perRow)));
+}
+
+async function generateProgressReportV2Pdf(d: Pv2PdfData, logoPng?: Uint8Array | null): Promise<Buffer> {
+  const L = pv2L(d.lang);
+  const pdf = await PDFDocument.create();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  const mono = await pdf.embedFont(StandardFonts.Courier);
+  let logo: PDFImage | null = null;
+  if (logoPng) {
+    try {
+      logo = await pdf.embedPng(logoPng);
+    } catch {
+      logo = null;
+    }
+  }
+  const pages: Pv2Page[] = [1, 2, 3].map((n) => {
+    const page = pdf.addPage([612, 792]);
+    page.drawRectangle({ x: 0, y: 792 - 76, width: 612, height: 76, color: PV2.navy });
+    page.drawRectangle({ x: 0, y: 792 - 79, width: 612, height: 3, color: PV2.gold });
+    let tx = 40;
+    if (logo) {
+      const h = 38;
+      const w = (logo.width / logo.height) * h;
+      page.drawImage(logo, { x: 40, y: 792 - 76 + 19, width: w, height: h });
+      tx = 40 + w + 14;
+    }
+    const p = new Pv2Page(page, font, bold, mono);
+    p.text(L.brand, tx, 792 - 28, 9, bold, PV2.gold);
+    p.text(L.title, tx, 792 - 44, 13, bold, PV2.white);
+    p.text(L.preparedFor(d.clientName, d.baselineDate, d.currentDate), tx, 792 - 60, 8.5, font, rgb(0.85, 0.87, 0.92));
+    page.drawRectangle({ x: 0, y: 0, width: 612, height: 36, color: PV2.light });
+    p.text(`Optimum Financial Group  |  ${d.phone}  |  ${d.site}`, 40, 15, 7.5, font, PV2.muted);
+    p.text(L.page(n), 612 - 40 - font.widthOfTextAtSize(L.page(n), 7.5), 15, 7.5, font, PV2.muted);
+    return p;
+  });
+
+  const mid = (k: "before" | "after") => pv2MiddleScore({ TU: d.scores.TU[k], EX: d.scores.EX[k], EQ: d.scores.EQ[k] });
+  const mb = mid("before");
+  const ma = mid("after");
+
+  // ── Page 1: score progress + wins + targets ───────────────────────────────
+  const p1 = pages[0];
+  p1.heading(L.scoreProgress);
+  const moved = BUREAUS.filter((b) => d.scores[b].before !== null && d.scores[b].after !== null);
+  const allUp = moved.length > 0 && moved.every((b) => d.scores[b].after! > d.scores[b].before!);
+  p1.para(L.intro(d.clientFirstName, d.baselineDate, allUp, mb !== null && ma !== null ? (ma >= mb ? L.climbed(mb, ma) : L.isNow(ma, mb)) : L.shownBelow));
+  const delta = (b: number | null, a: number | null) => (b === null || a === null ? "--" : `${a - b >= 0 ? "+" : ""}${a - b}`);
+  p1.table(
+    [L.bureau, L.baseline(d.baselineDate), L.current(d.currentDate), L.gained],
+    [
+      ...BUREAUS.map((b) => [BUREAU_FULL[b], String(d.scores[b].before ?? "--"), String(d.scores[b].after ?? "--"), delta(d.scores[b].before, d.scores[b].after)]),
+      [L.middle, String(mb ?? "--"), String(ma ?? "--"), `${delta(mb, ma)} ${L.pts}`],
+    ],
+    [0.28, 0.25, 0.25, 0.22],
+    8.5,
+    true,
+  );
+  for (const b of BUREAUS) {
+    const s = d.scores[b];
+    const line = `${(BUREAU_FULL[b] + ":").padEnd(12)} ${pv2AsciiBar(s.after)} ${s.before ?? "--"} -> ${s.after ?? "--"} (${delta(s.before, s.after)} ${L.pts})`;
+    p1.text(line, p1.M, p1.y, 8.5, mono, PV2.navy);
+    p1.y -= 12;
+  }
+  p1.y -= 8;
+  p1.heading(L.cameOff);
+  const winRows = d.wins.map((w) => [
+    w.item,
+    w.bureaus.join(" / "),
+    L.impactText(w.impact, w.kind, w.status === "PARTIAL" ? w.bureaus.length : 0),
+    w.status === "PARTIAL" ? L.partial(w.remainsOn.join("/")) : L.removed,
+  ]);
+  if (winRows.length) p1.table([L.itemRemoved, L.bureaus, L.impact, L.status], pv2Fit(winRows, 24, 150), [0.4, 0.14, 0.26, 0.2]);
+  if (d.clientActions.length) p1.callout(L.progressToo, L.progressTooBody(d.clientActions.join("; ")));
+  p1.heading(L.stillOn(d.round));
+  const targetRows = d.targets.map((t) => [t.item, t.bureaus.join(" / "), t.detail || "--", L.prio(t.priority)]);
+  if (targetRows.length) p1.table([L.item, L.bureaus, L.detail, L.priority], pv2Fit(targetRows, 24, Math.max(48, p1.y - 60)), [0.32, 0.14, 0.42, 0.12]);
+  else p1.para(L.noTargets, 9, PV2.muted);
+
+  // ── Page 2: utilization + what's working ──────────────────────────────────
+  const p2 = pages[1];
+  p2.heading(L.utilTitle);
+  const uo = d.utilizationOverall;
+  p2.para(L.utilIntro(uo.before, uo.after, uo.bureau ? BUREAU_FULL[uo.bureau] : ""));
+  const payTo = (bal: number, target: number) => (bal <= target ? L.alreadyOk : L.payTo(pv2Money(target)));
+  const uRows = d.utilization.map((u) => [u.account, pv2Money(u.limit), u.baseline === null ? "--" : pv2Money(u.baseline), pv2Money(u.current), `${u.pct}% ${L.band(u.pct)}`, payTo(u.current, u.payTo30), payTo(u.current, u.payTo10)]);
+  if (uRows.length) {
+    // Total row = the overall bureau's own accounts (label says which bureau).
+    const totalRows = uo.bureau ? d.utilization.filter((u) => u.bureau === uo.bureau) : d.utilization;
+    const lim = totalRows.reduce((s, u) => s + u.limit, 0);
+    const base = totalRows.reduce((s, u) => s + (u.baseline ?? 0), 0);
+    const cur = totalRows.reduce((s, u) => s + u.current, 0);
+    const fitted = pv2Fit(uRows, 18, 300);
+    fitted.push([L.totalRevolving(uo.bureau ?? ""), pv2Money(lim), pv2Money(base), pv2Money(cur), lim > 0 ? `${Math.round((cur / lim) * 100)}%` : "--", "", ""]);
+    p2.table([L.account, L.limit, L.baseBal, L.curBal, L.used, L.payTo30h, L.payTo10h], fitted, [0.22, 0.11, 0.13, 0.13, 0.13, 0.14, 0.14], 7.8, true);
+  } else p2.para(L.noUtil, 9, PV2.muted);
+  for (const n of d.utilizationNotes.slice(0, 3)) p2.para(n, 7.5, PV2.muted);
+  p2.heading(L.working);
+  for (const s of d.positives.slice(0, 5)) {
+    for (const [i, l] of p2.wrap(s, 9, p2.CW - 14).entries()) {
+      if (i === 0) p2.page.drawCircle({ x: p2.M + 3, y: p2.y + 3, size: 1.6, color: PV2.gold });
+      p2.text(l, p2.M + 12, p2.y, 9);
+      p2.y -= 12.5;
+    }
+  }
+  p2.y -= 6;
+  p2.heading(L.actionNeeded);
+  for (const s of d.actionNeeded.slice(0, 3)) p2.para(s);
+
+  // ── Page 3: roadmap + goal + plan + file strength + CROA ──────────────────
+  const p3 = pages[2];
+  p3.heading(L.roadmap);
+  const highUtil = d.utilization.filter((u) => u.pct > 30).slice(0, 3).map((u) => u.account).join(", ");
+  const roadmap: Array<[string, string, string]> = [
+    [L.roundsDone(d.round), L.removedCount(d.wins.length), L.done],
+    [L.roundActive(d.round), d.targets.slice(0, 3).map((t) => t.item.split(" - ")[0]).join(", ") || L.nextTargets, L.inProgress],
+    [L.utilization, highUtil ? L.bringUnder(highUtil) : L.keepUnder, L.clientAction],
+    [L.scoreGoal, L.projected(d.goal.low, d.goal.high), L.target],
+  ];
+  for (const [a, b, c] of roadmap) {
+    p3.text(`${a.padEnd(24)} -> `, p3.M, p3.y, 8.5, mono, PV2.navy);
+    p3.text(b, p3.M + 200, p3.y, 8.5, font, PV2.text, 230);
+    p3.text(c, p3.M + p3.CW - bold.widthOfTextAtSize(c, 8), p3.y, 8, bold, c === L.done ? PV2.green : PV2.navy);
+    p3.y -= 14;
+  }
+  p3.y -= 6;
+  p3.table(
+    [L.middle, ""],
+    [
+      [L.currentRow, String(ma ?? "--")],
+      [L.goalRow, L.goalVal(d.goal.low, d.goal.high)],
+      [L.gapRow, ma === null ? "--" : `${Math.max(0, d.goal.low - ma)}-${Math.max(0, d.goal.high - ma)} ${L.points}`],
+    ],
+    [0.5, 0.5],
+    8.5,
+  );
+  p3.heading(L.plan);
+  d.plan.slice(0, 5).forEach((s, i) => p3.para(`${L.step(i + 1)} - ${s}`, 8.8));
+  p3.heading(L.strength);
+  const fsN = Math.round((d.fileStrength / 100) * 20);
+  p3.text(`${L.strengthBar}: [${"=".repeat(fsN)}${" ".repeat(20 - fsN)}] ${d.fileStrength} / 100`, p3.M, p3.y, 9, mono, PV2.navy);
+  p3.y -= 15;
+  p3.para(d.fileStrengthNote, 8.8);
+  p3.para(L.questions(d.phone, d.site), 8.8, PV2.muted);
+  p3.y = Math.max(p3.y, 120);
+  p3.callout(L.croaTitle, L.croa);
+
+  return Buffer.from(await pdf.save());
+}
+
+// ── assemble report content from the diff ──────────────────────────────────
+
+function pv2BuildPdfData(opts: {
+  diff: Pv2Diff;
+  clientFirstName: string;
+  clientName: string;
+  round: number;
+  scores: Record<Bureau, { before: number | null; after: number | null }>;
+  phone: string;
+  site: string;
+  lang?: Pv2Lang;
+}): Pv2PdfData {
+  const lang = opts.lang ?? "en";
+  const L = pv2L(lang);
+  const { diff } = opts;
+  const ma = pv2MiddleScore({ TU: opts.scores.TU.after, EX: opts.scores.EX.after, EQ: opts.scores.EQ.after }) ?? 0;
+  const remainingLift = diff.targets.reduce((s, t) => s + t.lift, 0);
+  const goal = pv2GoalRange(ma, remainingLift, diff.utilizationOverall.after);
+  const fileStrength = pv2FileStrength({
+    openChargeOffsOrCollections: diff.after.openDerogatory,
+    lates24m: diff.after.lates24m,
+    olderLates: diff.after.olderLates,
+    overallUtil: diff.utilizationOverall.after,
+    publicRecord: diff.after.publicRecord,
+    openRevolving: diff.after.openRevolving,
+    anyDerogatory: diff.after.derogatory > 0,
+  });
+  const high = diff.utilization.filter((u) => u.pct > 30);
+  const actionNeeded: string[] = [];
+  if (high.length) {
+    actionNeeded.push(
+      L.actionUtil(high[0].account, high[0].pct, pv2Money(high[0].current), pv2Money(high[0].limit), high.slice(1, 4).map((u) => `${u.account} (${u.pct}%)`).join(", ")),
+    );
+  }
+  actionNeeded.push(L.keepCurrent);
+  const targetNames = diff.targets.slice(0, 4).map((t) => t.item.split(" - ")[0]).join(", ");
+  const plan = [
+    L.planOfg(opts.round, targetNames),
+    L.planClient(high.slice(0, 4).map((u) => u.account).join(L.then)),
+    L.planProtect(opts.round),
+    L.planTimeline(opts.round),
+    L.planNext(opts.round),
+  ];
+  const strengths: string[] = [];
+  if (diff.positivesFlags.history) strengths.push(L.sHistory);
+  if (diff.positivesFlags.noCollections) strengths.push(L.sNoColl);
+  if (diff.utilization.reduce((s, u) => s + u.limit, 0) >= 20000) strengths.push(L.sLimits);
+  const growth = [...diff.targets.slice(0, 2).map((t) => t.item.split(" - ")[0]), ...(high.length ? [L.gUtil] : [])];
+  return {
+    lang,
+    clientFirstName: opts.clientFirstName,
+    clientName: opts.clientName,
+    baselineDate: diff.beforeDate ?? "--",
+    currentDate: diff.afterDate ?? "--",
+    round: opts.round,
+    scores: opts.scores,
+    wins: diff.wins,
+    clientActions: diff.clientActions,
+    targets: diff.targets,
+    utilization: diff.utilization,
+    utilizationOverall: diff.utilizationOverall,
+    utilizationNotes: diff.utilizationNotes,
+    positives: diff.positives,
+    actionNeeded,
+    goal,
+    fileStrength,
+    fileStrengthNote: L.strengthNote(strengths.join(", "), growth.join(", ")),
+    plan,
+    phone: opts.phone,
+    site: opts.site,
+  };
+}
+// ── END inlined credit file engine ──
+
+// ── Credit file extraction jobs (runtime I/O) ───────────────────────────────
+// New uploads only. Any provider, PDF or image. Claude reads the file through
+// the Message Batches API from the queue cron (a full report takes 1–3 min,
+// over the 60s function limit). Results land in credit_file_extractions for
+// staff review; Analysis (Phase 2) and Progress (Phase 3) build on them.
+
+const CREDIT_FILE_MAX_BYTES = 25 * 1024 * 1024;
+const CREDIT_FILE_SUBMIT_PER_TICK = 5;
+const CREDIT_FILE_MAX_ATTEMPTS = 3;
+
+function creditFileExtractionModel(): string {
+  return String(process.env.ANTHROPIC_MODEL || "").trim() || "claude-sonnet-4-6";
+}
+
+/**
+ * Claude key for report work (credit-file extraction, wizard enhance / QA /
+ * narrative / score reads). Uses the dedicated ANTHROPIC_SMS_API_KEY (+ its
+ * workspace) when set — the shared ANTHROPIC_API_KEY is invalid in prod —
+ * falling back to the shared key.
+ */
+function reportsAnthropicKey(): string {
+  return (
+    String(process.env.ANTHROPIC_SMS_API_KEY || "").trim() ||
+    String(process.env.ANTHROPIC_API_KEY || "").trim()
+  );
+}
+
+/** User-level keys with "all workspaces" access must name the workspace. */
+function anthropicWorkspaceHeader(apiKey: string | undefined): Record<string, string> {
+  const smsKey = String(process.env.ANTHROPIC_SMS_API_KEY || "").trim();
+  const ws = String(process.env.ANTHROPIC_SMS_WORKSPACE_ID || "").trim();
+  return smsKey && ws && apiKey === smsKey ? { "anthropic-workspace-id": ws } : {};
+}
+
+function anthropicJsonHeaders(apiKey: string): Record<string, string> {
+  return {
+    ...anthropicWorkspaceHeader(apiKey),
+    "x-api-key": apiKey,
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+  };
+}
+
+function creditAnalysisContextFromRow(row: RowDataPacket | undefined): CreditAnalysisLenderContext {
+  return {
+    escrow: row?.escrow_flag === null || row?.escrow_flag === undefined ? null : Number(row.escrow_flag) === 1,
+    lender_score_model: row?.lender_score_model ? String(row.lender_score_model) : null,
+    lender_score: row?.lender_score != null ? Number(row.lender_score) : null,
+    lender_target_score: row?.lender_target_score != null ? Number(row.lender_target_score) : null,
+  };
+}
+
+async function loadEncryptedCdnFile(
+  storageKey: string,
+  iv: string,
+  tag: string,
+): Promise<Buffer> {
+  let enc: Buffer;
+  if (process.env.VITEST === "true" && storageKey.startsWith("vitest://")) {
+    const cached = vitestCdnPlaintextByUrl.get(storageKey);
+    if (!cached) throw new Error("Credit file not found in CDN");
+    enc = Buffer.from(cached);
+  } else {
+    const resp = await fetch(storageKey);
+    if (!resp.ok) throw new Error(`Credit file download failed (${resp.status})`);
+    enc = Buffer.from(await resp.arrayBuffer());
+  }
+  return decryptFile(enc, iv, tag);
+}
+
+/**
+ * Store an uploaded credit report (encrypted) and queue Claude extraction.
+ * For recognized text PDFs the text skeleton is saved now as a cross-check.
+ */
+async function createCreditFileExtraction(opts: {
+  buffer: Buffer;
+  mimeType: string;
+  fileName: string;
+  clientId?: number | null;
+  caseId?: number | null;
+  /** Existing credit_analyses row this enhanced read belongs to. */
+  creditAnalysisId?: number | null;
+  /** Progress Report Wizard session (Before / After uploads). */
+  reportWizardSessionId?: number | null;
+  purpose: "analysis" | "progress_before" | "progress_after" | "other";
+  adminId?: number | null;
+}): Promise<{ id: number; imagePages: number; totalPages: number; provider: string }> {
+  if (!isSupportedCreditFileMediaType(opts.mimeType)) {
+    throw new Error("Unsupported file type — upload a PDF or an image (JPG, PNG, WebP)");
+  }
+  if (opts.buffer.length === 0 || opts.buffer.length > CREDIT_FILE_MAX_BYTES) {
+    throw new Error("File is empty or larger than 25 MB");
+  }
+  let skeleton: CreditFile | null = null;
+  if (opts.mimeType === "application/pdf") {
+    try {
+      const pdfParse = await loadPdfParse();
+      const text = String((await pdfParse(opts.buffer))?.text || "");
+      skeleton = parseCreditFile(text);
+    } catch (e: any) {
+      console.warn("[credit-file] text skeleton skipped:", e?.message ?? e);
+    }
+  }
+  const { encrypted, iv, tag } = encryptFile(opts.buffer);
+  const safeName = opts.fileName.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
+  const storageKey = await uploadToCDN(
+    encrypted,
+    `credit_file_${Date.now()}_${safeName}.enc`,
+    "application/octet-stream",
+    opts.clientId ?? "credit-files",
+  );
+  const [ins] = await pool.query<ResultSetHeader>(
+    `INSERT INTO credit_file_extractions
+       (client_id, case_id, credit_analysis_id, report_wizard_session_id, purpose,
+        file_name, mime_type, file_size, storage_key, enc_iv, enc_tag, provider,
+        status, model, text_skeleton_json, image_pages, total_pages, created_by_admin_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)`,
+    [
+      opts.clientId ?? null,
+      opts.caseId ?? null,
+      opts.creditAnalysisId ?? null,
+      opts.reportWizardSessionId ?? null,
+      opts.purpose,
+      opts.fileName.slice(0, 255),
+      opts.mimeType,
+      opts.buffer.length,
+      storageKey,
+      iv,
+      tag,
+      skeleton?.provider ?? "unknown",
+      creditFileExtractionModel(),
+      skeleton ? JSON.stringify(skeleton) : null,
+      skeleton ? skeleton.imagePages : null,
+      skeleton ? skeleton.totalPages : null,
+      opts.adminId ?? null,
+    ],
+  );
+  return {
+    id: Number(ins.insertId),
+    imagePages: skeleton?.imagePages ?? 0,
+    totalPages: skeleton?.totalPages ?? 0,
+    provider: skeleton?.provider ?? "unknown",
+  };
+}
+
+/**
+ * Cron step: submit queued jobs as one Message Batch, then collect finished
+ * batches. Idempotent per tick; failures are recorded on the job.
+ */
+async function processCreditFileExtractions(): Promise<{
+  submitted: number;
+  completed: number;
+  failed: number;
+}> {
+  const out = { submitted: 0, completed: 0, failed: 0 };
+  const apiKey = reportsAnthropicKey();
+  if (!apiKey || process.env.VITEST === "true") return out;
+
+  // 1) Submit queued jobs.
+  const [queued] = await pool.query<RowDataPacket[]>(
+    `SELECT id, storage_key, enc_iv, enc_tag, mime_type, model, attempts
+     FROM credit_file_extractions
+     WHERE status = 'queued' AND attempts < ?
+     ORDER BY id ASC LIMIT ?`,
+    [CREDIT_FILE_MAX_ATTEMPTS, CREDIT_FILE_SUBMIT_PER_TICK],
+  );
+  if (queued.length > 0) {
+    const requests: Array<{ custom_id: string; params: Record<string, unknown> }> = [];
+    for (const row of queued) {
+      try {
+        const buf = await loadEncryptedCdnFile(
+          String(row.storage_key),
+          String(row.enc_iv),
+          String(row.enc_tag),
+        );
+        requests.push({
+          custom_id: `cfe_${row.id}`,
+          params: buildCreditFileExtractionParams({
+            fileBase64: buf.toString("base64"),
+            mediaType: row.mime_type as CreditFileMediaType,
+            model: String(row.model || creditFileExtractionModel()),
+          }),
+        });
+      } catch (e: any) {
+        await pool.query(
+          `UPDATE credit_file_extractions
+           SET attempts = attempts + 1, error_message = ?,
+               status = IF(attempts + 1 >= ?, 'failed', 'queued')
+           WHERE id = ?`,
+          [String(e?.message || e).slice(0, 500), CREDIT_FILE_MAX_ATTEMPTS, row.id],
+        );
+      }
+    }
+    if (requests.length > 0) {
+      const ids = requests.map((r) => Number(r.custom_id.slice(4)));
+      try {
+        const { data } = await axios.post(
+          "https://api.anthropic.com/v1/messages/batches",
+          { requests },
+          {
+            headers: anthropicJsonHeaders(apiKey),
+            timeout: 45_000,
+            maxBodyLength: Infinity,
+            maxContentLength: Infinity,
+          },
+        );
+        await pool.query(
+          `UPDATE credit_file_extractions
+           SET status = 'submitted', batch_id = ?, submitted_at = NOW(),
+               attempts = attempts + 1, error_message = NULL
+           WHERE id IN (?)`,
+          [String(data?.id || ""), ids],
+        );
+        out.submitted += ids.length;
+        // Credentials work again: jobs that failed only on a bad/missing key
+        // (not on the file) go back in the queue — no re-upload needed.
+        await pool.query(
+          `UPDATE credit_file_extractions
+           SET status = 'queued', attempts = 0, error_message = NULL
+           WHERE status = 'failed'
+             AND (error_message LIKE '%invalid x-api-key%' OR error_message LIKE '%authentication%'
+                  OR error_message LIKE '%401%')
+             AND created_at >= NOW() - INTERVAL 14 DAY
+           ORDER BY id DESC
+           LIMIT 20`,
+        );
+      } catch (e: any) {
+        const msg = String(
+          e?.response?.data?.error?.message || e?.message || e,
+        ).slice(0, 500);
+        console.error("[credit-file:submit]", e?.response?.status, msg);
+        await pool.query(
+          `UPDATE credit_file_extractions
+           SET attempts = attempts + 1, error_message = ?,
+               status = IF(attempts + 1 >= ?, 'failed', 'queued')
+           WHERE id IN (?)`,
+          [msg, CREDIT_FILE_MAX_ATTEMPTS, ids],
+        );
+      }
+    }
+  }
+
+  // 2) Collect finished batches.
+  const [batches] = await pool.query<RowDataPacket[]>(
+    `SELECT DISTINCT batch_id FROM credit_file_extractions
+     WHERE status = 'submitted' AND batch_id IS NOT NULL LIMIT 5`,
+  );
+  for (const b of batches) {
+    const batchId = String(b.batch_id);
+    try {
+      const { data: batch } = await axios.get(
+        `https://api.anthropic.com/v1/messages/batches/${encodeURIComponent(batchId)}`,
+        { headers: anthropicJsonHeaders(apiKey), timeout: 15_000 },
+      );
+      if (batch?.processing_status !== "ended" || !batch?.results_url) continue;
+      const { data: jsonl } = await axios.get(String(batch.results_url), {
+        headers: anthropicJsonHeaders(apiKey),
+        timeout: 30_000,
+        responseType: "text",
+        transformResponse: (x) => x,
+      });
+      for (const line of String(jsonl).split("\n")) {
+        if (!line.trim()) continue;
+        let item: any;
+        try {
+          item = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        const id = Number(String(item?.custom_id || "").replace(/^cfe_/, ""));
+        if (!id) continue;
+        const ok = await finishCreditFileExtraction(id, item?.result);
+        if (ok) out.completed++;
+        else out.failed++;
+      }
+      // Any job still 'submitted' for an ended batch had no result line.
+      await pool.query(
+        `UPDATE credit_file_extractions
+         SET status = 'failed', error_message = 'No result returned for this file', completed_at = NOW()
+         WHERE batch_id = ? AND status = 'submitted'`,
+        [batchId],
+      );
+    } catch (e: any) {
+      console.error("[credit-file:poll]", batchId, e?.message ?? e);
+    }
+  }
+  return out;
+}
+
+/**
+ * Progress Report v2 for a wizard session (Preview + Publish). Uses the
+ * account-level diff when both enhanced reads are ready; otherwise builds the
+ * same 3-page layout from the reviewed wizard data and flags it for review.
+ * Scores always come from the staff-verified review data.
+ */
+async function renderProgressReportV2ForSession(
+  sessionId: number,
+  data: OfGReportData,
+  roundNumber: number,
+): Promise<{ buffer: Buffer; fileName: string; flags: Pv2Flag[] }> {
+  const common = pv2CommonFromReview(data, roundNumber);
+  const { lang, scores } = common;
+
+  let diff: Pv2Diff | null = null;
+  const flags: Pv2Flag[] = [];
+  try {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT purpose, status, extracted_json FROM credit_file_extractions
+       WHERE report_wizard_session_id = ? AND purpose IN ('progress_before','progress_after')
+       ORDER BY id DESC`,
+      [sessionId],
+    );
+    const latest = (p: string) => rows.find((r) => r.purpose === p);
+    const b = latest("progress_before");
+    const a = latest("progress_after");
+    if (b?.status === "ready" && a?.status === "ready") {
+      const parse = (v: unknown): CreditFile => (typeof v === "string" ? JSON.parse(v) : v) as CreditFile;
+      let before = parse(b.extracted_json);
+      let after = parse(a.extracted_json);
+      const bd = parseReportDate(before.reportDate);
+      const ad = parseReportDate(after.reportDate);
+      // Chronology guard: BEFORE must be the older pull — swap and log.
+      if (bd && ad && bd.getTime() > ad.getTime()) {
+        [before, after] = [after, before];
+        flags.push({ code: "chronology_swapped", message: "BEFORE was newer than AFTER — swapped automatically." });
+      }
+      diff = pv2Diff(before, after, lang);
+    }
+  } catch (e: any) {
+    console.error("[report-v2:load-reads]", sessionId, e?.message ?? e);
+  }
+
+  const pdfData = diff
+    ? pv2BuildPdfData({ diff, ...common })
+    : pv2PdfDataFromReview(data, common);
+  flags.push(
+    ...pv2Validate({
+      diff,
+      scoresBefore: { TU: scores.TU.before, EX: scores.EX.before, EQ: scores.EQ.before },
+      scoresAfter: { TU: scores.TU.after, EX: scores.EX.after, EQ: scores.EQ.after },
+      clientText: [
+        ...pdfData.positives,
+        ...pdfData.actionNeeded,
+        ...pdfData.plan,
+        ...pdfData.wins.map((w) => w.item),
+        ...pdfData.targets.map((t) => t.item),
+      ],
+      fileStrength: pdfData.fileStrength,
+      goal: pdfData.goal,
+      utilization: pdfData.utilization,
+    }),
+  );
+  const buffer = await generateProgressReportV2Pdf(pdfData, await loadOfgLogoBytes());
+  const mon = new Date().toLocaleDateString("en-US", { month: "short", year: "numeric" }).replace(" ", "");
+  const first = (data.client.firstName || "Client").replace(/[^A-Za-z0-9_-]/g, "") || "Client";
+  return { buffer, fileName: `${first}_OFG_Progress_Report_${mon}.pdf`, flags };
+}
+
+/** Shared header data (names, round, staff-verified scores, language). */
+function pv2CommonFromReview(data: OfGReportData, roundNumber: number) {
+  const clientName = `${data.client.firstName || ""} ${data.client.lastName || ""}`.trim() || "Client";
+  return {
+    clientFirstName: data.client.firstName || clientName,
+    clientName,
+    round: roundNumber,
+    scores: {
+      TU: { before: data.bureauScores.transunion.before || null, after: data.bureauScores.transunion.after || null },
+      EX: { before: data.bureauScores.experian.before || null, after: data.bureauScores.experian.after || null },
+      EQ: { before: data.bureauScores.equifax.before || null, after: data.bureauScores.equifax.after || null },
+    } as Record<Bureau, { before: number | null; after: number | null }>,
+    phone: "(949) 736-5644",
+    site: "optimum-financial-group.com",
+    lang: (data.locale === "es" ? "es" : "en") as Pv2Lang,
+  };
+}
+
+/** v2 PDF straight from reviewed wizard data (no DB / account read). */
+async function progressReportV2PdfFromReview(data: OfGReportData, roundNumber: number): Promise<Buffer> {
+  return generateProgressReportV2Pdf(pv2PdfDataFromReview(data, pv2CommonFromReview(data, roundNumber)), await loadOfgLogoBytes());
+}
+
+/**
+ * v2 layout from the reviewed wizard data (no account-level read): staff-
+ * edited wins / targets / utilization, formulas from the spec.
+ */
+function pv2PdfDataFromReview(
+  data: OfGReportData,
+  common: Omit<Pv2PdfData, "wins" | "clientActions" | "targets" | "utilization" | "utilizationOverall" | "utilizationNotes" | "positives" | "actionNeeded" | "goal" | "fileStrength" | "fileStrengthNote" | "plan" | "baselineDate" | "currentDate">,
+): Pv2PdfData {
+  const prio = (p: string): Pv2Priority => (/high/i.test(p) ? "HIGH" : /low/i.test(p) ? "LOW" : "MEDIUM");
+  const wins: Pv2Win[] = (data.winsThisRound?.length ? data.winsThisRound : data.wins)
+    .filter((w) => w.itemRemoved && !isCreditorlessWinLabel(w.itemRemoved))
+    .map((w) => ({
+      item: w.itemRemoved,
+      bureaus: w.bureaus,
+      impact: prio(w.impact),
+      status: /partial/i.test(w.status) ? "PARTIAL" : "REMOVED",
+      remainsOn: [],
+      kind: /inquir/i.test(w.itemRemoved) ? "inquiry" : "account",
+    }));
+  const targets: Pv2Target[] = (data.targetsThisRound?.length ? data.targetsThisRound : data.targets)
+    .filter((t) => t.item && !isCreditorlessWinLabel(t.item))
+    .map((t) => ({ item: t.item, bureaus: t.bureaus, detail: t.detail, priority: prio(t.priority), lift: t.priority === "high" ? 30 : 12 }));
+  const utilization: Pv2UtilRow[] = data.utilization
+    .filter((u) => u.limit > 0)
+    .map((u) => ({
+      account: u.account,
+      bureau: "TU" as Bureau,
+      limit: u.limit,
+      baseline: null,
+      current: u.balance,
+      pct: Math.round((u.balance / u.limit) * 100),
+      payTo30: Math.floor(u.limit * 0.3),
+      payTo10: Math.floor(u.limit * 0.1),
+    }))
+    .sort((x, y) => y.pct - x.pct);
+  const lim = utilization.reduce((s, u) => s + u.limit, 0);
+  const overall = lim > 0 ? Math.round((utilization.reduce((s, u) => s + u.current, 0) / lim) * 100) : null;
+  const ma = pv2MiddleScore({ TU: common.scores.TU.after, EX: common.scores.EX.after, EQ: common.scores.EQ.after }) ?? 0;
+  const fileStrength = pv2FileStrength({
+    openChargeOffsOrCollections: targets.filter((t) => /charge|collection/i.test(t.item)).length,
+    lates24m: targets.some((t) => /late/i.test(`${t.item} ${t.detail}`)),
+    olderLates: false,
+    overallUtil: overall,
+    publicRecord: targets.some((t) => /bankrupt|judgment|lien/i.test(t.item)),
+    openRevolving: utilization.length,
+    anyDerogatory: targets.length > 0,
+  });
+  // Reuse the diff-based sentence builder with a minimal diff-shaped object.
+  const shaped = pv2BuildPdfData({
+    ...common,
+    diff: {
+      beforeDate: data.reportDate.before,
+      afterDate: data.reportDate.after,
+      wins,
+      clientActions: [],
+      targets,
+      utilization,
+      utilizationOverall: { before: null, after: overall, bureau: null },
+      utilizationNotes: [],
+      positives: [],
+      positivesFlags: { history: false, noCollections: !targets.some((t) => /collection/i.test(t.item)) },
+      internal: [],
+      counts: { beforeAccounts: 0, afterAccounts: 0, beforeInquiries: 0, afterInquiries: 0 },
+      after: { openDerogatory: 0, derogatory: targets.length, lates24m: false, olderLates: false, publicRecord: false, openRevolving: utilization.length },
+    },
+  });
+  return {
+    ...shaped,
+    // Staff-reviewed text, minus report-UI labels scraped as content.
+    positives: (data.positiveAccounts || []).filter((p) => p && !/current address|order an update now|currently using across/i.test(p)).slice(0, 5),
+    fileStrength,
+    goal: pv2GoalRange(ma, targets.reduce((s, t) => s + t.lift, 0), overall),
+  };
+}
+
+
+async function finishCreditFileExtraction(id: number, result: any): Promise<boolean> {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT provider, text_skeleton_json FROM credit_file_extractions WHERE id = ? LIMIT 1`,
+    [id],
+  );
+  if (!rows[0]) return false;
+  const fail = async (msg: string) => {
+    await pool.query(
+      `UPDATE credit_file_extractions
+       SET status = 'failed', error_message = ?, completed_at = NOW() WHERE id = ?`,
+      [msg.slice(0, 500), id],
+    );
+    return false;
+  };
+  if (result?.type !== "succeeded") {
+    return fail(
+      `Claude ${result?.type || "error"}: ${result?.error?.error?.message || result?.error?.message || "no message"}`,
+    );
+  }
+  const message = result.message;
+  if (message?.stop_reason === "max_tokens") {
+    return fail("Report too long for one pass (output limit reached) — split the file or retry");
+  }
+  if (message?.stop_reason === "refusal") return fail("Claude declined to read this file");
+  const text = (Array.isArray(message?.content) ? message.content : [])
+    .filter((c: any) => c?.type === "text")
+    .map((c: any) => c.text)
+    .join("");
+  try {
+    const provider = (String(rows[0].provider || "unknown") as CreditFileProvider);
+    const extracted = parseCreditFileExtraction(text, provider);
+    const skeletonRaw = rows[0].text_skeleton_json;
+    const skeleton: CreditFile | null = skeletonRaw
+      ? typeof skeletonRaw === "string"
+        ? JSON.parse(skeletonRaw)
+        : skeletonRaw
+      : null;
+    const check =
+      skeleton && skeleton.provider !== "unknown"
+        ? crossCheckCreditFile(extracted, skeleton)
+        : { issues: [] as CrossCheckIssue[], confidence: extracted.accounts.length ? 0.9 : 0.3 };
+    await pool.query(
+      `UPDATE credit_file_extractions
+       SET status = 'ready', extracted_json = ?, issues_json = ?, confidence = ?,
+           error_message = NULL, completed_at = NOW()
+       WHERE id = ?`,
+      [JSON.stringify(extracted), JSON.stringify(check.issues), check.confidence, id],
+    );
+    return true;
+  } catch (e: any) {
+    return fail(`Could not read Claude output: ${String(e?.message || e)}`);
+  }
+}
+
+
 /** Curated CRM tools for Admin Ask (read + guided writes). */
 async function executeAdminAiTool(
   rawName: string,
@@ -7738,6 +12712,7 @@ async function executeAdminAiTool(
       name === "update_contact" ||
       name === "convert_contact" ||
       name === "send_contact_sms" ||
+      name === "send_contact_whatsapp" ||
       name === "send_contact_email"
     ) {
       // CRM Contacts are admin-only (same as denyAffiliateAccess on REST routes)
@@ -8508,12 +13483,23 @@ async function executeAdminAiTool(
       const includeCases = stage !== "prospect";
 
       let prospectTotal = 0;
+      const prospectTrafficLight = { hot: 0, warm: 0, cold: 0 };
       if (includeProspects) {
         const [pRows] = await pool.query<RowDataPacket[]>(
           `SELECT COUNT(*) AS total FROM clients c WHERE ${prospectWhere.join(" AND ")}`,
           prospectArgs,
         );
         prospectTotal = Number(pRows[0]?.total || 0);
+        const [tRows] = await pool.query<RowDataPacket[]>(
+          `SELECT c.lead_temperature AS color, COUNT(*) AS total FROM clients c
+           WHERE ${prospectWhere.join(" AND ")} AND c.lead_temperature IS NOT NULL
+           GROUP BY c.lead_temperature`,
+          prospectArgs,
+        );
+        for (const r of tRows) {
+          const color = String(r.color) as "hot" | "warm" | "cold";
+          if (color in prospectTrafficLight) prospectTrafficLight[color] = Number(r.total || 0);
+        }
       }
 
       const columns: Record<string, { total: number }> = {
@@ -8553,6 +13539,8 @@ async function executeAdminAiTool(
         ok: true,
         data: {
           columns,
+          /** Prospect traffic light counts (pipeline prospects). */
+          prospect_traffic_light: prospectTrafficLight,
           href: "/admin/pipeline",
         },
       };
@@ -9288,6 +14276,9 @@ async function executeAdminAiTool(
             updated_at: d.updated_at,
           };
         });
+        const deliveriesByRound = await loadRoundReportDeliveries(
+          Number(row.client_id),
+        );
         return {
           ok: true,
           data: {
@@ -9297,6 +14288,7 @@ async function executeAdminAiTool(
             reports: reports.map((r) => {
               const reportId = Number(r.id);
               const rn = Number(r.round_number);
+              const sends = deliveriesByRound.get(rn) ?? [];
               const pdf =
                 pdfByReportId.get(reportId) || pdfByRound.get(rn) || null;
               const hasPdf = !!pdf || !!Number(r.has_legacy_pdf);
@@ -9319,6 +14311,8 @@ async function executeAdminAiTool(
                   ? Number(r.wizard_session_id)
                   : null,
                 created_at: r.created_at,
+                last_sent_at: sends[0]?.sent_at ?? null,
+                deliveries: sends,
               };
             }),
             wizard_drafts,
@@ -9439,6 +14433,10 @@ async function executeAdminAiTool(
             ? String(pdf.file_name || "")
             : null,
           created_at: r?.created_at ?? null,
+          deliveries:
+            (
+              await loadRoundReportDeliveries(Number(row.client_id), round)
+            ).get(round) ?? [],
           wizard: wiz
             ? {
                 session_id: Number(wiz.id),
@@ -9589,7 +14587,9 @@ async function executeAdminAiTool(
                 c.affiliate_id, c.contract_signed_at, c.package_id,
                 c.referral_category, c.referrer_id,
                 c.created_at, c.updated_at,
-                LEFT(COALESCE(c.admin_notes,''), 400) AS notes_excerpt,
+                RIGHT(COALESCE(c.admin_notes,''), 600) AS notes_excerpt,
+                c.lead_temperature, c.lead_temperature_reasons, c.lead_temperature_at,
+                c.analysis_reviewed_at, c.call_scheduled_at,
                 p.name AS package_name,
                 a.first_name AS assignee_first, a.last_name AS assignee_last,
                 r.first_name AS ref_first, r.last_name AS ref_last,
@@ -9688,6 +14688,15 @@ async function executeAdminAiTool(
               : null,
           affiliate_id: r.affiliate_id,
           contract_signed_at: r.contract_signed_at,
+          // Newest notes (append-only file): last ~600 characters.
+          notes_excerpt_is_latest: true,
+          lead_temperature: r.lead_temperature ?? null,
+          lead_temperature_reasons: r.lead_temperature_reasons
+            ? String(r.lead_temperature_reasons).split(",")
+            : [],
+          lead_temperature_at: r.lead_temperature_at ?? null,
+          analysis_reviewed_at: r.analysis_reviewed_at ?? null,
+          call_scheduled_at: r.call_scheduled_at ?? null,
           notes_excerpt: r.notes_excerpt
             ? decodeLiteralUnicodeEscapes(String(r.notes_excerpt))
             : null,
@@ -9775,10 +14784,36 @@ async function executeAdminAiTool(
         "ssn_card",
         "proof_of_address",
       ] as const;
-      const byType = new Map<string, RowDataPacket>();
+      // Onboarding-portal uploads live in client_task_completions (template
+      // slug = doc type), not client_documents — merge them so the checklist
+      // reflects what the client actually submitted.
+      const ctcWhere = ["ctc.client_id = ?", "ctc.file_storage_key IS NOT NULL"];
+      const ctcParams: any[] = [resolved.clientId];
+      if (resolved.caseId) {
+        ctcWhere.push("ctc.case_id = ?");
+        ctcParams.push(resolved.caseId);
+      }
+      const [portalRows] = await pool.query<RowDataPacket[]>(
+        `SELECT ctc.id, ctc.case_id, ctc.file_name, ctc.file_mime,
+                ctc.admin_review_status, ctc.admin_notes, ctc.completed_at,
+                ctc.admin_reviewed_at, t.slug
+         FROM client_task_completions ctc
+         JOIN onboarding_task_templates t ON t.id = ctc.task_template_id
+         WHERE ${ctcWhere.join(" AND ")} AND t.task_type = 'upload'
+         ORDER BY ctc.completed_at DESC
+         LIMIT 20`,
+        ctcParams,
+      );
+      const byType = new Map<string, { review_status: string | null }>();
       for (const r of rows) {
         const t = String(r.doc_type);
-        if (!byType.has(t)) byType.set(t, r);
+        if (!byType.has(t)) byType.set(t, { review_status: r.review_status });
+      }
+      for (const r of portalRows) {
+        const t = String(r.slug);
+        if (!byType.has(t)) {
+          byType.set(t, { review_status: r.admin_review_status });
+        }
       }
       return {
         ok: true,
@@ -9792,6 +14827,7 @@ async function executeAdminAiTool(
             review_status: byType.get(t)?.review_status || null,
           })),
           documents: rows.map((r) => ({
+            source: "case_documents",
             id: r.id,
             doc_type: r.doc_type,
             pipeline_round: r.pipeline_round,
@@ -9804,6 +14840,22 @@ async function executeAdminAiTool(
               : null,
             uploaded_at: r.uploaded_at,
             reviewed_at: r.reviewed_at,
+            case_id: r.case_id,
+          })),
+          // Not usable as attachment_case_document_id (different table).
+          onboarding_uploads: portalRows.map((r) => ({
+            source: "onboarding_portal",
+            task_completion_id: r.id,
+            doc_type: r.slug,
+            file_name: r.file_name,
+            mime_type: r.file_mime,
+            review_status: r.admin_review_status,
+            rejection_reason:
+              r.admin_review_status === "rejected" && r.admin_notes
+                ? String(r.admin_notes).slice(0, 200)
+                : null,
+            uploaded_at: r.completed_at,
+            reviewed_at: r.admin_reviewed_at,
             case_id: r.case_id,
           })),
           href: `/admin/pipeline?client=${resolved.clientId}`,
@@ -10127,6 +15179,7 @@ async function executeAdminAiTool(
       name === "update_contact" ||
       name === "convert_contact" ||
       name === "send_contact_sms" ||
+      name === "send_contact_whatsapp" ||
       name === "send_contact_email" ||
       name === "create_work_task" ||
       name === "update_work_task" ||
@@ -10135,6 +15188,7 @@ async function executeAdminAiTool(
       name === "send_email" ||
       name === "send_round_report" ||
       name === "send_sms" ||
+      name === "send_whatsapp" ||
       name === "update_pipeline_stage" ||
       name === "convert_prospect" ||
       name === "update_client" ||
@@ -11014,6 +16068,240 @@ async function executeAdminAiTool(
         data: {
           sent: true,
           audience: "contact",
+          contact_id: contactId,
+          contact_name: contactName,
+          to: toPhone,
+          from: fromE164,
+          body,
+          message_id: messageId,
+          conversation_id: conversationId,
+          provider_message_id: providerMessageId,
+          provider_status: providerStatus,
+          reopened,
+          sent_at: new Date().toISOString(),
+          note_appended: contactNoteAppended,
+          contact_note_appended: contactNoteAppended,
+          href: `/admin/conversations?contact=${contactId}`,
+        },
+      };
+    }
+
+    if (name === "send_contact_whatsapp") {
+      if (!whatsapp360dialogEnabled()) {
+        return {
+          ok: false,
+          error: "whatsapp_disabled",
+          message:
+            "WhatsApp is not enabled. Set WHATSAPP_360DIALOG_ENABLED=1 and D360_API_KEY.",
+        };
+      }
+      if (!(await adminMayUseWhatsapp(ctx.adminId))) {
+        return {
+          ok: false,
+          error: "forbidden",
+          message:
+            "WhatsApp is only available for the assigned WA Business admin (César).",
+        };
+      }
+      const contactId =
+        args.contact_id != null && Number(args.contact_id) > 0
+          ? Number(args.contact_id)
+          : 0;
+      const rawBody = decodeLiteralUnicodeEscapes(
+        String(args.body || args.message || ""),
+      ).trim();
+      if ([...rawBody].length > WHATSAPP_MAX_BODY_CHARS) {
+        return {
+          ok: false,
+          error: "whatsapp_body_too_long",
+          message: `WhatsApp body exceeds ${WHATSAPP_MAX_BODY_CHARS} characters`,
+        };
+      }
+      const body = rawBody;
+      const missing: string[] = [];
+      if (!contactId) missing.push("contact_id");
+      if (!body) missing.push("body");
+
+      let contactName: string | null = null;
+      let toPhone: string | null = null;
+      let conversationClosed = false;
+      const fromE164 = whatsappToE164(WHATSAPP_DEFAULT_ASSIGNEE_PHONE_LAST10);
+
+      if (missing.length === 0) {
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT id, first_name, last_name, phone, deleted_at, converted_client_id
+           FROM contacts WHERE id = ? LIMIT 1`,
+          [contactId],
+        );
+        if (!rows[0] || rows[0].deleted_at) {
+          return {
+            ok: false,
+            error: "not_found",
+            message:
+              "Contact not found (or soft-deleted). Use search_contacts.",
+          };
+        }
+        if (rows[0].converted_client_id != null) {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message:
+              "Contact was already converted to a pipeline prospect. Use send_whatsapp with that client_id instead.",
+          };
+        }
+        contactName =
+          `${rows[0].first_name || ""} ${rows[0].last_name || ""}`.trim();
+        toPhone = rows[0].phone ? String(rows[0].phone).trim() : null;
+        if (!toPhone) {
+          return {
+            ok: false,
+            error: "no_phone",
+            message:
+              "Contact has no phone on file. Use update_contact to set phone, then retry.",
+          };
+        }
+        conversationClosed = await contactComposeBlockedByClosed({
+          crmContactId: contactId,
+        });
+      }
+
+      const preview = {
+        audience: "contact" as const,
+        channel: "whatsapp" as const,
+        contact_id: contactId || null,
+        contact_name: contactName,
+        to: toPhone,
+        from: fromE164,
+        body,
+        conversation_closed: conversationClosed,
+        will_log_conversations_hub: true,
+        will_log_contact_note: true,
+        note: conversationClosed
+          ? "Conversation is closed. On confirm, it will reopen and WhatsApp will send via Conversations hub + contact admin_notes."
+          : "Dry-run does not send. On confirm, WhatsApp sends via 360dialog into Conversations hub and appends [WhatsApp …] to contacts.admin_notes.",
+      };
+
+      if (missing.length > 0) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: false,
+            missing_fields: missing,
+            preview,
+            guidance:
+              "Collect contact_id (from search_contacts) and body. Do not pass client_id here — use send_whatsapp for pipeline clients.",
+          },
+        };
+      }
+
+      if (!adminAiConfirmTrue(args.confirm)) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: true,
+            preview,
+            required_confirm_phrase: ADMIN_AI_WRITE_CONFIRM_PHRASE,
+            guidance: `Show the exact To / From / body. After approval, re-call with confirm=true and confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`,
+          },
+        };
+      }
+
+      const writeGate = adminAiWriteConfirmed(args);
+      if (writeGate.ok === false) {
+        return {
+          ok: false,
+          error: "confirm_required",
+          message: writeGate.message,
+        };
+      }
+
+      let reopened = false;
+      if (conversationClosed) {
+        await setContactConversationStatus({
+          crmContactId: contactId,
+          status: "open",
+          adminId: ctx.adminId,
+        });
+        reopened = true;
+      }
+
+      let messageId: number | null = null;
+      let conversationId: number | null = null;
+      let providerMessageId: string | null = null;
+      let providerStatus: string | null = null;
+      let contactNoteAppended = false;
+
+      try {
+        const result = await deliverHubConversationMessage({
+          adminId: ctx.adminId,
+          crmContactId: contactId,
+          channel: "whatsapp",
+          textBody: body,
+        });
+        messageId = result.message_id;
+        conversationId = result.conversation_id;
+        contactNoteAppended = !!result.contact_note_appended;
+        const [mrows] = await pool.query<RowDataPacket[]>(
+          `SELECT provider_message_id, provider_status, error_message
+           FROM conversation_messages WHERE id = ? LIMIT 1`,
+          [result.message_id],
+        );
+        providerMessageId = mrows[0]?.provider_message_id
+          ? String(mrows[0].provider_message_id)
+          : null;
+        providerStatus = mrows[0]?.provider_status
+          ? String(mrows[0].provider_status)
+          : result.provider_status;
+        if (!result.ok && result.error) {
+          return {
+            ok: false,
+            error: "send_failed",
+            message: String(result.error).slice(0, 400),
+          };
+        }
+        if (!contactNoteAppended) {
+          const ts = new Date().toISOString().slice(0, 16).replace("T", " ");
+          contactNoteAppended = await appendContactFileNote(
+            contactId,
+            formatSmsClientFileNote({
+              direction: "sent",
+              ts,
+              peerPhone: toPhone || "",
+              body: body.slice(0, 1500),
+              providerMessageId,
+              channelLabel: "WhatsApp",
+              providerLabel: "360dialog id",
+            }),
+          );
+        }
+      } catch (e: any) {
+        const msg = String(e?.message || e);
+        if (
+          msg === "conversation_closed" ||
+          e?.code === "conversation_closed"
+        ) {
+          return {
+            ok: false,
+            error: "conversation_closed",
+            message:
+              "Conversation is still closed. Reopen in Conversations, then retry send_contact_whatsapp.",
+          };
+        }
+        return {
+          ok: false,
+          error: "send_failed",
+          message: msg.slice(0, 400),
+        };
+      }
+
+      return {
+        ok: true,
+        data: {
+          sent: true,
+          audience: "contact",
+          channel: "whatsapp",
           contact_id: contactId,
           contact_name: contactName,
           to: toPhone,
@@ -12538,11 +17826,46 @@ async function executeAdminAiTool(
         .slice(0, 255);
       const fileBase64Raw =
         typeof args.file_base64 === "string" ? args.file_base64 : "";
-      const fileBuffer = fileBase64Raw
+      let fileBuffer = fileBase64Raw
         ? adminAiDecodeFileBase64(fileBase64Raw)
         : null;
+      // Re-run on the PDF stored with an earlier analysis (no base64 paste —
+      // full 3-bureau PDFs get truncated in tool arguments).
+      const sourceAnalysisId = Number(args.source_credit_analysis_id || 0);
+      let sourceFileName = "";
+      if (!fileBuffer && sourceAnalysisId > 0) {
+        const [src] = await pool.query<RowDataPacket[]>(
+          `SELECT e.storage_key, e.enc_iv, e.enc_tag, e.file_name, ca.client_id
+           FROM credit_file_extractions e
+           JOIN credit_analyses ca ON ca.id = e.credit_analysis_id
+           WHERE e.credit_analysis_id = ? AND e.purpose = 'analysis'
+           ORDER BY e.id DESC LIMIT 1`,
+          [sourceAnalysisId],
+        );
+        if (!src[0]) {
+          return {
+            ok: false,
+            error: "not_found",
+            message: `No stored credit report PDF for analysis ${sourceAnalysisId}. Upload it in OFG (Credit analysis) first.`,
+          };
+        }
+        if (Number(src[0].client_id) !== clientIdArg) {
+          return {
+            ok: false,
+            error: "mismatch",
+            message: `Analysis ${sourceAnalysisId} belongs to a different client.`,
+          };
+        }
+        fileBuffer = await loadEncryptedCdnFile(
+          String(src[0].storage_key),
+          String(src[0].enc_iv),
+          String(src[0].enc_tag),
+        );
+        sourceFileName = String(src[0].file_name || "").replace(/[/\\]/g, "_").slice(0, 255);
+      }
+      const effectiveFileName = fileName || sourceFileName;
       const mimeType = adminAiDocMimeFromFilename(
-        fileName,
+        effectiveFileName,
         "application/pdf",
       );
       const clientGoal = args.client_goal
@@ -12551,7 +17874,11 @@ async function executeAdminAiTool(
       const notes = args.notes
         ? decodeLiteralUnicodeEscapes(String(args.notes)).trim()
         : null;
-      const emailOptIn = args.email_opt_in === true;
+      const escrowArg = typeof args.escrow === "boolean" ? args.escrow : null;
+      // Escrow: never send client text while the loan is underwriting.
+      const emailOptIn = args.email_opt_in === true && escrowArg !== true;
+      const lenderScoreArg = Number.isInteger(args.lender_score) ? Number(args.lender_score) : null;
+      const lenderTargetArg = Number.isInteger(args.lender_target_score) ? Number(args.lender_target_score) : null;
       const repName = args.rep_name ? String(args.rep_name).trim() : null;
       const agentPhone = args.agent_phone
         ? String(args.agent_phone).trim()
@@ -12559,7 +17886,7 @@ async function executeAdminAiTool(
 
       const missing: string[] = [];
       if (!clientIdArg || clientIdArg <= 0) missing.push("client_id");
-      if (!fileName) missing.push("file_name");
+      if (!effectiveFileName) missing.push("file_name");
 
       let clientId: number | null = null;
       let clientName: string | null = null;
@@ -12626,7 +17953,8 @@ async function executeAdminAiTool(
         client_name: clientName,
         client_email: clientEmail,
         is_prospect: isProspect,
-        file_name: fileName || null,
+        file_name: effectiveFileName || null,
+        source_credit_analysis_id: sourceAnalysisId || null,
         mime_type: mimeType,
         file_size_bytes: fileBuffer?.length ?? null,
         text_language: textLanguage,
@@ -12644,7 +17972,7 @@ async function executeAdminAiTool(
             missing_fields: missing,
             preview,
             guidance:
-              "Provide client_id (from search_clients) and file_name (.pdf), then file_base64 from the credit report attachment.",
+              "Provide client_id (from search_clients), then source_credit_analysis_id (re-run a PDF already in OFG — preferred) or file_name + file_base64.",
           },
         };
       }
@@ -12668,10 +17996,10 @@ async function executeAdminAiTool(
           data: {
             dry_run: true,
             ready: false,
-            missing_fields: ["file_base64"],
+            missing_fields: ["source_credit_analysis_id or file_base64"],
             preview,
             guidance:
-              "Client looks valid. Re-call with file_base64 (PDF) to preview size, then confirm after user approval.",
+              "Client looks valid. Re-call with source_credit_analysis_id (PDF already in OFG — preferred for full 3-bureau reports) or file_base64, then confirm after user approval.",
           },
         };
       }
@@ -12738,15 +18066,32 @@ async function executeAdminAiTool(
           emailOptIn,
           file: {
             buffer: fileBuffer,
-            originalname: fileName,
+            originalname: effectiveFileName,
             mimetype: mimeType!,
           },
           fixedClientId: clientId!,
           sourceLabel: "agent_submission",
         });
+        if (escrowArg !== null || lenderScoreArg !== null || lenderTargetArg !== null || args.lender_score_model) {
+          const inRange = (n: number | null) => (n !== null && n >= 300 && n <= 900 ? n : null);
+          await pool.query(
+            `UPDATE credit_analyses
+             SET escrow_flag = ?, lender_score_model = ?, lender_score = ?, lender_target_score = ?
+             WHERE id = ?`,
+            [
+              escrowArg === null ? null : escrowArg ? 1 : 0,
+              args.lender_score_model ? String(args.lender_score_model).trim().slice(0, 40) : null,
+              inRange(lenderScoreArg),
+              inRange(lenderTargetArg),
+              result.id,
+            ],
+          );
+        }
         return {
           ok: true,
           data: {
+            escrow: escrowArg,
+            client_email_suppressed: escrowArg === true && args.email_opt_in === true,
             analysis_id: result.id,
             client_id: result.client_id,
             extraction_status: result.extraction_status,
@@ -13062,20 +18407,33 @@ async function executeAdminAiTool(
       });
 
       try {
-        await sendEmail({
-          to: toEmail as string,
-          subject,
-          html,
-          attachments: attachment
-            ? [
-                {
-                  filename: attachment.filename,
-                  content: attachment.content,
-                  contentType: attachment.contentType,
-                },
-              ]
-            : undefined,
-        });
+        await sendEmailLogged(
+          {
+            to: toEmail as string,
+            subject,
+            html,
+            attachments: attachment
+              ? [
+                  {
+                    filename: attachment.filename,
+                    content: attachment.content,
+                    contentType: attachment.contentType,
+                  },
+                ]
+              : undefined,
+          },
+          {
+            kind: "staff_email",
+            recipientType:
+              audience === "referrer"
+                ? "partner"
+                : audience === "staff"
+                  ? "admin"
+                  : "client",
+            clientId: clientId ?? null,
+            sentByAdminId: ctx.adminId,
+          },
+        );
       } catch (e: any) {
         if (mintedRawToken) {
           try {
@@ -13560,13 +18918,23 @@ async function executeAdminAiTool(
           lang,
         });
         try {
-          await sendEmail({
+          await sendEmailLogged(
+            {
             to: clientEmail,
             subject: tpl.subject,
             html: tpl.html,
             attachments:
               attachPdf && pdfAttachment ? [pdfAttachment] : undefined,
-          });
+          },
+            {
+              kind: "round_report",
+              recipientType: "client",
+              clientId,
+              caseId,
+              roundNumber,
+              sentByAdminId: ctx.adminId,
+            },
+          );
           emailSent = true;
         } catch (e: any) {
           return {
@@ -13584,6 +18952,8 @@ async function executeAdminAiTool(
           alsoSms: true,
           portalUrl: securePdfUrl,
           smsFromAdminId: ctx.adminId,
+          roundNumber,
+          staffInitiated: true,
         }).catch((e: any) => {
           console.error("[admin-ai] send_round_report sms", e?.message ?? e);
           return { sent: false, reason: "error" as string };
@@ -13595,6 +18965,8 @@ async function executeAdminAiTool(
         partnersEmailed = await emailLinkedReferrerPartnersRoundPdf({
           clientId,
           roundNumber,
+          caseId,
+          sentByAdminId: ctx.adminId,
           clientName: clientName || "Client",
           langFallback: lang,
           pdfAttachment,
@@ -13696,8 +19068,10 @@ async function executeAdminAiTool(
           twilio_configured: twilioConfigured,
           scope: listAll ? "all_active" : "assigned_to_acting_admin",
           numbers: rows.map(mapPhoneNumberRow),
+          // Always the acting admin's own line (also when all=true lists
+          // every number) so Claude knows which From to use.
           acting_admin_from: listAll
-            ? null
+            ? ((await listAssignedPhoneNumbers(ctx.adminId))[0]?.e164 ?? null)
             : rows[0]
               ? String(rows[0].e164)
               : null,
@@ -13710,7 +19084,7 @@ async function executeAdminAiTool(
       };
     }
 
-    if (name === "list_sms") {
+    if (name === "list_sms" || name === "list_whatsapp") {
       const resolved = await adminAiResolveClientId(args, scopedIds);
       if (resolved.ok === false) {
         return {
@@ -13724,9 +19098,20 @@ async function executeAdminAiTool(
       const limit = Number.isFinite(rawLimit)
         ? Math.min(50, Math.max(1, Math.floor(rawLimit)))
         : 20;
+      const channelArg = String(args.channel || "")
+        .trim()
+        .toLowerCase();
+      const channelFilter =
+        name === "list_whatsapp"
+          ? "whatsapp"
+          : ["sms", "whatsapp", "call", "internal"].includes(channelArg)
+            ? channelArg
+            : null;
       const [convRows] = await pool.query<RowDataPacket[]>(
-        `SELECT id FROM conversations WHERE client_id = ?`,
-        [clientId],
+        channelFilter
+          ? `SELECT id FROM conversations WHERE client_id = ? AND channel = ?`
+          : `SELECT id FROM conversations WHERE client_id = ?`,
+        channelFilter ? [clientId, channelFilter] : [clientId],
       );
       const convIds = convRows.map((r) => Number(r.id)).filter((id) => id > 0);
       if (!convIds.length) {
@@ -13734,23 +19119,36 @@ async function executeAdminAiTool(
           ok: true,
           data: {
             client_id: clientId,
+            channel: channelFilter,
             messages: [],
-            note: "No Conversations hub threads yet for this client.",
+            note: channelFilter
+              ? `No Conversations hub ${channelFilter} threads yet for this client.`
+              : "No Conversations hub threads yet for this client.",
             href: `/admin/conversations?client=${clientId}`,
           },
         };
       }
       const [msgs] = await pool.query<RowDataPacket[]>(
-        `SELECT m.id, m.conversation_id, m.direction, m.channel, m.body,
-                m.provider_message_id, m.provider_status, m.error_message,
-                m.created_at, m.media_url IS NOT NULL AS has_media,
-                m.call_duration_sec, m.recording_url IS NOT NULL AS has_recording,
-                m.call_insights_status, m.call_insights_json, m.metadata_json
-         FROM conversation_messages m
-         WHERE m.conversation_id IN (?)
-         ORDER BY m.id DESC
-         LIMIT ?`,
-        [convIds, limit],
+        channelFilter
+          ? `SELECT m.id, m.conversation_id, m.direction, m.channel, m.body,
+                  m.provider_message_id, m.provider_status, m.error_message,
+                  m.created_at, m.media_url IS NOT NULL AS has_media,
+                  m.call_duration_sec, m.recording_url IS NOT NULL AS has_recording,
+                  m.call_insights_status, m.call_insights_json, m.metadata_json
+           FROM conversation_messages m
+           WHERE m.conversation_id IN (?) AND m.channel = ?
+           ORDER BY m.id DESC
+           LIMIT ?`
+          : `SELECT m.id, m.conversation_id, m.direction, m.channel, m.body,
+                  m.provider_message_id, m.provider_status, m.error_message,
+                  m.created_at, m.media_url IS NOT NULL AS has_media,
+                  m.call_duration_sec, m.recording_url IS NOT NULL AS has_recording,
+                  m.call_insights_status, m.call_insights_json, m.metadata_json
+           FROM conversation_messages m
+           WHERE m.conversation_id IN (?)
+           ORDER BY m.id DESC
+           LIMIT ?`,
+        channelFilter ? [convIds, channelFilter, limit] : [convIds, limit],
       );
       return {
         ok: true,
@@ -13827,33 +19225,517 @@ async function executeAdminAiTool(
               };
             })
             .reverse(),
+          channel: channelFilter,
           href: `/admin/conversations?client=${clientId}`,
         },
       };
     }
 
-    if (name === "get_call_insights") {
-      const resolved = await adminAiResolveClientId(args, scopedIds);
-      if (resolved.ok === false) {
+    if (
+      name === "list_inbox" ||
+      name === "list_outbound_messages" ||
+      name === "list_admin_notifications"
+    ) {
+      // Cross-client reads: never for affiliate-scoped accounts.
+      if (scope) {
         return {
           ok: false,
-          error: resolved.error,
-          message: resolved.message,
+          error: "forbidden",
+          message: "Not available to affiliate accounts",
         };
       }
-      const clientId = resolved.clientId;
+    }
+
+    if (name === "update_lead_signals") {
+      if (scope) {
+        return { ok: false, error: "forbidden", message: "Write tools are not available to affiliate accounts" };
+      }
+      const clientId = Number(args.client_id) || 0;
+      if (!clientId) return { ok: false, error: "invalid_args", message: "client_id is required" };
+      const body: { analysis_reviewed?: boolean; call_scheduled_at?: string | null } = {};
+      if (typeof args.analysis_reviewed === "boolean") body.analysis_reviewed = args.analysis_reviewed;
+      if (args.call_scheduled_at !== undefined) {
+        body.call_scheduled_at = args.call_scheduled_at === null ? null : String(args.call_scheduled_at);
+      }
+      const [cRows] = await pool.query<RowDataPacket[]>(
+        `SELECT first_name, last_name, lead_temperature, analysis_reviewed_at, call_scheduled_at
+         FROM clients WHERE id = ? LIMIT 1`,
+        [clientId],
+      );
+      if (!cRows[0]) return { ok: false, error: "not_found", message: "Client not found" };
+      if (args.confirm !== true) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: Object.keys(body).length > 0,
+            preview: {
+              client_id: clientId,
+              client_name: `${cRows[0].first_name || ""} ${cRows[0].last_name || ""}`.trim(),
+              current_color: cRows[0].lead_temperature ?? null,
+              analysis_reviewed: { from: !!cRows[0].analysis_reviewed_at, to: body.analysis_reviewed ?? !!cRows[0].analysis_reviewed_at },
+              call_scheduled_at: { from: cRows[0].call_scheduled_at ?? null, to: body.call_scheduled_at === undefined ? cRows[0].call_scheduled_at ?? null : body.call_scheduled_at },
+            },
+            required_confirm_phrase: ADMIN_AI_WRITE_CONFIRM_PHRASE,
+            guidance: `Show the change. After approval, confirm=true + confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`,
+          },
+        };
+      }
+      const writeGate = adminAiWriteConfirmed(args);
+      if (writeGate.ok === false) {
+        return { ok: false, error: "confirm_required", message: writeGate.message };
+      }
+      const out = await applyLeadSignals(clientId, ctx.adminId, body);
+      if (out.ok === false) return { ok: false, error: "invalid_args", message: out.error };
+      return { ok: true, data: { updated: true, client_id: clientId, ...out.data, href: `/admin/pipeline?client=${clientId}` } };
+    }
+
+    if (name === "get_enhanced_report_status") {
+      const resolved = await adminAiResolveClientId(args, scopedIds);
+      if (resolved.ok === false) {
+        return { ok: false, error: resolved.error, message: resolved.message };
+      }
+      const limit = adminAiClampLimitMax(args.limit, 10, 20);
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, purpose, file_name, mime_type, provider, status, confidence, issues_json,
+                image_pages, total_pages, error_message, credit_analysis_id,
+                report_wizard_session_id, created_at, completed_at
+         FROM credit_file_extractions WHERE client_id = ?
+         ORDER BY id DESC LIMIT ?`,
+        [resolved.clientId, limit],
+      );
+      return {
+        ok: true,
+        data: {
+          client_id: resolved.clientId,
+          reads: rows.map((r) => {
+            const issues = r.issues_json
+              ? typeof r.issues_json === "string"
+                ? JSON.parse(r.issues_json)
+                : r.issues_json
+              : [];
+            return {
+              extraction_id: Number(r.id),
+              purpose: r.purpose,
+              status: r.status,
+              file_name: r.file_name,
+              provider: r.provider,
+              confidence: r.confidence != null ? Number(r.confidence) : null,
+              issues: Array.isArray(issues) ? issues.slice(0, 10) : [],
+              image_pages: r.image_pages,
+              total_pages: r.total_pages,
+              error: r.error_message ? String(r.error_message).slice(0, 240) : null,
+              credit_analysis_id: r.credit_analysis_id ?? null,
+              report_wizard_session_id: r.report_wizard_session_id ?? null,
+              enhanced_pdf_available: r.status === "ready",
+              created_at: r.created_at,
+              completed_at: r.completed_at,
+            };
+          }),
+          guidance:
+            "Ready analysis reads: staff use Download PDF on the analysis (enhanced report). Ready Before+After reads for a wizard session add account-detail pages at Preview/Publish. Failed reads keep today's reports.",
+        },
+      };
+    }
+
+    if (name === "list_prospects_by_temperature") {
+      const limit = adminAiClampLimitMax(args.limit, 30, 50);
+      const color = String(args.color || "all");
+      const where = [`(${adminProspectLeadSql()} OR ${adminWebReviewLeadSql()})`, "c.lead_temperature IS NOT NULL"];
+      const params: any[] = [];
+      if (["hot", "warm", "cold"].includes(color)) {
+        where.push("c.lead_temperature = ?");
+        params.push(color);
+      }
+      if (args.language === "en" || args.language === "es") {
+        where.push("c.preferred_language = ?");
+        params.push(args.language);
+      }
+      if (scopedIds && scopedIds.length > 0) {
+        where.push("c.affiliate_id IN (?)");
+        params.push(scopedIds);
+      }
+      params.push(limit);
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT c.id, c.first_name, c.last_name, c.phone, c.email, c.preferred_language,
+                c.lead_temperature, c.lead_temperature_reasons, c.lead_temperature_at,
+                c.analysis_reviewed_at, c.call_scheduled_at
+         FROM clients c
+         WHERE ${where.join(" AND ")}
+         ORDER BY FIELD(c.lead_temperature, 'hot', 'warm', 'cold'),
+                  c.call_scheduled_at IS NULL, c.call_scheduled_at ASC,
+                  c.lead_temperature_at DESC
+         LIMIT ?`,
+        params,
+      );
+      return {
+        ok: true,
+        data: {
+          count: rows.length,
+          prospects: rows.map((r) => ({
+            client_id: Number(r.id),
+            name: `${r.first_name || ""} ${r.last_name || ""}`.trim(),
+            phone: r.phone || null,
+            email: r.email || null,
+            language: r.preferred_language || null,
+            color: r.lead_temperature,
+            reasons: r.lead_temperature_reasons ? String(r.lead_temperature_reasons).split(",") : [],
+            color_since: r.lead_temperature_at,
+            analysis_reviewed_at: r.analysis_reviewed_at,
+            call_scheduled_at: r.call_scheduled_at,
+            href: `/admin/pipeline?client=${r.id}`,
+          })),
+          guidance:
+            "Call Hot first (close: payment, documents, monitoring login), then Warm (review the analysis, book with Cesar). Cold get automatic follow-up only. Owners: English → Lecca, Spanish → Ángel.",
+        },
+      };
+    }
+
+    if (name === "list_inbox") {
+      const sinceHours = adminAiClampHours(args.since_hours, 24, 168);
+      const limit = adminAiClampLimitMax(args.limit, 30, 50);
+      const channel = String(args.channel || "all");
+      const where = [
+        "m.direction = 'inbound'",
+        "m.created_at >= NOW() - INTERVAL ? HOUR",
+      ];
+      const params: any[] = [sinceHours];
+      if (["sms", "whatsapp", "call"].includes(channel)) {
+        where.push("m.channel = ?");
+        params.push(channel);
+      } else {
+        where.push("m.channel IN ('sms','whatsapp','call')");
+      }
+      if (adminAiBool(args.unread_only)) where.push("c.unread_count > 0");
+      if (adminAiBool(args.mine)) {
+        where.push("p.assigned_admin_id = ?");
+        params.push(ctx.adminId);
+      }
+      params.push(limit);
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT m.id, m.conversation_id, m.channel, m.body, m.from_address,
+                m.media_url IS NOT NULL AS has_media, m.call_duration_sec,
+                m.recording_url IS NOT NULL AS has_recording,
+                m.call_insights_status, m.created_at,
+                c.client_id, c.contact_id, c.unknown_contact_id, c.unread_count,
+                c.status AS thread_status,
+                CONCAT(COALESCE(cl.first_name,''),' ',COALESCE(cl.last_name,'')) AS client_name,
+                CONCAT(COALESCE(ct.first_name,''),' ',COALESCE(ct.last_name,'')) AS contact_name,
+                u.display_name AS unknown_name, u.phone_e164 AS unknown_phone,
+                p.e164 AS line_e164, p.friendly_name AS line_name,
+                CONCAT(COALESCE(a.first_name,''),' ',COALESCE(a.last_name,'')) AS line_admin
+         FROM conversation_messages m
+         JOIN conversations c ON c.id = m.conversation_id
+         LEFT JOIN clients cl ON cl.id = c.client_id
+         LEFT JOIN contacts ct ON ct.id = c.contact_id
+         LEFT JOIN conversation_unknown_contacts u ON u.id = c.unknown_contact_id
+         LEFT JOIN admin_phone_numbers p ON p.id = c.ofg_number_id
+         LEFT JOIN admins a ON a.id = p.assigned_admin_id
+         WHERE ${where.join(" AND ")}
+         ORDER BY m.created_at DESC, m.id DESC
+         LIMIT ?`,
+        params,
+      );
+      return {
+        ok: true,
+        data: {
+          since_hours: sinceHours,
+          count: rows.length,
+          messages: rows.map((r) => ({
+            message_id: Number(r.id),
+            conversation_id: Number(r.conversation_id),
+            channel: r.channel,
+            received_at: r.created_at,
+            from: adminAiInboxSender(r),
+            body_preview: decodeLiteralUnicodeEscapes(
+              String(r.body || ""),
+            ).slice(0, 280),
+            has_media: Number(r.has_media) === 1,
+            call_duration_sec:
+              r.call_duration_sec != null ? Number(r.call_duration_sec) : null,
+            has_recording: Number(r.has_recording) === 1,
+            call_insights_status: r.call_insights_status ?? null,
+            thread_unread: Number(r.unread_count || 0),
+            thread_status: r.thread_status,
+            line: r.line_e164
+              ? {
+                  e164: r.line_e164,
+                  name: r.line_name || null,
+                  assigned_to: String(r.line_admin || "").trim() || null,
+                }
+              : null,
+          })),
+          guidance:
+            "Reply with send_sms/send_whatsapp (client_id) or send_contact_sms (contact_id). For calls use get_call_insights with message_id. Unknown numbers can be saved with create_contact.",
+        },
+      };
+    }
+
+    if (name === "list_outbound_messages") {
+      const sinceHours = adminAiClampHours(args.since_hours, 48, 720);
+      const limit = adminAiClampLimitMax(args.limit, 30, 50);
+      const channel = String(args.channel || "all");
+      const kind = String(args.kind || "").trim().slice(0, 64);
+      const clientIdArg =
+        Number(args.client_id) > 0 ? Number(args.client_id) : null;
+      type OutRow = Record<string, unknown> & { sent_at: Date | string };
+      const out: OutRow[] = [];
+
+      // Hub SMS / WhatsApp (every outbound thread row, live delivery status).
+      if (channel !== "email" && kind !== "staff_email") {
+        const where = [
+          "m.direction = 'outbound'",
+          "m.created_at >= NOW() - INTERVAL ? HOUR",
+        ];
+        const params: any[] = [sinceHours];
+        if (channel === "sms" || channel === "whatsapp") {
+          where.push("m.channel = ?");
+          params.push(channel);
+        } else {
+          where.push("m.channel IN ('sms','whatsapp')");
+        }
+        if (clientIdArg) {
+          where.push("c.client_id = ?");
+          params.push(clientIdArg);
+        }
+        params.push(limit);
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT m.id, m.channel, m.body, m.to_address, m.from_address,
+                  m.provider_status, m.error_message, m.metadata_json,
+                  m.created_at, c.client_id, c.contact_id,
+                  CONCAT(COALESCE(cl.first_name,''),' ',COALESCE(cl.last_name,'')) AS client_name,
+                  CONCAT(COALESCE(ct.first_name,''),' ',COALESCE(ct.last_name,'')) AS contact_name,
+                  CONCAT(COALESCE(a.first_name,''),' ',COALESCE(a.last_name,'')) AS sent_by
+           FROM conversation_messages m
+           JOIN conversations c ON c.id = m.conversation_id
+           LEFT JOIN clients cl ON cl.id = c.client_id
+           LEFT JOIN contacts ct ON ct.id = c.contact_id
+           LEFT JOIN admins a ON a.id = m.sent_by_admin_id
+           WHERE ${where.join(" AND ")}
+           ORDER BY m.created_at DESC, m.id DESC
+           LIMIT ?`,
+          params,
+        );
+        for (const r of rows) {
+          let meta: Record<string, unknown> | null = null;
+          try {
+            meta =
+              typeof r.metadata_json === "string"
+                ? JSON.parse(r.metadata_json)
+                : (r.metadata_json as Record<string, unknown> | null);
+          } catch {
+            meta = null;
+          }
+          const trigger = meta?.trigger_event ? String(meta.trigger_event) : "";
+          out.push({
+            sent_at: r.created_at,
+            source: "conversation",
+            message_id: Number(r.id),
+            channel: r.channel,
+            recipient: r.contact_id ? "contact" : "client",
+            to: r.to_address,
+            from: r.from_address,
+            client_id: r.client_id ? Number(r.client_id) : null,
+            contact_id: r.contact_id ? Number(r.contact_id) : null,
+            name:
+              String(r.client_name || r.contact_name || "").trim() || null,
+            kind: /^round_.*_complete$/.test(trigger)
+              ? "round_report"
+              : trigger
+                ? `flow:${trigger}`
+                : "conversation",
+            preview: redactUrls(
+              decodeLiteralUnicodeEscapes(String(r.body || "")),
+            ).slice(0, 240),
+            status: r.error_message
+              ? "failed"
+              : String(r.provider_status || "queued"),
+            error: r.error_message ? String(r.error_message).slice(0, 240) : null,
+            sent_by: String(r.sent_by || "").trim() || null,
+          });
+        }
+      }
+
+      // Logged emails (and partner/staff sends not on a client thread).
+      if (channel === "email" || channel === "all") {
+        const where = [
+          "l.channel = 'email'",
+          "l.created_at >= NOW() - INTERVAL ? HOUR",
+        ];
+        const params: any[] = [sinceHours];
+        if (kind) {
+          where.push("l.kind = ?");
+          params.push(kind);
+        }
+        if (clientIdArg) {
+          where.push("l.client_id = ?");
+          params.push(clientIdArg);
+        }
+        params.push(limit);
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT l.*, CONCAT(COALESCE(cl.first_name,''),' ',COALESCE(cl.last_name,'')) AS client_name,
+                  CONCAT(COALESCE(a.first_name,''),' ',COALESCE(a.last_name,'')) AS sent_by
+           FROM outbound_message_log l
+           LEFT JOIN clients cl ON cl.id = l.client_id
+           LEFT JOIN admins a ON a.id = l.sent_by_admin_id
+           WHERE ${where.join(" AND ")}
+           ORDER BY l.created_at DESC, l.id DESC
+           LIMIT ?`,
+          params,
+        );
+        for (const r of rows) {
+          out.push({
+            sent_at: r.created_at,
+            source: "email_log",
+            log_id: Number(r.id),
+            channel: "email",
+            recipient: r.recipient_type,
+            to: r.to_address,
+            client_id: r.client_id ? Number(r.client_id) : null,
+            name: String(r.client_name || "").trim() || null,
+            kind: r.kind,
+            round_number: r.round_number != null ? Number(r.round_number) : null,
+            subject: r.subject,
+            preview: r.body_preview ? String(r.body_preview).slice(0, 240) : null,
+            status: r.status,
+            error: r.error_message,
+            sent_by: String(r.sent_by || "").trim() || null,
+          });
+        }
+      }
+
+      // SMS-only kind filter (e.g. round_report) applies to hub rows too.
+      const filtered = kind
+        ? out.filter((r) => r.kind === kind)
+        : out;
+      filtered.sort(
+        (a, b) =>
+          new Date(b.sent_at).getTime() - new Date(a.sent_at).getTime(),
+      );
+      return {
+        ok: true,
+        data: {
+          since_hours: sinceHours,
+          count: Math.min(filtered.length, limit),
+          messages: filtered.slice(0, limit),
+          guidance:
+            "SMS status comes from Twilio callbacks (queued → sent → delivered / undelivered / failed). Email status 'sent' means the provider accepted it. Partner emails have recipient=partner.",
+        },
+      };
+    }
+
+    if (name === "list_admin_notifications") {
+      const sinceHours = adminAiClampHours(args.since_hours, 72, 720);
+      const limit = adminAiClampLimitMax(args.limit, 30, 50);
+      let targetAdminId = ctx.adminId;
+      if (Number(args.admin_id) > 0 && Number(args.admin_id) !== ctx.adminId) {
+        const [roleRows] = await pool.query<RowDataPacket[]>(
+          `SELECT role FROM admins WHERE id = ? LIMIT 1`,
+          [ctx.adminId],
+        );
+        if (String(roleRows[0]?.role || "") !== "super_admin") {
+          return {
+            ok: false,
+            error: "forbidden",
+            message: "Only super_admin can read another admin's alerts",
+          };
+        }
+        targetAdminId = Number(args.admin_id);
+      }
+      const where = [
+        "n.admin_id = ?",
+        "n.created_at >= NOW() - INTERVAL ? HOUR",
+      ];
+      const params: any[] = [targetAdminId, sinceHours];
+      const eventKey = String(args.event_key || "").trim().slice(0, 64);
+      if (eventKey) {
+        where.push("n.event_key = ?");
+        params.push(eventKey);
+      }
+      if (adminAiBool(args.unread_only)) where.push("n.read_at IS NULL");
+      params.push(limit);
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT n.id, n.event_key, n.title, n.body, n.link_url, n.read_at, n.created_at
+         FROM admin_notifications n
+         WHERE ${where.join(" AND ")}
+         ORDER BY n.created_at DESC, n.id DESC
+         LIMIT ?`,
+        params,
+      );
+      return {
+        ok: true,
+        data: {
+          admin_id: targetAdminId,
+          since_hours: sinceHours,
+          count: rows.length,
+          notifications: rows.map((r) => ({
+            id: Number(r.id),
+            event_key: r.event_key,
+            title: r.title,
+            body: r.body ? String(r.body).slice(0, 600) : null,
+            link: r.link_url || null,
+            read: !!r.read_at,
+            created_at: r.created_at,
+          })),
+        },
+      };
+    }
+
+    if (name === "get_call_insights") {
       const messageIdArg =
         args.message_id != null && Number(args.message_id) > 0
           ? Number(args.message_id)
           : null;
+      const contactIdArg =
+        args.contact_id != null && Number(args.contact_id) > 0
+          ? Number(args.contact_id)
+          : null;
+      const hasClientKey =
+        Number(args.client_id) > 0 ||
+        Number(args.case_id) > 0 ||
+        (typeof args.case_number === "string" && !!args.case_number.trim());
+      // Contacts / unknown callers: resolve threads without a client_id
+      // (e.g. list_inbox → message_id, or a CRM contact_id).
+      let clientId: number | null = null;
+      let convSql = "";
+      let convParams: any[] = [];
+      if (!hasClientKey && (contactIdArg || messageIdArg)) {
+        if (scope) {
+          return {
+            ok: false,
+            error: "forbidden",
+            message:
+              "Affiliate accounts must pass client_id (contact/unknown calls are staff-only)",
+          };
+        }
+        if (contactIdArg) {
+          convSql = `SELECT id FROM conversations WHERE contact_id = ?`;
+          convParams = [contactIdArg];
+        } else {
+          convSql = `SELECT conversation_id AS id FROM conversation_messages WHERE id = ?`;
+          convParams = [messageIdArg];
+        }
+      } else {
+        const resolved = await adminAiResolveClientId(args, scopedIds);
+        if (resolved.ok === false) {
+          return {
+            ok: false,
+            error: resolved.error,
+            message: resolved.message,
+          };
+        }
+        clientId = resolved.clientId;
+        convSql = `SELECT id FROM conversations WHERE client_id = ?`;
+        convParams = [clientId];
+      }
       const rawLimit = Number(args.limit);
       const limit = Number.isFinite(rawLimit)
         ? Math.min(10, Math.max(1, Math.floor(rawLimit)))
         : 3;
 
       const [convRows] = await pool.query<RowDataPacket[]>(
-        `SELECT id FROM conversations WHERE client_id = ?`,
-        [clientId],
+        convSql,
+        convParams,
       );
       const convIds = convRows.map((r) => Number(r.id)).filter((id) => id > 0);
       if (!convIds.length) {
@@ -13861,9 +19743,12 @@ async function executeAdminAiTool(
           ok: true,
           data: {
             client_id: clientId,
+            contact_id: contactIdArg,
             calls: [],
-            note: "No Conversations hub threads yet for this client.",
-            href: `/admin/conversations?client=${clientId}`,
+            note: clientId
+              ? "No Conversations hub threads yet for this client."
+              : "No Conversations hub threads found for this contact/message.",
+            href: clientId ? `/admin/conversations?client=${clientId}` : "/admin/conversations",
             call_insights_enabled: callInsightsFeatureEnabled(),
           },
         };
@@ -13951,12 +19836,13 @@ async function executeAdminAiTool(
         ok: true,
         data: {
           client_id: clientId,
+          contact_id: contactIdArg,
           calls,
           call_insights_enabled: callInsightsFeatureEnabled(),
-          href: `/admin/conversations?client=${clientId}`,
+          href: clientId ? `/admin/conversations?client=${clientId}` : "/admin/conversations",
           guidance: callInsightsFeatureEnabled()
-            ? "When status is pending/processing, ask again after the next cron cycle. Use insights for staff coaching — do not invent details missing from transcript."
-            : "CALL_INSIGHTS_ENABLED is off on this environment — recordings still play in CRM but Claude resumes are not generated.",
+            ? "When status is pending/processing, ask again after the next cron cycle. Answer from transcript_full only. Do not invent details that are not in the transcript."
+            : "CALL_INSIGHTS_ENABLED is off on this environment — recordings still play in CRM but transcripts are not generated.",
         },
       };
     }
@@ -14384,6 +20270,451 @@ async function executeAdminAiTool(
       };
     }
 
+    if (name === "send_whatsapp") {
+      if (!whatsapp360dialogEnabled()) {
+        return {
+          ok: false,
+          error: "whatsapp_disabled",
+          message:
+            "WhatsApp is not enabled. Set WHATSAPP_360DIALOG_ENABLED=1 and D360_API_KEY.",
+        };
+      }
+      if (!(await adminMayUseWhatsapp(ctx.adminId))) {
+        return {
+          ok: false,
+          error: "forbidden",
+          message:
+            "WhatsApp is only available for the assigned WA Business admin (César).",
+        };
+      }
+      const rawBody = decodeLiteralUnicodeEscapes(
+        String(args.body || args.message || ""),
+      ).trim();
+      if ([...rawBody].length > WHATSAPP_MAX_BODY_CHARS) {
+        return {
+          ok: false,
+          error: "whatsapp_body_too_long",
+          message: `WhatsApp body exceeds ${WHATSAPP_MAX_BODY_CHARS} characters`,
+        };
+      }
+      const body = rawBody;
+      const referrerIdArg =
+        args.referrer_id != null && Number(args.referrer_id) > 0
+          ? Number(args.referrer_id)
+          : null;
+      const hasClientKey =
+        (args.client_id != null && Number(args.client_id) > 0) ||
+        (args.case_id != null && Number(args.case_id) > 0) ||
+        (typeof args.case_number === "string" && !!args.case_number.trim());
+
+      const namedTo = await resolveMcpStaffAssignee({
+        adminId: args.to_admin_id,
+        name: args.to_admin_name,
+        email: args.to_admin_email,
+      });
+      if (namedTo.ok === false) return namedTo;
+      const staffTo = namedTo.requested ? namedTo : null;
+
+      const missing: string[] = [];
+      if (!body) missing.push("body");
+      if (!referrerIdArg && !hasClientKey && !staffTo) {
+        missing.push(
+          "client_id / case_id / case_number, referrer_id, or to_admin_id / to_admin_name",
+        );
+      }
+
+      const fromE164 = whatsappToE164(WHATSAPP_DEFAULT_ASSIGNEE_PHONE_LAST10);
+
+      const audience: "client" | "referrer" | "staff" = staffTo
+        ? "staff"
+        : referrerIdArg
+          ? "referrer"
+          : "client";
+
+      let clientId: number | null = null;
+      let caseId: number | null = null;
+      let caseNumber: string | null = null;
+      let clientName: string | null = null;
+      let clientPhone: string | null = null;
+      let clientStatus: string | null = null;
+      let referrerId: number | null = referrerIdArg;
+      let referrerName: string | null = null;
+      let referrerPhone: string | null = null;
+      let toPhone: string | null = null;
+      let toName: string | null = null;
+      let conversationClosed = false;
+
+      if (missing.length === 0 && staffTo) {
+        const [staffRows] = await pool.query<RowDataPacket[]>(
+          `SELECT id, first_name, last_name, phone
+           FROM admins WHERE id = ? AND status = 'active' LIMIT 1`,
+          [staffTo.id],
+        );
+        if (!staffRows[0]) {
+          return {
+            ok: false,
+            error: "assignee_not_found",
+            message: "Staff not found or inactive. Use search_admins.",
+          };
+        }
+        toName =
+          `${staffRows[0].first_name || ""} ${staffRows[0].last_name || ""}`.trim();
+        toPhone = staffRows[0].phone ? String(staffRows[0].phone).trim() : null;
+        if (!toPhone) {
+          return {
+            ok: false,
+            error: "no_phone",
+            message:
+              "That staff member has no phone on file. Add a cell in People, then retry.",
+          };
+        }
+      }
+
+      if (missing.length === 0 && referrerId && audience === "referrer") {
+        const [refRows] = await pool.query<RowDataPacket[]>(
+          `SELECT id, first_name, last_name, phone, status
+           FROM referrers WHERE id = ? LIMIT 1`,
+          [referrerId],
+        );
+        if (!refRows[0]) {
+          return {
+            ok: false,
+            error: "not_found",
+            message:
+              "Referrer not found. Use search_referrers or get_client.referrer.id.",
+          };
+        }
+        if (String(refRows[0].status) !== "active") {
+          return {
+            ok: false,
+            error: "invalid_args",
+            message: "Cannot WhatsApp an inactive referrer",
+          };
+        }
+        referrerName =
+          `${refRows[0].first_name || ""} ${refRows[0].last_name || ""}`.trim();
+        referrerPhone = refRows[0].phone
+          ? String(refRows[0].phone).trim()
+          : null;
+        if (!referrerPhone) {
+          return {
+            ok: false,
+            error: "no_phone",
+            message:
+              "Referrer has no phone on file. Add a phone on the partner record, then retry.",
+          };
+        }
+        toPhone = referrerPhone;
+        toName = referrerName;
+      }
+
+      if (
+        missing.length === 0 &&
+        audience !== "staff" &&
+        (hasClientKey || audience === "client")
+      ) {
+        const resolved = await adminAiResolveClientId(args, scopedIds);
+        if (resolved.ok === false) {
+          if (audience === "client") {
+            return {
+              ok: false,
+              error: resolved.error,
+              message: resolved.message,
+            };
+          }
+        } else {
+          clientId = resolved.clientId;
+          caseId = resolved.caseId;
+          caseNumber = resolved.caseNumber;
+          const [cRows] = await pool.query<RowDataPacket[]>(
+            `SELECT first_name, last_name, phone, status
+             FROM clients WHERE id = ? LIMIT 1`,
+            [clientId],
+          );
+          if (!cRows[0]) {
+            return {
+              ok: false,
+              error: "not_found",
+              message:
+                "Client not found. Use search_clients — OFG client_id is not a HubSpot contact id.",
+            };
+          }
+          clientName =
+            `${cRows[0].first_name || ""} ${cRows[0].last_name || ""}`.trim();
+          clientPhone = cRows[0].phone ? String(cRows[0].phone).trim() : null;
+          clientStatus = String(cRows[0].status || "");
+          if (audience === "client" && clientStatus === "cancelled") {
+            return {
+              ok: false,
+              error: "invalid_args",
+              message: "Cannot WhatsApp a cancelled client",
+            };
+          }
+          if (audience === "client" && !clientPhone) {
+            return {
+              ok: false,
+              error: "no_phone",
+              message:
+                "Client has no phone on file. Add a phone in the CRM first.",
+            };
+          }
+          if (!caseId) {
+            const [cr] = await pool.query<RowDataPacket[]>(
+              `SELECT id, case_number FROM credit_repair_cases
+               WHERE client_id = ? AND status <> 'cancelled'
+               ORDER BY id DESC LIMIT 1`,
+              [clientId],
+            );
+            if (cr[0]) {
+              caseId = Number(cr[0].id);
+              caseNumber = cr[0].case_number ? String(cr[0].case_number) : null;
+            }
+          }
+          if (audience === "client") {
+            toPhone = clientPhone;
+            toName = clientName;
+            conversationClosed = await contactComposeBlockedByClosed({
+              clientId,
+            });
+          }
+        }
+      }
+
+      const preview = {
+        audience,
+        channel: "whatsapp" as const,
+        client_id: clientId,
+        client_name: clientName,
+        case_id: caseId,
+        case_number: caseNumber,
+        referrer_id: referrerId,
+        referrer_name: referrerName,
+        to: toPhone,
+        from: fromE164,
+        body,
+        conversation_closed: conversationClosed,
+        will_log_conversations_hub: audience === "client",
+        will_log_client_note: audience === "client",
+        will_log_referrer_note: audience === "referrer",
+        note:
+          audience === "referrer"
+            ? "Dry-run does not send. On confirm, WhatsApp goes to the referrer from César's WA Business; a note is saved on the partner record" +
+              (clientId ? " and on the linked client's file." : ".")
+            : audience === "staff"
+              ? "Dry-run does not send. On confirm, WhatsApp goes to that staff member's phone from César's WA Business."
+              : conversationClosed
+                ? "Conversation is closed. On confirm, it will reopen and WhatsApp will send via Conversations hub."
+                : "Dry-run does not send. On confirm, WhatsApp sends via 360dialog into Conversations hub + WhatsApp case note.",
+      };
+
+      if (missing.length > 0) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: false,
+            missing_fields: missing,
+            preview,
+            guidance:
+              "Collect body, and client_id (OFG), referrer_id, or to_admin_id / to_admin_name. For CRM Contacts use send_contact_whatsapp.",
+          },
+        };
+      }
+
+      if (!adminAiConfirmTrue(args.confirm)) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: true,
+            preview,
+            required_confirm_phrase: ADMIN_AI_WRITE_CONFIRM_PHRASE,
+            guidance: `Show the exact To / From / body. After approval, re-call with confirm=true and confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`,
+          },
+        };
+      }
+
+      const writeGate = adminAiWriteConfirmed(args);
+      if (writeGate.ok === false) {
+        return {
+          ok: false,
+          error: "confirm_required",
+          message: writeGate.message,
+        };
+      }
+
+      let reopened = false;
+      if (audience === "client" && clientId && conversationClosed) {
+        await setContactConversationStatus({
+          clientId,
+          status: "open",
+          adminId: ctx.adminId,
+        });
+        reopened = true;
+      }
+
+      const ts = new Date().toISOString().slice(0, 16).replace("T", " ");
+      let messageId: number | null = null;
+      let conversationId: number | null = null;
+      let providerMessageId: string | null = null;
+      let providerStatus: string | null = null;
+
+      if (audience === "client" && clientId) {
+        try {
+          const result = await deliverHubConversationMessage({
+            adminId: ctx.adminId,
+            clientId,
+            channel: "whatsapp",
+            textBody: body,
+          });
+          messageId = result.message_id;
+          conversationId = result.conversation_id;
+          const [mrows] = await pool.query<RowDataPacket[]>(
+            `SELECT provider_message_id, provider_status, error_message
+             FROM conversation_messages WHERE id = ? LIMIT 1`,
+            [result.message_id],
+          );
+          providerMessageId = mrows[0]?.provider_message_id
+            ? String(mrows[0].provider_message_id)
+            : null;
+          providerStatus = mrows[0]?.provider_status
+            ? String(mrows[0].provider_status)
+            : result.provider_status;
+          if (!result.ok && result.error) {
+            return {
+              ok: false,
+              error: "send_failed",
+              message: String(result.error).slice(0, 400),
+            };
+          }
+        } catch (e: any) {
+          const msg = String(e?.message || e);
+          if (
+            msg === "conversation_closed" ||
+            e?.code === "conversation_closed"
+          ) {
+            return {
+              ok: false,
+              error: "conversation_closed",
+              message:
+                "Conversation is still closed. Reopen in Conversations, then retry send_whatsapp.",
+            };
+          }
+          return {
+            ok: false,
+            error: "send_failed",
+            message: msg.slice(0, 400),
+          };
+        }
+      } else if ((audience === "referrer" || audience === "staff") && toPhone) {
+        try {
+          const sent = await sendWhatsapp360Text({
+            to: toPhone,
+            body,
+          });
+          providerMessageId = sent?.id ? String(sent.id) : null;
+          providerStatus = sent?.status ? String(sent.status) : "accepted";
+        } catch (e: any) {
+          return {
+            ok: false,
+            error: "send_failed",
+            message: String(e?.message || "WhatsApp send failed").slice(0, 400),
+          };
+        }
+      }
+
+      let clientNoteAppended = false;
+      let referrerNoteAppended = false;
+      const noteParts = [body.slice(0, 1500)];
+      if (providerMessageId) {
+        noteParts.push(`360dialog id: ${providerMessageId}`);
+      }
+      if (audience === "client" && clientId) {
+        clientNoteAppended = await appendClientFileSmsNote(
+          clientId,
+          formatSmsClientFileNote({
+            direction: "sent",
+            ts,
+            peerPhone: toPhone || "",
+            body: noteParts[0],
+            providerMessageId,
+            channelLabel: "WhatsApp",
+            providerLabel: "360dialog id",
+          }),
+        );
+      }
+      if (audience === "referrer" && referrerId) {
+        const about = clientName
+          ? ` re: ${clientName}${clientId ? ` (client_id=${clientId})` : ""}`
+          : "";
+        const refStamped = `[WhatsApp ${ts} UTC] Sent to ${toPhone}${about}\n${noteParts.join("\n")}`;
+        try {
+          await pool.query(
+            `UPDATE referrers
+             SET notes = CONCAT(
+                   COALESCE(notes, ''),
+                   CASE WHEN notes IS NULL OR notes = '' THEN '' ELSE '\n' END,
+                   ?
+                 )
+             WHERE id = ?`,
+            [refStamped.slice(0, 8000), referrerId],
+          );
+          referrerNoteAppended = true;
+        } catch (noteErr: any) {
+          console.error(
+            "[admin-ai] send_whatsapp referrer note",
+            noteErr?.message ?? noteErr,
+          );
+        }
+        if (clientId) {
+          clientNoteAppended = await appendClientFileSmsNote(
+            clientId,
+            formatSmsClientFileNote({
+              direction: "sent",
+              ts,
+              peerPhone: toPhone || "",
+              body: noteParts[0],
+              providerMessageId,
+              tag: "REFERRER",
+              peerLabel: referrerName || `referrer_id=${referrerId}`,
+              channelLabel: "WhatsApp",
+              providerLabel: "360dialog id",
+            }),
+          );
+        }
+      }
+
+      return {
+        ok: true,
+        data: {
+          sent: true,
+          audience,
+          channel: "whatsapp",
+          client_id: clientId,
+          client_name: clientName,
+          case_id: caseId,
+          case_number: caseNumber,
+          referrer_id: referrerId,
+          referrer_name: referrerName,
+          to: toPhone,
+          from: fromE164,
+          body,
+          message_id: messageId,
+          conversation_id: conversationId,
+          provider_message_id: providerMessageId,
+          provider_status: providerStatus,
+          reopened,
+          sent_at: new Date().toISOString(),
+          note_appended: clientNoteAppended || referrerNoteAppended,
+          client_note_appended: clientNoteAppended,
+          referrer_note_appended: referrerNoteAppended,
+          href: clientId
+            ? `/admin/conversations?client=${clientId}`
+            : "/admin/conversations",
+        },
+      };
+    }
+
     if (name === "update_pipeline_stage") {
       const stage = String(args.stage || "").trim();
       const allowed = [
@@ -14785,6 +21116,7 @@ async function executeAdminAiTool(
         "onboarding",
         "active",
         "paused",
+        "blocked",
         "cancelled",
       ];
       const notes =
@@ -14843,7 +21175,7 @@ async function executeAdminAiTool(
               ok: false,
               error: "use_convert_prospect",
               message:
-                "Cannot set status to pending_payment/onboarding/active until the client has an enrolled case. Call preview_convert_prospect then convert_prospect (creates the case + onboarding). For unconverted leads use status=prospect, paused, or cancelled only.",
+                "Cannot set status to pending_payment/onboarding/active until the client has an enrolled case. Call preview_convert_prospect then convert_prospect (creates the case + onboarding). For unconverted leads use status=prospect, paused, blocked, or cancelled only.",
             };
           }
         }
@@ -17522,6 +23854,56 @@ function extractScoresFromInterleavedBureauBlocks(
  *   576  567  545
  * rather than all three names on one header row.
  */
+/**
+ * Score row cells in column order, keeping "no score" placeholders as null so
+ * a missing bureau does not shift the others left (SmartCredit Ultra 3B:
+ * "638 \t —— \t 631" = TU 638, EX none, EQ 631). Returns null when the row
+ * has no placeholder (callers keep their existing number-only logic).
+ */
+function scoreCellsWithPlaceholders(line: string): (number | null)[] | null {
+  const cells: (number | null)[] = [];
+  let sawPlaceholder = false;
+  for (const m of line.matchAll(/(?<![,\d$])(\d{3})(?![\d,%])|[—–]+|-{2,}|\bN\/A\b/gi)) {
+    if (m[1]) {
+      const n = Number(m[1]);
+      if (!isValidBureauScore(n)) return null;
+      cells.push(n);
+    } else {
+      cells.push(null);
+      sawPlaceholder = true;
+    }
+  }
+  return sawPlaceholder ? cells : null;
+}
+
+/**
+ * Stacked bureau headers followed by a score row WITH a missing-bureau
+ * placeholder. Exact positional mapping — wins over label heuristics.
+ */
+function extractScoresFromStackedPlaceholderRow(text: string): BureauScores | null {
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.replace(/\t+/g, " ").trim())
+    .filter((l) => l.length > 0);
+  for (let i = 0; i < lines.length - 3; i++) {
+    const order: Array<keyof BureauScores> = [];
+    let j = i;
+    while (j < lines.length && order.length < 3) {
+      const b = detectSingleBureauInLine(lines[j]);
+      if (!b || order.includes(b)) break;
+      order.push(b);
+      j++;
+    }
+    if (order.length !== 3) continue;
+    const cells = scoreCellsWithPlaceholders(lines[j] || "");
+    if (!cells || cells.length !== 3 || cells.every((c) => c == null)) continue;
+    const scores: BureauScores = { transunion: null, experian: null, equifax: null };
+    order.forEach((b, k) => (scores[b] = cells[k]));
+    return scores;
+  }
+  return null;
+}
+
 function extractScoresFromStackedBureauHeaders(
   text: string,
 ): BureauScores | null {
@@ -17841,6 +24223,10 @@ function extractAllScores(
   text: string,
   provider: ReportProvider = detectProvider(text),
 ): BureauScores {
+  // Exact layout with an explicit "no score" cell: trust positions as-is.
+  const placeholderRow = extractScoresFromStackedPlaceholderRow(text);
+  if (placeholderRow) return placeholderRow;
+
   const fromColumns = extractScoresFromHeaderColumns(text);
   const labeled: BureauScores = {
     transunion: extractBureauScoreProvider(text, "transunion", provider),
@@ -17945,6 +24331,22 @@ export const JUNK_NEGATIVE_ACCOUNT =
 const RISK_FACTOR_NEGATIVE_NOISE =
   /^(too many|you have|lack of|proportion of|length of|amount (of )?owed|serious delinquen|number of|average (credit )?age|recent inquir|balances? on|payment history on|credit card use|available credit|hard inquir|the (presence|absence|ratio|level)|insufficient|limited credit)/i;
 
+/**
+ * Report section headings / table-of-contents rows ("10. Collections 52",
+ * "4.11 Possible Financial I (CLOSED) 42") — never a tradeline.
+ */
+// Requires a dot so creditor names like "21ST MORTGAGE" are not dropped.
+const SECTION_HEADING_NEGATIVE_NOISE = /^\d{1,2}(?:\.\d{1,2})*\.\s+\S|^\d{1,2}\.\d{1,2}\s+\S/;
+
+/**
+ * Per-tradeline field rows with bureau-column values
+ * ("30 Days Past Due 0 0 0", "Included in Bankruptcy N/A 0 N/A",
+ * "Amount Past Due $0 $0 $0") and payment-status values
+ * ("CURRENT ACCOUNT/WAS 30 DAYS PAST DUE DATE TWO").
+ */
+const TRADELINE_FIELD_ROW_NEGATIVE_NOISE =
+  /^(?:(?:times\s+)?\d{2,3}\s*days?\s*(?:past\s*due|late)|included\s+in\s+bankruptcy|amount\s+past\s+due|past\s+due\s+amount|current\s+account\s*\/\s*was\b|current\s*\/\s*was\b|was\s+\d{2,3}\s*days\b)/i;
+
 /** Summary-stat rows from tri-merge dashboards (counts / $ across bureaus). */
 const SUMMARY_STAT_NEGATIVE_NOISE =
   /^(total|open|closed|delinquent|derogatory|collection|inquir(?:y|ies)|past due|public records?|accounts?|charge.?offs?)\s*(accounts?|items?|balance|amount)?\s*[:\-]?\s*[\d$]/i;
@@ -17971,6 +24373,8 @@ export function isNonTradelineNegativeNoise(raw: string): boolean {
   if (isJunkNegativeAccountName(t)) return true;
   if (RISK_FACTOR_NEGATIVE_NOISE.test(t)) return true;
   if (SUMMARY_STAT_NEGATIVE_NOISE.test(t)) return true;
+  if (SECTION_HEADING_NEGATIVE_NOISE.test(t)) return true;
+  if (TRADELINE_FIELD_ROW_NEGATIVE_NOISE.test(t)) return true;
   // "Collection: 1 0 0" / "Delinquent: 4 4 5" / "Past Due: $0.00 $0.00 $0.00"
   if (
     /^(collection|delinquent|derogatory|past due|charge.?offs?|inquir(?:y|ies)|total accounts?)\s*:\s*[\d$.,\s]+$/i.test(
@@ -18033,6 +24437,8 @@ export type BureauCode = "TU" | "EX" | "EQ";
 export interface NegativeAccount {
   key: string;
   label: string;
+  /** Creditor name as printed (cross-layout matching). */
+  creditor?: string;
   type: string;
   bureaus: BureauCode[];
   bureaus_uncertain?: boolean;
@@ -18066,9 +24472,107 @@ function isTriBureauReport(text: string): boolean {
   );
 }
 
+/** "Account Status <value>" / "Status <value>" field row; group 1 = value. */
+const STATUS_FIELD_ROW = /^(?:account\s+|pay(?:ment)?\s+)?status\s+(.+)$/i;
+
+/**
+ * Creditor name from the nearest numbered tradeline heading above a field row
+ * (Equifax 3-bureau layout: "4.7 Kashable Llc", "4.11 Possible Financial I (CLOSED)").
+ */
+function findTradelineSectionCreditor(
+  lines: string[],
+  from: number,
+): string | null {
+  for (let j = from - 1; j >= 0 && j >= from - 120; j--) {
+    const m = lines[j].match(/^\d{1,2}\.\d{1,2}\s+(.+?)(?:\s+\(CLOSED\))?$/i);
+    if (m) {
+      const name = m[1].replace(/\s+\d{1,3}$/, "").trim();
+      return name && !isJunkNegativeAccountName(name) ? name : null;
+    }
+  }
+  return null;
+}
+
 /** Extract structured negatives with per-line bureau tags when detectable. */
+/** SmartCredit 3B account heading: "UNIFY FIN CU 349952****". */
+const SMARTCREDIT_ACCOUNT_HEADING = /^([A-Z0-9][A-Z0-9 &\/.'-]{1,40}?)\s+(\d{4,})\*{3,}$/;
+const SMARTCREDIT_NEGATIVE_CELL =
+  /collection|charge[\s-]?off|charged off|repossess|foreclos|bankrupt|judg(?:e)?ment|\blien\b|past due|delinquent|\blate\b|\d{2,3}\s*days?\s*(?:past|late)/i;
+const SMARTCREDIT_PLACEHOLDER = /^(?:[—–]+|-{2,}|N\/A)?$/i;
+
+/**
+ * SmartCredit Ultra 3B layout: account heading, field labels, then one row per
+ * field with TU / EX / EQ cells separated by tabs ("——" = bureau not
+ * reporting). One account per heading; bureaus = columns showing a negative;
+ * key = account-number prefix (creditor names vary between pulls, e.g.
+ * "TBOM/MILSTNE" vs "TBOMMILSTN"). Returns null when the layout is absent.
+ */
+function extractSmartCreditNegativeAccounts(lines: string[]): NegativeAccount[] | null {
+  // Creditor names by account-number prefix (headings: "UNIFY FIN CU 349952****").
+  const names = new Map<string, string>();
+  for (const l of lines) {
+    const m = l.match(SMARTCREDIT_ACCOUNT_HEADING);
+    if (m && !isJunkNegativeAccountName(m[1]) && !names.has(m[2].slice(0, 6))) {
+      names.set(m[2].slice(0, 6), m[1].trim());
+    }
+  }
+  if (names.size < 2) return null;
+  const order: BureauCode[] = ["TU", "EX", "EQ"];
+  const cellsOf = (l: string) => l.split(/\t+/).map((c) => c.trim());
+  // Each account's value rows start with its "Account Number" row
+  // ("349952**** \t —— \t ——"); the heading can sit pages earlier.
+  const starts: { i: number; acct: string }[] = [];
+  lines.forEach((l, i) => {
+    const cells = cellsOf(l);
+    if (cells.length !== 3) return;
+    const num = cells.map((c) => c.match(/^(\d{4,})\*{3,}$/)?.[1]).find(Boolean);
+    if (num && cells.every((c) => /^\d{4,}\*{3,}$/.test(c) || SMARTCREDIT_PLACEHOLDER.test(c))) {
+      starts.push({ i, acct: num });
+    }
+  });
+  if (starts.length === 0) return null;
+  const byKey = new Map<string, NegativeAccount>();
+  starts.forEach((st, n) => {
+    const end = n + 1 < starts.length ? starts[n + 1].i : Math.min(lines.length, st.i + 120);
+    const bureaus = new Set<BureauCode>();
+    let detail = "";
+    for (let j = st.i + 1; j < end; j++) {
+      const cells = cellsOf(lines[j]);
+      if (cells.length !== 3) continue;
+      // Skip the account-history grid ("TransUnion 30: 0 60: 0 …").
+      if (cells.some((c) => /^(?:trans\s*union|experian|equifax)\b/i.test(c))) continue;
+      cells.forEach((c, k) => {
+        if (SMARTCREDIT_PLACEHOLDER.test(c) || !SMARTCREDIT_NEGATIVE_CELL.test(c)) return;
+        bureaus.add(order[k]);
+        if (!detail || /charge|collection|repossess|foreclos|bankrupt/i.test(c)) detail = c;
+      });
+    }
+    if (bureaus.size === 0) return;
+    const prefix = st.acct.slice(0, 6);
+    const creditor = names.get(prefix) || `Account ${prefix}`;
+    // Status wording can change between pulls; the account number does not.
+    const key = `acct${prefix}`;
+    const prev = byKey.get(key);
+    byKey.set(key, {
+      key,
+      creditor,
+      label: `${creditor} — ${detail}`.slice(0, 100),
+      type: classifyNegativeLine(detail).type || detail,
+      bureaus: order.filter((b) => bureaus.has(b) || prev?.bureaus.includes(b)),
+    });
+  });
+  return [...byKey.values()].slice(0, 25);
+}
+
+/** True when the PDF text uses the SmartCredit 3B account layout. */
+export function hasSmartCreditAccountLayout(text: string): boolean {
+  return extractSmartCreditNegativeAccounts(text.split(/\r?\n/).map((l) => l.trim())) !== null;
+}
+
 export function extractNegativeAccounts(text: string): NegativeAccount[] {
   const lines = text.split(/\r?\n/).map((l) => l.trim());
+  const smartCredit = extractSmartCreditNegativeAccounts(lines);
+  if (smartCredit) return smartCredit;
   const accounts: NegativeAccount[] = [];
   const seen = new Set<string>();
   const triBureau = isTriBureauReport(text);
@@ -18077,13 +24581,28 @@ export function extractNegativeAccounts(text: string): NegativeAccount[] {
     const line = lines[i];
     if (line.length < 8 || line.length > 140) continue;
     if (!NEGATIVE_LINE_KEYWORDS.test(line)) continue;
-    if (isNonTradelineNegativeNoise(line)) continue;
-    if (!looksLikeTradelineNegativeInline(line)) continue;
 
-    const classified = classifyNegativeLine(line);
+    // Bureau-column status row ("Account Status Over 120 Days Past Due …")
+    // inside a numbered tradeline section ("4.7 Kashable Llc"): name the
+    // account after that section heading instead of the field label.
+    const statusRow = line.match(STATUS_FIELD_ROW);
+    const sectionCreditor = statusRow
+      ? findTradelineSectionCreditor(lines, i)
+      : null;
+    if (!sectionCreditor) {
+      if (isNonTradelineNegativeNoise(line)) continue;
+      if (!looksLikeTradelineNegativeInline(line)) continue;
+    }
+
+    const classified = sectionCreditor
+      ? {
+          ...classifyNegativeLine(statusRow![1]),
+          creditor: sectionCreditor,
+        }
+      : classifyNegativeLine(line);
     const creditor = classified.creditor || line.slice(0, 40);
     if (isNonTradelineNegativeNoise(creditor)) continue;
-    if (isNonTradelineNegativeNoise(line)) continue;
+    if (!sectionCreditor && isNonTradelineNegativeNoise(line)) continue;
     const key = normalizeAccountKey(creditor, classified.type);
     if (seen.has(key)) continue;
     seen.add(key);
@@ -18115,6 +24634,7 @@ export function extractNegativeAccounts(text: string): NegativeAccount[] {
     accounts.push({
       key,
       label,
+      creditor: classified.creditor || undefined,
       type: classified.type,
       bureaus,
       bureaus_uncertain: uncertain || undefined,
@@ -18125,7 +24645,49 @@ export function extractNegativeAccounts(text: string): NegativeAccount[] {
 
 /** Exact fingerprint match only — same creditor + different types are distinct. */
 function accountsMatch(a: NegativeAccount, b: NegativeAccount): boolean {
-  return a.key === b.key;
+  if (a.key === b.key) return true;
+  // Cross-layout (SmartCredit account-number keys vs other providers'
+  // creditor|type keys): same creditor = same account, so a still-reporting
+  // account is never claimed as removed. Prefix match tolerates truncation
+  // ("TBOM/MILSTNE" vs "TBOMMILSTN", "DISCOVERC" vs "DISCOVER CARD").
+  const ca = normalizeCreditorToken(a.creditor || "");
+  const cb = normalizeCreditorToken(b.creditor || "");
+  if (ca.length < 4 || cb.length < 4) return false;
+  return ca === cb || (Math.min(ca.length, cb.length) >= 6 && (ca.startsWith(cb) || cb.startsWith(ca)));
+}
+
+/** Words that describe an account but never name a creditor. */
+const NON_CREDITOR_WORDS = new Set(
+  (
+    "open closed negative positive derogatory collection collections chargeoff charge off charged " +
+    "bad debt account accounts credit card cards auto bank retail sales financing finance personal loan " +
+    "loans tire dealer dealers jewelers jewelry bulk purchase factoring company companies unknown amount " +
+    "high original other services service paid late payment payments days day past due revolving " +
+    "installment mortgage student medical utility utilities status remarks remark profit loss write " +
+    "written canceled cancelled grantor by in as of on the and to with transferred sold settled " +
+    "repossession foreclosure bankruptcy judgment lien delinquent tradeline item items type rating " +
+    "individual joint authorized user educational government insurance telecom miscellaneous misc " +
+    "department store oil gas consumer services"
+  ).split(/\s+/),
+);
+
+/**
+ * A win / target label must name a real creditor. Rejects column rows
+ * ("Collection/Chargeoff \t—— \t——"), bare statuses ("Negative Closed",
+ * "Derogatory"), and category-only names ("Open Sales Financing — Late
+ * Payment"). Only the part before " — " is judged.
+ */
+export function isCreditorlessWinLabel(label: string): boolean {
+  const raw = String(label || "");
+  if (/\t|——|—\s+—|-{2,}/.test(raw)) return true;
+  const name = raw.split(/\s+—\s+/)[0];
+  const words = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(" ")
+    .filter((w) => w && !/^\d+$/.test(w));
+  if (words.length === 0) return true;
+  return words.every((w) => NON_CREDITOR_WORDS.has(w) || w.length <= 1);
 }
 
 /** Diff structured negatives: removed = in before but not after. */
@@ -18145,23 +24707,31 @@ export function diffNegativeAccounts(
 export function mergeRemovedWins(
   structuredRemoved: NegativeAccount[],
   lineRemoved: string[],
+  /** After-side accounts: a line naming one of these is not a removal. */
+  stillReporting: NegativeAccount[] = [],
 ): Array<{ label: string; bureaus: BureauCode[] }> {
   const out: Array<{ label: string; bureaus: BureauCode[] }> = [];
   const seen = new Set<string>();
+  // Report-text prefixes that are not part of the account name.
+  const tidy = (l: string) => l.replace(/^\s*[-•*]\s+/, "").replace(/^agency client:\s*/i, "").trim();
+  structuredRemoved = structuredRemoved.map((a) => ({ ...a, label: tidy(a.label) }));
+  lineRemoved = lineRemoved.map(tidy);
   for (const acct of structuredRemoved) {
     const k = acct.label.toLowerCase().trim();
-    if (seen.has(k)) continue;
+    if (seen.has(k) || isCreditorlessWinLabel(acct.label)) continue;
     seen.add(k);
     out.push({ label: acct.label, bureaus: acct.bureaus });
   }
   for (const line of lineRemoved) {
     const k = line.toLowerCase().trim();
-    if (!k || seen.has(k)) continue;
+    if (!k || seen.has(k) || isCreditorlessWinLabel(line)) continue;
     // Skip if any structured label already covers this creditor token
     const lineKey = normalizeCreditorToken(line);
-    const covered = structuredRemoved.some((a) => {
-      const cred = a.key.split("|")[0];
-      return cred.length >= 5 && lineKey.includes(cred);
+    const credOf = (a: NegativeAccount) =>
+      normalizeCreditorToken(a.creditor || "") || a.key.split("|")[0];
+    const covered = [...structuredRemoved, ...stillReporting].some((a) => {
+      const cred = credOf(a);
+      return cred.length >= 5 && !cred.startsWith("acct") && lineKey.includes(cred);
     });
     if (covered) continue;
     seen.add(k);
@@ -18661,8 +25231,13 @@ async function extractFromCreditReportPdfs(
     );
     const beforeNeg = detectNegativeLines(leftText);
     const afterNeg = detectNegativeLines(rightText);
-    const lineRemoved = diffItems(beforeNeg, afterNeg);
-    const mergedRemoved = mergeRemovedWins(removed, lineRemoved);
+    // Both sides in the SmartCredit 3B account layout: the account-level diff
+    // is complete. The line diff would only add column rows as fake wins
+    // ("Collection/Chargeoff —— ——").
+    const accountLayoutBothSides =
+      hasSmartCreditAccountLayout(leftText) && hasSmartCreditAccountLayout(rightText);
+    const lineRemoved = accountLayoutBothSides ? [] : diffItems(beforeNeg, afterNeg);
+    const mergedRemoved = mergeRemovedWins(removed, lineRemoved, afterAccounts);
     const wins = mergedRemoved.map((item) => ({
       itemRemoved: item.label,
       bureaus: item.bureaus,
@@ -18692,7 +25267,10 @@ async function extractFromCreditReportPdfs(
               type: "Derogatory Item",
               bureaus: ["TU", "EX", "EQ"] as BureauCode[],
             }));
-    const targets = targetSource.slice(0, 8).map((acct, i) => ({
+    const targets = targetSource
+      .filter((acct) => !isCreditorlessWinLabel("label" in acct ? acct.label : String(acct)))
+      .slice(0, 8)
+      .map((acct, i) => ({
       item: "label" in acct ? acct.label : String(acct),
       bureaus: ("bureaus" in acct
         ? acct.bureaus
@@ -19317,7 +25895,7 @@ export async function runClaudeCreditAnalysisEnhance(opts: {
     }
     return { analyst: opts.analyst, enhanced: false, error: "vitest_skip" };
   }
-  const apiKey = String(process.env.ANTHROPIC_API_KEY || "").trim();
+  const apiKey = reportsAnthropicKey();
   if (!apiKey) {
     return {
       analyst: opts.analyst,
@@ -19403,6 +25981,7 @@ export async function runClaudeCreditAnalysisEnhance(opts: {
       {
         headers: {
           "x-api-key": apiKey,
+          ...anthropicWorkspaceHeader(apiKey),
           "anthropic-version": "2023-06-01",
           "content-type": "application/json",
         },
@@ -19454,6 +26033,12 @@ async function executeCreditAnalysisUpload(opts: {
   sourceLabel?: string;
   /** Default true when ANTHROPIC_API_KEY is set. */
   enhanceWithClaude?: boolean;
+  /**
+   * Staff uploads: also queue the enhanced account-level read so the
+   * existing "Download PDF" serves the enhanced report once ready. Runs in
+   * the background — never changes this response or its timing.
+   */
+  queueEnhancedPdf?: boolean;
 }): Promise<CreditAnalysisResult> {
   const {
     mode,
@@ -19707,7 +26292,7 @@ async function executeCreditAnalysisUpload(opts: {
   // Skip on weak extraction — short honesty message only; saves latency/tokens.
   const wantClaude =
     opts.enhanceWithClaude !== false &&
-    !!process.env.ANTHROPIC_API_KEY &&
+    !!reportsAnthropicKey() &&
     !weakExtraction;
   let analyst = analystBase;
   let claudeEnhanced = false;
@@ -19813,6 +26398,22 @@ async function executeCreditAnalysisUpload(opts: {
       generatedAt,
     ],
   );
+
+  if (opts.queueEnhancedPdf && isSupportedCreditFileMediaType(file.mimetype)) {
+    const analysisId = Number(insAnalysis.insertId);
+    waitUntil(
+      createCreditFileExtraction({
+        buffer: file.buffer,
+        mimeType: file.mimetype,
+        fileName: file.originalname || "credit-report",
+        clientId,
+        creditAnalysisId: analysisId,
+        purpose: "analysis",
+      }).catch((e: any) =>
+        console.error("[credit-analysis:enhanced-queue]", analysisId, e?.message ?? e),
+      ),
+    );
+  }
 
   return {
     id: insAnalysis.insertId,
@@ -20057,7 +26658,7 @@ function validateReportCompliance(data: OfGReportData): ReportComplianceResult {
 // ============================================================================
 // OFG PROGRESS REPORT PDF (inline)
 // ============================================================================
-// Keep in sync with api/ofgProgressReportPdf.ts (unit tests / sample scripts).
+// Progress Report v2 PDF: api/progressReportV2.ts (inlined engine block).
 
 const NAVY = rgb(0.051, 0.122, 0.235);
 const GOLD = rgb(0.788, 0.659, 0.298);
@@ -20072,164 +26673,6 @@ const AMBER = rgb(0.85, 0.55, 0.13);
 
 const LOGO_CDN =
   "https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white.png";
-
-type PdfLabels = {
-  progressReport: (name: string) => string;
-  scoreOverview: string;
-  middleScore: string;
-  before: string;
-  after: string;
-  pts: string;
-  goalProgress: string;
-  winsTitle: string;
-  noWins: string;
-  winsThisRoundTitle: string;
-  winsSinceEnrollmentTitle: string;
-  targetsTitle: string;
-  targetsThisRoundTitle: string;
-  targetsSinceEnrollmentTitle: string;
-  noTargets: string;
-  utilTitle: string;
-  utilEmpty: string;
-  utilPayTo30: string;
-  utilPayTo10: string;
-  positiveTitle: string;
-  positiveDefault: string;
-  roadmapTitle: (round: number) => string;
-  scoreGoal: string;
-  gapRemaining: string;
-  fileStrength: string;
-  actionPlanTitle: string;
-  ownerOfg: string;
-  ownerClient: string;
-  croaTitle: string;
-  footer: string;
-  page2Header: string;
-  page3Header: string;
-  reportDates: (before: string, after: string) => string;
-  bureauTu: string;
-  bureauEx: string;
-  bureauEq: string;
-  change: string;
-  milestones: string;
-  tradeline: string;
-  funding: string;
-  pageOf: (n: number, total: number) => string;
-};
-
-const LABELS: Record<"en" | "es", PdfLabels> = {
-  en: {
-    progressReport: (name) => `Progress Report — ${name}`,
-    scoreOverview: "Score progress at a glance",
-    middleScore: "Middle score",
-    before: "Before",
-    after: "After",
-    pts: "pts",
-    goalProgress: "Progress toward goal",
-    winsTitle: "What came off your report (Wins)",
-    noWins: "No wins detected — verify against source PDFs.",
-    winsThisRoundTitle: "This round (vs prior report)",
-    winsSinceEnrollmentTitle: "Since you started (vs enrollment)",
-    targetsTitle: "Still on report (Round targets)",
-    targetsThisRoundTitle: "Still on report — this round focus",
-    targetsSinceEnrollmentTitle: "Still on report — since enrollment",
-    noTargets: "None detected",
-    utilTitle: "Credit utilization",
-    utilEmpty: "Utilization details will appear when account data is available.",
-    utilPayTo30: "Pay to 30%",
-    utilPayTo10: "Pay to 10%",
-    positiveTitle: "Positive accounts working in your favor",
-    positiveDefault: "On-time payment history on open accounts",
-    roadmapTitle: (round) => `Round ${round} roadmap`,
-    scoreGoal: "Score goal",
-    gapRemaining: "Gap remaining",
-    fileStrength: "File strength",
-    actionPlanTitle: "Your action plan",
-    ownerOfg: "OFG",
-    ownerClient: "You",
-    croaTitle: "CROA disclosure",
-    footer: "optimum-financial-group.com  |  (949) 736-5644",
-    page2Header: "Utilization & what's working",
-    page3Header: "Roadmap & action plan",
-    reportDates: (b, a) => `Report dates: ${b}  →  ${a}`,
-    bureauTu: "TransUnion",
-    bureauEx: "Experian",
-    bureauEq: "Equifax",
-    change: "Change",
-    milestones: "Milestones",
-    tradeline: "Tradeline recommendation",
-    funding: "Funding readiness",
-    pageOf: (n, total) => `${n} / ${total}`,
-  },
-  es: {
-    progressReport: (name) => `Informe de Progreso — ${name}`,
-    scoreOverview: "Progreso de puntajes de un vistazo",
-    middleScore: "Puntaje medio",
-    before: "Antes",
-    after: "Despues",
-    pts: "pts",
-    goalProgress: "Progreso hacia la meta",
-    winsTitle: "Lo que salio de su reporte (Victorias)",
-    noWins: "No se detectaron victorias — verifique los PDFs fuente.",
-    winsThisRoundTitle: "Esta ronda (vs reporte anterior)",
-    winsSinceEnrollmentTitle: "Desde que empezo (vs inscripcion)",
-    targetsTitle: "Aun en el reporte (Objetivos de la ronda)",
-    targetsThisRoundTitle: "Aun en el reporte — enfoque de esta ronda",
-    targetsSinceEnrollmentTitle: "Aun en el reporte — desde la inscripcion",
-    noTargets: "Ninguno detectado",
-    utilTitle: "Utilizacion de credito",
-    utilEmpty:
-      "Los detalles de utilizacion apareceran cuando haya datos de cuentas.",
-    utilPayTo30: "Pagar al 30%",
-    utilPayTo10: "Pagar al 10%",
-    positiveTitle: "Cuentas positivas a su favor",
-    positiveDefault: "Historial de pagos puntuales en cuentas abiertas",
-    roadmapTitle: (round) => `Hoja de ruta — Ronda ${round}`,
-    scoreGoal: "Meta de puntaje",
-    gapRemaining: "Brecha restante",
-    fileStrength: "Fortaleza del archivo",
-    actionPlanTitle: "Su plan de accion",
-    ownerOfg: "OFG",
-    ownerClient: "Usted",
-    croaTitle: "Divulgacion CROA",
-    footer: "optimum-financial-group.com  |  (949) 736-5644",
-    page2Header: "Utilizacion y lo que funciona",
-    page3Header: "Hoja de ruta y plan de accion",
-    reportDates: (b, a) => `Fechas del informe: ${b}  ->  ${a}`,
-    bureauTu: "TransUnion",
-    bureauEx: "Experian",
-    bureauEq: "Equifax",
-    change: "Cambio",
-    milestones: "Hitos",
-    tradeline: "Recomendacion de tradeline",
-    funding: "Preparacion para fondeo",
-    pageOf: (n, total) => `${n} / ${total}`,
-  },
-};
-
-function resolveLocale(data: OfGReportData): "en" | "es" {
-  return data.locale === "es" ? "es" : "en";
-}
-
-/** StandardFonts (Helvetica) use WinAnsi — normalize unsafe glyphs. */
-function toPdfSafeText(input: string): string {
-  return String(input ?? "")
-    .replace(/\u2192|\u21D2|\u2794|\u27A1/g, "->")
-    .replace(/\u2190|\u21D0/g, "<-")
-    .replace(/[\u2013\u2014\u2015]/g, "-")
-    .replace(/\u2022|\u00B7|\u25CF|\u25E6/g, "*")
-    .replace(/\u2026/g, "...")
-    .replace(/[\u2018\u2019\u2032]/g, "'")
-    .replace(/[\u201C\u201D\u2033]/g, '"')
-    .replace(/\u00A0/g, " ")
-    .replace(/—/g, "-")
-    // Tabs/newlines are not WinAnsi-encodable (pdf-lib throws 0x0009 / 542004).
-    .replace(/[\t\r\n\f\v]+/g, " ")
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")
-    .replace(/[^\x20-\x7E\xA0-\xFF]/g, "?")
-    .replace(/ {2,}/g, " ")
-    .trim();
-}
 
 /** Official white OFG wordmark (logo_with_title_white.png) — inlined for Vercel. */
 const OFG_LOGO_HEADER_PNG_B64 =
@@ -20275,893 +26718,27 @@ async function loadOfgLogoBytes(): Promise<Uint8Array | null> {
   return null;
 }
 
-function scoreTone(after: number, before: number) {
-  const delta = after - before;
-  if (delta > 0) return GREEN;
-  if (delta < 0) return RED;
-  return MUTED;
+/** StandardFonts (Helvetica) use WinAnsi — normalize unsafe glyphs. */
+function toPdfSafeText(input: string): string {
+  return String(input ?? "")
+    .replace(/\u2192|\u21D2|\u2794|\u27A1/g, "->")
+    .replace(/\u2190|\u21D0/g, "<-")
+    .replace(/[\u2013\u2014\u2015]/g, "-")
+    .replace(/\u2022|\u00B7|\u25CF|\u25E6/g, "*")
+    .replace(/\u2026/g, "...")
+    .replace(/[\u2018\u2019\u2032]/g, "'")
+    .replace(/[\u201C\u201D\u2033]/g, '"')
+    .replace(/\u00A0/g, " ")
+    .replace(/—/g, "-")
+    // Tabs/newlines are not WinAnsi-encodable (pdf-lib throws 0x0009 / 542004).
+    .replace(/[\t\r\n\f\v]+/g, " ")
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")
+    .replace(/[^\x20-\x7E\xA0-\xFF]/g, "?")
+    .replace(/ {2,}/g, " ")
+    .trim();
 }
 
-function utilTone(pct: number) {
-  if (pct <= 30) return GREEN;
-  if (pct <= 50) return AMBER;
-  return RED;
-}
 
-function clamp01(n: number) {
-  return Math.min(1, Math.max(0, n));
-}
-
-function scorePct(score: number) {
-  return clamp01((score - 300) / 550);
-}
-
-function fmtMoney(n: number) {
-  return `$${Math.round(n).toLocaleString("en-US")}`;
-}
-
-function wrapText(
-  text: string,
-  font: PDFFont,
-  size: number,
-  maxWidth: number,
-): string[] {
-  const safe = toPdfSafeText(text);
-  const words = safe.split(/\s+/).filter(Boolean);
-  const lines: string[] = [];
-  let cur = "";
-  for (const w of words) {
-    const trial = cur ? `${cur} ${w}` : w;
-    if (font.widthOfTextAtSize(trial, size) > maxWidth && cur) {
-      lines.push(cur);
-      cur = w;
-    } else {
-      cur = trial;
-    }
-  }
-  if (cur) lines.push(cur);
-  return lines.length ? lines : [""];
-}
-
-async function generateOfgProgressReportPdf(
-  data: OfGReportData,
-  fileNameHint: string,
-): Promise<{ buffer: Buffer; fileName: string }> {
-  const locale = resolveLocale(data);
-  const L = LABELS[locale];
-  const pdf = await PDFDocument.create();
-  const font = await pdf.embedFont(StandardFonts.Helvetica);
-  const fontBold = await pdf.embedFont(StandardFonts.HelveticaBold);
-
-  let logo: PDFImage | null = null;
-  const logoBytes = await loadOfgLogoBytes();
-  if (logoBytes) {
-    try {
-      logo = await pdf.embedPng(logoBytes);
-    } catch {
-      try {
-        logo = await pdf.embedJpg(logoBytes);
-      } catch {
-        logo = null;
-      }
-    }
-  }
-
-  const dateLocale = locale === "es" ? "es-US" : "en-US";
-  const monthYear = new Date()
-    .toLocaleDateString(dateLocale, { month: "short", year: "numeric" })
-    .replace(" ", "");
-  const fileName =
-    fileNameHint ||
-    `${data.client.firstName}_OFG_Progress_Report_${monthYear}.pdf`;
-
-  const W = 612;
-  const H = 792;
-  const M = 36;
-  const CONTENT_W = W - M * 2;
-  const HEADER_H = 80;
-  const TOTAL_PAGES = 3;
-
-  const drawText = (
-    page: PDFPage,
-    text: string,
-    opts: {
-      x: number;
-      y: number;
-      size: number;
-      font?: PDFFont;
-      color?: ReturnType<typeof rgb>;
-      maxWidth?: number;
-    },
-  ) => {
-    const f = opts.font ?? font;
-    const safe = toPdfSafeText(text);
-    const clipped =
-      opts.maxWidth != null
-        ? (() => {
-            let s = safe;
-            while (
-              s.length > 0 &&
-              f.widthOfTextAtSize(s, opts.size) > opts.maxWidth!
-            ) {
-              s = s.slice(0, -1);
-            }
-            return s;
-          })()
-        : safe;
-    page.drawText(clipped, {
-      x: opts.x,
-      y: opts.y,
-      size: opts.size,
-      font: f,
-      color: opts.color ?? GRAY,
-    });
-  };
-
-  const drawHeader = (page: PDFPage, title: string) => {
-    page.drawRectangle({
-      x: 0,
-      y: H - HEADER_H,
-      width: W,
-      height: HEADER_H,
-      color: NAVY,
-    });
-    page.drawRectangle({
-      x: 0,
-      y: H - HEADER_H - 3,
-      width: W,
-      height: 3,
-      color: GOLD,
-    });
-    let titleX = M;
-    if (logo) {
-      const logoH = 44;
-      const logoW = (logo.width / logo.height) * logoH;
-      const logoY = H - HEADER_H + (HEADER_H - logoH) / 2 + 2;
-      page.drawImage(logo, {
-        x: M,
-        y: logoY,
-        width: logoW,
-        height: logoH,
-      });
-      titleX = M + logoW + 16;
-    } else {
-      drawText(page, "Optimum Financial Group", {
-        x: M,
-        y: H - HEADER_H + 28,
-        size: 13,
-        font: fontBold,
-        color: GOLD,
-      });
-      titleX = M;
-    }
-    drawText(page, title, {
-      x: titleX,
-      y: H - HEADER_H + (logo ? 30 : 14),
-      size: 9,
-      color: WHITE,
-      maxWidth: W - titleX - M,
-    });
-  };
-
-  const drawFooter = (page: PDFPage, pageNum: number) => {
-    page.drawRectangle({
-      x: 0,
-      y: 0,
-      width: W,
-      height: 36,
-      color: LIGHT,
-    });
-    page.drawRectangle({
-      x: 0,
-      y: 36,
-      width: W,
-      height: 1,
-      color: BORDER,
-    });
-    drawText(page, L.footer, {
-      x: M,
-      y: 14,
-      size: 8,
-      color: MUTED,
-    });
-    const pageLabel = L.pageOf(pageNum, TOTAL_PAGES);
-    const pw = font.widthOfTextAtSize(pageLabel, 8);
-    drawText(page, pageLabel, {
-      x: W - M - pw,
-      y: 14,
-      size: 8,
-      color: MUTED,
-    });
-  };
-
-  const drawCard = (
-    page: PDFPage,
-    x: number,
-    yBottom: number,
-    w: number,
-    h: number,
-  ) => {
-    page.drawRectangle({
-      x,
-      y: yBottom,
-      width: w,
-      height: h,
-      color: WHITE,
-      borderColor: BORDER,
-      borderWidth: 1,
-    });
-  };
-
-  const drawBar = (
-    page: PDFPage,
-    x: number,
-    y: number,
-    w: number,
-    h: number,
-    pct: number,
-    fill: ReturnType<typeof rgb>,
-  ) => {
-    page.drawRectangle({
-      x,
-      y,
-      width: w,
-      height: h,
-      color: rgb(0.93, 0.94, 0.96),
-    });
-    const filled = Math.max(2, w * clamp01(pct));
-    page.drawRectangle({
-      x,
-      y,
-      width: filled,
-      height: h,
-      color: fill,
-    });
-  };
-
-  const todayIso = new Date().toISOString().slice(0, 10);
-  const beforeDate = data.reportDate?.before || todayIso;
-  const afterDate = data.reportDate?.after || todayIso;
-  const midBefore = data.middleScore.before;
-  const midAfter = data.middleScore.after;
-  const midDelta = midAfter - midBefore;
-  const midSign = midDelta >= 0 ? "+" : "";
-  const goal = data.roadmap.scoreGoal || 720;
-  const goalPct = clamp01((midAfter - 300) / Math.max(1, goal - 300));
-
-  const bureaus: Array<{
-    label: string;
-    before: number;
-    after: number;
-  }> = [
-    {
-      label: L.bureauTu,
-      before: data.bureauScores.transunion.before,
-      after: data.bureauScores.transunion.after,
-    },
-    {
-      label: L.bureauEx,
-      before: data.bureauScores.experian.before,
-      after: data.bureauScores.experian.after,
-    },
-    {
-      label: L.bureauEq,
-      before: data.bureauScores.equifax.before,
-      after: data.bureauScores.equifax.after,
-    },
-  ];
-
-  // ── Page 1: scores + wins + targets ─────────────────────────────────────
-  {
-    const page = pdf.addPage([W, H]);
-    drawHeader(page, L.progressReport(data.client.firstName));
-    drawFooter(page, 1);
-    let y = H - HEADER_H - 28;
-
-    drawText(page, L.scoreOverview, {
-      x: M,
-      y,
-      size: 14,
-      font: fontBold,
-      color: NAVY,
-    });
-    y -= 16;
-    drawText(page, L.reportDates(beforeDate, afterDate), {
-      x: M,
-      y,
-      size: 9,
-      color: MUTED,
-    });
-    y -= 18;
-
-    // Middle score hero card
-    const heroH = 88;
-    drawCard(page, M, y - heroH, CONTENT_W, heroH);
-    page.drawRectangle({
-      x: M,
-      y: y - heroH,
-      width: 5,
-      height: heroH,
-      color: GOLD,
-    });
-    drawText(page, L.middleScore, {
-      x: M + 18,
-      y: y - 22,
-      size: 9,
-      font: fontBold,
-      color: MUTED,
-    });
-    drawText(page, `${midBefore}`, {
-      x: M + 18,
-      y: y - 48,
-      size: 22,
-      font: fontBold,
-      color: MUTED,
-    });
-    drawText(page, L.before, {
-      x: M + 18,
-      y: y - 64,
-      size: 8,
-      color: MUTED,
-    });
-    drawText(page, "->", {
-      x: M + 90,
-      y: y - 44,
-      size: 16,
-      font: fontBold,
-      color: GOLD,
-    });
-    drawText(page, `${midAfter}`, {
-      x: M + 120,
-      y: y - 48,
-      size: 28,
-      font: fontBold,
-      color: NAVY,
-    });
-    drawText(page, L.after, {
-      x: M + 120,
-      y: y - 64,
-      size: 8,
-      color: MUTED,
-    });
-
-    const deltaLabel = `${midSign}${midDelta} ${L.pts}`;
-    const deltaW = Math.max(72, fontBold.widthOfTextAtSize(deltaLabel, 12) + 20);
-    const deltaX = W - M - 18 - deltaW;
-    page.drawRectangle({
-      x: deltaX,
-      y: y - 52,
-      width: deltaW,
-      height: 28,
-      color: midDelta >= 0 ? rgb(0.9, 0.98, 0.93) : rgb(0.99, 0.92, 0.92),
-      borderColor: midDelta >= 0 ? GREEN : RED,
-      borderWidth: 1,
-    });
-    drawText(page, deltaLabel, {
-      x: deltaX + 10,
-      y: y - 42,
-      size: 12,
-      font: fontBold,
-      color: midDelta >= 0 ? GREEN : RED,
-    });
-
-    drawText(page, L.goalProgress, {
-      x: M + 250,
-      y: y - 22,
-      size: 8,
-      color: MUTED,
-    });
-    drawBar(page, M + 250, y - 72, 140, 8, goalPct, GOLD);
-    drawText(page, `${midAfter} / ${goal}`, {
-      x: M + 250,
-      y: y - 58,
-      size: 9,
-      font: fontBold,
-      color: NAVY,
-    });
-    y -= heroH + 16;
-
-    // Bureau score cards
-    const cardGap = 10;
-    const cardW = (CONTENT_W - cardGap * 2) / 3;
-    const cardH = 118;
-    bureaus.forEach((b, i) => {
-      const x = M + i * (cardW + cardGap);
-      const bottom = y - cardH;
-      drawCard(page, x, bottom, cardW, cardH);
-      const delta = b.after - b.before;
-      const sign = delta >= 0 ? "+" : "";
-      const tone = scoreTone(b.after, b.before);
-      drawText(page, b.label, {
-        x: x + 12,
-        y: y - 18,
-        size: 9,
-        font: fontBold,
-        color: MUTED,
-      });
-      drawText(page, `${b.after}`, {
-        x: x + 12,
-        y: y - 44,
-        size: 22,
-        font: fontBold,
-        color: NAVY,
-      });
-      drawText(page, `${L.before} ${b.before}`, {
-        x: x + 12,
-        y: y - 60,
-        size: 8,
-        color: MUTED,
-      });
-      drawText(page, `${sign}${delta} ${L.pts}`, {
-        x: x + 12,
-        y: y - 76,
-        size: 11,
-        font: fontBold,
-        color: tone,
-      });
-      drawBar(
-        page,
-        x + 12,
-        bottom + 14,
-        cardW - 24,
-        7,
-        scorePct(b.after),
-        tone,
-      );
-    });
-    y -= cardH + 18;
-
-    // Wins — dual tables when this-round vs since-enrollment differ
-    const winsThis = data.winsThisRound ?? data.wins;
-    const winsSince = data.winsSinceEnrollment ?? data.wins;
-    const showDualWins =
-      JSON.stringify(winsThis.map((w) => w.itemRemoved)) !==
-      JSON.stringify(winsSince.map((w) => w.itemRemoved));
-
-    const drawWinsBlock = (
-      title: string,
-      rows: typeof data.wins,
-      maxRows: number,
-    ) => {
-      drawText(page, title, {
-        x: M,
-        y,
-        size: 11,
-        font: fontBold,
-        color: NAVY,
-      });
-      y -= 12;
-      if (!rows.length) {
-        drawText(page, L.noWins, { x: M, y: y - 4, size: 8, color: MUTED });
-        y -= 16;
-        return;
-      }
-      for (let i = 0; i < Math.min(rows.length, maxRows); i++) {
-        const w = rows[i];
-        const rowH = 24;
-        if (y - rowH < 50) break;
-        drawCard(page, M, y - rowH, CONTENT_W, rowH);
-        page.drawEllipse({
-          x: M + 14,
-          y: y - rowH / 2,
-          xScale: 4,
-          yScale: 4,
-          color: GREEN,
-        });
-        const line = `${w.itemRemoved}  ·  ${w.bureaus.join("/")}  ·  ${w.status}`;
-        drawText(page, line, {
-          x: M + 28,
-          y: y - 15,
-          size: 8,
-          color: GRAY,
-          maxWidth: CONTENT_W - 40,
-        });
-        y -= rowH + 4;
-      }
-      y -= 6;
-    };
-
-    if (showDualWins) {
-      drawWinsBlock(L.winsThisRoundTitle, winsThis, 4);
-      drawWinsBlock(L.winsSinceEnrollmentTitle, winsSince, 4);
-    } else {
-      drawWinsBlock(L.winsTitle, data.wins, 6);
-    }
-
-    const targetsThis = data.targetsThisRound ?? data.targets;
-    const targetsSince = data.targetsSinceEnrollment ?? data.targets;
-    const showDualTargets =
-      JSON.stringify(targetsThis.map((t) => t.item)) !==
-      JSON.stringify(targetsSince.map((t) => t.item));
-
-    drawText(page, showDualTargets ? L.targetsSinceEnrollmentTitle : L.targetsTitle, {
-      x: M,
-      y,
-      size: 11,
-      font: fontBold,
-      color: NAVY,
-    });
-    y -= 14;
-    const targetLines = (showDualTargets ? targetsSince : data.targets).length
-      ? (showDualTargets ? targetsSince : data.targets).slice(0, 5).map((t, i) => {
-          const pri = t.priority ? ` [${t.priority}]` : "";
-          return `${i + 1}. ${t.item}${pri}`;
-        })
-      : [L.noTargets];
-    for (const line of targetLines) {
-      if (y < 50) break;
-      drawText(page, line, {
-        x: M,
-        y,
-        size: 9,
-        color: GRAY,
-        maxWidth: CONTENT_W,
-      });
-      y -= 14;
-    }
-    if (showDualTargets && targetsThis.length) {
-      y -= 4;
-      drawText(page, L.targetsThisRoundTitle, {
-        x: M,
-        y,
-        size: 10,
-        font: fontBold,
-        color: NAVY,
-      });
-      y -= 12;
-      for (const [i, t] of targetsThis.slice(0, 3).entries()) {
-        if (y < 50) break;
-        const pri = t.priority ? ` [${t.priority}]` : "";
-        drawText(page, `${i + 1}. ${t.item}${pri}`, {
-          x: M,
-          y,
-          size: 8,
-          color: GRAY,
-          maxWidth: CONTENT_W,
-        });
-        y -= 12;
-      }
-    }
-  }
-
-  // ── Page 2: utilization + positive ──────────────────────────────────────
-  {
-    const page = pdf.addPage([W, H]);
-    drawHeader(page, L.page2Header);
-    drawFooter(page, 2);
-    let y = H - HEADER_H - 28;
-
-    drawText(page, L.utilTitle, {
-      x: M,
-      y,
-      size: 14,
-      font: fontBold,
-      color: NAVY,
-    });
-    y -= 16;
-
-    if (!data.utilization.length) {
-      drawText(page, L.utilEmpty, { x: M, y, size: 9, color: MUTED });
-      y -= 24;
-    } else {
-      for (const u of data.utilization.slice(0, 8)) {
-        const rowH = 56;
-        if (y - rowH < 80) break;
-        drawCard(page, M, y - rowH, CONTENT_W, rowH);
-        drawText(page, u.account, {
-          x: M + 12,
-          y: y - 16,
-          size: 10,
-          font: fontBold,
-          color: NAVY,
-          maxWidth: CONTENT_W * 0.55,
-        });
-        drawText(
-          page,
-          `${fmtMoney(u.balance)} / ${fmtMoney(u.limit)}  ·  ${u.pctUsed}%`,
-          {
-            x: M + CONTENT_W * 0.55,
-            y: y - 16,
-            size: 9,
-            font: fontBold,
-            color: utilTone(u.pctUsed),
-          },
-        );
-        drawBar(
-          page,
-          M + 12,
-          y - 34,
-          CONTENT_W - 24,
-          8,
-          u.pctUsed / 100,
-          utilTone(u.pctUsed),
-        );
-        drawText(
-          page,
-          `${L.utilPayTo30}: ${fmtMoney(u.payTo30)}   ${L.utilPayTo10}: ${fmtMoney(u.payTo10)}`,
-          {
-            x: M + 12,
-            y: y - 48,
-            size: 8,
-            color: MUTED,
-          },
-        );
-        y -= rowH + 8;
-      }
-    }
-
-    y -= 8;
-    drawText(page, L.positiveTitle, {
-      x: M,
-      y,
-      size: 12,
-      font: fontBold,
-      color: NAVY,
-    });
-    y -= 14;
-    const positives = data.positiveAccounts.length
-      ? data.positiveAccounts
-      : [L.positiveDefault];
-    for (const p of positives.slice(0, 10)) {
-      if (y < 50) break;
-      const lines = wrapText(`* ${p}`, font, 9, CONTENT_W);
-      for (const line of lines) {
-        if (y < 50) break;
-        drawText(page, line, { x: M, y, size: 9, color: GRAY });
-        y -= 13;
-      }
-      y -= 2;
-    }
-
-    // Mini comparison chart (before vs after bars for middle + bureaus)
-    if (y > 160) {
-      y -= 10;
-      drawText(page, L.change, {
-        x: M,
-        y,
-        size: 12,
-        font: fontBold,
-        color: NAVY,
-      });
-      y -= 10;
-      const chartH = 110;
-      drawCard(page, M, y - chartH, CONTENT_W, chartH);
-      const series = [
-        { label: "Mid", before: midBefore, after: midAfter },
-        ...bureaus.map((b) => ({
-          label: b.label.slice(0, 3),
-          before: b.before,
-          after: b.after,
-        })),
-      ];
-      const groupW = CONTENT_W / series.length;
-      series.forEach((s, i) => {
-        const gx = M + i * groupW + 16;
-        const maxBar = 70;
-        const bb = scorePct(s.before) * maxBar;
-        const ba = scorePct(s.after) * maxBar;
-        const base = y - chartH + 28;
-        page.drawRectangle({
-          x: gx,
-          y: base,
-          width: 12,
-          height: bb,
-          color: rgb(0.75, 0.78, 0.84),
-        });
-        page.drawRectangle({
-          x: gx + 16,
-          y: base,
-          width: 12,
-          height: ba,
-          color: scoreTone(s.after, s.before),
-        });
-        drawText(page, s.label, {
-          x: gx,
-          y: base - 14,
-          size: 8,
-          color: MUTED,
-        });
-      });
-    }
-  }
-
-  // ── Page 3: roadmap + action + CROA ─────────────────────────────────────
-  {
-    const page = pdf.addPage([W, H]);
-    drawHeader(page, L.page3Header);
-    drawFooter(page, 3);
-    let y = H - HEADER_H - 28;
-
-    drawText(page, L.roadmapTitle(data.roadmap.currentRound), {
-      x: M,
-      y,
-      size: 14,
-      font: fontBold,
-      color: NAVY,
-    });
-    y -= 16;
-
-    const roadH = 78;
-    drawCard(page, M, y - roadH, CONTENT_W, roadH);
-    drawText(page, L.scoreGoal, {
-      x: M + 14,
-      y: y - 20,
-      size: 9,
-      color: MUTED,
-    });
-    drawText(page, `${goal}`, {
-      x: M + 14,
-      y: y - 42,
-      size: 22,
-      font: fontBold,
-      color: NAVY,
-    });
-    drawText(page, L.gapRemaining, {
-      x: M + 120,
-      y: y - 20,
-      size: 9,
-      color: MUTED,
-    });
-    drawText(page, `${data.roadmap.gapRemaining} ${L.pts}`, {
-      x: M + 120,
-      y: y - 42,
-      size: 18,
-      font: fontBold,
-      color: GOLD,
-    });
-    drawBar(page, M + 14, y - 66, CONTENT_W - 28, 10, goalPct, GOLD);
-    y -= roadH + 14;
-
-    // File strength
-    const fsH = 64;
-    drawCard(page, M, y - fsH, CONTENT_W, fsH);
-    const strength = Math.min(100, Math.max(0, data.fileStrengthScore || 0));
-    drawText(page, L.fileStrength, {
-      x: M + 14,
-      y: y - 22,
-      size: 10,
-      font: fontBold,
-      color: MUTED,
-    });
-    drawText(page, `${strength} / 100`, {
-      x: M + 14,
-      y: y - 44,
-      size: 18,
-      font: fontBold,
-      color: NAVY,
-    });
-    const strengthTone =
-      strength >= 70 ? GREEN : strength >= 45 ? AMBER : RED;
-    drawBar(
-      page,
-      M + 140,
-      y - 40,
-      CONTENT_W - 168,
-      12,
-      strength / 100,
-      strengthTone,
-    );
-    y -= fsH + 14;
-
-    if (data.roadmap.milestones?.length) {
-      drawText(page, L.milestones, {
-        x: M,
-        y,
-        size: 11,
-        font: fontBold,
-        color: NAVY,
-      });
-      y -= 14;
-      for (const m of data.roadmap.milestones.slice(0, 5)) {
-        if (y < 120) break;
-        const lines = wrapText(`* ${m}`, font, 9, CONTENT_W);
-        for (const line of lines) {
-          drawText(page, line, { x: M, y, size: 9, color: GRAY });
-          y -= 12;
-        }
-      }
-      y -= 6;
-    }
-
-    drawText(page, L.actionPlanTitle, {
-      x: M,
-      y,
-      size: 12,
-      font: fontBold,
-      color: NAVY,
-    });
-    y -= 12;
-    for (const a of data.actionPlan.slice(0, 6)) {
-      if (y < 110) break;
-      const owner =
-        a.owner === "ofg" ? L.ownerOfg : L.ownerClient;
-      const rowH = 26;
-      drawCard(page, M, y - rowH, CONTENT_W, rowH);
-      page.drawRectangle({
-        x: M + 8,
-        y: y - rowH + 6,
-        width: 36,
-        height: 14,
-        color: a.owner === "ofg" ? NAVY : GOLD,
-      });
-      drawText(page, owner, {
-        x: M + 12,
-        y: y - 16,
-        size: 7,
-        font: fontBold,
-        color: WHITE,
-      });
-      drawText(page, `${a.step}. ${a.description}`, {
-        x: M + 52,
-        y: y - 16,
-        size: 9,
-        color: GRAY,
-        maxWidth: CONTENT_W - 64,
-      });
-      y -= rowH + 6;
-    }
-
-    if (data.tradelineRecommendation) {
-      y -= 4;
-      drawText(page, L.tradeline, {
-        x: M,
-        y,
-        size: 10,
-        font: fontBold,
-        color: NAVY,
-      });
-      y -= 12;
-      const tLines = wrapText(
-        `${data.tradelineRecommendation.code}: ${data.tradelineRecommendation.projectedImpact}`,
-        font,
-        9,
-        CONTENT_W,
-      );
-      for (const line of tLines) {
-        drawText(page, line, { x: M, y, size: 9, color: GRAY });
-        y -= 12;
-      }
-    }
-    if (data.fundingReadinessNote) {
-      y -= 4;
-      drawText(page, L.funding, {
-        x: M,
-        y,
-        size: 10,
-        font: fontBold,
-        color: NAVY,
-      });
-      y -= 12;
-      for (const line of wrapText(
-        data.fundingReadinessNote,
-        font,
-        9,
-        CONTENT_W,
-      )) {
-        drawText(page, line, { x: M, y, size: 9, color: GRAY });
-        y -= 12;
-      }
-    }
-
-    y = Math.min(y - 8, 130);
-    drawText(page, L.croaTitle, {
-      x: M,
-      y,
-      size: 10,
-      font: fontBold,
-      color: NAVY,
-    });
-    y -= 12;
-    for (const line of wrapText(data.croaDisclosure || "", font, 7.5, CONTENT_W)) {
-      if (y < 48) break;
-      drawText(page, line, { x: M, y, size: 7.5, color: MUTED });
-      y -= 10;
-    }
-  }
-
-  const bytes = await pdf.save();
-  return { buffer: Buffer.from(bytes), fileName };
-}
 
 function reportDataToSummaryMd(data: OfGReportData): string {
   const todayIso = new Date().toISOString().slice(0, 10);
@@ -22418,6 +27995,10 @@ function extractToken(req: Request): string | null {
   return null;
 }
 
+/** Portal response when staff set clients.status = 'blocked'. */
+const CLIENT_BLOCKED_MESSAGE =
+  "Your account is temporarily on hold. Please contact Optimum Financial Group support.";
+
 function requireAuth(actor: ActorType) {
   return async (req: AuthedRequest, res: Response, next: NextFunction) => {
     const token = extractToken(req);
@@ -22448,6 +28029,12 @@ function requireAuth(actor: ActorType) {
       );
       if (rows.length === 0 || rows[0].status === "cancelled") {
         return res.status(401).json({ error: "Account is no longer active" });
+      }
+      if (rows[0].status === "blocked") {
+        return res.status(403).json({
+          error: CLIENT_BLOCKED_MESSAGE,
+          code: "account_blocked",
+        });
       }
     }
 
@@ -24062,7 +29649,7 @@ async function runClaudeProgressReportQa(opts: {
   targets: OfGReportData["targets"];
   wins: OfGReportData["wins"];
 }): Promise<ProgressReportAlert[]> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = reportsAnthropicKey();
   if (!apiKey) return [];
   const model = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
   const system = `You are a credit-repair QA assistant for Optimum Financial Group.
@@ -24096,6 +29683,7 @@ If none, return [].`;
     {
       headers: {
         "x-api-key": apiKey,
+        ...anthropicWorkspaceHeader(apiKey),
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
       },
@@ -24216,7 +29804,7 @@ async function runClaudeOfgReportNarrative(opts: {
   data: OfGReportData;
   afterPdfText?: string;
 }): Promise<{ data: OfGReportData; enhanced: boolean; error?: string }> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = reportsAnthropicKey();
   if (!apiKey) {
     return {
       data: opts.data,
@@ -24263,6 +29851,7 @@ async function runClaudeOfgReportNarrative(opts: {
       {
         headers: {
           "x-api-key": apiKey,
+          ...anthropicWorkspaceHeader(apiKey),
           "anthropic-version": "2023-06-01",
           "content-type": "application/json",
         },
@@ -24303,7 +29892,7 @@ async function runClaudeBureauScoreExtract(opts: {
   used: boolean;
   error?: string;
 }> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = reportsAnthropicKey();
   if (!apiKey) {
     return {
       data: opts.data,
@@ -24339,6 +29928,7 @@ async function runClaudeBureauScoreExtract(opts: {
       {
         headers: {
           "x-api-key": apiKey,
+          ...anthropicWorkspaceHeader(apiKey),
           "anthropic-version": "2023-06-01",
           "content-type": "application/json",
         },
@@ -24488,7 +30078,7 @@ async function runWizardSessionExtraction(
   // Parse PDF text once for score fallback + narrative context.
   let beforeText = "";
   let afterText = "";
-  if (process.env.ANTHROPIC_API_KEY) {
+  if (reportsAnthropicKey()) {
     try {
       const pdfParse = await loadPdfParse();
       const [beforeParsed, afterParsed] = await Promise.all([
@@ -24506,7 +30096,7 @@ async function runWizardSessionExtraction(
   const datesNeedHelp =
     meta.before_date_from_pdf === false || meta.after_date_from_pdf === false;
   if (
-    process.env.ANTHROPIC_API_KEY &&
+    reportsAnthropicKey() &&
     (needsClaudeScoreFallback(working, conf) || datesNeedHelp)
   ) {
     const scoreResult = await runClaudeBureauScoreExtract({
@@ -24539,7 +30129,7 @@ async function runWizardSessionExtraction(
     meta.claude_scores = false;
   }
 
-  if (wantEnhance && process.env.ANTHROPIC_API_KEY) {
+  if (wantEnhance && reportsAnthropicKey()) {
     const narrative = await runClaudeOfgReportNarrative({
       data: working,
       afterPdfText: afterText,
@@ -25245,6 +30835,70 @@ const GET_CREDIT_REPORT_SMS_FROM_E164 = "+19496740714"; // César OFG (prospect 
 const GET_CREDIT_REPORT_SOURCE_LABEL = "get_credit_report";
 const GOLF_TOURNAMENT_LABEL_SLUG = "golf_tournament_prospect";
 const LAS_VEGAS_EVENT_LABEL_SLUG = "las_vegas_event";
+const OFY_EVENT_LABEL_SLUG = "ofy";
+
+type GetCreditReportEventKind = "golf" | "vegas" | "ofy" | null;
+
+type GetCreditReportEventMeta = {
+  kind: Exclude<GetCreditReportEventKind, null>;
+  labelSlug: string;
+  placeEn: string;
+  placeEs: string;
+  detailEn: string;
+  detailEs: string;
+};
+
+/** Keep in sync with api/getCreditReportLead.ts */
+const GET_CREDIT_REPORT_EVENTS: Record<string, GetCreditReportEventMeta> = {
+  "2026-09-14": {
+    kind: "golf",
+    labelSlug: GOLF_TOURNAMENT_LABEL_SLUG,
+    placeEn: "Golf tournament",
+    placeEs: "Torneo de golf",
+    detailEn: "",
+    detailEs: "",
+  },
+  "2026-09-15": {
+    kind: "vegas",
+    labelSlug: LAS_VEGAS_EVENT_LABEL_SLUG,
+    placeEn: "Las Vegas",
+    placeEs: "Las Vegas",
+    detailEn: "",
+    detailEs: "",
+  },
+  "2026-10-01": {
+    kind: "ofy",
+    labelSlug: OFY_EVENT_LABEL_SLUG,
+    placeEn: "Family Fun Night · Chino",
+    placeEs: "Family Fun Night · Chino",
+    detailEn: "7011 Schaefer Ave Ste E · 5–7 PM",
+    detailEs: "7011 Schaefer Ave Ste E · 5–7 PM",
+  },
+  "2026-10-08": {
+    kind: "ofy",
+    labelSlug: OFY_EVENT_LABEL_SLUG,
+    placeEn: "Family Fun Night · Fontana",
+    placeEs: "Family Fun Night · Fontana",
+    detailEn: "5–7 PM",
+    detailEs: "5–7 PM",
+  },
+  "2026-10-22": {
+    kind: "ofy",
+    labelSlug: OFY_EVENT_LABEL_SLUG,
+    placeEn: "Family Fun Night · Fontana + Rancho Cucamonga",
+    placeEs: "Family Fun Night · Fontana + Rancho Cucamonga",
+    detailEn: "5–7 PM",
+    detailEs: "5–7 PM",
+  },
+  "2026-10-29": {
+    kind: "ofy",
+    labelSlug: OFY_EVENT_LABEL_SLUG,
+    placeEn: "Family Fun Night · Upland",
+    placeEs: "Family Fun Night · Upland",
+    detailEn: "5–7 PM",
+    detailEs: "5–7 PM",
+  },
+};
 
 function smsGetCreditReportStaffAlert(opts: {
   firstName: string;
@@ -25252,7 +30906,7 @@ function smsGetCreditReportStaffAlert(opts: {
   phone: string;
   email: string;
   lang?: string;
-  eventKind?: "golf" | "vegas" | null;
+  eventKind?: GetCreditReportEventKind;
   pipelineUrl: string;
 }): string {
   const name =
@@ -25264,7 +30918,9 @@ function smsGetCreditReportStaffAlert(opts: {
       ? " · golf"
       : opts.eventKind === "vegas"
         ? " · vegas"
-        : "";
+        : opts.eventKind === "ofy"
+          ? " · ofy"
+          : "";
   const phone = String(opts.phone || "").trim();
   const email = String(opts.email || "").trim();
   const url = String(opts.pipelineUrl || "").trim();
@@ -25283,12 +30939,16 @@ function laCalendarDateYmd(now: Date = new Date()): string {
   }).format(now);
 }
 
+function getCreditReportEventMeta(
+  ymd: string = laCalendarDateYmd(),
+): GetCreditReportEventMeta | null {
+  return GET_CREDIT_REPORT_EVENTS[ymd] ?? null;
+}
+
 function getCreditReportEventLabelSlug(
   ymd: string = laCalendarDateYmd(),
 ): string | null {
-  if (ymd === "2026-09-14") return GOLF_TOURNAMENT_LABEL_SLUG;
-  if (ymd === "2026-09-15") return LAS_VEGAS_EVENT_LABEL_SLUG;
-  return null;
+  return getCreditReportEventMeta(ymd)?.labelSlug ?? null;
 }
 
 function getCreditReportLabelSlugs(
@@ -25302,17 +30962,15 @@ function getCreditReportLabelSlugs(
 
 function getCreditReportEventKind(
   ymd: string = laCalendarDateYmd(),
-): "golf" | "vegas" | null {
-  if (ymd === "2026-09-14") return "golf";
-  if (ymd === "2026-09-15") return "vegas";
-  return null;
+): GetCreditReportEventKind {
+  return getCreditReportEventMeta(ymd)?.kind ?? null;
 }
 
 function tplGetCreditReportWelcome(opts: {
   firstName: string;
   mfsnUrl: string;
   lang?: string;
-  eventKind?: "golf" | "vegas" | null;
+  eventKind?: GetCreditReportEventKind;
 }) {
   const isEs = opts.lang === "es";
   const name = escapeHtml(opts.firstName || (isEs ? "amigo/a" : "there"));
@@ -25347,6 +31005,19 @@ function tplGetCreditReportWelcome(opts: {
     preheader = isEs
       ? "Tu CTA al reporte gratis está listo."
       : "Your free-report CTA is ready.";
+  } else if (event === "ofy") {
+    headline = isEs
+      ? `¡Gracias por acompañarnos en Family Fun Night, ${name}!`
+      : `Thanks for joining us at Family Fun Night, ${name}!`;
+    intro = isEs
+      ? "Obtén tu reporte de crédito gratis ahora — soft pull seguro, sin impacto en tu score."
+      : "Get your free credit snapshot now — secure soft pull, no score impact.";
+    subject = isEs
+      ? "Tu reporte gratis — Options for Youth + OFG"
+      : "Your free credit report — Options for Youth + OFG";
+    preheader = isEs
+      ? "Un clic para tu snapshot gratis."
+      : "One tap for your free snapshot.";
   } else {
     headline = isEs
       ? `Tu reporte de crédito gratis te espera, ${name}`
@@ -25385,7 +31056,7 @@ function smsGetCreditReportWelcome(opts: {
   firstName: string;
   shortUrl: string;
   lang?: string;
-  eventKind?: "golf" | "vegas" | null;
+  eventKind?: GetCreditReportEventKind;
 }): string {
   const isEs = opts.lang === "es";
   const name = String(opts.firstName || "").trim() || (isEs ? "hola" : "hi");
@@ -25399,6 +31070,11 @@ function smsGetCreditReportWelcome(opts: {
     return isEs
       ? `Hola ${name}, gracias por Las Vegas. Tu reporte gratis: ${url}`
       : `Hi ${name}, thanks for meeting us in Las Vegas. Free report: ${url}`;
+  }
+  if (opts.eventKind === "ofy") {
+    return isEs
+      ? `Hola ${name}, gracias por Family Fun Night (OFY). Tu reporte gratis: ${url}`
+      : `Hi ${name}, thanks for Family Fun Night (OFY). Free report: ${url}`;
   }
   return isEs
     ? `Hola ${name}, Optimum Financial Group: obtén tu reporte gratis aquí: ${url}`
@@ -25424,6 +31100,590 @@ async function resolveGetCreditReportSmsFromE164(): Promise<string | null> {
   );
   if (rows[0]?.e164) return String(rows[0].e164);
   return GET_CREDIT_REPORT_SMS_FROM_E164;
+}
+
+// ============================================================================
+// EVENT MARKETING (CRM section — keep in sync with api/eventMarketing.ts)
+// ============================================================================
+const EVENT_MARKETING_SOURCE_LABEL = "event_marketing";
+const EVENT_MARKETING_NOTIFY_KEY = "event_registration" as const;
+
+type EventMarketingMergeVars = {
+  first_name: string;
+  session_title: string;
+  session_when: string;
+  session_location: string;
+  class_note: string;
+  comic_note: string;
+  report_url: string;
+  class_link: string;
+};
+
+type EventSessionPickRow = {
+  id: number;
+  starts_at: string | Date;
+  status: string;
+};
+
+/** Replace {{token}} placeholders (case-insensitive keys). */
+function applyEventMarketingTemplate(
+  template: string,
+  vars: Partial<EventMarketingMergeVars>,
+): string {
+  const map: Record<string, string> = {
+    first_name: String(vars.first_name || "").trim() || "there",
+    session_title: String(vars.session_title || "").trim(),
+    session_when: String(vars.session_when || "").trim(),
+    session_location: String(vars.session_location || "").trim(),
+    class_note: String(vars.class_note || "").trim(),
+    comic_note: String(vars.comic_note || "").trim(),
+    report_url: String(vars.report_url || "").trim(),
+    class_link: String(vars.class_link || "").trim(),
+  };
+  return String(template || "").replace(
+    /\{\{\s*([a-z0-9_]+)\s*\}\}/gi,
+    (_, key: string) => {
+      const k = key.toLowerCase();
+      return Object.prototype.hasOwnProperty.call(map, k) ? map[k] : "";
+    },
+  );
+}
+
+function eventCompanyPublicPath(slug: string): string {
+  return `/e/${encodeURIComponent(String(slug || "").trim())}`;
+}
+
+function eventSessionPublicPath(companySlug: string, shortCode: string): string {
+  return `/e/${encodeURIComponent(String(companySlug || "").trim())}/s/${encodeURIComponent(String(shortCode || "").trim())}`;
+}
+
+/**
+ * Auto-pick: soonest scheduled session with starts_at >= now (LA wall clock
+ * compared as DATETIME strings). Falls back to soonest future-or-past scheduled.
+ * Pass laWallClockAsUtcDate() as `now` when starts_at values are mysql DATETIME
+ * wall clocks decoded with pool timezone +00:00.
+ */
+function pickNextEventSessionId(
+  sessions: EventSessionPickRow[],
+  now: Date = new Date(),
+): number | null {
+  const scheduled = sessions.filter((s) => s.status === "scheduled");
+  if (!scheduled.length) return null;
+  const nowMs = now.getTime();
+  const upcoming = scheduled
+    .map((s) => ({
+      id: s.id,
+      ms: new Date(s.starts_at).getTime(),
+    }))
+    .filter((s) => !Number.isNaN(s.ms))
+    .sort((a, b) => a.ms - b.ms);
+  if (!upcoming.length) return null;
+  const next = upcoming.find((s) => s.ms >= nowMs - 2 * 60 * 60 * 1000);
+  return (next || upcoming[upcoming.length - 1]).id;
+}
+
+function slugifyEventCode(input: string): string {
+  return String(input || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 32);
+}
+
+function buildClassNote(opts: {
+  lang: "en" | "es";
+  classLink?: string | null;
+  scheduleNote?: string | null;
+}): string {
+  const link = String(opts.classLink || "").trim();
+  const note = String(opts.scheduleNote || "").trim();
+  const parts: string[] = [];
+  if (link) {
+    parts.push(
+      opts.lang === "es" ? ` Enlace Zoom: ${link}.` : ` Zoom link: ${link}.`,
+    );
+  }
+  if (note) {
+    parts.push(opts.lang === "es" ? ` ${note}` : ` ${note}`);
+  }
+  return parts.join("");
+}
+
+function buildComicNote(opts: {
+  lang: "en" | "es";
+  offerComic: boolean;
+}): string {
+  if (!opts.offerComic) return "";
+  return opts.lang === "es"
+    ? " y un cómic de educación financiera"
+    : " and a financial literacy comic book";
+}
+
+/** Parse event DATETIME (LA wall clock) to ms; pool stores wall clock as UTC Date. */
+function eventStartsAtMs(startsAt: string | Date): number {
+  if (startsAt instanceof Date && !Number.isNaN(startsAt.getTime())) {
+    return startsAt.getTime();
+  }
+  const m = String(startsAt || "").match(
+    /(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/,
+  );
+  if (!m) {
+    const t = new Date(String(startsAt || "")).getTime();
+    return Number.isNaN(t) ? NaN : t;
+  }
+  return Date.UTC(
+    Number(m[1]),
+    Number(m[2]) - 1,
+    Number(m[3]),
+    Number(m[4]),
+    Number(m[5]),
+    Number(m[6] || 0),
+  );
+}
+
+/** Current America/Los_Angeles wall clock as a UTC Date (matches mysql DATETIME). */
+function laWallClockAsUtcDate(now: Date = new Date()): Date {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(now);
+  const get = (type: string) =>
+    Number(parts.find((p) => p.type === type)?.value || 0);
+  let hour = get("hour");
+  if (hour === 24) hour = 0;
+  return new Date(
+    Date.UTC(
+      get("year"),
+      get("month") - 1,
+      get("day"),
+      hour,
+      get("minute"),
+      get("second"),
+    ),
+  );
+}
+
+function eventDateTimeIso(v: unknown): string {
+  if (v instanceof Date && !Number.isNaN(v.getTime())) {
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `${v.getUTCFullYear()}-${p(v.getUTCMonth() + 1)}-${p(v.getUTCDate())}T${p(v.getUTCHours())}:${p(v.getUTCMinutes())}:${p(v.getUTCSeconds())}`;
+  }
+  const s = String(v ?? "").replace(" ", "T");
+  return s.length >= 19 ? s.slice(0, 19) : s;
+}
+
+function formatEventSessionWhen(
+  startsAt: string | Date,
+  lang: "en" | "es",
+): string {
+  const ms = eventStartsAtMs(startsAt);
+  if (Number.isNaN(ms)) return String(startsAt || "");
+  return new Date(ms).toLocaleString(lang === "es" ? "es-US" : "en-US", {
+    timeZone: "UTC",
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function formatEventSessionLocation(
+  location: string | null | undefined,
+): string {
+  const loc = String(location || "").trim();
+  return loc ? `, ${loc}` : "";
+}
+
+function bool01(v: unknown, fallback = false): number {
+  if (v === undefined || v === null) return fallback ? 1 : 0;
+  if (typeof v === "boolean") return v ? 1 : 0;
+  if (typeof v === "number") return v ? 1 : 0;
+  const s = String(v).trim().toLowerCase();
+  if (s === "1" || s === "true" || s === "yes") return 1;
+  if (s === "0" || s === "false" || s === "no") return 0;
+  return fallback ? 1 : 0;
+}
+
+function mapEventCompanyRow(
+  r: RowDataPacket,
+  opts?: { registration_count?: number },
+) {
+  return {
+    id: Number(r.id),
+    slug: String(r.slug),
+    name: String(r.name),
+    name_es: r.name_es != null ? String(r.name_es) : null,
+    label_slug: String(r.label_slug),
+    is_active: Boolean(r.is_active),
+    sort_order: Number(r.sort_order || 0),
+    welcome_heading_en: String(r.welcome_heading_en || ""),
+    welcome_heading_es: String(r.welcome_heading_es || ""),
+    welcome_body_en: String(r.welcome_body_en || ""),
+    welcome_body_es: String(r.welcome_body_es || ""),
+    offer_free_report: Boolean(r.offer_free_report),
+    offer_comic: Boolean(r.offer_comic),
+    class_link_url: r.class_link_url != null ? String(r.class_link_url) : null,
+    class_schedule_note_en:
+      r.class_schedule_note_en != null
+        ? String(r.class_schedule_note_en)
+        : null,
+    class_schedule_note_es:
+      r.class_schedule_note_es != null
+        ? String(r.class_schedule_note_es)
+        : null,
+    email_subject_en: String(r.email_subject_en || ""),
+    email_subject_es: String(r.email_subject_es || ""),
+    email_body_en: String(r.email_body_en || ""),
+    email_body_es: String(r.email_body_es || ""),
+    sms_body_en: String(r.sms_body_en || ""),
+    sms_body_es: String(r.sms_body_es || ""),
+    public_url: eventCompanyPublicPath(String(r.slug)),
+    registration_count:
+      opts?.registration_count != null
+        ? opts.registration_count
+        : r.registration_count != null
+          ? Number(r.registration_count)
+          : undefined,
+    created_at: r.created_at != null ? String(r.created_at) : undefined,
+    updated_at: r.updated_at != null ? String(r.updated_at) : undefined,
+  };
+}
+
+function mapEventSeriesRow(r: RowDataPacket) {
+  return {
+    id: Number(r.id),
+    company_id: Number(r.company_id),
+    slug: String(r.slug),
+    name_en: String(r.name_en),
+    name_es: String(r.name_es),
+    kind: String(r.kind || "in_person") as
+      | "in_person"
+      | "online"
+      | "hybrid",
+    is_active: Boolean(r.is_active),
+    sort_order: Number(r.sort_order || 0),
+  };
+}
+
+function mapEventSessionRow(
+  r: RowDataPacket,
+  companySlug?: string,
+) {
+  const shortCode = String(r.short_code);
+  const slug = companySlug || (r.company_slug != null ? String(r.company_slug) : "");
+  return {
+    id: Number(r.id),
+    company_id: Number(r.company_id),
+    series_id: Number(r.series_id),
+    short_code: shortCode,
+    title_en: String(r.title_en),
+    title_es: String(r.title_es),
+    starts_at: eventDateTimeIso(r.starts_at),
+    ends_at: r.ends_at != null ? eventDateTimeIso(r.ends_at) : null,
+    location_en: r.location_en != null ? String(r.location_en) : null,
+    location_es: r.location_es != null ? String(r.location_es) : null,
+    capacity: r.capacity != null ? Number(r.capacity) : null,
+    status: String(r.status || "scheduled") as
+      | "scheduled"
+      | "cancelled"
+      | "completed",
+    registration_count:
+      r.registration_count != null ? Number(r.registration_count) : undefined,
+    public_url: slug
+      ? eventSessionPublicPath(slug, shortCode)
+      : undefined,
+    series_name_en:
+      r.series_name_en != null ? String(r.series_name_en) : undefined,
+    series_name_es:
+      r.series_name_es != null ? String(r.series_name_es) : undefined,
+  };
+}
+
+function mapEventFormFieldRow(r: RowDataPacket) {
+  let options: string[] | null = null;
+  if (r.options_json != null) {
+    const parsed = parseWizardJsonField<string[]>(r.options_json);
+    options = Array.isArray(parsed) ? parsed.map(String) : null;
+  }
+  return {
+    id: Number(r.id),
+    company_id: Number(r.company_id),
+    field_key: String(r.field_key),
+    label_en: String(r.label_en),
+    label_es: String(r.label_es),
+    field_type: String(r.field_type || "text") as
+      | "text"
+      | "email"
+      | "phone"
+      | "textarea"
+      | "select"
+      | "checkbox"
+      | "language",
+    options_json: options,
+    is_required: Boolean(r.is_required),
+    is_system: Boolean(r.is_system),
+    is_active: Boolean(r.is_active),
+    sort_order: Number(r.sort_order || 0),
+  };
+}
+
+function mapEventRegistrationRow(r: RowDataPacket) {
+  return {
+    id: Number(r.id),
+    client_id: Number(r.client_id),
+    company_id: Number(r.company_id),
+    series_id: r.series_id != null ? Number(r.series_id) : null,
+    session_id: r.session_id != null ? Number(r.session_id) : null,
+    answers_json:
+      parseWizardJsonField<Record<string, unknown>>(r.answers_json) ?? null,
+    source_qr: (String(r.source_qr || "company") === "session"
+      ? "session"
+      : "company") as "company" | "session",
+    checked_in_at: r.checked_in_at != null ? String(r.checked_in_at) : null,
+    created_at: String(r.created_at || ""),
+    first_name: r.first_name != null ? String(r.first_name) : undefined,
+    last_name: r.last_name != null ? String(r.last_name) : undefined,
+    email: r.email != null ? String(r.email) : undefined,
+    phone: r.phone != null ? String(r.phone) : undefined,
+    session_title_en:
+      r.session_title_en != null ? String(r.session_title_en) : null,
+  };
+}
+
+const EVENT_FORM_FIELD_TYPES = new Set([
+  "text",
+  "email",
+  "phone",
+  "textarea",
+  "select",
+  "checkbox",
+  "language",
+]);
+
+const EVENT_SERIES_KINDS = new Set(["in_person", "online", "hybrid"]);
+const EVENT_SESSION_STATUSES = new Set([
+  "scheduled",
+  "cancelled",
+  "completed",
+]);
+
+const DEFAULT_EVENT_FORM_FIELDS: Array<{
+  field_key: string;
+  label_en: string;
+  label_es: string;
+  field_type: string;
+  is_required: number;
+  is_system: number;
+  sort_order: number;
+}> = [
+  {
+    field_key: "first_name",
+    label_en: "First name",
+    label_es: "Nombre",
+    field_type: "text",
+    is_required: 1,
+    is_system: 1,
+    sort_order: 10,
+  },
+  {
+    field_key: "last_name",
+    label_en: "Last name",
+    label_es: "Apellido",
+    field_type: "text",
+    is_required: 1,
+    is_system: 1,
+    sort_order: 20,
+  },
+  {
+    field_key: "email",
+    label_en: "Email",
+    label_es: "Correo",
+    field_type: "email",
+    is_required: 1,
+    is_system: 1,
+    sort_order: 30,
+  },
+  {
+    field_key: "phone",
+    label_en: "Phone",
+    label_es: "Teléfono",
+    field_type: "phone",
+    is_required: 1,
+    is_system: 1,
+    sort_order: 40,
+  },
+  {
+    field_key: "preferred_language",
+    label_en: "Preferred language",
+    label_es: "Idioma preferido",
+    field_type: "language",
+    is_required: 1,
+    is_system: 1,
+    sort_order: 50,
+  },
+  {
+    field_key: "interest_class",
+    label_en: "I want the Mastering Your Money Zoom class",
+    label_es: "Quiero la clase Zoom Mastering Your Money",
+    field_type: "checkbox",
+    is_required: 0,
+    is_system: 0,
+    sort_order: 60,
+  },
+  {
+    field_key: "notes",
+    label_en: "Notes (optional)",
+    label_es: "Notas (opcional)",
+    field_type: "textarea",
+    is_required: 0,
+    is_system: 0,
+    sort_order: 70,
+  },
+];
+
+async function seedDefaultEventFormFields(companyId: number): Promise<void> {
+  for (const f of DEFAULT_EVENT_FORM_FIELDS) {
+    await pool.query(
+      `INSERT INTO event_form_fields
+         (company_id, field_key, label_en, label_es, field_type, options_json,
+          is_required, is_system, is_active, sort_order)
+       VALUES (?, ?, ?, ?, ?, NULL, ?, ?, 1, ?)
+       ON DUPLICATE KEY UPDATE field_key = field_key`,
+      [
+        companyId,
+        f.field_key,
+        f.label_en,
+        f.label_es,
+        f.field_type,
+        f.is_required,
+        f.is_system,
+        f.sort_order,
+      ],
+    );
+  }
+}
+
+async function loadEventCompanyDetail(companyId: number) {
+  const [companyRows] = await pool.query<RowDataPacket[]>(
+    `SELECT c.*,
+            (SELECT COUNT(*) FROM event_registrations er WHERE er.company_id = c.id) AS registration_count
+     FROM event_companies c WHERE c.id = ? LIMIT 1`,
+    [companyId],
+  );
+  if (!companyRows[0]) return null;
+  const company = mapEventCompanyRow(companyRows[0]);
+  const [seriesRows] = await pool.query<RowDataPacket[]>(
+    `SELECT * FROM event_series WHERE company_id = ? ORDER BY sort_order ASC, id ASC`,
+    [companyId],
+  );
+  const [sessionRows] = await pool.query<RowDataPacket[]>(
+    `SELECT s.*, ser.name_en AS series_name_en, ser.name_es AS series_name_es,
+            (SELECT COUNT(*) FROM event_registrations er WHERE er.session_id = s.id) AS registration_count
+     FROM event_sessions s
+     JOIN event_series ser ON ser.id = s.series_id
+     WHERE s.company_id = ?
+     ORDER BY s.starts_at ASC, s.id ASC`,
+    [companyId],
+  );
+  const [fieldRows] = await pool.query<RowDataPacket[]>(
+    `SELECT * FROM event_form_fields WHERE company_id = ?
+     ORDER BY sort_order ASC, id ASC`,
+    [companyId],
+  );
+  const [regRows] = await pool.query<RowDataPacket[]>(
+    `SELECT er.*, c.first_name, c.last_name, c.email, c.phone,
+            s.title_en AS session_title_en
+     FROM event_registrations er
+     JOIN clients c ON c.id = er.client_id
+     LEFT JOIN event_sessions s ON s.id = er.session_id
+     WHERE er.company_id = ?
+     ORDER BY er.created_at DESC
+     LIMIT 500`,
+    [companyId],
+  );
+  return {
+    company,
+    series: seriesRows.map(mapEventSeriesRow),
+    sessions: sessionRows.map((r) => mapEventSessionRow(r, company.slug)),
+    form_fields: fieldRows.map(mapEventFormFieldRow),
+    registrations: regRows.map(mapEventRegistrationRow),
+  };
+}
+
+async function notifyEventRegistration(opts: {
+  clientId: number;
+  firstName: string;
+  lastName: string;
+  email: string;
+  phone: string;
+  lang: string;
+  companyName: string;
+  sessionTitle: string;
+}): Promise<void> {
+  const clientName =
+    `${opts.firstName} ${opts.lastName}`.trim() || opts.email || "Lead";
+  const pipelineUrl = `${APP_URL}/admin/pipeline?client=${opts.clientId}`;
+  const companyName = String(opts.companyName || "").trim() || "Event";
+  const sessionTitle = String(opts.sessionTitle || "").trim();
+  await notifyAllTeamAdmins(EVENT_MARKETING_NOTIFY_KEY, (admin) => {
+    const adminLang = admin.preferred_language === "es" ? "es" : "en";
+    const langLabel = opts.lang === "es" ? "ES" : "EN";
+    const subject =
+      adminLang === "es"
+        ? `Registro evento — ${clientName}`
+        : `Event registration — ${clientName}`;
+    const summary =
+      adminLang === "es"
+        ? [`${opts.phone} · ${opts.email} · ${langLabel}`, companyName, sessionTitle || null]
+            .filter(Boolean)
+            .join(" · ")
+        : [`${opts.phone} · ${opts.email} · ${langLabel}`, companyName, sessionTitle || null]
+            .filter(Boolean)
+            .join(" · ");
+    const safeName = escapeHtml(clientName);
+    const safeEmail = escapeHtml(opts.email);
+    const safePhone = escapeHtml(opts.phone);
+    const safeSummary = escapeHtml(summary);
+    const body =
+      adminLang === "es"
+        ? `<h1 style="margin:0 0 16px;font-size:22px;font-weight:800;color:#0f172a;">${escapeHtml(subject)}</h1>
+           <p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#334155;">
+             Nuevo registro de Event Marketing.
+           </p>
+           <p style="margin:0 0 8px;font-size:14px;line-height:1.6;color:#64748b;">${safeName}</p>
+           <p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:#64748b;">${safePhone} · ${safeEmail}</p>
+           <p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:#334155;">${safeSummary}</p>
+           ${emailButton(pipelineUrl, "Abrir en pipeline")}`
+        : `<h1 style="margin:0 0 16px;font-size:22px;font-weight:800;color:#0f172a;">${escapeHtml(subject)}</h1>
+           <p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#334155;">
+             New Event Marketing registration.
+           </p>
+           <p style="margin:0 0 8px;font-size:14px;line-height:1.6;color:#64748b;">${safeName}</p>
+           <p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:#64748b;">${safePhone} · ${safeEmail}</p>
+           <p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:#334155;">${safeSummary}</p>
+           ${emailButton(pipelineUrl, "Open in pipeline")}`;
+    const sms =
+      `OFG event reg: ${clientName} · ${opts.phone} · ${companyName}${sessionTitle ? ` · ${sessionTitle}` : ""}. ${pipelineUrl}`.slice(
+        0,
+        320,
+      );
+    return {
+      subject,
+      html: body,
+      inAppTitle: subject,
+      inAppBody: summary,
+      linkUrl: pipelineUrl,
+      smsBody: sms,
+    };
+  });
 }
 
 // ============================================================================
@@ -25546,9 +31806,12 @@ const ADMIN_NOTIFY_EVENT_KEYS: AdminNotifyEventKey[] = [
   "inbound_sms",
   "missed_call",
   "voicemail",
+  "call_transcript",
   "funding_doc_upload",
   "funding_application_created",
   "get_credit_report_lead",
+  "event_registration",
+  "prospect_temperature",
   "progress_report_alerts",
   "morning_digest",
 ];
@@ -25567,9 +31830,12 @@ function allAdminNotifyEventsOn(): AdminNotifyEventToggles {
     inbound_sms: true,
     missed_call: true,
     voicemail: true,
+    call_transcript: true,
     funding_doc_upload: true,
     funding_application_created: true,
     get_credit_report_lead: true,
+    event_registration: true,
+    prospect_temperature: true,
     progress_report_alerts: true,
     morning_digest: true,
   };
@@ -25655,19 +31921,26 @@ function formatSmsClientFileNote(opts: {
   providerMessageId?: string | null;
   tag?: string;
   peerLabel?: string;
+  /** Default "SMS"; use "WhatsApp" for 360dialog notes. */
+  channelLabel?: string;
+  /** Default "Twilio SID"; use "360dialog id" for WhatsApp. */
+  providerLabel?: string;
 }): string {
   const verb = opts.direction === "sent" ? "Sent to" : "Received from";
   const tagPart = opts.tag ? `${opts.tag} ` : "";
+  const channel = opts.channelLabel || "SMS";
   const peer =
     opts.direction === "sent" && opts.peerLabel
       ? `${opts.peerPhone} (${opts.peerLabel})`
       : opts.peerPhone;
   const parts = [
-    `[SMS ${tagPart}${opts.ts} UTC] ${verb} ${peer}`,
+    `[${channel} ${tagPart}${opts.ts} UTC] ${verb} ${peer}`,
     opts.body.slice(0, 1500),
   ];
   if (opts.providerMessageId) {
-    parts.push(`Twilio SID: ${opts.providerMessageId}`);
+    parts.push(
+      `${opts.providerLabel || "Twilio SID"}: ${opts.providerMessageId}`,
+    );
   }
   return parts.join("\n");
 }
@@ -26063,10 +32336,11 @@ async function listActiveNotifyExtraEmails(): Promise<
         .trim()
         .toLowerCase();
       if (!email || !isValidEmail(email)) continue;
-      if (
-        isUndeliverableNotifyEmail(email) &&
-        process.env.VITEST !== "true"
-      ) {
+      // Vitest only fans out to fixture inboxes. Real staff and ops extras
+      // stay untouched, including their saved event lists.
+      if (process.env.VITEST === "true") {
+        if (!isIntegrationTestAdminEmail(email)) continue;
+      } else if (isUndeliverableNotifyEmail(email)) {
         continue;
       }
       out.push({
@@ -26155,19 +32429,25 @@ type TeamAdminRecipient = {
 };
 
 /** Active Optimum staff (excludes affiliate portal users).
- * Outside Vitest, skip leftover `@example.test` / `@affiliate.test` fixture
- * admins so they never receive real purchase/inbound fan-out. Under Vitest,
- * include them so ephemeral-agent suites (e.g. notification prefs) can assert
- * delivery without mutating real staff prefs. */
+ * Production skips leftover `@example.test` / `@affiliate.test` fixture
+ * admins so they never receive live alerts. Vitest notifies fixture admins
+ * only, so suites never read or write real staff notification prefs or bells. */
 async function listActiveTeamAdmins(): Promise<TeamAdminRecipient[]> {
-  const excludeFixtures = process.env.VITEST !== "true";
+  const fixtureOnly = process.env.VITEST === "true";
   const [rows] = await pool.query<RowDataPacket[]>(
     `SELECT id, email, first_name, phone, preferred_language, notification_prefs_json
      FROM admins
      WHERE status = 'active'
        AND role IN ('super_admin', 'admin', 'agent')
        AND email IS NOT NULL AND TRIM(email) <> ''
-       ${excludeFixtures ? SQL_EXCLUDE_INTEGRATION_TEST_ADMIN_EMAIL : ""}`,
+       ${
+         fixtureOnly
+           ? `AND (
+                LOWER(TRIM(email)) LIKE '%@example.test'
+                OR LOWER(TRIM(email)) LIKE '%@affiliate.test'
+              )`
+           : SQL_EXCLUDE_INTEGRATION_TEST_ADMIN_EMAIL
+       }`,
   );
   return rows.map((r) => ({
     id: Number(r.id),
@@ -26567,6 +32847,378 @@ async function deliverAdminNotificationChannels(opts: {
   }
 
   return result;
+}
+
+/** Default round-audit reviewer (Lecca); override with ROUND_AUDIT_ALERT_ADMIN_IDS. */
+const ROUND_AUDIT_DEFAULT_ADMIN_IDS = "150002";
+
+export function parseRoundAuditConfig(env: NodeJS.ProcessEnv = process.env): {
+  adminIds: number[];
+  minRound: number;
+} {
+  const ids = String(env.ROUND_AUDIT_ALERT_ADMIN_IDS ?? ROUND_AUDIT_DEFAULT_ADMIN_IDS)
+    .split(",")
+    .map((x) => Number(x.trim()))
+    .filter((n) => Number.isInteger(n) && n > 0);
+  const min = Number(env.ROUND_AUDIT_MIN_ROUND);
+  return { adminIds: ids, minRound: Number.isInteger(min) && min >= 2 ? min : 6 };
+}
+
+/**
+ * Round 6+ audit alert (Zoom Oct 14): when a Round ≥ 6 progress report is
+ * published, tell the dispute-audit reviewer by SMS + in-app (no email) so
+ * extended-round files get audited. One alert per case + round.
+ */
+async function notifyRoundAuditAlert(opts: {
+  clientId: number;
+  caseId: number;
+  roundNumber: number;
+  maxRounds: number;
+  clientName: string;
+}): Promise<number> {
+  const { adminIds, minRound } = parseRoundAuditConfig();
+  if (opts.roundNumber < minRound || adminIds.length === 0) return 0;
+  const recipients = (await listActiveTeamAdmins()).filter((a) => adminIds.includes(a.id));
+  let sent = 0;
+  for (const admin of recipients) {
+    const es = admin.preferred_language === "es";
+    const title = es
+      ? `Auditoria Ronda ${opts.roundNumber} — ${opts.clientName}`
+      : `Round ${opts.roundNumber} audit — ${opts.clientName}`;
+    const [dupe] = await pool.query<RowDataPacket[]>(
+      `SELECT id FROM admin_notifications WHERE admin_id = ? AND title = ? LIMIT 1`,
+      [admin.id, title.slice(0, 255)],
+    );
+    if (dupe[0]) continue;
+    const linkUrl = `${APP_URL}/admin/pipeline?client=${opts.clientId}`;
+    const body = es
+      ? `${opts.clientName} publico la Ronda ${opts.roundNumber} de ${opts.maxRounds}. Revisar el expediente con el equipo de disputas.`
+      : `${opts.clientName} just published Round ${opts.roundNumber} of ${opts.maxRounds}. Please audit the file with the dispute team.`;
+    // SMS + in-app only for this alert (email off), still honoring the
+    // admin's own SMS / in-app toggles for progress_report_alerts.
+    const prefs: AdminNotificationPrefs = {
+      ...admin.prefs,
+      email: Object.fromEntries(
+        Object.keys(admin.prefs.email).map((k) => [k, false]),
+      ) as AdminNotificationPrefs["email"],
+    };
+    const delivered = await deliverAdminNotificationChannels({
+      admin: { ...admin, prefs },
+      eventKey: "progress_report_alerts",
+      tpl: {
+        subject: title,
+        html: `<p>${escapeHtml(body)}</p>`,
+        inAppTitle: title,
+        inAppBody: body,
+        linkUrl,
+        smsBody: `OFG: ${title}. ${linkUrl}`.slice(0, 300),
+      },
+    }).catch((e: any) => {
+      console.error("[round-audit-alert]", admin.id, e?.message ?? e);
+      return null;
+    });
+    if (delivered && (delivered.sms || delivered.in_app)) sent++;
+  }
+  return sent;
+}
+
+// ── Prospect traffic light (semáforo) — engine ───────────────────────────────
+
+/** Cesar by default; override with LEAD_HOT_STALE_ALERT_ADMIN_IDS. */
+function leadHotStaleAlertAdminIds(): number[] {
+  return String(process.env.LEAD_HOT_STALE_ALERT_ADMIN_IDS ?? "90001")
+    .split(",")
+    .map((x) => Number(x.trim()))
+    .filter((n) => Number.isInteger(n) && n > 0);
+}
+
+const LEAD_REASON_TEXT: Record<LeadReason, { en: string; es: string }> = {
+  analysis_reviewed: { en: "analysis reviewed", es: "análisis revisado" },
+  call_scheduled: { en: "call scheduled", es: "llamada agendada" },
+  payment_started: { en: "payment started", es: "pago iniciado" },
+  monitoring_login: { en: "monitoring login saved", es: "login de monitoreo guardado" },
+  documents_uploaded: { en: "documents uploaded", es: "documentos subidos" },
+  recent_reply: { en: "replied in the last 14 days", es: "contestó en los últimos 14 días" },
+  has_credit_report: { en: "has credit report / analysis", es: "tiene reporte / análisis" },
+  no_reply_14d: { en: "no reply in 14+ days", es: "sin respuesta en 14+ días" },
+};
+
+const LEAD_COLOR_TEXT: Record<LeadTemperature, { en: string; es: string }> = {
+  hot: { en: "Hot", es: "Caliente" },
+  warm: { en: "Warm", es: "Tibio" },
+  cold: { en: "Cold", es: "Frío" },
+};
+
+/**
+ * Record manual traffic-light signals (button or Claude) and recompute.
+ * Returns the new light, or an error message for bad input.
+ */
+async function applyLeadSignals(
+  clientId: number,
+  adminId: number,
+  body: { analysis_reviewed?: unknown; call_scheduled_at?: unknown },
+): Promise<
+  | { ok: true; data: LeadSignalsResponse }
+  | { ok: false; status: number; error: string }
+> {
+  const sets: string[] = [];
+  const args: unknown[] = [];
+  if (typeof body.analysis_reviewed === "boolean") {
+    sets.push("analysis_reviewed_at = ?", "analysis_reviewed_by_admin_id = ?");
+    args.push(body.analysis_reviewed ? new Date() : null, body.analysis_reviewed ? adminId : null);
+  }
+  if (body.call_scheduled_at !== undefined) {
+    if (body.call_scheduled_at === null || body.call_scheduled_at === "") {
+      sets.push("call_scheduled_at = NULL");
+    } else {
+      const when = new Date(String(body.call_scheduled_at));
+      if (Number.isNaN(when.getTime())) {
+        return { ok: false, status: 400, error: "call_scheduled_at must be a date/time" };
+      }
+      sets.push("call_scheduled_at = ?");
+      args.push(when);
+    }
+  }
+  if (!sets.length) {
+    return { ok: false, status: 400, error: "Send analysis_reviewed and/or call_scheduled_at" };
+  }
+  const [found] = await pool.query<RowDataPacket[]>(`SELECT id FROM clients WHERE id = ? LIMIT 1`, [clientId]);
+  if (!found[0]) return { ok: false, status: 404, error: "Client not found" };
+  await pool.query(`UPDATE clients SET ${sets.join(", ")} WHERE id = ?`, [...args, clientId]);
+  await recomputeProspectTemperatures(clientId);
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT lead_temperature, lead_temperature_reasons, lead_temperature_at,
+            analysis_reviewed_at, call_scheduled_at
+     FROM clients WHERE id = ? LIMIT 1`,
+    [clientId],
+  );
+  const r = rows[0];
+  return {
+    ok: true,
+    data: {
+      lead_temperature: r.lead_temperature ?? null,
+      lead_temperature_reasons: r.lead_temperature_reasons
+        ? (String(r.lead_temperature_reasons).split(",") as LeadSignalsResponse["lead_temperature_reasons"])
+        : [],
+      lead_temperature_at: r.lead_temperature_at ?? null,
+      analysis_reviewed_at: r.analysis_reviewed_at ?? null,
+      call_scheduled_at: r.call_scheduled_at ?? null,
+    },
+  };
+}
+
+/** Send one prospect alert (prospect_temperature prefs) to the given admins. */
+async function notifyProspectTemperature(
+  adminIds: number[],
+  build: (lang: "en" | "es") => { title: string; body: string },
+  clientId: number,
+): Promise<void> {
+  const ids = new Set(adminIds.filter((n) => n > 0));
+  if (!ids.size) return;
+  const linkUrl = `${APP_URL}/admin/pipeline?client=${clientId}`;
+  for (const admin of (await listActiveTeamAdmins()).filter((a) => ids.has(a.id))) {
+    const lang = admin.preferred_language === "es" ? "es" : "en";
+    const { title, body } = build(lang);
+    await deliverAdminNotificationChannels({
+      admin,
+      eventKey: "prospect_temperature",
+      tpl: {
+        subject: title,
+        html: `<p>${escapeHtml(body)}</p>`,
+        inAppTitle: title,
+        inAppBody: body,
+        linkUrl,
+        smsBody: `OFG: ${title}. ${linkUrl}`.slice(0, 300),
+      },
+    }).catch((e: any) => console.error("[prospect-temperature:notify]", admin.id, e?.message ?? e));
+  }
+}
+
+/**
+ * Recompute the traffic light for every prospect / web lead (or one client).
+ * Writes only changes; alerts on upgrades (owner by language), Hot with no
+ * movement for 3 days (Cesar) and a first successful payment (ready to
+ * convert — staff confirm). Clears the light on non-prospects.
+ */
+async function recomputeProspectTemperatures(onlyClientId?: number): Promise<{
+  checked: number;
+  changed: number;
+  alerts: number;
+}> {
+  const out = { checked: 0, changed: 0, alerts: 0 };
+  const where = `(${adminProspectLeadSql()} OR ${adminWebReviewLeadSql()})${onlyClientId ? " AND c.id = ?" : ""}`;
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT c.id, c.first_name, c.last_name, c.preferred_language,
+            c.lead_temperature, c.lead_temperature_at, c.analysis_reviewed_at,
+            c.call_scheduled_at, c.lead_hot_stale_alerted_at, c.lead_convert_suggested_at,
+            (c.smart_credit_email IS NOT NULL OR c.myfreescorenow_email IS NOT NULL
+             OR c.cms_secrets_ciphertext IS NOT NULL OR c.smart_credit_connected_at IS NOT NULL) AS has_login
+     FROM clients c WHERE ${where}`,
+    onlyClientId ? [onlyClientId] : [],
+  );
+  const ids = rows.map((r) => Number(r.id));
+  out.checked = ids.length;
+
+  // Prospects that converted / were cancelled lose the light.
+  if (!onlyClientId) {
+    await pool.query(
+      `UPDATE clients SET lead_temperature = NULL, lead_temperature_reasons = NULL
+       WHERE lead_temperature IS NOT NULL ${ids.length ? "AND id NOT IN (?)" : ""}`,
+      ids.length ? [ids] : [],
+    );
+  } else if (!ids.length) {
+    await pool.query(
+      `UPDATE clients SET lead_temperature = NULL, lead_temperature_reasons = NULL WHERE id = ?`,
+      [onlyClientId],
+    );
+  }
+  if (!ids.length) return out;
+
+  const byClient = async (sql: string): Promise<Map<number, RowDataPacket>> => {
+    const [r] = await pool.query<RowDataPacket[]>(sql, [ids]);
+    return new Map(r.map((x) => [Number(x.client_id), x]));
+  };
+  const msgs = await byClient(
+    `SELECT cv.client_id,
+            MAX(CASE WHEN m.direction = 'inbound' THEN m.created_at END) AS last_inbound,
+            MAX(CASE WHEN m.direction IN ('inbound','outbound') THEN m.created_at END) AS last_movement,
+            MAX(CASE WHEN m.channel = 'call' AND m.call_duration_sec >= ${LEAD_REVIEW_CALL_MIN_SEC} THEN m.created_at END) AS last_long_call
+     FROM conversations cv JOIN conversation_messages m ON m.conversation_id = cv.id
+     WHERE cv.client_id IN (?) GROUP BY cv.client_id`,
+  );
+  const analyses = await byClient(
+    `SELECT client_id, MAX(COALESCE(generated_at, created_at)) AS analyzed_at
+     FROM credit_analyses WHERE client_id IN (?) GROUP BY client_id`,
+  );
+  const reports = await byClient(
+    `SELECT client_id, COUNT(*) AS n FROM credit_file_extractions WHERE client_id IN (?) GROUP BY client_id`,
+  );
+  const pays = await byClient(
+    `SELECT client_id, COUNT(*) AS attempts, SUM(status = 'succeeded') AS succeeded,
+            MAX(created_at) AS last_payment
+     FROM payments WHERE client_id IN (?) GROUP BY client_id`,
+  );
+  const [docRows] = await pool.query<RowDataPacket[]>(
+    `SELECT client_id, COUNT(*) AS n FROM (
+       SELECT client_id FROM client_documents WHERE client_id IN (?)
+       UNION ALL
+       SELECT r.client_id FROM client_info_request_files f
+       JOIN client_info_requests r ON r.id = f.request_id
+       WHERE r.client_id IN (?)
+     ) d GROUP BY client_id`,
+    [ids, ids],
+  );
+  const docs = new Map(docRows.map((x) => [Number(x.client_id), x]));
+
+  const now = new Date();
+  const date = (v: unknown) => (v ? new Date(v as string) : null);
+  for (const r of rows) {
+    const id = Number(r.id);
+    const m = msgs.get(id);
+    const analyzedAt = date(analyses.get(id)?.analyzed_at);
+    let reviewedAt = date(r.analysis_reviewed_at);
+    const longCall = date(m?.last_long_call);
+    if (!reviewedAt && analyzedAt && longCall && longCall > analyzedAt) {
+      reviewedAt = longCall;
+      await pool.query(
+        `UPDATE clients SET analysis_reviewed_at = ? WHERE id = ? AND analysis_reviewed_at IS NULL`,
+        [longCall, id],
+      );
+    }
+    const pay = pays.get(id);
+    const { temperature, reasons } = computeLeadTemperature({
+      now,
+      lastInboundAt: date(m?.last_inbound),
+      hasCreditReport: !!analyzedAt || Number(reports.get(id)?.n || 0) > 0,
+      analysisReviewedAt: reviewedAt,
+      callScheduledAt: date(r.call_scheduled_at),
+      paymentStarted: Number(pay?.attempts || 0) > 0,
+      monitoringLogin: Number(r.has_login) === 1,
+      documentsUploaded: Number(docs.get(id)?.n || 0) > 0,
+    });
+    const prev = (r.lead_temperature as LeadTemperature | null) ?? null;
+    const name = `${r.first_name || ""} ${r.last_name || ""}`.trim() || `Prospect #${id}`;
+    const lang = r.preferred_language === "es" ? "es" : "en";
+    const reasonsText = (l: "en" | "es") => reasons.map((x) => LEAD_REASON_TEXT[x][l]).join(", ");
+
+    if (prev !== temperature || r.lead_temperature_reasons !== reasons.join(",")) {
+      await pool.query(
+        `UPDATE clients SET lead_temperature = ?, lead_temperature_reasons = ?,
+                lead_temperature_at = IF(lead_temperature <=> ?, lead_temperature_at, NOW())
+         WHERE id = ?`,
+        [temperature, reasons.join(","), temperature, id],
+      );
+      out.changed++;
+      if (isLeadTemperatureUpgrade(prev, temperature)) {
+        const owner = await resolveLanguageOwnerAdminId(lang);
+        if (owner) {
+          await notifyProspectTemperature(
+            [owner],
+            (l) => ({
+              title: l === "es"
+                ? `${name} subió a ${LEAD_COLOR_TEXT[temperature].es}`
+                : `${name} moved up to ${LEAD_COLOR_TEXT[temperature].en}`,
+              body: l === "es"
+                ? `${LEAD_COLOR_TEXT[prev!].es} → ${LEAD_COLOR_TEXT[temperature].es}: ${reasonsText("es")}.`
+                : `${LEAD_COLOR_TEXT[prev!].en} → ${LEAD_COLOR_TEXT[temperature].en}: ${reasonsText("en")}.`,
+            }),
+            id,
+          );
+          out.alerts++;
+        }
+      }
+    }
+
+    // First color ever (launch / new prospect): silent baseline — no backlog
+    // burst of stale / ready-to-convert alerts for existing prospects.
+    if (prev === null) {
+      await pool.query(
+        `UPDATE clients
+         SET lead_hot_stale_alerted_at = COALESCE(lead_hot_stale_alerted_at, NOW()),
+             lead_convert_suggested_at = IF(?, COALESCE(lead_convert_suggested_at, NOW()), lead_convert_suggested_at)
+         WHERE id = ?`,
+        [Number(pay?.succeeded || 0) > 0 ? 1 : 0, id],
+      );
+      continue;
+    }
+
+    // Hot for 3 days with no movement → Cesar.
+    const lastMovement = [date(m?.last_movement), date(r.lead_temperature_at), date(pay?.last_payment), reviewedAt]
+      .filter((d): d is Date => !!d)
+      .sort((a, b) => b.getTime() - a.getTime())[0] ?? null;
+    if (isHotLeadStale({ temperature, lastMovementAt: lastMovement, lastAlertAt: date(r.lead_hot_stale_alerted_at), now })) {
+      await notifyProspectTemperature(
+        leadHotStaleAlertAdminIds(),
+        (l) => ({
+          title: l === "es" ? `Caliente sin movimiento 3 días: ${name}` : `Hot lead idle 3 days: ${name}`,
+          body: l === "es"
+            ? `${name} está en Caliente (${reasonsText("es")}) y no ha tenido movimiento en 3 días.`
+            : `${name} is Hot (${reasonsText("en")}) with no movement for 3 days.`,
+        }),
+        id,
+      );
+      await pool.query(`UPDATE clients SET lead_hot_stale_alerted_at = NOW() WHERE id = ?`, [id]);
+      out.alerts++;
+    }
+
+    // Step 2: paid → suggest conversion (staff confirm; never automatic).
+    if (Number(pay?.succeeded || 0) > 0 && !r.lead_convert_suggested_at) {
+      const owner = await resolveLanguageOwnerAdminId(lang);
+      await notifyProspectTemperature(
+        [owner ?? 0, ...leadHotStaleAlertAdminIds()],
+        (l) => ({
+          title: l === "es" ? `Listo para convertir: ${name}` : `Ready to convert: ${name}`,
+          body: l === "es"
+            ? `${name} ya pagó. Revisa documentos y login y conviértelo a cliente nuevo desde su ficha.`
+            : `${name} has paid. Check documents and login, then convert to a new client from their file.`,
+        }),
+        id,
+      );
+      await pool.query(`UPDATE clients SET lead_convert_suggested_at = NOW() WHERE id = ?`, [id]);
+      out.alerts++;
+    }
+  }
+  return out;
 }
 
 async function notifyAllTeamAdmins(
@@ -27255,7 +33907,7 @@ async function notifyGetCreditReportLead(opts: {
   email: string;
   phone: string;
   lang: string;
-  eventKind: "golf" | "vegas" | null;
+  eventKind: GetCreditReportEventKind;
 }): Promise<void> {
   const clientName =
     `${opts.firstName} ${opts.lastName}`.trim() || opts.email || "Lead";
@@ -27269,7 +33921,11 @@ async function notifyGetCreditReportLead(opts: {
           : "Golf tournament"
         : opts.eventKind === "vegas"
           ? "Las Vegas"
-          : null;
+          : opts.eventKind === "ofy"
+            ? adminLang === "es"
+              ? "Family Fun Night (OFY)"
+              : "Family Fun Night (OFY)"
+            : null;
     const langLabel = opts.lang === "es" ? "ES" : "EN";
     const subject =
       adminLang === "es"
@@ -27527,6 +34183,8 @@ export async function __testCancelPaymentConfirmedUploadNudges(
 async function emailLinkedReferrerPartnersRoundPdf(opts: {
   clientId: number;
   roundNumber: number;
+  caseId?: number | null;
+  sentByAdminId?: number | null;
   clientName: string;
   langFallback: "en" | "es";
   pdfAttachment: {
@@ -27565,12 +34223,22 @@ async function emailLinkedReferrerPartnersRoundPdf(opts: {
           : `Round ${opts.roundNumber}`,
       lang,
     });
-    const ok = await sendEmail({
-      to: email,
-      subject: partnerTpl.subject,
-      html: partnerTpl.html,
-      attachments: [opts.pdfAttachment],
-    })
+    const ok = await sendEmailLogged(
+      {
+        to: email,
+        subject: partnerTpl.subject,
+        html: partnerTpl.html,
+        attachments: [opts.pdfAttachment],
+      },
+      {
+        kind: "round_report",
+        recipientType: "partner",
+        clientId: opts.clientId,
+        caseId: opts.caseId ?? null,
+        roundNumber: opts.roundNumber,
+        sentByAdminId: opts.sentByAdminId ?? null,
+      },
+    )
       .then(() => true)
       .catch((err) => {
         console.error(
@@ -27806,6 +34474,36 @@ function smsClientReminderBody(opts: {
  * Round-complete can use the publishing admin's OFG (smsFromAdminId);
  * otherwise Lecca / signup From via resolveClientReminderSmsFrom.
  */
+/** Client statuses that stop every automated client message. */
+export const CLIENT_AUTOMATION_HOLD_STATUSES = ["paused", "blocked"] as const;
+
+export function isClientAutomationHoldStatus(status: unknown): boolean {
+  return (CLIENT_AUTOMATION_HOLD_STATUSES as readonly string[]).includes(
+    String(status || ""),
+  );
+}
+
+/**
+ * paused / blocked clients receive no automated messages (flows, queued
+ * reminders, payment nudges, reminder SMS). Returns the hold status + the
+ * client's email (so staff-addressed queue rows are not suppressed), or null.
+ */
+async function getClientAutomationHold(
+  clientId: number,
+): Promise<{ status: string; email: string | null } | null> {
+  if (!(clientId > 0)) return null;
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT status, email FROM clients WHERE id = ? LIMIT 1`,
+    [clientId],
+  );
+  const st = rows[0]?.status;
+  if (!isClientAutomationHoldStatus(st)) return null;
+  return {
+    status: String(st),
+    email: rows[0]?.email ? String(rows[0].email).trim().toLowerCase() : null,
+  };
+}
+
 async function maybeSendClientReminderSms(opts: {
   clientId: number;
   triggerEvent: string;
@@ -27814,9 +34512,24 @@ async function maybeSendClientReminderSms(opts: {
   isSandbox?: boolean;
   /** When set (e.g. round publish), SMS From = this admin's OFG line. */
   smsFromAdminId?: number | null;
-}): Promise<{ sent: boolean; reason?: string }> {
+  /** Round number for progress-report sends (outbound log / MCP delivery). */
+  roundNumber?: number | null;
+  /** Staff clicked send/resend — allowed even when the client is paused/blocked. */
+  staffInitiated?: boolean;
+}): Promise<{
+  sent: boolean;
+  reason?: string;
+  /** conversation_messages.id of the logged SMS (live delivery status). */
+  messageId?: number;
+  from?: string;
+  to?: string;
+  body?: string;
+}> {
   if (opts.isSandbox) return { sent: false, reason: "sandbox" };
   if (!opts.alsoSms) return { sent: false, reason: "step_also_sms_off" };
+  if (!opts.staffInitiated && (await getClientAutomationHold(opts.clientId))) {
+    return { sent: false, reason: "client_on_hold" };
+  }
   if (!(await isClientReminderSmsEnabled())) {
     return { sent: false, reason: "master_off" };
   }
@@ -27838,42 +34551,57 @@ async function maybeSendClientReminderSms(opts: {
   }).slice(0, SMS_MAX_BODY_CHARS);
   const toE164 = toSmsE164(String(client.phone));
 
-  // Publisher OFG for round reports; fall through to Lecca From if that fails.
+  // Publisher OFG for round reports first; fall through to the reminder From
+  // if that line is missing or the send fails. Either way the SMS is logged
+  // on the client's conversation below (previously the publisher-line path
+  // returned early and left no thread row / delivery status).
+  type ReminderFrom = {
+    e164: string;
+    phoneNumberId: number | null;
+    assignedAdminId: number | null;
+  };
+  const candidates: ReminderFrom[] = [];
   if (opts.smsFromAdminId != null && Number(opts.smsFromAdminId) > 0) {
-    const sent = await sendClientSmsFromAdmin({
-      adminId: Number(opts.smsFromAdminId),
-      to: toE164,
-      body,
-    }).catch((e: any) => {
-      console.error("[flow:reminder-sms:admin]", e?.message ?? e);
-      return false;
-    });
-    if (sent) return { sent: true };
-    console.warn(
-      "[flow:reminder-sms] publisher OFG failed — falling back to reminder From",
-      opts.smsFromAdminId,
-    );
+    const publisherAdminId = Number(opts.smsFromAdminId);
+    const phones = await listAssignedPhoneNumbers(publisherAdminId);
+    if (phones[0]) {
+      candidates.push({
+        e164: String(phones[0].e164),
+        phoneNumberId: Number(phones[0].id),
+        assignedAdminId: publisherAdminId,
+      });
+    } else {
+      console.log(
+        "[sms:skip] admin has no assigned OFG number — using reminder From",
+        publisherAdminId,
+      );
+    }
   }
+  const reminderFrom = await resolveClientReminderSmsFrom();
+  if (reminderFrom && !candidates.some((c) => c.e164 === reminderFrom.e164)) {
+    candidates.push(reminderFrom);
+  }
+  if (candidates.length === 0) return { sent: false, reason: "no_from_number" };
 
-  const from = await resolveClientReminderSmsFrom();
-  if (!from) return { sent: false, reason: "no_from_number" };
-
+  let from = candidates[0];
   let providerSid: string | undefined;
   let providerStatus: string | null = null;
   let errorMessage: string | null = null;
-  try {
-    const result = await sendSms({
-      to: toE164,
-      body,
-      from: from.e164,
-    });
-    providerSid = result?.sid;
-    providerStatus = result?.status || "sent";
-  } catch (e: any) {
-    errorMessage = String(e?.message || e).slice(0, 480);
-    console.error("[reminder-sms]", opts.clientId, errorMessage);
+  for (let i = 0; i < candidates.length; i++) {
+    from = candidates[i];
+    try {
+      const result = await sendSms({ to: toE164, body, from: from.e164 });
+      providerSid = result?.sid;
+      providerStatus = result?.status || "sent";
+      errorMessage = null;
+      break;
+    } catch (e: any) {
+      errorMessage = String(e?.message || e).slice(0, 480);
+      console.error("[reminder-sms]", opts.clientId, from.e164, errorMessage);
+    }
   }
 
+  let loggedMessageId: number | undefined;
   try {
     const assignee =
       client.assigned_admin_id != null
@@ -27889,6 +34617,7 @@ async function maybeSendClientReminderSms(opts: {
     const meta = JSON.stringify({
       reminder_sms: true,
       trigger_event: opts.triggerEvent,
+      recipient: "client",
     });
     const [ins] = await pool.query<ResultSetHeader>(
       `INSERT INTO conversation_messages
@@ -27908,6 +34637,7 @@ async function maybeSendClientReminderSms(opts: {
         meta,
       ],
     );
+    loggedMessageId = Number(ins.insertId);
     await pool.query(
       `UPDATE conversations
        SET last_message_at = NOW(),
@@ -27933,10 +34663,147 @@ async function maybeSendClientReminderSms(opts: {
     );
   }
 
+  const roundFromTrigger = /^round_(\d+)_complete$/.exec(opts.triggerEvent);
+  const roundNumber =
+    opts.roundNumber ?? (roundFromTrigger ? Number(roundFromTrigger[1]) : null);
+  await logOutboundMessage({
+    channel: "sms",
+    recipientType: "client",
+    kind: /^round_.*_complete$/.test(opts.triggerEvent)
+      ? "round_report"
+      : `flow:${opts.triggerEvent}`,
+    clientId: opts.clientId,
+    roundNumber,
+    to: toE164,
+    from: from.e164,
+    bodyPreview: redactUrls(body),
+    providerMessageId: providerSid || null,
+    status: errorMessage ? "failed" : "sent",
+    error: errorMessage,
+    conversationMessageId: loggedMessageId ?? null,
+    sentByAdminId: from.assignedAdminId,
+  });
+  const detail = {
+    messageId: loggedMessageId,
+    from: from.e164,
+    to: toE164,
+    body,
+  };
   return errorMessage
-    ? { sent: false, reason: "sms_failed" }
-    : { sent: true };
+    ? { sent: false, reason: "sms_failed", ...detail }
+    : { sent: true, ...detail };
 }
+
+/**
+ * Opt-in outbound send log (outbound_message_log) read by Admin Ask MCP
+ * (list_outbound_messages, list_progress_reports deliveries). Never call for
+ * auth/OTP/magic-link mail. Failures here never block the send itself.
+ */
+async function logOutboundMessage(entry: {
+  channel: "sms" | "email" | "whatsapp";
+  recipientType: "client" | "partner" | "admin" | "contact" | "other";
+  kind: string;
+  to: string;
+  clientId?: number | null;
+  caseId?: number | null;
+  roundNumber?: number | null;
+  from?: string | null;
+  subject?: string | null;
+  bodyPreview?: string | null;
+  providerMessageId?: string | null;
+  status: "sent" | "failed";
+  error?: string | null;
+  conversationMessageId?: number | null;
+  sentByAdminId?: number | null;
+}): Promise<void> {
+  try {
+    await pool.query(
+      `INSERT INTO outbound_message_log
+         (channel, recipient_type, kind, client_id, case_id, round_number,
+          to_address, from_address, subject, body_preview, provider_message_id,
+          status, error_message, conversation_message_id, sent_by_admin_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        entry.channel,
+        entry.recipientType,
+        entry.kind.slice(0, 64),
+        entry.clientId ?? null,
+        entry.caseId ?? null,
+        entry.roundNumber ?? null,
+        entry.to.slice(0, 255),
+        entry.from ? entry.from.slice(0, 255) : null,
+        entry.subject ? entry.subject.slice(0, 255) : null,
+        entry.bodyPreview ? entry.bodyPreview.slice(0, 1000) : null,
+        entry.providerMessageId ? entry.providerMessageId.slice(0, 255) : null,
+        entry.status,
+        entry.error ? entry.error.slice(0, 500) : null,
+        entry.conversationMessageId ?? null,
+        entry.sentByAdminId ?? null,
+      ],
+    );
+  } catch (e: any) {
+    console.error("[outbound-log]", e?.message ?? e);
+  }
+}
+
+/**
+ * sendEmail + outbound_message_log entry (sent or failed). Rethrows send
+ * errors so callers keep their existing failure handling.
+ */
+async function sendEmailLogged(
+  email: SendEmailOptions,
+  log: {
+    kind: string;
+    recipientType: "client" | "partner" | "admin" | "contact" | "other";
+    clientId?: number | null;
+    caseId?: number | null;
+    roundNumber?: number | null;
+    sentByAdminId?: number | null;
+  },
+): Promise<{ id?: string }> {
+  const base = {
+    channel: "email" as const,
+    ...log,
+    to: String(email.to),
+    from: FROM_EMAIL,
+    subject: email.subject,
+    bodyPreview: emailHtmlPreview(email.html || email.text || ""),
+  };
+  try {
+    const result = await sendEmail(email);
+    await logOutboundMessage({
+      ...base,
+      providerMessageId: result?.id ?? null,
+      status: "sent",
+    });
+    return result;
+  } catch (e: any) {
+    await logOutboundMessage({
+      ...base,
+      status: "failed",
+      error: String(e?.message || e),
+    });
+    throw e;
+  }
+}
+
+/** Replace URLs (secure PDF / magic links carry tokens) before logging. */
+function redactUrls(text: string): string {
+  return String(text || "").replace(/https?:\/\/\S+/gi, "[link]");
+}
+
+/** Plain-text preview of an HTML email body for the outbound log. */
+function emailHtmlPreview(html: string, max = 600): string {
+  return redactUrls(String(html || ""))
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
 
 function tplReferrerClientActivated(opts: {
   referrerFirstName: string;
@@ -28494,6 +35361,1462 @@ async function sendSms(opts: {
   return { sid: msg.sid, status: msg.status };
 }
 
+// ============================================================================
+// INBOUND AI (SMS / voice) — pure helpers duplicated from api/inboundAi.ts
+// (Vercel monolith: do NOT runtime-import sibling; sync via api/inboundAi.sync.test.ts)
+// Gates default OFF: INBOUND_AI_SMS_ENABLED / INBOUND_AI_VOICE_ENABLED
+// ============================================================================
+
+const INBOUND_AI_MAX_SMS_TURNS = 3;
+const INBOUND_AI_MAX_VOICE_TURNS = 4;
+const INBOUND_AI_MIN_CONFIDENCE = 0.55;
+/** Keep under Twilio ~15s webhook budget when AI must run inline (fallback). */
+const INBOUND_AI_SMS_TIMEOUT_MS = 20_000;
+const INBOUND_AI_VOICE_TIMEOUT_MS = 8_000;
+
+/** Pending AI jobs — Vitest awaits via flushInboundAiJobs(); Vercel uses waitUntil. */
+const inboundAiPendingJobs: Promise<unknown>[] = [];
+
+/**
+ * Ack Twilio fast: schedule Claude/send/notify after the webhook responds.
+ * On Vercel, waitUntil keeps the isolate alive. In Vitest, call flushInboundAiJobs().
+ */
+function scheduleInboundAiWork(job: () => Promise<unknown>): void {
+  const p = Promise.resolve()
+    .then(job)
+    .catch((e: any) =>
+      console.warn("[inbound-ai:async]", e?.message || e),
+    );
+  inboundAiPendingJobs.push(p);
+  if (inboundAiPendingJobs.length > 80) {
+    inboundAiPendingJobs.splice(0, inboundAiPendingJobs.length - 40);
+  }
+  try {
+    waitUntil(p);
+  } catch (e: any) {
+    console.warn("[inbound-ai:waitUntil]", e?.message || e);
+  }
+}
+
+async function flushInboundAiJobs(): Promise<void> {
+  const batch = inboundAiPendingJobs.splice(0, inboundAiPendingJobs.length);
+  if (batch.length) await Promise.allSettled(batch);
+}
+
+function inboundAiEnvFlagOn(raw: string | undefined | null): boolean {
+  const v = String(raw ?? "0")
+    .trim()
+    .toLowerCase();
+  return v === "1" || v === "true" || v === "on" || v === "yes";
+}
+
+function inboundAiSmsEnabled(): boolean {
+  return inboundAiEnvFlagOn(process.env.INBOUND_AI_SMS_ENABLED);
+}
+
+function inboundAiVoiceEnabled(): boolean {
+  return inboundAiEnvFlagOn(process.env.INBOUND_AI_VOICE_ENABLED);
+}
+
+/**
+ * Inbound AI Anthropic key per channel. SMS prefers ANTHROPIC_SMS_API_KEY
+ * (separate billing), falling back to ANTHROPIC_API_KEY; voice uses the shared key.
+ * Mirrors inboundAiAnthropicKey in api/inboundAi.ts.
+ */
+function inboundAiAnthropicKey(channel: "sms" | "voice"): {
+  apiKey: string;
+  slot: "ANTHROPIC_SMS_API_KEY" | "ANTHROPIC_API_KEY";
+  workspaceId?: string;
+} | null {
+  if (channel === "sms") {
+    const smsKey = String(process.env.ANTHROPIC_SMS_API_KEY || "").trim();
+    if (smsKey) {
+      // User-level keys (sk-ant-usr-…) with "all workspaces" access must name
+      // the workspace to bill on every request (anthropic-workspace-id).
+      const workspaceId = String(
+        process.env.ANTHROPIC_SMS_WORKSPACE_ID || "",
+      ).trim();
+      return workspaceId
+        ? { apiKey: smsKey, slot: "ANTHROPIC_SMS_API_KEY", workspaceId }
+        : { apiKey: smsKey, slot: "ANTHROPIC_SMS_API_KEY" };
+    }
+  }
+  const shared = String(process.env.ANTHROPIC_API_KEY || "").trim();
+  return shared ? { apiKey: shared, slot: "ANTHROPIC_API_KEY" } : null;
+}
+
+function inboundAiAnthropicReady(channel: "sms" | "voice"): boolean {
+  return inboundAiAnthropicKey(channel) !== null;
+}
+
+/**
+ * Optional staff allowlist (INBOUND_AI_ADMIN_IDS). Unset = all assigned lines.
+ * César-only rollout: INBOUND_AI_ADMIN_IDS=90001. Does not touch Twilio routing.
+ */
+function parseInboundAiAdminAllowlist(): number[] | null {
+  const raw = String(process.env.INBOUND_AI_ADMIN_IDS ?? "").trim();
+  if (!raw) return null;
+  const ids = raw
+    .split(/[,;\s]+/)
+    .map((s) => Number(String(s).trim()))
+    .filter((n) => Number.isFinite(n) && n > 0);
+  return ids;
+}
+
+function inboundAiMayRunOnAssignedLine(
+  assignedAdminId: number | null | undefined,
+): boolean {
+  const id =
+    assignedAdminId != null && Number.isFinite(Number(assignedAdminId))
+      ? Number(assignedAdminId)
+      : 0;
+  if (id <= 0) return false;
+  const allow = parseInboundAiAdminAllowlist();
+  if (allow == null) return true;
+  if (allow.length === 0) return false;
+  return allow.includes(id);
+}
+
+const INBOUND_AI_HARD_ESCALATE: Array<{ reason: string; re: RegExp }> = [
+  {
+    reason: "legal_threat",
+    re: /\b(lawyer|attorney|sue|lawsuit|legal\s+action|bbb|better\s+business|ftc|cfpb|abogado|demanda|demandar)\b/i,
+  },
+  {
+    reason: "cancel_refund",
+    re: /\b(cancel|cancellation|cancelar|cancelaci[oó]n|refund|reembolso|charge\s*back|chargeback|dispute\s+the\s+charge)\b/i,
+  },
+  {
+    reason: "payment_issue",
+    re: /\b(card\s+(declined|charged)|overcharg|billing\s+error|wrong\s+amount|payment\s+(failed|problem|issue)|unauthorized\s+charge|pago\s+(fall[oó]|rechaz|problem)|tarjeta\s+rechaz)\b/i,
+  },
+  {
+    reason: "human_request",
+    re: /\b(speak\s+to\s+(a\s+)?(person|human|someone|manager|agent|representative)|real\s+person|transfer\s+me|call\s+me\s+back|quiero\s+hablar|con\s+una\s+persona|gerente|representante)\b/i,
+  },
+  {
+    reason: "anger",
+    re: /\b(scam|fraud|ripoff|rip\s*off|furious|pissed|worst\s+company|estafa|fraude)\b/i,
+  },
+  {
+    reason: "bureau_dispute_advice",
+    re: /\b(how\s+do\s+i\s+dispute|c[oó]mo\s+(disputo|impugno)|dispute\s+(experian|equifax|transunion|the\s+bureau)|remove\s+(this|the)\s+(collection|charge\s*off)|fix\s+my\s+credit|arreglar\s+mi\s+cr[eé]dito)\b/i,
+  },
+];
+
+/** Exact TCPA keywords (Twilio Advanced Opt-Out style). */
+function inboundAiComplianceKeyword(
+  text: string,
+): "stop" | "help" | "start" | null {
+  const t = String(text || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[!.]+$/g, "");
+  if (!t) return null;
+  if (/^(STOP|STOPALL|UNSUBSCRIBE|END|QUIT|CANCELAR|BAJA)$/.test(t))
+    return "stop";
+  if (/^(HELP|INFO|AYUDA)$/.test(t)) return "help";
+  if (/^(START|YES|UNSTOP)$/.test(t)) return "start";
+  return null;
+}
+
+function inboundAiHelpReply(lang: "en" | "es"): string {
+  return lang === "es"
+    ? "Optimum Credit: para ayuda escribe a tu especialista o llama al (844) 401-9494. Responde STOP para cancelar mensajes."
+    : "Optimum Credit: for help text your specialist or call (844) 401-9494. Reply STOP to opt out.";
+}
+
+function inboundAiHardEscalateReason(
+  text: string,
+  opts: { isUnknown: boolean; aiTurnCount: number; maxTurns?: number },
+): string | null {
+  if (opts.isUnknown) return "unknown_contact";
+  const max = opts.maxTurns ?? INBOUND_AI_MAX_SMS_TURNS;
+  if (opts.aiTurnCount >= max) return "max_turns";
+  const body = String(text || "").trim();
+  if (!body) return "empty_or_media_only";
+  if (inboundAiComplianceKeyword(body)) return "compliance_keyword";
+  for (const p of INBOUND_AI_HARD_ESCALATE) {
+    if (p.re.test(body)) return p.reason;
+  }
+  return null;
+}
+
+function inboundAiDetectLang(
+  preferredLanguage: string | null | undefined,
+  messageText: string,
+): "en" | "es" {
+  if (preferredLanguage === "es" || preferredLanguage === "en") {
+    return preferredLanguage;
+  }
+  const t = String(messageText || "");
+  if (
+    /[áéíóúñ¿¡]/i.test(t) ||
+    /\b(hola|gracias|quiero|necesito|por\s+favor|ayuda|cuánto|cuando)\b/i.test(t)
+  ) {
+    return "es";
+  }
+  return "en";
+}
+
+type InboundAiAction = "resolve" | "escalate" | "reply";
+type InboundAiDecision = {
+  action: InboundAiAction;
+  reply: string;
+  summary: string;
+  confidence: number;
+  escalate_reason: string | null;
+};
+
+function parseInboundAiDecision(raw: unknown): InboundAiDecision | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  const actionRaw = String(o.action || "")
+    .trim()
+    .toLowerCase();
+  const action: InboundAiAction | null =
+    actionRaw === "resolve" ||
+    actionRaw === "reply" ||
+    actionRaw === "escalate"
+      ? actionRaw
+      : null;
+  if (!action) return null;
+  let confidence = Number(o.confidence);
+  if (!Number.isFinite(confidence)) confidence = 0;
+  confidence = Math.max(0, Math.min(1, confidence));
+  return {
+    action,
+    reply: String(o.reply || "")
+      .trim()
+      .slice(0, 480),
+    summary: String(o.summary || o.escalate_reason || "")
+      .trim()
+      .slice(0, 500),
+    confidence,
+    escalate_reason: o.escalate_reason
+      ? String(o.escalate_reason).trim().slice(0, 200)
+      : null,
+  };
+}
+
+/**
+ * Fallback when Claude answers with plain-text JSON instead of the tool call.
+ * Tolerates ```json fences and raw line breaks / tabs inside string values
+ * (invalid JSON that Claude emits for multi-line SMS replies).
+ */
+function parseInboundAiDecisionText(text: string): InboundAiDecision | null {
+  const match = String(text || "").match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  const tryParse = (src: string): unknown => {
+    try {
+      return JSON.parse(src);
+    } catch {
+      return null;
+    }
+  };
+  let obj = tryParse(match[0]);
+  if (!obj) {
+    // Escape control characters that appear inside quoted strings.
+    let out = "";
+    let inStr = false;
+    let esc = false;
+    for (const ch of match[0]) {
+      if (inStr) {
+        if (esc) {
+          esc = false;
+        } else if (ch === "\\") {
+          esc = true;
+        } else if (ch === '"') {
+          inStr = false;
+        } else if (ch === "\n") {
+          out += "\\n";
+          continue;
+        } else if (ch === "\r") {
+          continue;
+        } else if (ch === "\t") {
+          out += "\\t";
+          continue;
+        }
+      } else if (ch === '"') {
+        inStr = true;
+      }
+      out += ch;
+    }
+    obj = tryParse(out);
+  }
+  return obj ? parseInboundAiDecision(obj) : null;
+}
+
+function finalizeInboundAiDecision(
+  decision: InboundAiDecision | null,
+): InboundAiDecision {
+  if (!decision) {
+    return {
+      action: "escalate",
+      reply: "",
+      summary: "Claude returned invalid JSON",
+      confidence: 0,
+      escalate_reason: "parse_error",
+    };
+  }
+  if (
+    (decision.action === "resolve" || decision.action === "reply") &&
+    decision.confidence < INBOUND_AI_MIN_CONFIDENCE
+  ) {
+    return {
+      ...decision,
+      action: "escalate",
+      escalate_reason: decision.escalate_reason || "low_confidence",
+      summary: decision.summary || "Low confidence — escalating to staff",
+    };
+  }
+  if (
+    (decision.action === "resolve" || decision.action === "reply") &&
+    !decision.reply.trim()
+  ) {
+    return {
+      ...decision,
+      action: "escalate",
+      escalate_reason: "empty_reply",
+      summary: decision.summary || "Empty AI reply — escalating",
+    };
+  }
+  return decision;
+}
+
+function inboundAiSystemPrompt(lang: "en" | "es"): string {
+  return `You are Optimum Financial Group (Optimum Credit) first-line SMS/voice assistant for clients and prospects.
+Reply language: ${lang === "es" ? "Spanish" : "English"}. Keep SMS under 320 characters. No markdown. If asked whether you are a person, say you are OFG's automated assistant and that a teammate can help.
+You MAY help with: business hours/process FAQs, how to upload docs / portal steps, account status from CRM context (stage, missing docs, next steps), and soft "what happens next in credit repair" process education.
+You must NOT: give bureau dispute strategy, invent scores/dates/amounts, take payments, promise deletions, or handle cancel/refund/legal.
+Round status: use ONLY the round numbers, dates and report status given in CRM context. Links: share ONLY the portal_reports_link / latest_report_pdf_link given in CRM context — never any other URL. Amounts: only amounts written in the FAQ snippets.
+Respond by calling the triage_decision tool (if tools are unavailable, return ONLY valid JSON):
+{"action":"resolve"|"reply"|"escalate","reply":"text to send (empty ok on escalate)","summary":"1-line staff note","confidence":0.0-1.0,"escalate_reason":null|string}
+- resolve: you fully answered; no human needed
+- reply: partial answer; expect another client message
+- escalate: hand to staff now`;
+}
+
+// ── Reply safety guard (code-level, runs on every AI reply before sending) ──
+
+/** First AI reply in a thread identifies the automated assistant. */
+function inboundAiDisclosurePrefix(lang: "en" | "es"): string {
+  return lang === "es"
+    ? "Asistente automático de OFG: "
+    : "OFG automated assistant: ";
+}
+
+const INBOUND_AI_BILLING_RE =
+  /\b(bill|billed|billing|charge|charged|payment|pay|price|cost|fee|invoice|cobro|cobran|cobrar|pago|pagar|precio|costo|factura|mensualidad)\b/i;
+
+/** Billing-topic question: AI may answer from the FAQ, staff always review. */
+function inboundAiIsBillingQuestion(text: string): boolean {
+  return INBOUND_AI_BILLING_RE.test(String(text || ""));
+}
+
+const INBOUND_AI_PROMISE_RE =
+  /\b(guarantee[sd]?|guaranteed|garantiz\w*|100\s*%|we\s*(will|'ll)\s*(remove|delete|erase)|will\s+be\s+(removed|deleted)|(eliminaremos|borraremos|quitaremos)|ser[aá]\s+(eliminad|borrad)\w*)\b/i;
+
+/**
+ * Block an AI reply that goes beyond "information + round status + report
+ * links". Returns a reason (escalate instead of sending) or null (safe).
+ * - links: only exact URLs the platform gave the model (portal / report PDF)
+ * - $ amounts, credit scores (300–850) and dates: only if present in the
+ *   grounding text (CRM context, FAQ, thread, inbound)
+ * - no promises of deletions / guaranteed results
+ */
+function checkInboundAiReply(
+  reply: string,
+  opts: { allowedUrls: string[]; groundingText: string },
+): string | null {
+  const text = String(reply || "");
+  const ground = String(opts.groundingText || "").toLowerCase();
+  const urls = text.match(/https?:\/\/[^\s)>\]]+/gi) || [];
+  for (const raw of urls) {
+    const url = raw.replace(/[.,;:!?]+$/, "");
+    if (!opts.allowedUrls.includes(url)) return "unapproved_link";
+  }
+  if (/\b(www\.|[a-z0-9-]+\.(com|net|org|io|co|us)\b)/i.test(text.replace(/https?:\/\/[^\s)>\]]+/gi, ""))) {
+    return "unapproved_link";
+  }
+  for (const m of text.match(/\$\s?\d[\d,]*(\.\d{1,2})?/g) || []) {
+    const n = m.replace(/[$\s]/g, "");
+    if (!ground.includes(n.toLowerCase())) return "unverified_amount";
+  }
+  for (const m of text.match(/\b[3-8]\d{2}\b/g) || []) {
+    const v = Number(m);
+    if (v >= 300 && v <= 850 && !ground.includes(m)) return "unverified_score";
+  }
+  for (const m of text.match(/\b\d{1,2}\/\d{1,2}(\/\d{2,4})?\b|\b\d{4}-\d{2}-\d{2}\b/g) || []) {
+    if (!ground.includes(m.toLowerCase())) return "unverified_date";
+  }
+  if (INBOUND_AI_PROMISE_RE.test(text)) return "promise";
+  return null;
+}
+
+function inboundAiEscalationHoldMessage(lang: "en" | "es"): string {
+  return lang === "es"
+    ? "Gracias — un miembro del equipo te atenderá en breve."
+    : "Thanks — a teammate will follow up with you shortly.";
+}
+
+type InboundAiClaudeFailureReason =
+  | "claude_auth"
+  | "claude_http"
+  | "claude_timeout"
+  | "parse_error";
+
+/** Claude auth/HTTP/timeout/parse failures still text the hold line. */
+function inboundAiClaudeFailureDecision(
+  lang: "en" | "es",
+  reason: InboundAiClaudeFailureReason,
+): InboundAiDecision {
+  const summary =
+    reason === "claude_auth"
+      ? "Claude rejected the API key — escalating to staff"
+      : reason === "claude_timeout"
+        ? "Claude timed out — escalating to staff"
+        : reason === "claude_http"
+          ? "Claude request failed — escalating to staff"
+          : "Claude returned invalid JSON";
+  return {
+    action: "escalate",
+    reply: inboundAiEscalationHoldMessage(lang),
+    summary,
+    confidence: 0,
+    escalate_reason: reason,
+  };
+}
+
+function inboundAiResolvedSystemNote(summary: string): string {
+  const s = String(summary || "Handled by inbound AI").trim().slice(0, 400);
+  return `[Inbound AI] Resolved — ${s}`;
+}
+
+function inboundAiEscalatedSystemNote(
+  reason: string,
+  summary?: string,
+): string {
+  const r = String(reason || "escalate").trim().slice(0, 120);
+  const s = String(summary || "")
+    .trim()
+    .slice(0, 280);
+  return s
+    ? `[Inbound AI] Escalated (${r}) — ${s}`
+    : `[Inbound AI] Escalated (${r})`;
+}
+
+function countAiOutboundTurnsFromRows(
+  messages: Array<{ direction?: unknown; metadata_json?: unknown }> | RowDataPacket[],
+): number {
+  let n = 0;
+  for (const m of messages) {
+    if (String((m as any).direction || "") !== "outbound") continue;
+    let meta: Record<string, unknown> | null = null;
+    const raw = (m as any).metadata_json;
+    if (raw && typeof raw === "object") meta = raw as Record<string, unknown>;
+    else if (typeof raw === "string") {
+      try {
+        const o = JSON.parse(raw);
+        if (o && typeof o === "object") meta = o as Record<string, unknown>;
+      } catch {
+        /* ignore */
+      }
+    }
+    // Failure holds must not consume the 3-turn FAQ budget.
+    if (meta?.inbound_ai_failure === true) continue;
+    if (meta?.inbound_ai === true || meta?.source === "inbound_ai") n += 1;
+  }
+  return n;
+}
+
+function inboundAiIsClaudeFailureReason(
+  reason: string | null | undefined,
+): boolean {
+  return (
+    reason === "claude_auth" ||
+    reason === "claude_http" ||
+    reason === "claude_timeout" ||
+    reason === "parse_error" ||
+    reason === "claude_unavailable"
+  );
+}
+
+/** `messagesNewestFirst` matches the SMS query (ORDER BY id DESC). */
+function inboundAiLatestOutboundIsFailureHold(
+  messagesNewestFirst:
+    | Array<{
+        direction?: unknown;
+        metadata_json?: unknown;
+        provider_status?: unknown;
+      }>
+    | RowDataPacket[],
+): boolean {
+  for (const row of messagesNewestFirst) {
+    const m = row as {
+      direction?: unknown;
+      metadata_json?: unknown;
+      provider_status?: unknown;
+    };
+    if (String(m.direction || "") !== "outbound") continue;
+    let meta: Record<string, unknown> | null = null;
+    const raw = m.metadata_json;
+    if (raw && typeof raw === "object") meta = raw as Record<string, unknown>;
+    else if (typeof raw === "string") {
+      try {
+        const o = JSON.parse(raw);
+        if (o && typeof o === "object") meta = o as Record<string, unknown>;
+      } catch {
+        meta = null;
+      }
+    }
+    if (meta?.inbound_ai_failure !== true) return false;
+    const status = String(m.provider_status || "").toLowerCase();
+    if (status === "failed" || status === "undelivered") return false;
+    return true;
+  }
+  return false;
+}
+
+function pickFallbackEscalationAdminId(opts: {
+  languageOwnerId: number | null;
+  cesarId: number | null;
+  leccaId: number | null;
+  angelId: number | null;
+  lang: "en" | "es";
+}): number | null {
+  if (opts.cesarId) return opts.cesarId;
+  if (opts.lang === "es" && opts.angelId) return opts.angelId;
+  if (opts.lang === "en" && opts.leccaId) return opts.leccaId;
+  if (opts.languageOwnerId) return opts.languageOwnerId;
+  return opts.leccaId || opts.angelId || null;
+}
+
+async function resolveInboundAiFallbackStaffIds(): Promise<{
+  cesarId: number | null;
+  leccaId: number | null;
+  angelId: number | null;
+}> {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT id, first_name, last_name FROM admins
+     WHERE status = 'active' AND role IN ('super_admin','admin','agent')`,
+  );
+  let cesarId: number | null = null;
+  let leccaId: number | null = null;
+  let angelId: number | null = null;
+  for (const r of rows) {
+    const first = String(r.first_name || "")
+      .trim()
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/\p{M}/gu, "");
+    const id = Number(r.id);
+    if (!cesarId && first.startsWith("cesar")) cesarId = id;
+    if (!leccaId && (first.startsWith("lecca") || first === "lika"))
+      leccaId = id;
+    if (!angelId && first.startsWith("angel")) angelId = id;
+  }
+  return { cesarId, leccaId, angelId };
+}
+
+/** Structured triage output for inbound AI (forced tool_use). */
+const INBOUND_AI_DECISION_TOOL = {
+  name: "triage_decision",
+  description:
+    "ALWAYS call this exactly once with the triage decision for the latest inbound message: the reply to send (if any) and a staff note.",
+  strict: true,
+  input_schema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      action: { type: "string", enum: ["resolve", "reply", "escalate"] },
+      reply: {
+        type: "string",
+        description: "Text to send the contact (empty allowed on escalate)",
+      },
+      summary: { type: "string", description: "1-line staff note" },
+      confidence: { type: "number" },
+      escalate_reason: { type: ["string", "null"] },
+    },
+    required: ["action", "reply", "summary", "confidence", "escalate_reason"],
+  },
+} as const;
+
+async function callInboundAiClaude(opts: {
+  lang: "en" | "es";
+  channel: "sms" | "voice";
+  displayName: string;
+  inboundText: string;
+  crmContext: string;
+  faqContext: string;
+  threadLines: string;
+  aiTurnCount: number;
+  timeoutMs: number;
+}): Promise<InboundAiDecision> {
+  const resolvedKey = inboundAiAnthropicKey(opts.channel);
+  if (!resolvedKey) {
+    return inboundAiClaudeFailureDecision(opts.lang, "claude_http");
+  }
+  const { apiKey, slot: keySlot, workspaceId } = resolvedKey;
+  const userMsg = [
+    `Channel: ${opts.channel}`,
+    `Contact: ${opts.displayName}`,
+    `Language: ${opts.lang}`,
+    `Prior AI turns this thread: ${opts.aiTurnCount}`,
+    `CRM:\n${opts.crmContext || "(none)"}`,
+    `FAQ snippets:\n${opts.faqContext || "(none)"}`,
+    `Recent thread:\n${opts.threadLines || "(none)"}`,
+    `Latest inbound:\n${opts.inboundText}`,
+  ].join("\n\n");
+  try {
+    const aiRes = await axios.post(
+      "https://api.anthropic.com/v1/messages",
+      {
+        model:
+          String(process.env.ANTHROPIC_MODEL || "").trim() ||
+          "claude-sonnet-4-6",
+        max_tokens: 700,
+        system: inboundAiSystemPrompt(opts.lang),
+        messages: [{ role: "user", content: userMsg }],
+        // Tool call: Claude returns a parsed object, so replies with line
+        // breaks / quotes can no longer break JSON.parse (the Oct 5–6
+        // "parse_error on every message" incident). `auto` + strict (not a
+        // forced tool_choice, which 400s on Opus 5.5 / Sonnet 5.5) — the
+        // system prompt requires the call; text JSON is the fallback.
+        tools: [INBOUND_AI_DECISION_TOOL],
+        tool_choice: { type: "auto" },
+      },
+      {
+        headers: {
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json",
+          ...(workspaceId ? { "anthropic-workspace-id": workspaceId } : {}),
+        },
+        timeout: opts.timeoutMs,
+        validateStatus: () => true,
+      },
+    );
+    if (aiRes.status === 401 || aiRes.status === 403) {
+      console.warn(
+        `[inbound-ai] Claude HTTP ${aiRes.status} (${opts.channel}, key=${keySlot})`,
+        String(aiRes.data?.error?.message || "").slice(0, 200),
+      );
+      return inboundAiClaudeFailureDecision(opts.lang, "claude_auth");
+    }
+    if (aiRes.status < 200 || aiRes.status >= 300) {
+      console.warn(
+        `[inbound-ai] Claude HTTP ${aiRes.status}`,
+        String(aiRes.data?.error?.message || "").slice(0, 200),
+      );
+      return inboundAiClaudeFailureDecision(opts.lang, "claude_http");
+    }
+    const blocks: any[] = Array.isArray(aiRes.data?.content)
+      ? aiRes.data.content
+      : [];
+    const toolInput = blocks.find(
+      (b) => b?.type === "tool_use" && b?.name === INBOUND_AI_DECISION_TOOL.name,
+    )?.input;
+    // Fallback: plain-text JSON (older behavior) if no tool block came back.
+    const text = blocks
+      .filter((b) => b?.type === "text")
+      .map((b) => b.text)
+      .join("");
+    const parsed: InboundAiDecision | null = toolInput
+      ? parseInboundAiDecision(toolInput)
+      : parseInboundAiDecisionText(text);
+    if (!parsed) {
+      console.warn(
+        "[inbound-ai] parse_error",
+        JSON.stringify({
+          channel: opts.channel,
+          stop_reason: aiRes.data?.stop_reason ?? null,
+          has_tool: !!toolInput,
+          text: text.slice(0, 300),
+        }),
+      );
+      return inboundAiClaudeFailureDecision(opts.lang, "parse_error");
+    }
+    return finalizeInboundAiDecision(parsed);
+  } catch (e: any) {
+    const timedOut =
+      e?.code === "ECONNABORTED" || /timeout/i.test(String(e?.message || ""));
+    console.warn("[inbound-ai] Claude error:", e?.message || e);
+    return inboundAiClaudeFailureDecision(
+      opts.lang,
+      timedOut ? "claude_timeout" : "claude_http",
+    );
+  }
+}
+
+async function loadInboundAiFaqContext(limit = 8): Promise<string> {
+  try {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT question, answer, category FROM support_faq
+       WHERE is_active = 1
+       ORDER BY sort_order ASC, id ASC
+       LIMIT ?`,
+      [limit],
+    );
+    return rows
+      .map(
+        (r) =>
+          `Q(${r.category || "general"}): ${String(r.question || "").slice(0, 120)}\nA: ${String(r.answer || "").slice(0, 280)}`,
+      )
+      .join("\n---\n");
+  } catch {
+    return "";
+  }
+}
+
+async function insertInboundAiSystemNote(
+  conversationId: number,
+  body: string,
+  meta: Record<string, unknown>,
+): Promise<void> {
+  await pool.query(
+    `INSERT INTO conversation_messages
+       (conversation_id, direction, channel, body, metadata_json)
+     VALUES (?, 'system', 'internal', ?, ?)`,
+    [conversationId, body.slice(0, 2000), JSON.stringify(meta)],
+  );
+}
+
+async function sendInboundAiSmsReply(opts: {
+  conversationId: number;
+  toE164: string;
+  fromE164: string;
+  body: string;
+  ofgNumberId: number | null;
+  /** Claude auth/HTTP/parse hold — not a FAQ turn, and not repeated back-to-back. */
+  failureHold?: boolean;
+}): Promise<{ sid: string | null; status: string | null }> {
+  const text = decodeLiteralUnicodeEscapes(String(opts.body || "")).trim();
+  if (!text) return { sid: null, status: null };
+  let sid: string | null = null;
+  let status: string | null = null;
+  let errorMessage: string | null = null;
+  try {
+    const result = await sendSms({
+      to: opts.toE164,
+      body: text,
+      from: opts.fromE164,
+    });
+    sid = result?.sid || null;
+    status = result?.status || "queued";
+  } catch (e: any) {
+    errorMessage = String(e?.message || e);
+    status = "failed";
+    console.error("[inbound-ai:sms-send]", errorMessage);
+  }
+  const preview = text.slice(0, 200);
+  await pool.query(
+    `INSERT INTO conversation_messages
+       (conversation_id, direction, channel, body, from_address, to_address,
+        provider_message_id, provider_status, error_message, metadata_json)
+     VALUES (?, 'outbound', 'sms', ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      opts.conversationId,
+      text,
+      opts.fromE164,
+      opts.toE164,
+      sid,
+      status,
+      errorMessage,
+      JSON.stringify({
+        inbound_ai: true,
+        source: "inbound_ai",
+        ...(opts.failureHold ? { inbound_ai_failure: true } : {}),
+      }),
+    ],
+  );
+  await pool.query(
+    `UPDATE conversations
+     SET last_message_at = NOW(), last_message_preview = ?,
+         ofg_number_id = COALESCE(ofg_number_id, ?)
+     WHERE id = ?`,
+    [preview, opts.ofgNumberId, opts.conversationId],
+  );
+  return { sid, status };
+}
+
+async function notifyInboundAiOutcome(opts: {
+  adminId: number;
+  mode: "resolved" | "escalated" | "handling";
+  fromLabel: string;
+  summary: string;
+  linkUrl: string;
+  clientId?: number | null;
+  unknownContactId?: number | null;
+  providerMessageId?: string | null;
+  channel?: "sms" | "voice";
+}): Promise<void> {
+  const adminId = opts.adminId;
+  if (!adminId) return;
+  const [aRows] = await pool.query<RowDataPacket[]>(
+    `SELECT id, email, first_name, preferred_language, notification_prefs_json
+     FROM admins WHERE id = ? AND status = 'active' LIMIT 1`,
+    [adminId],
+  );
+  if (!aRows[0]) return;
+  const prefs = parseAdminNotificationPrefs(aRows[0].notification_prefs_json);
+  const channelLabel = opts.channel === "voice" ? "call" : "SMS";
+  const title =
+    opts.mode === "resolved"
+      ? `AI resolved ${channelLabel} — ${opts.fromLabel}`.slice(0, 255)
+      : opts.mode === "handling"
+        ? `AI handling ${channelLabel} — ${opts.fromLabel}`.slice(0, 255)
+        : `AI escalated ${channelLabel} — ${opts.fromLabel}`.slice(0, 255);
+  const body = String(opts.summary || "").slice(0, 500);
+  const absoluteLink = opts.linkUrl.startsWith("http")
+    ? opts.linkUrl
+    : `${APP_URL}${opts.linkUrl.startsWith("/") ? "" : "/"}${opts.linkUrl}`;
+
+  // Reuse inbound_sms prefs so existing mute toggles apply.
+  if (adminNotifyPrefOn(prefs, "in_app", "inbound_sms")) {
+    const notifId = await insertAdminInAppNotification({
+      adminId,
+      eventKey: "inbound_sms",
+      title,
+      body,
+      linkUrl: opts.linkUrl,
+      payload: {
+        provider_message_id: opts.providerMessageId || null,
+        client_id: opts.clientId ?? null,
+        unknown_contact_id: opts.unknownContactId ?? null,
+        inbound_ai: true,
+        inbound_ai_mode: opts.mode,
+        channel: opts.channel || "sms",
+      },
+    });
+    if (notifId) {
+      await publishAdminBellRealtime(adminId, {
+        notification_id: notifId,
+        event_key: "inbound_sms",
+      });
+    }
+  }
+
+  const adminEmail = String(aRows[0].email || "")
+    .trim()
+    .toLowerCase();
+  if (
+    adminEmail &&
+    isValidEmail(adminEmail) &&
+    adminNotifyPrefOn(prefs, "email", "inbound_sms")
+  ) {
+    const lang = aRows[0].preferred_language === "es" ? "es" : "en";
+    const modeLabel =
+      opts.mode === "resolved"
+        ? "AI resolved"
+        : opts.mode === "handling"
+          ? "AI handling"
+          : "AI escalated";
+    const emailTpl = tplAdminInboundSmsAlert({
+      adminFirstName: String(aRows[0].first_name || "Team"),
+      fromLabel: `${modeLabel}: ${opts.fromLabel}`,
+      preview: body,
+      linkUrl: absoluteLink,
+      lang,
+    });
+    try {
+      await sendEmail({
+        to: adminEmail,
+        subject: emailTpl.subject,
+        html: emailTpl.html,
+      });
+    } catch (e: any) {
+      console.error("[inbound-ai:notify-email]", e?.message || e);
+    }
+  }
+}
+
+/** Assigned active staffer, else every active staff member (never affiliates). */
+export async function resolveInboundAiEscalationRecipients(
+  assignedAdminId: number | null,
+): Promise<{ recipients: RowDataPacket[]; toAll: boolean }> {
+  const cols = `id, email, phone, first_name, preferred_language`;
+  if (assignedAdminId) {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT ${cols} FROM admins
+       WHERE id = ? AND status = 'active' AND role IN ('super_admin','admin','agent') LIMIT 1`,
+      [assignedAdminId],
+    );
+    if (rows.length) return { recipients: rows, toAll: false };
+  }
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT ${cols} FROM admins
+     WHERE status = 'active' AND role IN ('super_admin','admin','agent')
+     ORDER BY id ASC`,
+  );
+  return { recipients: rows, toAll: true };
+}
+
+/**
+ * AI escalation alert (SMS or call). Bell + email + SMS to the assigned
+ * staffer; when nobody is assigned (or they are inactive), to ALL active staff
+ * (super_admin / admin / agent). Escalations ignore the inbound_sms mute
+ * toggles — a human must see them. Extra notify emails get one copy.
+ * Returns who was alerted on which channels (for logs / tests).
+ */
+export async function notifyInboundAiEscalation(opts: {
+  assignedAdminId: number | null;
+  fromLabel: string;
+  summary: string;
+  linkUrl: string;
+  clientId?: number | null;
+  unknownContactId?: number | null;
+  providerMessageId?: string | null;
+  channel: "sms" | "voice";
+  /** OFG line that received the message/call — SMS From fallback. */
+  fallbackFromE164?: string | null;
+}): Promise<{ adminId: number; inApp: boolean; email: boolean; sms: boolean }[]> {
+  const { recipients, toAll } = await resolveInboundAiEscalationRecipients(opts.assignedAdminId);
+
+  const channelLabel = opts.channel === "voice" ? "call" : "SMS";
+  const title = `AI escalated ${channelLabel} — ${opts.fromLabel}${toAll ? " (unassigned)" : ""}`.slice(0, 255);
+  const body = String(opts.summary || "Needs a human").slice(0, 500);
+  const absoluteLink = opts.linkUrl.startsWith("http")
+    ? opts.linkUrl
+    : `${APP_URL}${opts.linkUrl.startsWith("/") ? "" : "/"}${opts.linkUrl}`;
+  const out: { adminId: number; inApp: boolean; email: boolean; sms: boolean }[] = [];
+  const emailed = new Set<string>();
+  let lastTpl: { subject: string; html: string } | null = null;
+
+  for (const a of recipients) {
+    const adminId = Number(a.id);
+    const lang = a.preferred_language === "es" ? "es" : "en";
+    const r = { adminId, inApp: false, email: false, sms: false };
+    try {
+      const notifId = await insertAdminInAppNotification({
+        adminId,
+        eventKey: "inbound_sms",
+        title,
+        body,
+        linkUrl: opts.linkUrl,
+        payload: {
+          provider_message_id: opts.providerMessageId || null,
+          client_id: opts.clientId ?? null,
+          unknown_contact_id: opts.unknownContactId ?? null,
+          inbound_ai: true,
+          inbound_ai_mode: "escalated",
+          channel: opts.channel,
+          unassigned: toAll,
+        },
+      });
+      if (notifId) {
+        r.inApp = true;
+        await publishAdminBellRealtime(adminId, { notification_id: notifId, event_key: "inbound_sms" });
+      }
+    } catch (e: any) {
+      console.error(`[inbound-ai:escalate:in-app] admin ${adminId}:`, e?.message || e);
+    }
+
+    const email = String(a.email || "").trim().toLowerCase();
+    const tpl = tplAdminInboundSmsAlert({
+      adminFirstName: String(a.first_name || "Team"),
+      fromLabel: `AI escalated ${channelLabel}: ${opts.fromLabel}`,
+      preview: body,
+      linkUrl: absoluteLink,
+      lang,
+    });
+    lastTpl = tpl;
+    if (email && isValidEmail(email) && !emailed.has(email)) {
+      try {
+        await sendEmail({ to: email, subject: tpl.subject, html: tpl.html });
+        emailed.add(email);
+        r.email = true;
+      } catch (e: any) {
+        console.error(`[inbound-ai:escalate:email] ${email}:`, e?.message || e);
+      }
+    }
+
+    const phone = String(a.phone || "").trim();
+    if (phone) {
+      try {
+        const from = (await resolveAssignedSmsFrom(adminId)) || opts.fallbackFromE164 || null;
+        const toDigits = normalizePhoneDigits(phone);
+        if (from && toDigits && toDigits !== normalizePhoneDigits(from)) {
+          const prefix =
+            lang === "es"
+              ? `OFG: la IA escaló ${opts.channel === "voice" ? "una llamada" : "un SMS"} de ${opts.fromLabel}: ${body}`
+              : `OFG: AI escalated ${channelLabel} from ${opts.fromLabel}: ${body}`;
+          await sendSms({ to: phone, from, body: `${prefix.slice(0, 260)}\n${absoluteLink}`.slice(0, 320) });
+          r.sms = true;
+        }
+      } catch (e: any) {
+        console.error(`[inbound-ai:escalate:sms] admin ${adminId}:`, e?.message || e);
+      }
+    }
+    out.push(r);
+  }
+
+  if (lastTpl) {
+    await emailAdminNotifyExtraRecipients({
+      subject: lastTpl.subject,
+      html: lastTpl.html,
+      eventKey: "inbound_sms",
+      skipEmails: emailed,
+    }).catch((e) => console.warn("[inbound-ai:escalate:extra]", e?.message || e));
+  }
+  console.log(
+    `[inbound-ai:escalate] ${opts.channel} ${toAll ? "unassigned → all staff" : `assigned ${opts.assignedAdminId}`}: ${out.length} alerted`,
+  );
+  return out;
+}
+
+/**
+ * AI-first SMS triage. Returns tookOver=true when normal inbound_sms notify
+ * should be skipped (AI already notified resolve/escalate, or replied mid-thread).
+ */
+/**
+ * Round status for the SMS AI (read-only): current round, schedule dates,
+ * latest published report, the portal reports link and a fresh 72h secure
+ * PDF link to the latest report. Returns the context text + the only URLs the
+ * AI is allowed to send.
+ */
+async function loadInboundAiRoundContext(
+  clientId: number,
+): Promise<{ text: string; allowedUrls: string[] }> {
+  const portal = `${APP_URL}/portal/reports`;
+  const allowedUrls = [portal];
+  const parts: string[] = [`portal_reports_link=${portal}`];
+  const fmt = (d: unknown) => {
+    if (!d) return null;
+    const iso = new Date(d as string).toISOString().slice(0, 10);
+    const [y, m, dd] = iso.split("-");
+    return `${iso} (${m}/${dd}/${y})`;
+  };
+  try {
+    const caseId = await resolvePrimaryActiveCaseId(pool, clientId);
+    if (caseId) {
+      const [c] = await pool.query<RowDataPacket[]>(
+        `SELECT pipeline_stage, max_rounds FROM credit_repair_cases WHERE id = ? LIMIT 1`,
+        [caseId],
+      );
+      const stage = String(c[0]?.pipeline_stage || "");
+      const maxRounds = clampMaxRounds(c[0]?.max_rounds);
+      const [pub] = await pool.query<RowDataPacket[]>(
+        `SELECT round_number, created_at FROM client_round_reports
+         WHERE client_id = ? ORDER BY round_number DESC, id DESC LIMIT 1`,
+        [clientId],
+      );
+      const lastRound = pub[0] ? Number(pub[0].round_number) : 0;
+      const stageRound = /^round_(\d+)$/.exec(stage);
+      const currentRound = stageRound ? Math.max(Number(stageRound[1]), lastRound) : lastRound;
+      parts.push(`pipeline_stage=${stage || "?"}`);
+      if (currentRound > 0) parts.push(`current_round=${currentRound} of ${maxRounds}`);
+      const [sch] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM case_round_schedules WHERE case_id = ? LIMIT 1`,
+        [caseId],
+      );
+      if (sch[0]) {
+        const next = currentRound + 1;
+        const extended =
+          typeof sch[0].extended_dates_json === "string"
+            ? JSON.parse(sch[0].extended_dates_json || "{}")
+            : sch[0].extended_dates_json || {};
+        const nextDate = next <= 5 ? sch[0][`round_${next}_date`] : extended?.[String(next)];
+        if (next <= maxRounds && nextDate) {
+          parts.push(`next_round=${next} expected=${fmt(nextDate)}`);
+        }
+      }
+      if (pub[0]) {
+        parts.push(`latest_report=Round ${lastRound} published ${fmt(pub[0].created_at)}`);
+        const pdf = await findRoundReportPdfRow({ clientId, roundNumber: lastRound });
+        if (pdf?.id) {
+          const token = await createRoundReportDownloadToken(Number(pdf.id), clientId);
+          const url = `${APP_URL}/api/public/round-report-pdf/${token}`;
+          allowedUrls.push(url);
+          parts.push(`latest_report_pdf_link (Round ${lastRound}, expires in ${ROUND_PDF_DOWNLOAD_TTL_HOURS}h)=${url}`);
+        }
+      } else {
+        parts.push("latest_report=none published yet");
+      }
+    }
+  } catch (e: any) {
+    console.warn("[inbound-ai:round-context]", clientId, e?.message ?? e);
+  }
+  return { text: parts.join("; "), allowedUrls };
+}
+
+async function tryProcessInboundAiSms(opts: {
+  conversationId: number;
+  ofgNumberId: number | null;
+  assignedAdminId: number | null;
+  clientId?: number | null;
+  crmContactId?: number | null;
+  unknownContactId?: number | null;
+  fromE164: string;
+  toE164: string;
+  inboundBody: string;
+  fromLabel: string;
+  linkUrl: string;
+  providerMessageId?: string | null;
+}): Promise<{ tookOver: boolean; mode: "resolve" | "reply" | "escalate" | "skip" }> {
+  if (!inboundAiSmsEnabled()) {
+    return { tookOver: false, mode: "skip" };
+  }
+  if (!inboundAiMayRunOnAssignedLine(opts.assignedAdminId)) {
+    return { tookOver: false, mode: "skip" };
+  }
+  const fromE164 = String(opts.toE164 || "").trim(); // OFG line (we send From here)
+  const toPeer = String(opts.fromE164 || "").trim(); // client phone
+  if (!fromE164 || !toPeer) return { tookOver: false, mode: "skip" };
+
+  const isUnknown = opts.unknownContactId != null && opts.unknownContactId > 0;
+
+  const [recent] = await pool.query<RowDataPacket[]>(
+    `SELECT direction, body, metadata_json, provider_status FROM conversation_messages
+     WHERE conversation_id = ?
+     ORDER BY id DESC LIMIT 16`,
+    [opts.conversationId],
+  );
+  const aiTurnCount = countAiOutboundTurnsFromRows(recent);
+  const hard = inboundAiHardEscalateReason(opts.inboundBody, {
+    isUnknown,
+    aiTurnCount,
+  });
+
+  let preferredLanguage: string | null = null;
+  let displayName = opts.fromLabel || "there";
+  let crmContext = "";
+  let allowedReplyUrls: string[] = [`${APP_URL}/portal/reports`];
+  /** Blocked clients (portal locked) never get an AI reply — staff only. */
+  let clientBlocked = false;
+  if (opts.clientId) {
+    const [crows] = await pool.query<RowDataPacket[]>(
+      `SELECT first_name, last_name, status, pipeline_stage, preferred_language
+       FROM clients WHERE id = ? LIMIT 1`,
+      [opts.clientId],
+    );
+    if (crows[0]) {
+      preferredLanguage = crows[0].preferred_language
+        ? String(crows[0].preferred_language)
+        : null;
+      displayName =
+        `${crows[0].first_name || ""} ${crows[0].last_name || ""}`.trim() ||
+        displayName;
+      crmContext = `status=${crows[0].status || "?"}; stage=${crows[0].pipeline_stage || "?"}; lang=${preferredLanguage || "?"}`;
+      clientBlocked = String(crows[0].status || "") === "blocked";
+    }
+    const rounds = await loadInboundAiRoundContext(opts.clientId);
+    crmContext = `${crmContext}; ${rounds.text}`;
+    allowedReplyUrls = rounds.allowedUrls;
+  } else if (opts.crmContactId) {
+    const [crows] = await pool.query<RowDataPacket[]>(
+      `SELECT first_name, last_name, preferred_language FROM contacts
+       WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+      [opts.crmContactId],
+    );
+    if (crows[0]) {
+      preferredLanguage = crows[0].preferred_language
+        ? String(crows[0].preferred_language)
+        : null;
+      displayName =
+        `${crows[0].first_name || ""} ${crows[0].last_name || ""}`.trim() ||
+        displayName;
+      crmContext = `kind=crm_contact; lang=${preferredLanguage || "?"}`;
+    }
+  } else {
+    crmContext = "kind=unknown_contact";
+  }
+
+  const lang = inboundAiDetectLang(preferredLanguage, opts.inboundBody);
+  const compliance = inboundAiComplianceKeyword(opts.inboundBody);
+
+  const escalateToAdminId = async (): Promise<number> => {
+    let adminId = opts.assignedAdminId ? Number(opts.assignedAdminId) : 0;
+    if (adminId > 0) {
+      const [alive] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM admins WHERE id = ? AND status = 'active' LIMIT 1`,
+        [adminId],
+      );
+      if (alive[0]) return adminId;
+    }
+    const ownerId = await resolveLanguageOwnerAdminId(lang);
+    const staff = await resolveInboundAiFallbackStaffIds();
+    const fallback = pickFallbackEscalationAdminId({
+      languageOwnerId: ownerId,
+      cesarId: staff.cesarId,
+      leccaId: staff.leccaId,
+      angelId: staff.angelId,
+      lang,
+    });
+    return fallback || adminId || 0;
+  };
+
+  const adminId = await escalateToAdminId();
+  if (!adminId) {
+    console.warn("[inbound-ai] no escalatee admin — skipping takeover");
+    return { tookOver: false, mode: "skip" };
+  }
+
+  await pool.query(
+    `UPDATE conversations
+     SET assigned_admin_id = COALESCE(assigned_admin_id, ?), status = 'open'
+     WHERE id = ?`,
+    [adminId, opts.conversationId],
+  );
+
+  const publishAi = async () => {
+    await publishConversationRealtime({
+      type: "message",
+      adminIds: [adminId],
+      payload: {
+        conversation_id: opts.conversationId,
+        client_id: opts.clientId ?? null,
+        contact_id: opts.crmContactId ?? null,
+        unknown_contact_id: opts.unknownContactId ?? null,
+      },
+    });
+  };
+
+  // TCPA: never Claude-reply to STOP/HELP/START — handle or escalate to staff.
+  if (compliance === "stop" || compliance === "start") {
+    await insertInboundAiSystemNote(
+      opts.conversationId,
+      inboundAiEscalatedSystemNote(
+        compliance,
+        compliance === "stop"
+          ? "Opt-out keyword — no AI reply (carrier/Twilio may also handle)"
+          : "Opt-in keyword — staff should confirm messaging consent",
+      ),
+      { inbound_ai: true, mode: "escalated", reason: compliance },
+    );
+    await publishAi();
+    await notifyInboundAiEscalation({
+      assignedAdminId: opts.assignedAdminId ? Number(opts.assignedAdminId) : null,
+      fallbackFromE164: fromE164,
+      fromLabel: displayName,
+      summary:
+        compliance === "stop"
+          ? "STOP/opt-out keyword — do not auto-text; confirm suppression"
+          : "START/opt-in keyword — confirm before messaging",
+      linkUrl: opts.linkUrl,
+      clientId: opts.clientId,
+      unknownContactId: opts.unknownContactId,
+      providerMessageId: opts.providerMessageId,
+      channel: "sms",
+    }).catch((e) => console.warn("[inbound-ai:notify]", e?.message || e));
+    return { tookOver: true, mode: "escalate" };
+  }
+
+  if (compliance === "help") {
+    await sendInboundAiSmsReply({
+      conversationId: opts.conversationId,
+      toE164: toPeer,
+      fromE164,
+      body: inboundAiHelpReply(lang),
+      ofgNumberId: opts.ofgNumberId,
+    });
+    await insertInboundAiSystemNote(
+      opts.conversationId,
+      inboundAiEscalatedSystemNote("help", "Sent compliance HELP reply"),
+      { inbound_ai: true, mode: "escalated", reason: "help" },
+    );
+    await publishAi();
+    await notifyInboundAiOutcome({
+      adminId,
+      mode: "escalated",
+      fromLabel: displayName,
+      summary: "HELP keyword — sent compliance reply; staff may follow up",
+      linkUrl: opts.linkUrl,
+      clientId: opts.clientId,
+      unknownContactId: opts.unknownContactId,
+      providerMessageId: opts.providerMessageId,
+      channel: "sms",
+    }).catch((e) => console.warn("[inbound-ai:notify]", e?.message || e));
+    return { tookOver: true, mode: "escalate" };
+  }
+
+  const threadLines = [...recent]
+    .reverse()
+    .filter((m) => String(m.body || "").trim())
+    .slice(-8)
+    .map(
+      (m) =>
+        `${String(m.direction) === "inbound" ? "Contact" : String(m.direction) === "outbound" ? "OFG" : "System"}: ${String(m.body).slice(0, 280)}`,
+    )
+    .join("\n");
+
+  let decision: InboundAiDecision;
+  let faqContextUsed = "";
+  if (hard) {
+    decision = {
+      action: "escalate",
+      // MMS-only / empty: staff-only — do not auto-text the consumer.
+      reply:
+        hard === "empty_or_media_only"
+          ? ""
+          : inboundAiEscalationHoldMessage(lang),
+      summary: `Hard escalate: ${hard}`,
+      confidence: 1,
+      escalate_reason: hard,
+    };
+  } else if (clientBlocked) {
+    decision = {
+      action: "escalate",
+      reply: "",
+      summary: "Client is blocked — staff only, no AI reply",
+      confidence: 1,
+      escalate_reason: "client_blocked",
+    };
+  } else if (!inboundAiAnthropicReady("sms")) {
+    decision = {
+      action: "escalate",
+      reply: inboundAiEscalationHoldMessage(lang),
+      summary: "Claude unavailable — escalating to staff",
+      confidence: 0,
+      escalate_reason: "claude_unavailable",
+    };
+  } else {
+    const faqContext = await loadInboundAiFaqContext(8);
+    faqContextUsed = faqContext;
+    decision = await callInboundAiClaude({
+      lang,
+      channel: "sms",
+      displayName,
+      inboundText: opts.inboundBody.slice(0, 800),
+      crmContext,
+      faqContext,
+      threadLines,
+      aiTurnCount,
+      timeoutMs: INBOUND_AI_SMS_TIMEOUT_MS,
+    });
+  }
+
+  // Code-level safety check: anything beyond information / round status /
+  // approved report links is never sent — staff get the draft instead.
+  let blockedDraft: string | null = null;
+  if (decision.action !== "escalate") {
+    const blockReason = checkInboundAiReply(decision.reply, {
+      allowedUrls: allowedReplyUrls,
+      groundingText: [crmContext, faqContextUsed, threadLines, opts.inboundBody].join("\n"),
+    });
+    if (blockReason) {
+      blockedDraft = decision.reply;
+      decision = {
+        action: "escalate",
+        reply: inboundAiEscalationHoldMessage(lang),
+        summary: `AI reply blocked (${blockReason}) — draft: ${decision.reply.slice(0, 300)}`,
+        confidence: decision.confidence,
+        escalate_reason: `reply_guard:${blockReason}`,
+      };
+    }
+  }
+  if (blockedDraft) {
+    console.warn("[inbound-ai:reply-guard]", opts.conversationId, decision.escalate_reason);
+  }
+  // First AI reply in a thread says it's OFG's automated assistant.
+  if (decision.action !== "escalate" && aiTurnCount === 0) {
+    decision = { ...decision, reply: `${inboundAiDisclosurePrefix(lang)}${decision.reply}` };
+  }
+  const billingQuestion = inboundAiIsBillingQuestion(opts.inboundBody);
+
+  if (decision.action === "escalate") {
+    const hold = decision.reply.trim();
+    const failureHold = inboundAiIsClaudeFailureReason(decision.escalate_reason);
+    // One hold per failure streak. Repeating it on every inbound would spam
+    // the customer and, if counted as turns, lock the thread out of Claude.
+    const skipRepeatHold =
+      failureHold && inboundAiLatestOutboundIsFailureHold(recent);
+    if (hold && !skipRepeatHold) {
+      await sendInboundAiSmsReply({
+        conversationId: opts.conversationId,
+        toE164: toPeer,
+        fromE164,
+        body: hold,
+        ofgNumberId: opts.ofgNumberId,
+        failureHold,
+      });
+    }
+    await insertInboundAiSystemNote(
+      opts.conversationId,
+      inboundAiEscalatedSystemNote(
+        decision.escalate_reason || "escalate",
+        decision.summary,
+      ),
+      {
+        inbound_ai: true,
+        mode: "escalated",
+        reason: decision.escalate_reason,
+      },
+    );
+    await pool.query(
+      `UPDATE conversations SET assigned_admin_id = ?, status = 'open' WHERE id = ?`,
+      [adminId, opts.conversationId],
+    );
+    await publishAi();
+    // Assigned staffer only; unassigned → all active staff (bell + email + SMS).
+    await notifyInboundAiEscalation({
+      assignedAdminId: opts.assignedAdminId ? Number(opts.assignedAdminId) : null,
+      fromLabel: displayName,
+      summary: decision.summary || decision.escalate_reason || "Needs human",
+      linkUrl: opts.linkUrl,
+      clientId: opts.clientId,
+      unknownContactId: opts.unknownContactId,
+      providerMessageId: opts.providerMessageId,
+      channel: "sms",
+      fallbackFromE164: fromE164,
+    }).catch((e) => console.warn("[inbound-ai:notify]", e?.message || e));
+    return { tookOver: true, mode: "escalate" };
+  }
+
+  await sendInboundAiSmsReply({
+    conversationId: opts.conversationId,
+    toE164: toPeer,
+    fromE164,
+    body: decision.reply,
+    ofgNumberId: opts.ofgNumberId,
+  });
+
+  if (decision.action === "resolve") {
+    await insertInboundAiSystemNote(
+      opts.conversationId,
+      inboundAiResolvedSystemNote(decision.summary),
+      { inbound_ai: true, mode: "resolved" },
+    );
+    // Stays open (not closed / not marked read) so staff can review it.
+    await pool.query(
+      `UPDATE conversations SET status = 'open', assigned_admin_id = ? WHERE id = ?`,
+      [adminId, opts.conversationId],
+    );
+    await publishAi();
+    await notifyInboundAiOutcome({
+      adminId,
+      mode: "resolved",
+      fromLabel: displayName,
+      summary: `${billingQuestion ? "Billing question answered by AI — please review. " : ""}${decision.summary || "AI handled the SMS"}`,
+      linkUrl: opts.linkUrl,
+      clientId: opts.clientId,
+      unknownContactId: opts.unknownContactId,
+      providerMessageId: opts.providerMessageId,
+      channel: "sms",
+    }).catch((e) => console.warn("[inbound-ai:notify]", e?.message || e));
+    return { tookOver: true, mode: "resolve" };
+  }
+
+  // reply — keep open; still notify staff so AI handling is visible
+  await pool.query(
+    `UPDATE conversations SET status = 'open', assigned_admin_id = ? WHERE id = ?`,
+    [adminId, opts.conversationId],
+  );
+  await publishAi();
+  await notifyInboundAiOutcome({
+    adminId,
+    mode: "handling",
+    fromLabel: displayName,
+    summary: `${billingQuestion ? "Billing question answered by AI — please review. " : ""}${decision.summary || decision.reply.slice(0, 200) || "AI replied; awaiting client"}`,
+    linkUrl: opts.linkUrl,
+    clientId: opts.clientId,
+    unknownContactId: opts.unknownContactId,
+    providerMessageId: opts.providerMessageId,
+    channel: "sms",
+  }).catch((e) => console.warn("[inbound-ai:notify]", e?.message || e));
+  return { tookOver: true, mode: "reply" };
+}
+
 /** Prefer a host Twilio can reach (not localhost / private LAN). */
 function isNonPublicHostname(hostname: string): boolean {
   const h = String(hostname || "").toLowerCase();
@@ -28793,6 +37116,41 @@ function isValidTwilioWebhookRequest(req: Request): boolean {
   return false;
 }
 
+/** Batch transcription callbacks are JSON. Twilio signs the raw body. */
+function isValidTwilioJsonWebhook(req: Request): boolean {
+  if (process.env.VITEST === "true") return true;
+  const authToken = process.env.TWILIO_AUTH_TOKEN;
+  if (!authToken) return !IS_PROD;
+  const signature = req.headers["x-twilio-signature"] as string | undefined;
+  if (!signature) return false;
+  const raw = String((req as Request & { rawBody?: string }).rawBody || "");
+  if (!raw) return false;
+  const validateWithBody = (
+    twilio as unknown as {
+      validateRequestWithBody?: (
+        authToken: string,
+        twilioSignature: string,
+        url: string,
+        body: string,
+      ) => boolean;
+    }
+  ).validateRequestWithBody;
+  if (typeof validateWithBody !== "function") return false;
+  const candidates = twilioWebhookCandidateUrls(req);
+  for (const url of candidates) {
+    try {
+      if (validateWithBody(authToken, signature, url, raw)) return true;
+    } catch {
+      /* try next */
+    }
+  }
+  console.warn(
+    "[twilio] Invalid JSON signature — tried URLs:",
+    candidates.join(" | "),
+  );
+  return false;
+}
+
 /** Twilio delivery pipeline order — ignore out-of-order / regressive callbacks. */
 const TWILIO_SMS_STATUS_RANK: Record<string, number> = {
   accepted: 1,
@@ -28874,14 +37232,34 @@ async function adminCanAccessUnknownContact(
   unknownContactId: number,
 ): Promise<boolean> {
   const ids = await adminAssignedPhoneNumberIds(adminId);
-  if (!ids.length) return false;
-  const [rows] = await pool.query<RowDataPacket[]>(
-    `SELECT id FROM conversation_unknown_contacts
-     WHERE id = ? AND ofg_number_id IN (${ids.map(() => "?").join(",")})
+  if (ids.length) {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT id FROM conversation_unknown_contacts
+       WHERE id = ? AND ofg_number_id IN (${ids.map(() => "?").join(",")})
+       LIMIT 1`,
+      [unknownContactId, ...ids],
+    );
+    if (rows.length > 0) return true;
+  }
+  // WhatsApp / assignee-only threads (no OFG line on the unknown contact)
+  const [assigned] = await pool.query<RowDataPacket[]>(
+    `SELECT id FROM conversations
+     WHERE unknown_contact_id = ? AND assigned_admin_id = ?
      LIMIT 1`,
-    [unknownContactId, ...ids],
+    [unknownContactId, adminId],
   );
-  return rows.length > 0;
+  if (assigned.length > 0) return true;
+  // Cold WhatsApp outbound: unknown created with ofg_number_id NULL before thread exists
+  if (await adminMayUseWhatsapp(adminId)) {
+    const [waUnknown] = await pool.query<RowDataPacket[]>(
+      `SELECT id FROM conversation_unknown_contacts
+       WHERE id = ? AND status = 'open' AND ofg_number_id IS NULL
+       LIMIT 1`,
+      [unknownContactId],
+    );
+    if (waUnknown.length > 0) return true;
+  }
+  return false;
 }
 
 /**
@@ -29767,13 +38145,16 @@ async function getOrCreateUnknownSmsConversation(opts: {
   ofgNumberId?: number | null;
   assignedAdminId?: number | null;
   reopenIfClosed?: boolean;
+  /** Default sms; use whatsapp for 360dialog threads. */
+  channel?: "sms" | "whatsapp";
 }): Promise<number> {
   const reopenIfClosed = opts.reopenIfClosed !== false;
+  const channel = opts.channel === "whatsapp" ? "whatsapp" : "sms";
   const [conv] = await pool.query<RowDataPacket[]>(
     `SELECT id, status FROM conversations
-     WHERE unknown_contact_id = ? AND channel = 'sms'
+     WHERE unknown_contact_id = ? AND channel = ?
      LIMIT 1`,
-    [opts.unknownContactId],
+    [opts.unknownContactId, channel],
   );
   if (conv[0]) {
     const id = Number(conv[0].id);
@@ -29804,8 +38185,9 @@ async function getOrCreateUnknownSmsConversation(opts: {
   const [insC] = await pool.query<ResultSetHeader>(
     `INSERT INTO conversations
        (client_id, channel, status, assigned_admin_id, ofg_number_id, unknown_contact_id)
-     VALUES (NULL, 'sms', 'open', ?, ?, ?)`,
+     VALUES (NULL, ?, 'open', ?, ?, ?)`,
     [
+      channel,
       opts.assignedAdminId ?? null,
       opts.ofgNumberId ?? null,
       opts.unknownContactId,
@@ -29814,7 +38196,7 @@ async function getOrCreateUnknownSmsConversation(opts: {
   return Number(insC.insertId);
 }
 
-/** SMS/call thread for a CRM contact (address book). */
+/** SMS/call/WhatsApp thread for a CRM contact (address book). */
 async function getOrCreateCrmContactChannelConversation(opts: {
   crmContactId: number;
   channel: string;
@@ -29823,7 +38205,12 @@ async function getOrCreateCrmContactChannelConversation(opts: {
   reopenIfClosed?: boolean;
 }): Promise<number> {
   const reopenIfClosed = opts.reopenIfClosed !== false;
-  const channel = opts.channel === "call" ? "call" : "sms";
+  const channel =
+    opts.channel === "call"
+      ? "call"
+      : opts.channel === "whatsapp"
+        ? "whatsapp"
+        : "sms";
   const [conv] = await pool.query<RowDataPacket[]>(
     `SELECT id, status FROM conversations
      WHERE contact_id = ? AND channel = ?
@@ -29871,29 +38258,38 @@ async function getOrCreateCrmContactChannelConversation(opts: {
   return Number(insC.insertId);
 }
 
-/** Find open unknown on an OFG line, or create one for cold outbound. */
+/** Find open unknown on an OFG line (or any line when ofg null), or create one. */
 async function findOrCreateOpenUnknownContact(opts: {
   phoneRaw: string;
-  ofgNumberId: number;
+  ofgNumberId?: number | null;
   assignedAdminId: number;
 }): Promise<{ unknownId: number; created: boolean; phoneE164: string }> {
   const phoneE164 = toSmsE164(opts.phoneRaw);
   const phoneVariants = phoneMatchVariants(phoneE164);
   let existingU: RowDataPacket[] = [];
   if (phoneVariants.length) {
+    const ofgClause =
+      opts.ofgNumberId != null ? `AND ofg_number_id = ?` : ``;
+    const args: any[] =
+      opts.ofgNumberId != null
+        ? [
+            opts.ofgNumberId,
+            ...phoneVariants,
+            ...phoneVariants.map((v) => normalizePhoneDigits(v)),
+          ]
+        : [
+            ...phoneVariants,
+            ...phoneVariants.map((v) => normalizePhoneDigits(v)),
+          ];
     const [found] = await pool.query<RowDataPacket[]>(
       `SELECT id FROM conversation_unknown_contacts
-       WHERE status = 'open' AND ofg_number_id = ?
+       WHERE status = 'open' ${ofgClause}
          AND (
            phone_e164 IN (${phoneVariants.map(() => "?").join(",")})
            OR REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(phone_e164,''),'+',''),'-',''),'(',''),')','') IN (${phoneVariants.map(() => "?").join(",")})
          )
        LIMIT 1`,
-      [
-        opts.ofgNumberId,
-        ...phoneVariants,
-        ...phoneVariants.map((v) => normalizePhoneDigits(v)),
-      ],
+      args,
     );
     existingU = found;
   }
@@ -29908,7 +38304,7 @@ async function findOrCreateOpenUnknownContact(opts: {
     `INSERT INTO conversation_unknown_contacts
        (phone_e164, ofg_number_id, status, unread_count)
      VALUES (?, ?, 'open', 0)`,
-    [phoneE164, opts.ofgNumberId],
+    [phoneE164, opts.ofgNumberId ?? null],
   );
   return {
     unknownId: Number(insU.insertId),
@@ -29952,6 +38348,244 @@ async function resolveConversationOutboundMedia(
   return twilioReachableMmsUrl(mediaId);
 }
 
+// ============================================================================
+// WHATSAPP (360dialog) — pure helpers duplicated from api/whatsapp360dialog.ts
+// (Vercel monolith: do NOT runtime-import sibling; sync via whatsapp360dialog.sync.test.ts)
+// Gates default OFF: WHATSAPP_360DIALOG_ENABLED + D360_API_KEY
+// Assignee: WHATSAPP_ASSIGNED_ADMIN_ID or César profile phone (951) 378-3429
+// ============================================================================
+
+const WHATSAPP_360_API_BASE = "https://waba-v2.360dialog.io";
+const WHATSAPP_MAX_BODY_CHARS = 4096;
+const WHATSAPP_DEFAULT_ASSIGNEE_PHONE_LAST10 = "9513783429";
+
+let whatsappAssigneeCache: { id: number | null; at: number } | null = null;
+
+function whatsapp360EnvFlagOn(raw: string | undefined | null): boolean {
+  const v = String(raw ?? "0")
+    .trim()
+    .toLowerCase();
+  return v === "1" || v === "true" || v === "on" || v === "yes";
+}
+
+function whatsapp360dialogApiKey(): string {
+  return String(process.env.D360_API_KEY || "").trim();
+}
+
+function whatsapp360dialogEnabled(): boolean {
+  return (
+    whatsapp360EnvFlagOn(process.env.WHATSAPP_360DIALOG_ENABLED) &&
+    !!whatsapp360dialogApiKey()
+  );
+}
+
+function whatsapp360dialogVerifyToken(): string {
+  return String(process.env.WHATSAPP_360DIALOG_VERIFY_TOKEN || "").trim();
+}
+
+function whatsappDigits(raw: string | null | undefined): string {
+  return String(raw || "").replace(/\D/g, "");
+}
+
+function whatsappToE164(raw: string | null | undefined): string {
+  const digits = whatsappDigits(raw);
+  if (!digits) return "";
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+  return `+${digits}`;
+}
+
+function mapWhatsapp360ProviderStatus(status: string): string {
+  const s = String(status || "")
+    .trim()
+    .toLowerCase();
+  if (s === "sent" || s === "delivered" || s === "read" || s === "failed") {
+    return s;
+  }
+  if (s === "accepted" || s === "queued") return "accepted";
+  return s || "unknown";
+}
+
+type Whatsapp360InboundMessage = {
+  providerMessageId: string;
+  fromWaId: string;
+  fromE164: string;
+  type: string;
+  textBody: string;
+  timestamp?: string;
+  profileName?: string | null;
+};
+
+type Whatsapp360StatusUpdate = {
+  providerMessageId: string;
+  status: string;
+  recipientId?: string;
+  errors?: string | null;
+};
+
+function parseWhatsapp360WebhookPayload(body: unknown): {
+  messages: Whatsapp360InboundMessage[];
+  statuses: Whatsapp360StatusUpdate[];
+} {
+  const messages: Whatsapp360InboundMessage[] = [];
+  const statuses: Whatsapp360StatusUpdate[] = [];
+  const root = body as {
+    entry?: Array<{
+      changes?: Array<{
+        value?: {
+          messages?: Array<Record<string, unknown>>;
+          statuses?: Array<Record<string, unknown>>;
+          contacts?: Array<{
+            wa_id?: string;
+            profile?: { name?: string };
+          }>;
+        };
+      }>;
+    }>;
+  };
+  const entries = Array.isArray(root?.entry) ? root.entry : [];
+  for (const entry of entries) {
+    const changes = Array.isArray(entry?.changes) ? entry.changes : [];
+    for (const change of changes) {
+      const value = change?.value || {};
+      const contacts = Array.isArray(value.contacts) ? value.contacts : [];
+      const nameByWa = new Map<string, string>();
+      for (const c of contacts) {
+        const wa = whatsappDigits(c?.wa_id);
+        const name = String(c?.profile?.name || "").trim();
+        if (wa && name) nameByWa.set(wa, name);
+      }
+      const msgs = Array.isArray(value.messages) ? value.messages : [];
+      for (const msg of msgs) {
+        const fromWaId = whatsappDigits(String(msg.from || ""));
+        if (!fromWaId) continue;
+        const providerMessageId = String(msg.id || "").trim();
+        if (!providerMessageId) continue;
+        const type = String(msg.type || "unknown");
+        let textBody = "";
+        if (type === "text") {
+          const text = msg.text as { body?: string } | undefined;
+          textBody = String(text?.body || "");
+        } else if (type === "button") {
+          const button = msg.button as
+            | { text?: string; payload?: string }
+            | undefined;
+          textBody = String(button?.text || button?.payload || "[button]");
+        } else if (type === "interactive") {
+          const interactive = msg.interactive as
+            | {
+                type?: string;
+                button_reply?: { title?: string };
+                list_reply?: { title?: string };
+              }
+            | undefined;
+          textBody = String(
+            interactive?.button_reply?.title ||
+              interactive?.list_reply?.title ||
+              interactive?.type ||
+              "interactive",
+          );
+        } else {
+          textBody = `[${type}]`;
+        }
+        messages.push({
+          providerMessageId,
+          fromWaId,
+          fromE164: whatsappToE164(fromWaId),
+          type,
+          textBody,
+          timestamp: msg.timestamp != null ? String(msg.timestamp) : undefined,
+          profileName: nameByWa.get(fromWaId) || null,
+        });
+      }
+      const sts = Array.isArray(value.statuses) ? value.statuses : [];
+      for (const st of sts) {
+        const providerMessageId = String(st.id || "").trim();
+        if (!providerMessageId) continue;
+        const status = String(st.status || "")
+          .trim()
+          .toLowerCase();
+        const errors = Array.isArray(st.errors)
+          ? JSON.stringify(st.errors).slice(0, 500)
+          : null;
+        statuses.push({
+          providerMessageId,
+          status,
+          recipientId:
+            st.recipient_id != null ? String(st.recipient_id) : undefined,
+          errors,
+        });
+      }
+    }
+  }
+  return { messages, statuses };
+}
+
+async function resolveWhatsappAssigneeAdminId(): Promise<number | null> {
+  const envId = Number(process.env.WHATSAPP_ASSIGNED_ADMIN_ID || 0);
+  if (Number.isFinite(envId) && envId > 0) return envId;
+  const now = Date.now();
+  if (whatsappAssigneeCache && now - whatsappAssigneeCache.at < 60_000) {
+    return whatsappAssigneeCache.id;
+  }
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT id, phone FROM admins
+     WHERE status = 'active' AND phone IS NOT NULL AND TRIM(phone) != ''`,
+  );
+  let found: number | null = null;
+  for (const r of rows) {
+    if (
+      normalizePhoneLast10(String(r.phone || "")) ===
+      WHATSAPP_DEFAULT_ASSIGNEE_PHONE_LAST10
+    ) {
+      found = Number(r.id);
+      break;
+    }
+  }
+  whatsappAssigneeCache = { id: found, at: now };
+  return found;
+}
+
+async function adminMayUseWhatsapp(adminId: number): Promise<boolean> {
+  if (!whatsapp360dialogEnabled()) return false;
+  const assignee = await resolveWhatsappAssigneeAdminId();
+  return assignee != null && Number(adminId) === Number(assignee);
+}
+
+async function sendWhatsapp360Text(opts: {
+  to: string;
+  body: string;
+}): Promise<{ id: string; status: string }> {
+  const apiKey = whatsapp360dialogApiKey();
+  if (!apiKey) throw new Error("D360_API_KEY not configured");
+  const toDigits = whatsappDigits(opts.to);
+  if (!toDigits) throw new Error("WhatsApp recipient phone required");
+  const res = await fetch(`${WHATSAPP_360_API_BASE}/messages`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "D360-API-KEY": apiKey,
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: toDigits,
+      type: "text",
+      text: { preview_url: false, body: opts.body },
+    }),
+  });
+  const data = (await res.json().catch(() => ({}))) as any;
+  if (!res.ok) {
+    const errMsg =
+      data?.error?.message ||
+      data?.message ||
+      `WhatsApp send failed (${res.status})`;
+    throw new Error(String(errMsg));
+  }
+  const id = String(data?.messages?.[0]?.id || "");
+  return { id, status: "accepted" };
+}
+
 async function deliverHubConversationMessage(opts: {
   adminId: number;
   clientId?: number;
@@ -29988,7 +38622,7 @@ async function deliverHubConversationMessage(opts: {
     );
   }
   const ch = opts.isInternalNote ? "internal" : String(opts.channel || "sms");
-  if (!["sms", "internal"].includes(ch)) {
+  if (!["sms", "internal", "whatsapp"].includes(ch)) {
     throw new Error("Unsupported channel");
   }
   if ((hasUnknown || hasCrm) && ch === "internal") {
@@ -29999,6 +38633,14 @@ async function deliverHubConversationMessage(opts: {
   }
   if (ch === "sms" && [...opts.textBody].length > SMS_MAX_BODY_CHARS) {
     throw new Error(`SMS body exceeds ${SMS_MAX_BODY_CHARS} characters`);
+  }
+  if (ch === "whatsapp" && [...opts.textBody].length > WHATSAPP_MAX_BODY_CHARS) {
+    throw new Error(
+      `WhatsApp body exceeds ${WHATSAPP_MAX_BODY_CHARS} characters`,
+    );
+  }
+  if (ch === "whatsapp" && !(await adminMayUseWhatsapp(opts.adminId))) {
+    throw new Error("WhatsApp not enabled for this account");
   }
   // Closed threads stay usable for staff: auto-reopen on outbound compose.
   const reopen = await ensureContactOpenForStaffOutbound({
@@ -30021,6 +38663,8 @@ async function deliverHubConversationMessage(opts: {
     : assigned[0]
       ? String(assigned[0].e164)
       : undefined;
+  const whatsappAssigneeId =
+    ch === "whatsapp" ? await resolveWhatsappAssigneeAdminId() : null;
 
   let conversationId = 0;
   let toAddress = "";
@@ -30036,28 +38680,45 @@ async function deliverHubConversationMessage(opts: {
       [opts.clientId],
     );
     if (!crows[0]) throw new Error("Client not found");
+    const threadChannel =
+      ch === "internal" ? "internal" : ch === "whatsapp" ? "whatsapp" : "sms";
     conversationId = await getOrCreateClientChannelConversation({
       clientId: opts.clientId!,
-      channel: ch === "internal" ? "internal" : "sms",
+      channel: threadChannel,
       ofgNumberId: ch === "sms" ? ofgNumberId : null,
-      assignedAdminId: opts.adminId,
+      assignedAdminId:
+        ch === "whatsapp"
+          ? (whatsappAssigneeId ?? opts.adminId)
+          : opts.adminId,
       reopenIfClosed: false,
     });
     if (ch !== "internal") {
       if (!crows[0].phone) throw new Error("Client has no phone");
       toAddress = toSmsE164(String(crows[0].phone));
-      if (!fromE164) throw new Error("No OFG phone number assigned");
-      const result = await sendSms({
-        to: toAddress,
-        body: opts.textBody,
-        from: fromE164,
-        mediaUrls: opts.mediaUrl ? [opts.mediaUrl] : undefined,
-      }).catch((e) => {
-        errorMessage = String(e?.message || e);
-        return null;
-      });
-      providerId = result?.sid;
-      providerStatus = result?.status || (errorMessage ? "failed" : null);
+      if (ch === "whatsapp") {
+        const result = await sendWhatsapp360Text({
+          to: toAddress,
+          body: opts.textBody,
+        }).catch((e) => {
+          errorMessage = String(e?.message || e);
+          return null;
+        });
+        providerId = result?.id;
+        providerStatus = result?.status || (errorMessage ? "failed" : null);
+      } else {
+        if (!fromE164) throw new Error("No OFG phone number assigned");
+        const result = await sendSms({
+          to: toAddress,
+          body: opts.textBody,
+          from: fromE164,
+          mediaUrls: opts.mediaUrl ? [opts.mediaUrl] : undefined,
+        }).catch((e) => {
+          errorMessage = String(e?.message || e);
+          return null;
+        });
+        providerId = result?.sid;
+        providerStatus = result?.status || (errorMessage ? "failed" : null);
+      }
     }
     realtimePayload = {
       client_id: opts.clientId,
@@ -30074,25 +38735,41 @@ async function deliverHubConversationMessage(opts: {
     if (!crows[0]) throw new Error("Contact not found");
     if (!crows[0].phone) throw new Error("Contact has no phone");
     toAddress = toSmsE164(String(crows[0].phone));
-    if (!fromE164) throw new Error("No OFG phone number assigned");
+    const crmChannel = ch === "whatsapp" ? "whatsapp" : "sms";
     conversationId = await getOrCreateCrmContactChannelConversation({
       crmContactId: crmId,
-      channel: "sms",
-      ofgNumberId,
-      assignedAdminId: opts.adminId,
+      channel: crmChannel,
+      ofgNumberId: ch === "whatsapp" ? null : ofgNumberId,
+      assignedAdminId:
+        ch === "whatsapp"
+          ? (whatsappAssigneeId ?? opts.adminId)
+          : opts.adminId,
       reopenIfClosed: false,
     });
-    const result = await sendSms({
-      to: toAddress,
-      body: opts.textBody,
-      from: fromE164,
-      mediaUrls: opts.mediaUrl ? [opts.mediaUrl] : undefined,
-    }).catch((e) => {
-      errorMessage = String(e?.message || e);
-      return null;
-    });
-    providerId = result?.sid;
-    providerStatus = result?.status || (errorMessage ? "failed" : null);
+    if (ch === "whatsapp") {
+      const result = await sendWhatsapp360Text({
+        to: toAddress,
+        body: opts.textBody,
+      }).catch((e) => {
+        errorMessage = String(e?.message || e);
+        return null;
+      });
+      providerId = result?.id;
+      providerStatus = result?.status || (errorMessage ? "failed" : null);
+    } else {
+      if (!fromE164) throw new Error("No OFG phone number assigned");
+      const result = await sendSms({
+        to: toAddress,
+        body: opts.textBody,
+        from: fromE164,
+        mediaUrls: opts.mediaUrl ? [opts.mediaUrl] : undefined,
+      }).catch((e) => {
+        errorMessage = String(e?.message || e);
+        return null;
+      });
+      providerId = result?.sid;
+      providerStatus = result?.status || (errorMessage ? "failed" : null);
+    }
     realtimePayload = {
       contact_id: crmId,
       conversation_id: conversationId,
@@ -30114,28 +38791,44 @@ async function deliverHubConversationMessage(opts: {
         : ofgNumberId;
     if (!urows[0].phone_e164) throw new Error("Unknown contact has no phone");
     toAddress = toSmsE164(String(urows[0].phone_e164));
-    const fromForUnknown = assigned.find((n) => Number(n.id) === ofgNumberId)
-      ?.e164
-      ? String(assigned.find((n) => Number(n.id) === ofgNumberId)!.e164)
-      : fromE164;
-    if (!fromForUnknown) throw new Error("No OFG phone number assigned");
     conversationId = await getOrCreateUnknownSmsConversation({
       unknownContactId: unknownId,
-      ofgNumberId,
-      assignedAdminId: opts.adminId,
+      ofgNumberId: ch === "whatsapp" ? null : ofgNumberId,
+      assignedAdminId:
+        ch === "whatsapp"
+          ? (whatsappAssigneeId ?? opts.adminId)
+          : opts.adminId,
       reopenIfClosed: false,
+      channel: ch === "whatsapp" ? "whatsapp" : "sms",
     });
-    const result = await sendSms({
-      to: toAddress,
-      body: opts.textBody,
-      from: fromForUnknown,
-      mediaUrls: opts.mediaUrl ? [opts.mediaUrl] : undefined,
-    }).catch((e) => {
-      errorMessage = String(e?.message || e);
-      return null;
-    });
-    providerId = result?.sid;
-    providerStatus = result?.status || (errorMessage ? "failed" : null);
+    if (ch === "whatsapp") {
+      const result = await sendWhatsapp360Text({
+        to: toAddress,
+        body: opts.textBody,
+      }).catch((e) => {
+        errorMessage = String(e?.message || e);
+        return null;
+      });
+      providerId = result?.id;
+      providerStatus = result?.status || (errorMessage ? "failed" : null);
+    } else {
+      const fromForUnknown = assigned.find((n) => Number(n.id) === ofgNumberId)
+        ?.e164
+        ? String(assigned.find((n) => Number(n.id) === ofgNumberId)!.e164)
+        : fromE164;
+      if (!fromForUnknown) throw new Error("No OFG phone number assigned");
+      const result = await sendSms({
+        to: toAddress,
+        body: opts.textBody,
+        from: fromForUnknown,
+        mediaUrls: opts.mediaUrl ? [opts.mediaUrl] : undefined,
+      }).catch((e) => {
+        errorMessage = String(e?.message || e);
+        return null;
+      });
+      providerId = result?.sid;
+      providerStatus = result?.status || (errorMessage ? "failed" : null);
+    }
     realtimePayload = {
       unknown_contact_id: unknownId,
       conversation_id: conversationId,
@@ -30194,8 +38887,12 @@ async function deliverHubConversationMessage(opts: {
     );
     realtimePayload.message_id = ins.insertId;
     realtimePayload.contact = await crmContactHubSnapshot(opts.crmContactId!);
-    // Auto-log outbound SMS/MMS on the contact file (MCP + Conversations UI).
-    if (!errorMessage && ch === "sms" && opts.crmContactId) {
+    // Auto-log outbound SMS/MMS/WhatsApp on the contact file (MCP + Conversations UI).
+    if (
+      !errorMessage &&
+      (ch === "sms" || ch === "whatsapp") &&
+      opts.crmContactId
+    ) {
       const ts = new Date().toISOString().slice(0, 16).replace("T", " ");
       contactNoteAppended = await appendContactFileNote(
         opts.crmContactId,
@@ -30205,6 +38902,8 @@ async function deliverHubConversationMessage(opts: {
           peerPhone: toAddress || "",
           body: (opts.textBody || preview).slice(0, 1500),
           providerMessageId: providerId || null,
+          channelLabel: ch === "whatsapp" ? "WhatsApp" : "SMS",
+          providerLabel: ch === "whatsapp" ? "360dialog id" : "Twilio SID",
         }),
       );
     }
@@ -30313,18 +39012,12 @@ async function chargeCard(opts: {
     ),
   );
 
-  if (
-    data?.messages?.resultCode !== "Ok" ||
-    data?.transactionResponse?.responseCode !== "1"
-  ) {
-    const errText =
-      data?.transactionResponse?.errors?.error?.[0]?.errorText ||
-      data?.messages?.message?.[0]?.text ||
-      "Payment processing failed";
-    throw new Error(errText);
+  const parsed = parseAnetChargeResponse(data);
+  if (parsed.ok === false) {
+    throw new Error(parsed.error);
   }
 
-  const transactionId = data.transactionResponse.transId as string;
+  const transactionId = parsed.transactionId;
 
   // Step 2: Create customer profile from the successful transaction.
   // This is the documented approach — a separate call after charge.
@@ -30371,6 +39064,91 @@ async function chargeCard(opts: {
   }
 
   return { transactionId, customerProfileId, customerPaymentProfileId };
+}
+
+/**
+ * Charge a stored Authorize.net CIM profile via createTransactionRequest
+ * (profile payment). Replaces the deprecated createCustomerProfileTransaction
+ * call, whose JSON response is NOT wrapped in a
+ * `createCustomerProfileTransactionResponse` key — reading that key made
+ * approved charges look declined (Monterrubio, Oct 7 2026).
+ */
+async function chargeStoredProfile(opts: {
+  amountDollars: string;
+  customerProfileId: string;
+  paymentProfileId: string;
+  description: string;
+  clientId: number;
+}): Promise<
+  { ok: true; transactionId: string } | { ok: false; error: string }
+> {
+  const resp = await fetch(AUTHORIZENET_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      createTransactionRequest: {
+        merchantAuthentication: {
+          name: process.env.AUTHORIZENET_API_LOGIN_ID,
+          transactionKey: process.env.AUTHORIZENET_TRANSACTION_KEY,
+        },
+        transactionRequest: {
+          transactionType: "authCaptureTransaction",
+          amount: opts.amountDollars,
+          profile: {
+            customerProfileId: opts.customerProfileId,
+            paymentProfile: { paymentProfileId: opts.paymentProfileId },
+          },
+          order: { description: opts.description.slice(0, 255) },
+          userFields: {
+            userField: [{ name: "client_id", value: String(opts.clientId) }],
+          },
+        },
+      },
+    }),
+  });
+  const data = (await resp.json()) as any;
+  console.log(
+    "[anet:charge-profile]",
+    JSON.stringify({
+      resultCode: data?.messages?.resultCode,
+      responseCode: data?.transactionResponse?.responseCode,
+      transId: data?.transactionResponse?.transId,
+      errors: data?.transactionResponse?.errors,
+      messages: data?.messages?.message,
+    }),
+  );
+  return parseAnetChargeResponse(data);
+}
+
+/**
+ * Interpret a createTransactionRequest response. responseCode "1" with a
+ * transId is approved even if resultCode is not "Ok". Duplicate submissions
+ * (error 11, within Authorize.net's 2-minute window) get a clear message so
+ * the client does not keep retrying.
+ */
+export function parseAnetChargeResponse(
+  data: any,
+): { ok: true; transactionId: string } | { ok: false; error: string } {
+  const tx = data?.transactionResponse;
+  const transId = tx?.transId ? String(tx.transId) : "";
+  if (String(tx?.responseCode ?? "") === "1" && transId && transId !== "0") {
+    return { ok: true, transactionId: transId };
+  }
+  const errCode = String(tx?.errors?.error?.[0]?.errorCode ?? "");
+  if (errCode === "11") {
+    return {
+      ok: false,
+      error:
+        "This payment was just submitted. Please wait a few minutes and refresh before trying again.",
+    };
+  }
+  return {
+    ok: false,
+    error:
+      tx?.errors?.error?.[0]?.errorText ||
+      data?.messages?.message?.[0]?.text ||
+      "Payment declined",
+  };
 }
 
 /**
@@ -30986,19 +39764,107 @@ async function assertDocsReadyTaskGate(
   return { ok: true };
 }
 
+/** Label on the auto-created "review & approve documents" work task. */
+const DOCS_REVIEW_TASK_LABEL = "docs_review";
+/** Default reviewer when DOCS_REVIEW_ASSIGNEE_ADMIN_ID is unset (Lecca). */
+const DOCS_REVIEW_DEFAULT_ASSIGNEE_ID = 150002;
+
+async function resolveDocsReviewAssigneeId(): Promise<number | null> {
+  const configured = Number(
+    String(process.env.DOCS_REVIEW_ASSIGNEE_ADMIN_ID || "").trim(),
+  );
+  const id =
+    Number.isInteger(configured) && configured > 0
+      ? configured
+      : DOCS_REVIEW_DEFAULT_ASSIGNEE_ID;
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT id FROM admins WHERE id = ? AND status = 'active' LIMIT 1`,
+    [id],
+  );
+  return rows[0] ? id : null;
+}
+
+/**
+ * Client finished every required onboarding task → open one "review & approve"
+ * work task for the docs reviewer (idempotent per case while not done).
+ */
+async function openDocsReviewWorkTask(opts: {
+  clientId: number;
+  caseId: number;
+}): Promise<{ taskId: number; assigneeId: number | null; title: string } | null> {
+  const [existing] = await pool.query<RowDataPacket[]>(
+    `SELECT id FROM admin_work_tasks
+     WHERE case_id = ? AND status <> 'done'
+       AND JSON_CONTAINS(COALESCE(labels_json, JSON_ARRAY()), JSON_QUOTE(?))
+     LIMIT 1`,
+    [opts.caseId, DOCS_REVIEW_TASK_LABEL],
+  );
+  if (existing[0]) return null;
+
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT c.first_name, c.last_name, cr.case_number
+     FROM clients c
+     JOIN credit_repair_cases cr ON cr.id = ? AND cr.client_id = c.id
+     WHERE c.id = ? LIMIT 1`,
+    [opts.caseId, opts.clientId],
+  );
+  if (!rows[0]) return null;
+  const name =
+    `${rows[0].first_name || ""} ${rows[0].last_name || ""}`.trim() || "Client";
+  const caseLabel = rows[0].case_number ? ` (${rows[0].case_number})` : "";
+  const link = `${APP_URL}/admin/pipeline?client=${opts.clientId}`;
+  const title = `Review & approve documents — ${name}${caseLabel}`;
+  const description = [
+    `${name} completed all required onboarding tasks (ID front/back, SSN card, proof of address, agreement).`,
+    "Review each document in the client file and approve or reject it. This task closes automatically once every required task is approved.",
+    `Open file: ${link}`,
+  ].join("\n\n");
+  const assigneeId = await resolveDocsReviewAssigneeId();
+  const due = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+  const [ins] = await pool.query<ResultSetHeader>(
+    `INSERT INTO admin_work_tasks
+       (title, description, status, priority, due_at, labels_json, source,
+        assignee_admin_id, case_id, created_by_admin_id)
+     VALUES (?, ?, 'backlog', 'high', ?, ?, 'optimum', ?, ?, NULL)`,
+    [
+      title.slice(0, 255),
+      description,
+      due,
+      JSON.stringify([DOCS_REVIEW_TASK_LABEL]),
+      assigneeId,
+      opts.caseId,
+    ],
+  );
+  return { taskId: Number(ins.insertId), assigneeId, title };
+}
+
+/** All required tasks approved → mark the open docs-review task done. */
+async function closeDocsReviewWorkTask(caseId: number): Promise<void> {
+  await pool.query(
+    `UPDATE admin_work_tasks SET status = 'done'
+     WHERE case_id = ? AND status <> 'done'
+       AND JSON_CONTAINS(COALESCE(labels_json, JSON_ARRAY()), JSON_QUOTE(?))`,
+    [caseId, DOCS_REVIEW_TASK_LABEL],
+  );
+}
+
 async function maybeAutoAdvanceDocsReadyFromTasks(opts: {
   clientId: number;
   caseId: number;
   adminId: number;
 }): Promise<boolean> {
+  const gate = await assertDocsReadyTaskGate(opts.caseId);
+  if (gate.ok === false) return false;
+  await closeDocsReviewWorkTask(opts.caseId).catch((e: any) =>
+    console.error("[docs-review-task:close]", e?.message ?? e),
+  );
+
   const [caseRows] = await pool.query<RowDataPacket[]>(
     `SELECT pipeline_stage FROM credit_repair_cases WHERE id = ? LIMIT 1`,
     [opts.caseId],
   );
   if (caseRows[0]?.pipeline_stage !== "new_client") return false;
-
-  const gate = await assertDocsReadyTaskGate(opts.caseId);
-  if (gate.ok === false) return false;
 
   await advanceCasePipeline(pool, {
     clientId: opts.clientId,
@@ -31657,6 +40523,8 @@ async function fetchProspectsWithLabels(
   }
   let sql = `SELECT c.id, c.first_name, c.last_name, c.email, c.phone,
             c.preferred_language, c.created_at,
+            c.lead_temperature, c.lead_temperature_reasons, c.lead_temperature_at,
+            c.analysis_reviewed_at, c.call_scheduled_at,
             ca.id AS credit_analysis_id, ca.mode AS analysis_mode,
             ca.client_goal, ca.notes, ca.agent_phone, ca.rep_name,
             pc.case_id, pc.case_number
@@ -31739,6 +40607,8 @@ async function fetchWebReviewProspectsWithLabels(
   }
   let sql = `SELECT c.id, c.first_name, c.last_name, c.email, c.phone,
             c.preferred_language, c.created_at,
+            c.lead_temperature, c.lead_temperature_reasons, c.lead_temperature_at,
+            c.analysis_reviewed_at, c.call_scheduled_at,
             ca.id AS credit_analysis_id, ca.mode AS analysis_mode,
             ca.client_goal, ca.notes, ca.agent_phone, ca.rep_name,
             pc.case_id, pc.case_number
@@ -32457,6 +41327,15 @@ async function triggerReminderFlow(
   );
   if (flows.length === 0) return;
   const flowId = flows[0].id as number;
+  const hold = await getClientAutomationHold(clientId);
+  if (hold) {
+    console.log(
+      `[flow:${triggerEvent}] Skipping client ${clientId} — status ${hold.status} (automations on hold)`,
+    );
+    return;
+  }
+  const flowRoundNumber =
+    Number(extraVars?.round_number) > 0 ? Number(extraVars?.round_number) : null;
 
   // Optional label gate: if the flow specifies required_label_slugs, only run
   // it when the client currently holds ALL of those label slugs.
@@ -32567,6 +41446,7 @@ async function triggerReminderFlow(
               portalUrl: smsLink,
               isSandbox: isSandboxDelivery,
               smsFromAdminId: opts?.smsFromAdminId,
+              roundNumber: flowRoundNumber,
             }).catch((e: any) =>
               console.error("[flow:reminder-sms:no-email]", e?.message ?? e),
             );
@@ -32669,13 +41549,24 @@ async function triggerReminderFlow(
 
         if (isImmediate) {
           try {
+            const flowEmail = {
+              to: deliverTo,
+              subject: resolvedSubj,
+              html: fullHtml,
+              attachments: emailAttachments,
+            };
             await Promise.race([
-              sendEmail({
-                to: deliverTo,
-                subject: resolvedSubj,
-                html: fullHtml,
-                attachments: emailAttachments,
-              }),
+              isSandboxDelivery
+                ? sendEmail(flowEmail)
+                : sendEmailLogged(flowEmail, {
+                    kind: /^round_.*_complete$/.test(triggerEvent)
+                      ? "round_report"
+                      : `flow:${triggerEvent}`,
+                    recipientType: "client",
+                    clientId,
+                    roundNumber: flowRoundNumber,
+                    sentByAdminId: opts?.smsFromAdminId ?? null,
+                  }),
               new Promise<never>((_, reject) =>
                 setTimeout(
                   () => reject(new Error("SMTP timeout after 8s")),
@@ -32692,6 +41583,7 @@ async function triggerReminderFlow(
               portalUrl: smsLink,
               isSandbox: isSandboxDelivery,
               smsFromAdminId: opts?.smsFromAdminId,
+              roundNumber: flowRoundNumber,
             }).catch((e: any) =>
               console.error("[flow:reminder-sms]", e?.message ?? e),
             );
@@ -33117,6 +42009,7 @@ const ADMIN_AI_MCP_WRITE_TOOLS = new Set([
   "update_contact",
   "convert_contact",
   "send_contact_sms",
+  "send_contact_whatsapp",
   "send_contact_email",
   "create_work_task",
   "update_work_task",
@@ -33127,6 +42020,8 @@ const ADMIN_AI_MCP_WRITE_TOOLS = new Set([
   "send_round_report",
   "send_sms",
   "send_text",
+  "send_whatsapp",
+  "send_wa",
   "update_pipeline_stage",
   "convert_prospect",
   "update_client",
@@ -33142,6 +42037,7 @@ const ADMIN_AI_MCP_WRITE_TOOLS = new Set([
   "upload_funding_document",
   "update_referrer",
   "attach_referrer",
+  "update_lead_signals",
 ]);
 
 /** MCP tool annotations — always readOnlyHint so Claude does not gate dry-runs.
@@ -34149,6 +43045,115 @@ function buildCorsAllowedOrigins(opts?: {
 
 const CORS_ALLOWED_ORIGINS = buildCorsAllowedOrigins();
 
+/** Plain-language reason for a failed call-forwarding leg (Twilio error). */
+export function explainCallForwardingError(
+  errorCode: string | null,
+  lang: "en" | "es",
+): string {
+  const es = lang === "es";
+  switch (errorCode) {
+    case "13227":
+    case "21215":
+      return es
+        ? "Twilio no tiene permiso para llamar a ese país. Hay que activar el país en Twilio (Voice → Geo permissions) o usar un número de EE. UU."
+        : "Twilio isn't allowed to call that country. Enable it in Twilio (Voice → Geo permissions) or use a US number.";
+    case "13224":
+    case "21217":
+      return es
+        ? "El número de reenvío no es válido. Revísalo en Perfil → Reenvío de llamadas."
+        : "The forwarding number is invalid. Check it in Profile → Call forwarding.";
+    default:
+      return es
+        ? `La llamada al celular falló${errorCode ? ` (error ${errorCode})` : ""}. Revisa el número de reenvío.`
+        : `The call to the cell failed${errorCode ? ` (error ${errorCode})` : ""}. Check the forwarding number.`;
+  }
+}
+
+/**
+ * Forwarded cell leg failed → alert that staff member + super admins via the
+ * missed_call channel, at most once per 24h per staff member.
+ */
+async function alertCallForwardingFailure(opts: {
+  adminId: number;
+  errorCode: string | null;
+}): Promise<void> {
+  const [recent] = await pool.query<RowDataPacket[]>(
+    `SELECT id FROM admin_notifications
+     WHERE event_key = 'missed_call'
+       AND JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.kind')) = 'forwarding_failed'
+       AND JSON_EXTRACT(payload_json, '$.forwarding_admin_id') = ?
+       AND created_at >= NOW() - INTERVAL 24 HOUR
+     LIMIT 1`,
+    [opts.adminId],
+  );
+  if (recent[0]) return;
+
+  const [who] = await pool.query<RowDataPacket[]>(
+    `SELECT first_name, last_name, call_forwarding_phone FROM admins WHERE id = ? LIMIT 1`,
+    [opts.adminId],
+  );
+  if (!who[0]) return;
+  const name = `${who[0].first_name || ""} ${who[0].last_name || ""}`.trim();
+  const phone = String(who[0].call_forwarding_phone || "");
+  const masked = phone ? `…${phone.slice(-4)}` : "";
+  const [supers] = await pool.query<RowDataPacket[]>(
+    `SELECT id FROM admins WHERE role = 'super_admin' AND status = 'active'`,
+  );
+  const recipientIds = new Set<number>([
+    opts.adminId,
+    ...supers.map((r) => Number(r.id)),
+  ]);
+  const recipients = (await listActiveTeamAdmins()).filter((a) =>
+    recipientIds.has(a.id),
+  );
+  const linkUrl = `${APP_URL}/admin/profile`;
+  for (const admin of recipients) {
+    const lang = admin.preferred_language === "es" ? "es" : "en";
+    const reason = explainCallForwardingError(opts.errorCode, lang);
+    const title =
+      lang === "es"
+        ? `Reenvío de llamadas fallando — ${name}`
+        : `Call forwarding is failing — ${name}`;
+    const body =
+      lang === "es"
+        ? `Las llamadas de OFG no llegan al celular ${masked} de ${name}. ${reason}`
+        : `OFG calls are not reaching ${name}'s cell ${masked}. ${reason}`;
+    await deliverAdminNotificationChannels({
+      admin,
+      eventKey: "missed_call",
+      tpl: {
+        subject: title,
+        html: `<p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#334155;">${escapeHtml(body)}</p>`,
+        inAppTitle: title,
+        inAppBody: body,
+        linkUrl,
+        smsBody: `${title}. ${reason}`.slice(0, 300),
+      },
+    }).catch((e: any) =>
+      console.error("[voice:forward-alert]", e?.message ?? e),
+    );
+  }
+  // Dedupe marker, stored as read so the bell doesn't show it twice
+  // (also gives MCP list_admin_notifications a record).
+  await pool
+    .query(
+      `INSERT INTO admin_notifications (admin_id, event_key, title, body, link_url, payload_json, read_at)
+       VALUES (?, 'missed_call', ?, ?, ?, ?, NOW())`,
+      [
+        opts.adminId,
+        `Call forwarding failed${opts.errorCode ? ` (${opts.errorCode})` : ""}`,
+        explainCallForwardingError(opts.errorCode, "en"),
+        linkUrl,
+        JSON.stringify({
+          kind: "forwarding_failed",
+          forwarding_admin_id: opts.adminId,
+          error_code: opts.errorCode,
+        }),
+      ],
+    )
+    .catch(() => null);
+}
+
 function buildApp() {
   const app = express();
   // Vercel (and most reverse proxies) set X-Forwarded-For. Required for
@@ -34307,7 +43312,7 @@ function buildApp() {
         .json({ error: "Too many requests. Please try again later." });
     }
     const [rows] = await pool.query<RowDataPacket[]>(
-      "SELECT id, first_name, preferred_language FROM clients WHERE email = ? LIMIT 1",
+      "SELECT id, first_name, preferred_language, status FROM clients WHERE email = ? LIMIT 1",
       [email],
     );
     if (rows.length === 0) {
@@ -34318,6 +43323,11 @@ function buildApp() {
         error: "No account found for that email.",
         code: "ACCOUNT_NOT_FOUND",
       });
+    }
+    if (rows[0].status === "blocked") {
+      return res
+        .status(403)
+        .json({ error: CLIENT_BLOCKED_MESSAGE, code: "account_blocked" });
     }
     const code = await createOtp(
       "client",
@@ -34356,10 +43366,15 @@ function buildApp() {
         .json({ error: "Too many attempts. Please try again later." });
     }
     const [rows] = await pool.query<RowDataPacket[]>(
-      "SELECT id, email, first_name, last_name FROM clients WHERE email = ? LIMIT 1",
+      "SELECT id, email, first_name, last_name, status FROM clients WHERE email = ? LIMIT 1",
       [email],
     );
     if (rows.length === 0) return res.status(404).json({ error: "Not found" });
+    if (rows[0].status === "blocked") {
+      return res
+        .status(403)
+        .json({ error: CLIENT_BLOCKED_MESSAGE, code: "account_blocked" });
+    }
     const ok = await consumeOtp("client", rows[0].id as number, code, "login");
     if (!ok) return res.status(401).json({ error: "Invalid or expired code" });
     await pool.query<ResultSetHeader>(
@@ -34562,6 +43577,7 @@ function buildApp() {
           !!personalPhone && phones.length > 0 && isTwilioConfigured(),
         social_dm_enabled: socialDmFeatureStatus().mode === "live",
         social_dm_mode: socialDmFeatureStatus().mode,
+        whatsapp_enabled: await adminMayUseWhatsapp(adminId),
       },
     });
   });
@@ -34640,6 +43656,7 @@ function buildApp() {
       const social = socialDmFeatureStatus();
       user.social_dm_enabled = social.mode === "live";
       user.social_dm_mode = social.mode;
+      user.whatsapp_enabled = await adminMayUseWhatsapp(req.auth!.id);
 
       res.json({ user });
     },
@@ -35170,12 +44187,17 @@ function buildApp() {
       });
     }
     const [rows] = await pool.query<RowDataPacket[]>(
-      "SELECT id, email, first_name, last_name FROM clients WHERE id = ? LIMIT 1",
+      "SELECT id, email, first_name, last_name, status FROM clients WHERE id = ? LIMIT 1",
       [clientId],
     );
     if (rows.length === 0)
       return res.status(404).json({ error: "Account not found" });
     const c = rows[0];
+    if (c.status === "blocked") {
+      return res
+        .status(403)
+        .json({ error: CLIENT_BLOCKED_MESSAGE, code: "account_blocked" });
+    }
     await pool.query<ResultSetHeader>(
       "UPDATE clients SET email_verified_at = COALESCE(email_verified_at, NOW()) WHERE id = ?",
       [clientId],
@@ -35920,6 +44942,1263 @@ function buildApp() {
         .json({ error: "We couldn't submit your info. Please try again." });
     }
   });
+
+  // ============================================================================
+  // PUBLIC EVENT MARKETING — /e landing + registration
+  // ============================================================================
+
+  app.get("/api/public/event-marketing", async (req, res) => {
+    if (
+      hitRateLimit(
+        rateLimitKey(req, "public-event-marketing-list"),
+        60,
+        15 * 60 * 1000,
+      )
+    ) {
+      return res
+        .status(429)
+        .json({ error: "Too many requests. Try again later." });
+    }
+    try {
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, slug, name, name_es, sort_order
+         FROM event_companies
+         WHERE is_active = 1
+         ORDER BY sort_order ASC, id ASC`,
+      );
+      res.json({
+        companies: rows.map((r) => ({
+          id: Number(r.id),
+          slug: String(r.slug),
+          name: String(r.name),
+          name_es: r.name_es != null ? String(r.name_es) : null,
+          sort_order: Number(r.sort_order || 0),
+        })),
+      });
+    } catch (err: any) {
+      console.error("[public:event-marketing]", err?.message ?? err);
+      res.status(500).json({ error: "Unable to load events" });
+    }
+  });
+
+  app.get("/api/public/event-marketing/:slug", async (req, res) => {
+    if (
+      hitRateLimit(
+        rateLimitKey(req, "public-event-marketing-slug"),
+        60,
+        15 * 60 * 1000,
+      )
+    ) {
+      return res
+        .status(429)
+        .json({ error: "Too many requests. Try again later." });
+    }
+    const slug = String(req.params.slug || "")
+      .trim()
+      .toLowerCase();
+    if (!slug) return res.status(400).json({ error: "slug required" });
+    const sessionCode = req.query.session
+      ? String(req.query.session).trim().toLowerCase()
+      : "";
+
+    try {
+      const [tabRows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, slug, name, name_es, sort_order
+         FROM event_companies
+         WHERE is_active = 1
+         ORDER BY sort_order ASC, id ASC`,
+      );
+      const companies = tabRows.map((r) => ({
+        id: Number(r.id),
+        slug: String(r.slug),
+        name: String(r.name),
+        name_es: r.name_es != null ? String(r.name_es) : null,
+        sort_order: Number(r.sort_order || 0),
+      }));
+
+      const [companyRows] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM event_companies WHERE slug = ? AND is_active = 1 LIMIT 1`,
+        [slug],
+      );
+      if (!companyRows[0]) {
+        return res.status(404).json({ error: "Event not found" });
+      }
+      const company = mapEventCompanyRow(companyRows[0]);
+      const companyId = company.id;
+
+      const [seriesRows] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM event_series
+         WHERE company_id = ? AND is_active = 1
+         ORDER BY sort_order ASC, id ASC`,
+        [companyId],
+      );
+      const [sessionRows] = await pool.query<RowDataPacket[]>(
+        `SELECT s.*, ser.name_en AS series_name_en, ser.name_es AS series_name_es,
+                (SELECT COUNT(*) FROM event_registrations er WHERE er.session_id = s.id) AS registration_count
+         FROM event_sessions s
+         JOIN event_series ser ON ser.id = s.series_id
+         WHERE s.company_id = ? AND s.status = 'scheduled'
+         ORDER BY s.starts_at ASC, s.id ASC`,
+        [companyId],
+      );
+      const [fieldRows] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM event_form_fields
+         WHERE company_id = ? AND is_active = 1
+         ORDER BY sort_order ASC, id ASC`,
+        [companyId],
+      );
+
+      const pickRows: EventSessionPickRow[] = sessionRows.map((r) => ({
+        id: Number(r.id),
+        starts_at: r.starts_at as string | Date,
+        status: String(r.status || "scheduled"),
+      }));
+      const nextSessionId = pickNextEventSessionId(
+        pickRows,
+        laWallClockAsUtcDate(),
+      );
+
+      let selectedSessionId: number | null = null;
+      if (sessionCode) {
+        const match = sessionRows.find(
+          (r) => String(r.short_code).toLowerCase() === sessionCode,
+        );
+        if (match) selectedSessionId = Number(match.id);
+      }
+
+      res.json({
+        companies,
+        company,
+        series: seriesRows.map(mapEventSeriesRow),
+        sessions: sessionRows.map((r) => mapEventSessionRow(r, company.slug)),
+        form_fields: fieldRows.map(mapEventFormFieldRow),
+        next_session_id: nextSessionId,
+        selected_session_id: selectedSessionId,
+        mfsn_url: MFSN_FREE_SNAPSHOT_URL,
+      });
+    } catch (err: any) {
+      console.error("[public:event-marketing:slug]", err?.message ?? err);
+      res.status(500).json({ error: "Unable to load event" });
+    }
+  });
+
+  app.post("/api/public/event-marketing/register", async (req, res) => {
+    if (
+      hitRateLimit(
+        rateLimitKey(req, "public-event-marketing-register"),
+        12,
+        15 * 60 * 1000,
+      )
+    ) {
+      return res
+        .status(429)
+        .json({ error: "Too many requests. Try again later." });
+    }
+
+    const b = req.body || {};
+    const companySlug = String(b.company_slug || "")
+      .trim()
+      .toLowerCase();
+    const answers =
+      b.answers && typeof b.answers === "object" && !Array.isArray(b.answers)
+        ? (b.answers as Record<string, unknown>)
+        : {};
+    const sourceQr =
+      String(b.source_qr || "").toLowerCase() === "session"
+        ? "session"
+        : "company";
+    let sessionId =
+      b.session_id != null && b.session_id !== ""
+        ? Number(b.session_id)
+        : null;
+    if (sessionId != null && (!Number.isFinite(sessionId) || sessionId <= 0)) {
+      sessionId = null;
+    }
+
+    if (!companySlug) {
+      return res.status(400).json({ error: "company_slug is required" });
+    }
+
+    try {
+      const [companyRows] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM event_companies WHERE slug = ? AND is_active = 1 LIMIT 1`,
+        [companySlug],
+      );
+      if (!companyRows[0]) {
+        return res.status(404).json({ error: "Event not found" });
+      }
+      const companyRow = companyRows[0];
+      const companyId = Number(companyRow.id);
+      const company = mapEventCompanyRow(companyRow);
+
+      const [fieldRows] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM event_form_fields
+         WHERE company_id = ? AND is_active = 1
+         ORDER BY sort_order ASC, id ASC`,
+        [companyId],
+      );
+      const formFields = fieldRows.map(mapEventFormFieldRow);
+
+      const firstName = String(
+        answers.first_name ?? b.first_name ?? "",
+      ).trim();
+      const lastName = String(answers.last_name ?? b.last_name ?? "").trim();
+      const email = String(answers.email ?? b.email ?? "")
+        .trim()
+        .toLowerCase();
+      const phoneRaw = String(answers.phone ?? b.phone ?? "").trim();
+      const langRaw = String(
+        answers.preferred_language ?? b.preferred_language ?? "en",
+      )
+        .trim()
+        .toLowerCase();
+      const lang: "en" | "es" = langRaw === "es" ? "es" : "en";
+
+      for (const field of formFields) {
+        if (!field.is_required) continue;
+        const raw =
+          answers[field.field_key] ??
+          (field.field_key === "first_name"
+            ? firstName
+            : field.field_key === "last_name"
+              ? lastName
+              : field.field_key === "email"
+                ? email
+                : field.field_key === "phone"
+                  ? phoneRaw
+                  : field.field_key === "preferred_language"
+                    ? lang
+                    : undefined);
+        if (field.field_type === "checkbox") {
+          const on =
+            raw === true ||
+            raw === 1 ||
+            raw === "1" ||
+            raw === "true" ||
+            raw === "on" ||
+            raw === "yes";
+          if (!on) {
+            return res
+              .status(400)
+              .json({ error: `${field.field_key} is required` });
+          }
+          continue;
+        }
+        if (raw == null || String(raw).trim() === "") {
+          return res
+            .status(400)
+            .json({ error: `${field.field_key} is required` });
+        }
+      }
+
+      if (!firstName || !lastName || !email || !phoneRaw) {
+        return res.status(400).json({
+          error: "first_name, last_name, email, and phone are required",
+        });
+      }
+      if (!PUBLIC_EMAIL_RE.test(email)) {
+        return res.status(400).json({ error: "Invalid email address" });
+      }
+      const phoneDigits = normalizePhoneDigits(phoneRaw);
+      if (phoneDigits.length < 10) {
+        return res.status(400).json({ error: "Invalid phone number" });
+      }
+      if (isPlaceholderPhone(phoneRaw)) {
+        return res.status(400).json({ error: "Invalid phone number" });
+      }
+      if (
+        looksLikeSpamPersonName(firstName, lastName) &&
+        looksLikeSpamEmail(email)
+      ) {
+        return res.status(400).json({ error: "Unable to submit" });
+      }
+
+      // Resolve session (optional) + capacity
+      let sessionRow: RowDataPacket | null = null;
+      let seriesId: number | null = null;
+      if (sessionId == null) {
+        const [scheduled] = await pool.query<RowDataPacket[]>(
+          `SELECT id, starts_at, status FROM event_sessions
+           WHERE company_id = ? AND status = 'scheduled'
+           ORDER BY starts_at ASC`,
+          [companyId],
+        );
+        const picked = pickNextEventSessionId(
+          scheduled.map((r) => ({
+            id: Number(r.id),
+            starts_at: r.starts_at as string | Date,
+            status: String(r.status),
+          })),
+          laWallClockAsUtcDate(),
+        );
+        if (picked) sessionId = picked;
+      }
+      if (sessionId != null) {
+        const [sessRows] = await pool.query<RowDataPacket[]>(
+          `SELECT * FROM event_sessions
+           WHERE id = ? AND company_id = ? LIMIT 1`,
+          [sessionId, companyId],
+        );
+        if (!sessRows[0]) {
+          return res.status(400).json({ error: "Invalid session" });
+        }
+        if (String(sessRows[0].status) !== "scheduled") {
+          return res
+            .status(400)
+            .json({ error: "That session is not available" });
+        }
+        sessionRow = sessRows[0];
+        seriesId = Number(sessRows[0].series_id);
+        const capacity =
+          sessRows[0].capacity != null ? Number(sessRows[0].capacity) : null;
+        if (capacity != null && capacity > 0) {
+          const [cntRows] = await pool.query<RowDataPacket[]>(
+            `SELECT COUNT(*) AS cnt FROM event_registrations WHERE session_id = ?`,
+            [sessionId],
+          );
+          const cnt = Number(cntRows[0]?.cnt || 0);
+          if (cnt >= capacity) {
+            return res
+              .status(409)
+              .json({ error: "This session is full. Please choose another." });
+          }
+        }
+      }
+
+      let clientId: number | null = null;
+      let status: string | null = null;
+
+      const [byEmail] = await pool.query<RowDataPacket[]>(
+        `SELECT id, status FROM clients WHERE email = ? LIMIT 1`,
+        [email],
+      );
+      if (byEmail[0]) {
+        clientId = Number(byEmail[0].id);
+        status = String(byEmail[0].status || "");
+      } else {
+        const byPhone = await findClientIdByPhone(phoneRaw);
+        if (byPhone) {
+          clientId = byPhone;
+          const [rows] = await pool.query<RowDataPacket[]>(
+            `SELECT status FROM clients WHERE id = ? LIMIT 1`,
+            [clientId],
+          );
+          status = rows[0] ? String(rows[0].status || "") : null;
+        }
+      }
+
+      if (clientId) {
+        if (status === "prospect") {
+          await pool.query(
+            `UPDATE clients
+             SET first_name = ?, last_name = ?,
+                 phone = ?,
+                 preferred_language = ?,
+                 email = COALESCE(NULLIF(TRIM(email), ''), ?)
+             WHERE id = ?`,
+            [firstName, lastName, phoneRaw, lang, email, clientId],
+          );
+        } else {
+          await pool.query(
+            `UPDATE clients
+             SET phone = COALESCE(NULLIF(TRIM(phone), ''), ?),
+                 preferred_language = COALESCE(preferred_language, ?)
+             WHERE id = ?`,
+            [phoneRaw, lang, clientId],
+          );
+        }
+      } else {
+        const [ins] = await pool.query<ResultSetHeader>(
+          `INSERT INTO clients
+             (email, first_name, last_name, phone, preferred_language,
+              assigned_admin_id, status, pipeline_stage)
+           VALUES (?, ?, ?, ?, ?, NULL, 'prospect', 'prospect')`,
+          [email, firstName, lastName, phoneRaw, lang],
+        );
+        clientId = ins.insertId;
+        status = "prospect";
+      }
+
+      const labelSlugs = [
+        EVENT_MARKETING_SOURCE_LABEL,
+        String(companyRow.label_slug || "").trim(),
+        WEB_LEAD_REVIEW_LABEL,
+      ].filter(Boolean);
+      await attachLabelsBySlug(clientId!, labelSlugs).catch((e: any) =>
+        console.error("[event-marketing] labels", e?.message ?? e),
+      );
+
+      const answersToStore: Record<string, unknown> = {
+        ...answers,
+        first_name: firstName,
+        last_name: lastName,
+        email,
+        phone: phoneRaw,
+        preferred_language: lang,
+      };
+
+      const [regIns] = await pool.query<ResultSetHeader>(
+        `INSERT INTO event_registrations
+           (client_id, company_id, series_id, session_id, answers_json, source_qr)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          clientId,
+          companyId,
+          seriesId,
+          sessionId,
+          JSON.stringify(answersToStore),
+          sourceQr,
+        ],
+      );
+      const registrationId = regIns.insertId;
+
+      const isEs = lang === "es";
+      const sessionTitle = sessionRow
+        ? String(isEs ? sessionRow.title_es : sessionRow.title_en || "")
+        : company.name;
+      const sessionWhen = sessionRow
+        ? formatEventSessionWhen(sessionRow.starts_at as string | Date, lang)
+        : "";
+      const sessionLocation = sessionRow
+        ? formatEventSessionLocation(
+            String(
+              isEs
+                ? sessionRow.location_es || sessionRow.location_en || ""
+                : sessionRow.location_en || "",
+            ),
+          )
+        : "";
+      const classNote = buildClassNote({
+        lang,
+        classLink: company.class_link_url,
+        scheduleNote: isEs
+          ? company.class_schedule_note_es
+          : company.class_schedule_note_en,
+      });
+      const comicNote = buildComicNote({
+        lang,
+        offerComic: company.offer_comic,
+      });
+      const mergeVars: Partial<EventMarketingMergeVars> = {
+        first_name: firstName,
+        session_title: sessionTitle,
+        session_when: sessionWhen,
+        session_location: sessionLocation,
+        class_note: classNote,
+        comic_note: comicNote,
+        report_url: MFSN_FREE_SNAPSHOT_URL,
+        class_link: company.class_link_url || "",
+      };
+
+      const emailSubject = applyEventMarketingTemplate(
+        isEs ? company.email_subject_es : company.email_subject_en,
+        mergeVars,
+      );
+      const emailBodyText = applyEventMarketingTemplate(
+        isEs ? company.email_body_es : company.email_body_en,
+        mergeVars,
+      );
+      const smsBody = applyEventMarketingTemplate(
+        isEs ? company.sms_body_es : company.sms_body_en,
+        mergeVars,
+      );
+
+      let emailSent = false;
+      try {
+        const bodyHtml = `<p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;white-space:pre-wrap;">${escapeHtml(emailBodyText)}</p>`;
+        await sendEmail({
+          to: email,
+          subject: emailSubject || (isEs ? "Registro confirmado" : "You're registered"),
+          html: emailLayout({
+            title: isEs ? "Registro" : "Registration",
+            preheader: emailSubject.slice(0, 120),
+            bodyHtml,
+            lang,
+          }),
+        });
+        emailSent = true;
+      } catch (e: any) {
+        console.error("[event-marketing] email", e?.message ?? e);
+      }
+
+      let smsSent = false;
+      try {
+        const fromE164 = await resolveGetCreditReportSmsFromE164();
+        if (fromE164 && smsBody.trim()) {
+          await sendSms({ to: phoneRaw, from: fromE164, body: smsBody.slice(0, 320) });
+          smsSent = true;
+        } else if (!fromE164) {
+          console.warn("[event-marketing] SMS skipped — no From number");
+        }
+      } catch (e: any) {
+        console.error("[event-marketing] sms", e?.message ?? e);
+      }
+
+      try {
+        await notifyEventRegistration({
+          clientId: clientId!,
+          firstName,
+          lastName,
+          email,
+          phone: phoneRaw,
+          lang,
+          companyName: company.name,
+          sessionTitle,
+        });
+      } catch (e: any) {
+        console.error("[event-marketing] staff notify", e?.message ?? e);
+      }
+
+      triggerReminderFlow("event_registered", clientId!).catch((e: any) =>
+        console.error("[event-marketing] reminder flow", e?.message ?? e),
+      );
+
+      res.json({
+        ok: true,
+        client_id: clientId,
+        registration_id: registrationId,
+        event_kind: company.slug,
+        mfsn_url: MFSN_FREE_SNAPSHOT_URL,
+        email_sent: emailSent,
+        sms_sent: smsSent,
+      });
+    } catch (err: any) {
+      if (sendFriendlyError(res, err, { duplicateLabel: "email" })) return;
+      console.error("[public:event-marketing:register]", err?.message ?? err);
+      res
+        .status(500)
+        .json({ error: "We couldn't submit your registration. Please try again." });
+    }
+  });
+
+  // ============================================================================
+  // ADMIN EVENT MARKETING
+  // ============================================================================
+
+  app.get(
+    "/api/admin/event-marketing/companies",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (_req, res) => {
+      try {
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT c.*,
+                  (SELECT COUNT(*) FROM event_registrations er WHERE er.company_id = c.id) AS registration_count
+           FROM event_companies c
+           ORDER BY c.sort_order ASC, c.id ASC`,
+        );
+        res.json({ companies: rows.map((r) => mapEventCompanyRow(r)) });
+      } catch (err: any) {
+        console.error("[admin:event-marketing:companies]", err?.message ?? err);
+        res.status(500).json({ error: "Unable to load companies" });
+      }
+    },
+  );
+
+  app.post(
+    "/api/admin/event-marketing/companies",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req, res) => {
+      const b = req.body || {};
+      const name = String(b.name || "").trim();
+      let slug = String(b.slug || "").trim().toLowerCase();
+      if (!slug && name) slug = slugifyEventCode(name).slice(0, 80);
+      const labelSlug = String(b.label_slug || slug || "")
+        .trim()
+        .toLowerCase();
+      if (!name || !slug || !labelSlug) {
+        return res
+          .status(400)
+          .json({ error: "name, slug, and label_slug are required" });
+      }
+      const defaults = {
+        welcome_heading_en: `Welcome — ${name} + Optimum Financial Group`,
+        welcome_heading_es: `Bienvenidos — ${name} + Optimum Financial Group`,
+        welcome_body_en:
+          "Sign up for the upcoming event. Every family receives a free credit report. We will confirm details by text and email after you register.",
+        welcome_body_es:
+          "Regístrate al próximo evento. Cada familia recibe un reporte de crédito gratis. Confirmaremos los detalles por SMS y correo después de registrarte.",
+        email_subject_en: `You're registered — ${name}`,
+        email_subject_es: `Estás registrado — ${name}`,
+        email_body_en:
+          "Thanks {{first_name}}! You're signed up for {{session_title}} ({{session_when}}{{session_location}}).{{class_note}} Free report: {{report_url}}",
+        email_body_es:
+          "¡Gracias {{first_name}}! Te registraste para {{session_title}} ({{session_when}}{{session_location}}).{{class_note}} Reporte gratis: {{report_url}}",
+        sms_body_en:
+          "Hi {{first_name}}, you're in for {{session_title}} {{session_when}}. Free report: {{report_url}}",
+        sms_body_es:
+          "Hola {{first_name}}, estás registrado/a en {{session_title}} {{session_when}}. Reporte gratis: {{report_url}}",
+      };
+      try {
+        const [ins] = await pool.query<ResultSetHeader>(
+          `INSERT INTO event_companies
+             (slug, name, name_es, label_slug, is_active, sort_order,
+              welcome_heading_en, welcome_heading_es, welcome_body_en, welcome_body_es,
+              offer_free_report, offer_comic, class_link_url,
+              class_schedule_note_en, class_schedule_note_es,
+              email_subject_en, email_subject_es, email_body_en, email_body_es,
+              sms_body_en, sms_body_es)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            slug.slice(0, 80),
+            name.slice(0, 200),
+            b.name_es != null ? String(b.name_es).trim().slice(0, 200) : null,
+            labelSlug.slice(0, 80),
+            bool01(b.is_active, true),
+            Number.isFinite(Number(b.sort_order)) ? Number(b.sort_order) : 0,
+            String(b.welcome_heading_en || defaults.welcome_heading_en).slice(0, 500),
+            String(b.welcome_heading_es || defaults.welcome_heading_es).slice(0, 500),
+            String(b.welcome_body_en || defaults.welcome_body_en),
+            String(b.welcome_body_es || defaults.welcome_body_es),
+            bool01(b.offer_free_report, true),
+            bool01(b.offer_comic, false),
+            b.class_link_url != null
+              ? String(b.class_link_url).trim().slice(0, 500) || null
+              : null,
+            b.class_schedule_note_en != null
+              ? String(b.class_schedule_note_en).trim().slice(0, 500) || null
+              : null,
+            b.class_schedule_note_es != null
+              ? String(b.class_schedule_note_es).trim().slice(0, 500) || null
+              : null,
+            String(b.email_subject_en || defaults.email_subject_en).slice(0, 500),
+            String(b.email_subject_es || defaults.email_subject_es).slice(0, 500),
+            String(b.email_body_en || defaults.email_body_en),
+            String(b.email_body_es || defaults.email_body_es),
+            String(b.sms_body_en || defaults.sms_body_en).slice(0, 500),
+            String(b.sms_body_es || defaults.sms_body_es).slice(0, 500),
+          ],
+        );
+        await seedDefaultEventFormFields(ins.insertId);
+        const detail = await loadEventCompanyDetail(ins.insertId);
+        res.status(201).json(detail);
+      } catch (err: any) {
+        if (sendFriendlyError(res, err, { duplicateLabel: "slug" })) return;
+        console.error("[admin:event-marketing:create-company]", err?.message ?? err);
+        res.status(500).json({ error: "Unable to create company" });
+      }
+    },
+  );
+
+  app.get(
+    "/api/admin/event-marketing/companies/:id",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!id || Number.isNaN(id)) {
+        return res.status(400).json({ error: "Invalid company id" });
+      }
+      try {
+        const detail = await loadEventCompanyDetail(id);
+        if (!detail) return res.status(404).json({ error: "Not found" });
+        res.json(detail);
+      } catch (err: any) {
+        console.error("[admin:event-marketing:company]", err?.message ?? err);
+        res.status(500).json({ error: "Unable to load company" });
+      }
+    },
+  );
+
+  app.put(
+    "/api/admin/event-marketing/companies/:id",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!id || Number.isNaN(id)) {
+        return res.status(400).json({ error: "Invalid company id" });
+      }
+      const b = req.body || {};
+      const updates: string[] = [];
+      const args: unknown[] = [];
+      const setStr = (col: string, val: unknown, max?: number) => {
+        updates.push(`${col} = ?`);
+        const s = val == null ? null : String(val).trim();
+        args.push(s == null ? null : max ? s.slice(0, max) : s);
+      };
+      if (b.slug !== undefined) setStr("slug", String(b.slug).toLowerCase(), 80);
+      if (b.name !== undefined) setStr("name", b.name, 200);
+      if (b.name_es !== undefined) setStr("name_es", b.name_es, 200);
+      if (b.label_slug !== undefined)
+        setStr("label_slug", String(b.label_slug).toLowerCase(), 80);
+      if (b.is_active !== undefined) {
+        updates.push("is_active = ?");
+        args.push(bool01(b.is_active));
+      }
+      if (b.sort_order !== undefined) {
+        updates.push("sort_order = ?");
+        args.push(Number(b.sort_order) || 0);
+      }
+      if (b.welcome_heading_en !== undefined)
+        setStr("welcome_heading_en", b.welcome_heading_en, 500);
+      if (b.welcome_heading_es !== undefined)
+        setStr("welcome_heading_es", b.welcome_heading_es, 500);
+      if (b.welcome_body_en !== undefined) setStr("welcome_body_en", b.welcome_body_en);
+      if (b.welcome_body_es !== undefined) setStr("welcome_body_es", b.welcome_body_es);
+      if (b.offer_free_report !== undefined) {
+        updates.push("offer_free_report = ?");
+        args.push(bool01(b.offer_free_report));
+      }
+      if (b.offer_comic !== undefined) {
+        updates.push("offer_comic = ?");
+        args.push(bool01(b.offer_comic));
+      }
+      if (b.class_link_url !== undefined)
+        setStr("class_link_url", b.class_link_url, 500);
+      if (b.class_schedule_note_en !== undefined)
+        setStr("class_schedule_note_en", b.class_schedule_note_en, 500);
+      if (b.class_schedule_note_es !== undefined)
+        setStr("class_schedule_note_es", b.class_schedule_note_es, 500);
+      if (b.email_subject_en !== undefined)
+        setStr("email_subject_en", b.email_subject_en, 500);
+      if (b.email_subject_es !== undefined)
+        setStr("email_subject_es", b.email_subject_es, 500);
+      if (b.email_body_en !== undefined) setStr("email_body_en", b.email_body_en);
+      if (b.email_body_es !== undefined) setStr("email_body_es", b.email_body_es);
+      if (b.sms_body_en !== undefined) setStr("sms_body_en", b.sms_body_en, 500);
+      if (b.sms_body_es !== undefined) setStr("sms_body_es", b.sms_body_es, 500);
+
+      if (updates.length === 0) {
+        return res.status(400).json({ error: "Nothing to update" });
+      }
+      try {
+        args.push(id);
+        const [result] = await pool.query<ResultSetHeader>(
+          `UPDATE event_companies SET ${updates.join(", ")} WHERE id = ?`,
+          args,
+        );
+        if (result.affectedRows === 0) {
+          return res.status(404).json({ error: "Not found" });
+        }
+        const detail = await loadEventCompanyDetail(id);
+        res.json(detail);
+      } catch (err: any) {
+        if (sendFriendlyError(res, err, { duplicateLabel: "slug" })) return;
+        console.error("[admin:event-marketing:put-company]", err?.message ?? err);
+        res.status(500).json({ error: "Unable to update company" });
+      }
+    },
+  );
+
+  app.post(
+    "/api/admin/event-marketing/companies/:id/series",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req, res) => {
+      const companyId = Number(req.params.id);
+      if (!companyId || Number.isNaN(companyId)) {
+        return res.status(400).json({ error: "Invalid company id" });
+      }
+      const b = req.body || {};
+      const nameEn = String(b.name_en || "").trim();
+      const nameEs = String(b.name_es || nameEn).trim();
+      let slug = String(b.slug || "").trim().toLowerCase();
+      if (!slug && nameEn) slug = slugifyEventCode(nameEn);
+      const kind = String(b.kind || "in_person");
+      if (!nameEn || !slug) {
+        return res.status(400).json({ error: "name_en and slug are required" });
+      }
+      if (!EVENT_SERIES_KINDS.has(kind)) {
+        return res.status(400).json({ error: "Invalid kind" });
+      }
+      try {
+        const [co] = await pool.query<RowDataPacket[]>(
+          `SELECT id FROM event_companies WHERE id = ? LIMIT 1`,
+          [companyId],
+        );
+        if (!co[0]) return res.status(404).json({ error: "Company not found" });
+        const [ins] = await pool.query<ResultSetHeader>(
+          `INSERT INTO event_series
+             (company_id, slug, name_en, name_es, kind, is_active, sort_order)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            companyId,
+            slug.slice(0, 80),
+            nameEn.slice(0, 200),
+            nameEs.slice(0, 200),
+            kind,
+            bool01(b.is_active, true),
+            Number.isFinite(Number(b.sort_order)) ? Number(b.sort_order) : 0,
+          ],
+        );
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT * FROM event_series WHERE id = ? LIMIT 1`,
+          [ins.insertId],
+        );
+        res.status(201).json({ series: mapEventSeriesRow(rows[0]) });
+      } catch (err: any) {
+        if (sendFriendlyError(res, err, { duplicateLabel: "slug" })) return;
+        console.error("[admin:event-marketing:series]", err?.message ?? err);
+        res.status(500).json({ error: "Unable to create series" });
+      }
+    },
+  );
+
+  app.put(
+    "/api/admin/event-marketing/series/:id",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!id || Number.isNaN(id)) {
+        return res.status(400).json({ error: "Invalid series id" });
+      }
+      const b = req.body || {};
+      const updates: string[] = [];
+      const args: unknown[] = [];
+      if (b.slug !== undefined) {
+        updates.push("slug = ?");
+        args.push(String(b.slug).trim().toLowerCase().slice(0, 80));
+      }
+      if (b.name_en !== undefined) {
+        updates.push("name_en = ?");
+        args.push(String(b.name_en).trim().slice(0, 200));
+      }
+      if (b.name_es !== undefined) {
+        updates.push("name_es = ?");
+        args.push(String(b.name_es).trim().slice(0, 200));
+      }
+      if (b.kind !== undefined) {
+        if (!EVENT_SERIES_KINDS.has(String(b.kind))) {
+          return res.status(400).json({ error: "Invalid kind" });
+        }
+        updates.push("kind = ?");
+        args.push(String(b.kind));
+      }
+      if (b.is_active !== undefined) {
+        updates.push("is_active = ?");
+        args.push(bool01(b.is_active));
+      }
+      if (b.sort_order !== undefined) {
+        updates.push("sort_order = ?");
+        args.push(Number(b.sort_order) || 0);
+      }
+      if (updates.length === 0) {
+        return res.status(400).json({ error: "Nothing to update" });
+      }
+      try {
+        args.push(id);
+        const [result] = await pool.query<ResultSetHeader>(
+          `UPDATE event_series SET ${updates.join(", ")} WHERE id = ?`,
+          args,
+        );
+        if (result.affectedRows === 0) {
+          return res.status(404).json({ error: "Not found" });
+        }
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT * FROM event_series WHERE id = ? LIMIT 1`,
+          [id],
+        );
+        res.json({ series: mapEventSeriesRow(rows[0]) });
+      } catch (err: any) {
+        if (sendFriendlyError(res, err, { duplicateLabel: "slug" })) return;
+        console.error("[admin:event-marketing:put-series]", err?.message ?? err);
+        res.status(500).json({ error: "Unable to update series" });
+      }
+    },
+  );
+
+  app.post(
+    "/api/admin/event-marketing/companies/:id/sessions",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req, res) => {
+      const companyId = Number(req.params.id);
+      if (!companyId || Number.isNaN(companyId)) {
+        return res.status(400).json({ error: "Invalid company id" });
+      }
+      const b = req.body || {};
+      const seriesId = Number(b.series_id);
+      const titleEn = String(b.title_en || "").trim();
+      const titleEs = String(b.title_es || titleEn).trim();
+      const startsAt = String(b.starts_at || "").trim().replace("T", " ").slice(0, 19);
+      let shortCode = String(b.short_code || "").trim().toLowerCase();
+      if (!shortCode && titleEn) shortCode = slugifyEventCode(titleEn);
+      if (!seriesId || !titleEn || !startsAt || !shortCode) {
+        return res.status(400).json({
+          error: "series_id, title_en, starts_at, and short_code are required",
+        });
+      }
+      const status = String(b.status || "scheduled");
+      if (!EVENT_SESSION_STATUSES.has(status)) {
+        return res.status(400).json({ error: "Invalid status" });
+      }
+      try {
+        const [ser] = await pool.query<RowDataPacket[]>(
+          `SELECT id FROM event_series WHERE id = ? AND company_id = ? LIMIT 1`,
+          [seriesId, companyId],
+        );
+        if (!ser[0]) {
+          return res.status(400).json({ error: "Invalid series for company" });
+        }
+        const [co] = await pool.query<RowDataPacket[]>(
+          `SELECT slug FROM event_companies WHERE id = ? LIMIT 1`,
+          [companyId],
+        );
+        if (!co[0]) return res.status(404).json({ error: "Company not found" });
+        const endsAt = b.ends_at
+          ? String(b.ends_at).trim().replace("T", " ").slice(0, 19)
+          : null;
+        const capacity =
+          b.capacity != null && b.capacity !== ""
+            ? Number(b.capacity)
+            : null;
+        const [ins] = await pool.query<ResultSetHeader>(
+          `INSERT INTO event_sessions
+             (company_id, series_id, short_code, title_en, title_es,
+              starts_at, ends_at, location_en, location_es, capacity, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            companyId,
+            seriesId,
+            shortCode.slice(0, 32),
+            titleEn.slice(0, 255),
+            titleEs.slice(0, 255),
+            startsAt,
+            endsAt,
+            b.location_en != null
+              ? String(b.location_en).trim().slice(0, 500) || null
+              : null,
+            b.location_es != null
+              ? String(b.location_es).trim().slice(0, 500) || null
+              : null,
+            capacity != null && Number.isFinite(capacity) ? capacity : null,
+            status,
+          ],
+        );
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT s.*, ser.name_en AS series_name_en, ser.name_es AS series_name_es
+           FROM event_sessions s
+           JOIN event_series ser ON ser.id = s.series_id
+           WHERE s.id = ? LIMIT 1`,
+          [ins.insertId],
+        );
+        res.status(201).json({
+          session: mapEventSessionRow(rows[0], String(co[0].slug)),
+        });
+      } catch (err: any) {
+        if (sendFriendlyError(res, err, { duplicateLabel: "short_code" }))
+          return;
+        console.error("[admin:event-marketing:sessions]", err?.message ?? err);
+        res.status(500).json({ error: "Unable to create session" });
+      }
+    },
+  );
+
+  app.put(
+    "/api/admin/event-marketing/sessions/:id",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!id || Number.isNaN(id)) {
+        return res.status(400).json({ error: "Invalid session id" });
+      }
+      const b = req.body || {};
+      const updates: string[] = [];
+      const args: unknown[] = [];
+      if (b.series_id !== undefined) {
+        updates.push("series_id = ?");
+        args.push(Number(b.series_id));
+      }
+      if (b.short_code !== undefined) {
+        updates.push("short_code = ?");
+        args.push(String(b.short_code).trim().toLowerCase().slice(0, 32));
+      }
+      if (b.title_en !== undefined) {
+        updates.push("title_en = ?");
+        args.push(String(b.title_en).trim().slice(0, 255));
+      }
+      if (b.title_es !== undefined) {
+        updates.push("title_es = ?");
+        args.push(String(b.title_es).trim().slice(0, 255));
+      }
+      if (b.starts_at !== undefined) {
+        updates.push("starts_at = ?");
+        args.push(
+          String(b.starts_at).trim().replace("T", " ").slice(0, 19),
+        );
+      }
+      if (b.ends_at !== undefined) {
+        updates.push("ends_at = ?");
+        args.push(
+          b.ends_at
+            ? String(b.ends_at).trim().replace("T", " ").slice(0, 19)
+            : null,
+        );
+      }
+      if (b.location_en !== undefined) {
+        updates.push("location_en = ?");
+        args.push(
+          b.location_en != null
+            ? String(b.location_en).trim().slice(0, 500) || null
+            : null,
+        );
+      }
+      if (b.location_es !== undefined) {
+        updates.push("location_es = ?");
+        args.push(
+          b.location_es != null
+            ? String(b.location_es).trim().slice(0, 500) || null
+            : null,
+        );
+      }
+      if (b.capacity !== undefined) {
+        updates.push("capacity = ?");
+        const cap =
+          b.capacity != null && b.capacity !== ""
+            ? Number(b.capacity)
+            : null;
+        args.push(cap != null && Number.isFinite(cap) ? cap : null);
+      }
+      if (b.status !== undefined) {
+        if (!EVENT_SESSION_STATUSES.has(String(b.status))) {
+          return res.status(400).json({ error: "Invalid status" });
+        }
+        updates.push("status = ?");
+        args.push(String(b.status));
+      }
+      if (updates.length === 0) {
+        return res.status(400).json({ error: "Nothing to update" });
+      }
+      try {
+        args.push(id);
+        const [result] = await pool.query<ResultSetHeader>(
+          `UPDATE event_sessions SET ${updates.join(", ")} WHERE id = ?`,
+          args,
+        );
+        if (result.affectedRows === 0) {
+          return res.status(404).json({ error: "Not found" });
+        }
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT s.*, ser.name_en AS series_name_en, ser.name_es AS series_name_es,
+                  c.slug AS company_slug
+           FROM event_sessions s
+           JOIN event_series ser ON ser.id = s.series_id
+           JOIN event_companies c ON c.id = s.company_id
+           WHERE s.id = ? LIMIT 1`,
+          [id],
+        );
+        res.json({
+          session: mapEventSessionRow(rows[0], String(rows[0].company_slug)),
+        });
+      } catch (err: any) {
+        if (sendFriendlyError(res, err, { duplicateLabel: "short_code" }))
+          return;
+        console.error("[admin:event-marketing:put-session]", err?.message ?? err);
+        res.status(500).json({ error: "Unable to update session" });
+      }
+    },
+  );
+
+  app.post(
+    "/api/admin/event-marketing/companies/:id/form-fields",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req, res) => {
+      const companyId = Number(req.params.id);
+      if (!companyId || Number.isNaN(companyId)) {
+        return res.status(400).json({ error: "Invalid company id" });
+      }
+      const b = req.body || {};
+      let fieldKey = String(b.field_key || "").trim().toLowerCase();
+      if (!fieldKey && b.label_en) {
+        fieldKey = slugifyEventCode(String(b.label_en)).replace(/-/g, "_");
+      }
+      const labelEn = String(b.label_en || "").trim();
+      const labelEs = String(b.label_es || labelEn).trim();
+      const fieldType = String(b.field_type || "text");
+      if (!fieldKey || !labelEn) {
+        return res
+          .status(400)
+          .json({ error: "field_key and label_en are required" });
+      }
+      if (!EVENT_FORM_FIELD_TYPES.has(fieldType)) {
+        return res.status(400).json({ error: "Invalid field_type" });
+      }
+      const optionsJson = Array.isArray(b.options_json)
+        ? JSON.stringify(b.options_json.map(String))
+        : null;
+      try {
+        const [co] = await pool.query<RowDataPacket[]>(
+          `SELECT id FROM event_companies WHERE id = ? LIMIT 1`,
+          [companyId],
+        );
+        if (!co[0]) return res.status(404).json({ error: "Company not found" });
+        const [ins] = await pool.query<ResultSetHeader>(
+          `INSERT INTO event_form_fields
+             (company_id, field_key, label_en, label_es, field_type, options_json,
+              is_required, is_system, is_active, sort_order)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+          [
+            companyId,
+            fieldKey.slice(0, 64),
+            labelEn.slice(0, 200),
+            labelEs.slice(0, 200),
+            fieldType,
+            optionsJson,
+            bool01(b.is_required, false),
+            bool01(b.is_active, true),
+            Number.isFinite(Number(b.sort_order)) ? Number(b.sort_order) : 0,
+          ],
+        );
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT * FROM event_form_fields WHERE id = ? LIMIT 1`,
+          [ins.insertId],
+        );
+        res.status(201).json({ field: mapEventFormFieldRow(rows[0]) });
+      } catch (err: any) {
+        if (sendFriendlyError(res, err, { duplicateLabel: "field_key" }))
+          return;
+        console.error("[admin:event-marketing:form-fields]", err?.message ?? err);
+        res.status(500).json({ error: "Unable to create form field" });
+      }
+    },
+  );
+
+  app.put(
+    "/api/admin/event-marketing/form-fields/:id",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!id || Number.isNaN(id)) {
+        return res.status(400).json({ error: "Invalid field id" });
+      }
+      const b = req.body || {};
+      const updates: string[] = [];
+      const args: unknown[] = [];
+      if (b.label_en !== undefined) {
+        updates.push("label_en = ?");
+        args.push(String(b.label_en).trim().slice(0, 200));
+      }
+      if (b.label_es !== undefined) {
+        updates.push("label_es = ?");
+        args.push(String(b.label_es).trim().slice(0, 200));
+      }
+      if (b.field_type !== undefined) {
+        if (!EVENT_FORM_FIELD_TYPES.has(String(b.field_type))) {
+          return res.status(400).json({ error: "Invalid field_type" });
+        }
+        updates.push("field_type = ?");
+        args.push(String(b.field_type));
+      }
+      if (b.options_json !== undefined) {
+        updates.push("options_json = ?");
+        args.push(
+          Array.isArray(b.options_json)
+            ? JSON.stringify(b.options_json.map(String))
+            : null,
+        );
+      }
+      if (b.is_required !== undefined) {
+        updates.push("is_required = ?");
+        args.push(bool01(b.is_required));
+      }
+      if (b.is_active !== undefined) {
+        updates.push("is_active = ?");
+        args.push(bool01(b.is_active));
+      }
+      if (b.sort_order !== undefined) {
+        updates.push("sort_order = ?");
+        args.push(Number(b.sort_order) || 0);
+      }
+      if (b.field_key !== undefined) {
+        updates.push("field_key = ?");
+        args.push(String(b.field_key).trim().toLowerCase().slice(0, 64));
+      }
+      if (updates.length === 0) {
+        return res.status(400).json({ error: "Nothing to update" });
+      }
+      try {
+        args.push(id);
+        const [result] = await pool.query<ResultSetHeader>(
+          `UPDATE event_form_fields SET ${updates.join(", ")} WHERE id = ?`,
+          args,
+        );
+        if (result.affectedRows === 0) {
+          return res.status(404).json({ error: "Not found" });
+        }
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT * FROM event_form_fields WHERE id = ? LIMIT 1`,
+          [id],
+        );
+        res.json({ field: mapEventFormFieldRow(rows[0]) });
+      } catch (err: any) {
+        if (sendFriendlyError(res, err, { duplicateLabel: "field_key" }))
+          return;
+        console.error("[admin:event-marketing:put-field]", err?.message ?? err);
+        res.status(500).json({ error: "Unable to update form field" });
+      }
+    },
+  );
+
+  app.delete(
+    "/api/admin/event-marketing/form-fields/:id",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!id || Number.isNaN(id)) {
+        return res.status(400).json({ error: "Invalid field id" });
+      }
+      try {
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT id, is_system FROM event_form_fields WHERE id = ? LIMIT 1`,
+          [id],
+        );
+        if (!rows[0]) return res.status(404).json({ error: "Not found" });
+        if (Number(rows[0].is_system) === 1) {
+          return res
+            .status(400)
+            .json({ error: "System form fields cannot be deleted" });
+        }
+        await pool.query(`DELETE FROM event_form_fields WHERE id = ?`, [id]);
+        res.json({ ok: true });
+      } catch (err: any) {
+        console.error("[admin:event-marketing:del-field]", err?.message ?? err);
+        res.status(500).json({ error: "Unable to delete form field" });
+      }
+    },
+  );
+
+  app.post(
+    "/api/admin/event-marketing/registrations/:id/check-in",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!id || Number.isNaN(id)) {
+        return res.status(400).json({ error: "Invalid registration id" });
+      }
+      try {
+        const [result] = await pool.query<ResultSetHeader>(
+          `UPDATE event_registrations
+           SET checked_in_at = COALESCE(checked_in_at, NOW())
+           WHERE id = ?`,
+          [id],
+        );
+        if (result.affectedRows === 0) {
+          return res.status(404).json({ error: "Not found" });
+        }
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT er.*, c.first_name, c.last_name, c.email, c.phone,
+                  s.title_en AS session_title_en
+           FROM event_registrations er
+           JOIN clients c ON c.id = er.client_id
+           LEFT JOIN event_sessions s ON s.id = er.session_id
+           WHERE er.id = ? LIMIT 1`,
+          [id],
+        );
+        res.json({ registration: mapEventRegistrationRow(rows[0]) });
+      } catch (err: any) {
+        console.error("[admin:event-marketing:check-in]", err?.message ?? err);
+        res.status(500).json({ error: "Unable to check in" });
+      }
+    },
+  );
 
   // ============================================================================
   // PUBLIC BUSINESS FUNDING — /funding multi-step wizard
@@ -38701,45 +48980,17 @@ function buildApp() {
 
     try {
       if (method === "stored_profile") {
-        const payload = {
-          createCustomerProfileTransactionRequest: {
-            merchantAuthentication: {
-              name: process.env.AUTHORIZENET_API_LOGIN_ID,
-              transactionKey: process.env.AUTHORIZENET_TRANSACTION_KEY,
-            },
-            transaction: {
-              profileTransAuthCapture: {
-                amount: amountDollars,
-                customerProfileId: anetCustomerProfileId,
-                customerPaymentProfileId: anetPaymentProfileId,
-                order: {
-                  description: String(label).slice(0, 255),
-                },
-              },
-            },
-          },
-        };
-
-        const anetResp = await fetch(AUTHORIZENET_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
+        const result = await chargeStoredProfile({
+          amountDollars,
+          customerProfileId: String(anetCustomerProfileId),
+          paymentProfileId: String(anetPaymentProfileId),
+          description: String(label),
+          clientId,
         });
-        const anetData = (await anetResp.json()) as any;
-
-        const txResp =
-          anetData?.createCustomerProfileTransactionResponse?.directResponse;
-        if (!txResp) {
-          console.error("[pay/token] CIM error:", JSON.stringify(anetData));
-          chargeError = "Payment declined. Please try a different card.";
+        if (result.ok === true) {
+          chargeResult = { transactionId: result.transactionId };
         } else {
-          const parts = txResp.split(",");
-          // Position 0: result code (1=approved, 2=declined, 3=error)
-          if (parts[0] !== "1") {
-            chargeError = parts[3] || "Payment declined";
-          } else {
-            chargeResult = { transactionId: parts[6] || `CIM-${Date.now()}` };
-          }
+          chargeError = result.error;
         }
       } else {
         // new_card — charge via Accept.js nonce
@@ -38980,7 +49231,7 @@ function buildApp() {
              AND cr.max_rounds > 5
          ) u
          ORDER BY u.target_date ASC, u.round_number ASC
-         LIMIT 8`,
+         LIMIT 24`,
       );
       const adminId = req.auth!.id;
       const [myWorkTasks] = await pool.query<RowDataPacket[]>(
@@ -39054,6 +49305,34 @@ function buildApp() {
     },
   );
 
+/**
+ * Clients-list stage filter. Extended OFG rounds (6–12) are not pipeline
+ * stages: the client stays at `round_5` and the real round is the next one
+ * after the highest published report (capped by the case's max_rounds).
+ *  - `round_5`      → round_5 clients NOT yet in an extended round
+ *  - `round_6`..12  → that extended round
+ *  - `round_6_plus` → any extended round
+ * Other values are plain pipeline_stage matches (unchanged).
+ */
+  /** Real round for a `round_5` client (5, or 6–12 when extended). */
+  const ADMIN_CLIENT_EFFECTIVE_ROUND_SQL = `LEAST(
+    (SELECT COALESCE(MAX(crc.max_rounds), 5) FROM credit_repair_cases crc WHERE crc.client_id = c.id),
+    GREATEST(5, (SELECT COALESCE(MAX(crr.round_number), 0) FROM client_round_reports crr WHERE crr.client_id = c.id) + 1))`;
+  function adminClientStageFilterSql(stage: string): { sql: string; params: unknown[] } {
+  const effective = ADMIN_CLIENT_EFFECTIVE_ROUND_SQL;
+  if (stage === "round_5") {
+    return { sql: `(c.pipeline_stage = 'round_5' AND ${effective} <= 5)`, params: [] };
+  }
+  if (stage === "round_6_plus") {
+    return { sql: `(c.pipeline_stage = 'round_5' AND ${effective} >= 6)`, params: [] };
+  }
+  const m = /^round_(\d+)$/.exec(stage);
+  if (m && Number(m[1]) >= 6) {
+    return { sql: `(c.pipeline_stage = 'round_5' AND ${effective} = ?)`, params: [Number(m[1])] };
+  }
+  return { sql: "c.pipeline_stage = ?", params: [stage] };
+}
+
   app.get(
     "/api/admin/clients",
     requireAdmin,
@@ -39106,8 +49385,9 @@ function buildApp() {
       const where: string[] = [];
       const args: any[] = [];
       if (stage) {
-        where.push("c.pipeline_stage = ?");
-        args.push(stage);
+        const stageSql = adminClientStageFilterSql(stage);
+        where.push(stageSql.sql);
+        args.push(...stageSql.params);
       }
       if (search) {
         const ident = clientIdentitySearchSql(search);
@@ -39205,6 +49485,8 @@ function buildApp() {
         `SELECT c.id, c.first_name, c.last_name, c.email, c.phone, c.pipeline_stage,
               c.status, c.admin_notes, c.created_at, c.preferred_language,
               c.assigned_admin_id, c.referral_category, c.referrer_id,
+              CASE WHEN c.pipeline_stage = 'round_5' THEN ${ADMIN_CLIENT_EFFECTIVE_ROUND_SQL} ELSE NULL END
+                AS effective_round,
               p.name AS package_name, p.slug AS package_slug,
               COALESCE(pay_agg.total_paid_cents, 0)  AS total_paid_cents,
               COALESCE(pay_agg.payment_count,   0)   AS payment_count,
@@ -39252,6 +49534,204 @@ function buildApp() {
           totalPages: Math.max(1, Math.ceil(total / limit)),
         },
       });
+    },
+  );
+
+  /**
+   * CSV export for Google Sheet reconcile (Lecca tracker).
+   * Same filters as GET /admin/clients; no pagination (capped).
+   * Keep escape/build in sync with api/clientsExport.ts.
+   */
+  app.get(
+    "/api/admin/clients/export",
+    requireAdmin,
+    async (req: AuthedRequest, res) => {
+      try {
+        const scope = await getAffiliateScope(req.auth!.id);
+        if (scope && !scope.hasPortalAccess) {
+          return res.status(403).json({ error: "Portal access required" });
+        }
+        const stage = req.query.stage as string | undefined;
+        const search = req.query.search as string | undefined;
+        const status = req.query.status as string | undefined;
+        const unconvertedLead =
+          req.query.unconverted_lead === "1" ||
+          req.query.unconverted_lead === "true";
+        const language = req.query.language as string | undefined;
+        const billing = req.query.billing as string | undefined;
+        const joined_from = req.query.joined_from as string | undefined;
+        const joined_to = req.query.joined_to as string | undefined;
+        const has_notes = req.query.has_notes as string | undefined;
+        const labelParam =
+          (req.query.labels as string | undefined) ||
+          (req.query.label as string | undefined);
+        const labelSlugs = labelParam
+          ? labelParam
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean)
+          : [];
+        const sortColMap: Record<string, string> = {
+          created_at: "c.created_at",
+          first_name: "c.first_name",
+          last_name: "c.last_name",
+          email: "c.email",
+          package_name: "p.name",
+          pipeline_stage: "c.pipeline_stage",
+          status: "c.status",
+        };
+        const sortByRaw = String(req.query.sort_by || "created_at");
+        const orderCol = sortColMap[sortByRaw] || "c.created_at";
+        const orderDir =
+          String(req.query.sort_dir || "DESC").toUpperCase() === "ASC"
+            ? "ASC"
+            : "DESC";
+        const where: string[] = [];
+        const args: any[] = [];
+        if (stage) {
+          const stageSql = adminClientStageFilterSql(stage);
+          where.push(stageSql.sql);
+          args.push(...stageSql.params);
+        }
+        if (search) {
+          const ident = clientIdentitySearchSql(search);
+          where.push(ident.sql);
+          args.push(...ident.params);
+        }
+        if (status) {
+          where.push("c.status = ?");
+          args.push(status);
+        }
+        if (unconvertedLead) {
+          where.push(adminProspectLeadSql());
+        }
+        if (language === "en" || language === "es") {
+          where.push("c.preferred_language = ?");
+          args.push(language);
+        }
+        if (joined_from) {
+          where.push("DATE(c.created_at) >= ?");
+          args.push(joined_from);
+        }
+        if (joined_to) {
+          where.push("DATE(c.created_at) <= ?");
+          args.push(joined_to);
+        }
+        if (has_notes === "yes") {
+          where.push("(c.admin_notes IS NOT NULL AND c.admin_notes != '')");
+        } else if (has_notes === "no") {
+          where.push("(c.admin_notes IS NULL OR c.admin_notes = '')");
+        }
+        if (billing === "overdue") {
+          where.push(
+            "EXISTS (SELECT 1 FROM payment_splits ps WHERE ps.client_id = c.id AND ps.status = 'overdue')",
+          );
+        } else if (billing === "split_plan") {
+          where.push(
+            "EXISTS (SELECT 1 FROM payment_splits ps WHERE ps.client_id = c.id)",
+          );
+        } else if (billing === "paid_full") {
+          where.push(
+            "EXISTS (SELECT 1 FROM payment_splits ps WHERE ps.client_id = c.id)" +
+              " AND NOT EXISTS (SELECT 1 FROM payment_splits ps2 WHERE ps2.client_id = c.id AND ps2.status IN ('pending','overdue'))",
+          );
+        } else if (billing === "direct_paid") {
+          where.push(
+            "EXISTS (SELECT 1 FROM payments py WHERE py.client_id = c.id AND py.status = 'succeeded')" +
+              " AND NOT EXISTS (SELECT 1 FROM payment_splits ps WHERE ps.client_id = c.id)",
+          );
+        } else if (billing === "no_payment") {
+          where.push(
+            "NOT EXISTS (SELECT 1 FROM payments py WHERE py.client_id = c.id AND py.status = 'succeeded')" +
+              " AND NOT EXISTS (SELECT 1 FROM payment_splits ps WHERE ps.client_id = c.id)",
+          );
+        }
+        if (labelSlugs.length > 0) {
+          where.push(
+            `EXISTS (SELECT 1 FROM client_labels cl JOIN labels l ON l.id = cl.label_id
+                   WHERE cl.client_id = c.id AND l.slug IN (?))`,
+          );
+          args.push(labelSlugs);
+        }
+        if (scope) {
+          where.push("c.affiliate_id IN (?)");
+          args.push(scope.scopedAffiliateIds);
+        }
+        const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+        const EXPORT_MAX = 20_000;
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT c.id, c.first_name, c.last_name, c.email, c.phone,
+                  c.pipeline_stage, c.status, c.created_at
+           FROM clients c
+           LEFT JOIN packages p ON p.id = c.package_id
+           ${whereClause}
+           ORDER BY ${orderCol} ${orderDir}, c.id DESC
+           LIMIT ?`,
+          [...args, EXPORT_MAX],
+        );
+
+        const esc = (value: string | number | null | undefined): string => {
+          if (value === null || value === undefined) return "";
+          const s = String(value);
+          if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+          return s;
+        };
+        const fmtDate = (value: unknown): string => {
+          if (value == null || value === "") return "";
+          const d = value instanceof Date ? value : new Date(String(value));
+          if (Number.isNaN(d.getTime())) return String(value).slice(0, 32);
+          return d.toISOString().slice(0, 10);
+        };
+        const headers = [
+          "client_id",
+          "first_name",
+          "last_name",
+          "name",
+          "status",
+          "pipeline_stage",
+          "email",
+          "phone",
+          "created_at",
+        ];
+        const lines = [headers.join(",")];
+        for (const r of rows) {
+          const first = String(r.first_name || "").trim();
+          const last = String(r.last_name || "").trim();
+          const name = `${first} ${last}`.trim();
+          lines.push(
+            [
+              Number(r.id),
+              first,
+              last,
+              name,
+              String(r.status || ""),
+              String(r.pipeline_stage || ""),
+              r.email ? String(r.email) : "",
+              r.phone ? String(r.phone) : "",
+              fmtDate(r.created_at),
+            ]
+              .map(esc)
+              .join(","),
+          );
+        }
+        const csv = lines.join("\n") + "\n";
+        const ymd = new Date().toISOString().slice(0, 10);
+        const filename = `ofg-clients-${ymd}.csv`;
+        res.setHeader("Content-Type", "text/csv; charset=utf-8");
+        res.setHeader(
+          "Content-Disposition",
+          `attachment; filename="${filename}"`,
+        );
+        if (rows.length >= EXPORT_MAX) {
+          res.setHeader("X-Export-Truncated", "1");
+          res.setHeader("X-Export-Max-Rows", String(EXPORT_MAX));
+        }
+        // BOM helps Excel open UTF-8 accents correctly
+        return res.status(200).send("\uFEFF" + csv);
+      } catch (e: any) {
+        console.error("[admin:clients:export]", e?.message ?? e);
+        return res.status(500).json({ error: "Export failed" });
+      }
     },
   );
 
@@ -39947,6 +50427,7 @@ function buildApp() {
           },
           fixedClientId: clientId,
           sourceLabel: "agent_submission",
+          queueEnhancedPdf: true,
         });
         res.json(result);
       } catch (err: any) {
@@ -39988,6 +50469,7 @@ function buildApp() {
       const tasksFilter = req.query.tasks as string | undefined;
       const infoRequests = req.query.info_requests as string | undefined;
       const hasNotes = req.query.has_notes as string | undefined;
+      const leadTemperature = req.query.lead_temperature as string | undefined;
       const labelParam =
         (req.query.labels as string | undefined) ||
         (req.query.label as string | undefined);
@@ -40036,6 +50518,12 @@ function buildApp() {
 
       if (clientStatus) {
         pushClientFilter("c.status = ?", clientStatus);
+      }
+
+      // Traffic light filter applies to the prospect column only.
+      if (leadTemperature === "hot" || leadTemperature === "warm" || leadTemperature === "cold") {
+        prospectWhere.push("c.lead_temperature = ?");
+        prospectArgs.push(leadTemperature);
       }
 
       if (hasNotes === "yes") {
@@ -43715,6 +54203,7 @@ function buildApp() {
         "onboarding",
         "active",
         "paused",
+        "blocked",
         "cancelled",
       ];
       const updates: string[] = [];
@@ -44666,6 +55155,481 @@ function buildApp() {
     },
   );
 
+  /** Append one timestamped, attributed line to clients.admin_notes. */
+  async function appendClientAdminNote(
+    clientId: number,
+    adminId: number,
+    text: string,
+  ): Promise<string | null> {
+    const [aRows] = await pool.query<RowDataPacket[]>(
+      `SELECT first_name, last_name FROM admins WHERE id = ? LIMIT 1`,
+      [adminId],
+    );
+    const author =
+      `${aRows[0]?.first_name || ""} ${aRows[0]?.last_name || ""}`.trim() ||
+      `Admin #${adminId}`;
+    const ts = new Date().toISOString().slice(0, 16).replace("T", " ");
+    const line = `[${ts} UTC — ${author}] ${text}`.slice(0, 2000);
+    await pool.query(
+      `UPDATE clients
+       SET admin_notes = CONCAT(
+             COALESCE(admin_notes, ''),
+             CASE WHEN admin_notes IS NULL OR admin_notes = '' THEN '' ELSE '\n' END,
+             ?
+           )
+       WHERE id = ?`,
+      [line, clientId],
+    );
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT admin_notes FROM clients WHERE id = ? LIMIT 1`,
+      [clientId],
+    );
+    return (rows[0]?.admin_notes as string | null) ?? null;
+  }
+
+  // ── Add a staff note to a client file ────────────────────────────────────
+  app.post(
+    "/api/admin/clients/:id/notes",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const id = Number(req.params.id);
+      const note = String(req.body?.note ?? "").trim();
+      if (!id) return res.status(400).json({ error: "Invalid client id" });
+      if (!note) return res.status(400).json({ error: "note is required" });
+      if (note.length > 1500) {
+        return res.status(400).json({ error: "note is too long (max 1500)" });
+      }
+      const [existing] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM clients WHERE id = ? LIMIT 1`,
+        [id],
+      );
+      if (!existing[0])
+        return res.status(404).json({ error: "Client not found" });
+      const adminNotes = await appendClientAdminNote(id, req.auth!.id, note);
+      res.json({ ok: true, admin_notes: adminNotes });
+    },
+  );
+
+  // ── Pause / resume a client (reason required to pause) ──────────────────
+  app.post(
+    "/api/admin/clients/:id/pause",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const id = Number(req.params.id);
+      const paused = req.body?.paused === true;
+      const reason = String(req.body?.reason ?? "").trim();
+      // Which hold to apply when paused=true: paused (default) or blocked.
+      const holdStatus = req.body?.hold_status === "blocked" ? "blocked" : "paused";
+      if (!id) return res.status(400).json({ error: "Invalid client id" });
+      if (typeof req.body?.paused !== "boolean") {
+        return res.status(400).json({ error: "paused (boolean) is required" });
+      }
+      if (paused && !reason) {
+        return res
+          .status(400)
+          .json({ error: "reason is required to pause a client" });
+      }
+      if (reason.length > 1000) {
+        return res.status(400).json({ error: "reason is too long (max 1000)" });
+      }
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT status FROM clients WHERE id = ? LIMIT 1`,
+        [id],
+      );
+      if (!rows[0]) return res.status(404).json({ error: "Client not found" });
+      const from = String(rows[0].status);
+      if (paused && (from === holdStatus || from === "cancelled")) {
+        return res
+          .status(422)
+          .json({ error: `Client is already ${from}`, status: from });
+      }
+      if (!paused && !isClientAutomationHoldStatus(from)) {
+        return res
+          .status(422)
+          .json({ error: "Client is not paused or blocked", status: from });
+      }
+
+      let to: string = holdStatus;
+      if (!paused) {
+        // Resume to where they belong: prospect if never enrolled, onboarding
+        // while still a new client, otherwise active.
+        if (!(await clientHasEnrolledCase(id))) {
+          to = "prospect";
+        } else {
+          const caseId = await resolvePrimaryActiveCaseId(pool, id);
+          const [cRows] = caseId
+            ? await pool.query<RowDataPacket[]>(
+                `SELECT pipeline_stage FROM credit_repair_cases WHERE id = ? LIMIT 1`,
+                [caseId],
+              )
+            : [[] as RowDataPacket[]];
+          to =
+            cRows[0]?.pipeline_stage === "new_client" ? "onboarding" : "active";
+        }
+      }
+      await pool.query(`UPDATE clients SET status = ? WHERE id = ?`, [to, id]);
+      const adminNotes = await appendClientAdminNote(
+        id,
+        req.auth!.id,
+        paused
+          ? `${holdStatus === "blocked" ? "Blocked" : "Paused"} (was ${from}): ${reason}`
+          : `Resumed → ${to}${reason ? `: ${reason}` : ""}`,
+      );
+      res.json({ ok: true, status: to, admin_notes: adminNotes });
+    },
+  );
+
+  // ── Credit file extraction (any provider; PDF or image) ─────────────────
+  app.post(
+    "/api/admin/credit-files",
+    requireAdmin,
+    denyAffiliateAccess,
+    upload.single("file"),
+    async (req: AuthedRequest, res) => {
+      const file = req.file as Express.Multer.File | undefined;
+      if (!file) return res.status(400).json({ error: "file is required" });
+      const sizeErr = assertMultipartUnderVercelLimit([file]);
+      if (sizeErr) return res.status(413).json({ error: sizeErr });
+      if (!isSupportedCreditFileMediaType(file.mimetype)) {
+        return res.status(400).json({
+          error: "Unsupported file type — upload a PDF or an image (JPG, PNG, WebP)",
+        });
+      }
+      const purposeRaw = String(req.body?.purpose || "other");
+      const purpose = (
+        ["analysis", "progress_before", "progress_after", "other"].includes(purposeRaw)
+          ? purposeRaw
+          : "other"
+      ) as "analysis" | "progress_before" | "progress_after" | "other";
+      const clientId = Number(req.body?.client_id) || null;
+      const caseId = Number(req.body?.case_id) || null;
+      if (clientId) {
+        const [c] = await pool.query<RowDataPacket[]>(
+          `SELECT id FROM clients WHERE id = ? LIMIT 1`,
+          [clientId],
+        );
+        if (!c[0]) return res.status(404).json({ error: "Client not found" });
+      }
+      try {
+        const job = await createCreditFileExtraction({
+          buffer: file.buffer,
+          mimeType: file.mimetype,
+          fileName: file.originalname || "credit-report",
+          clientId,
+          caseId,
+          purpose,
+          adminId: req.auth!.id,
+        });
+        res.status(202).json({
+          id: job.id,
+          status: "queued",
+          provider: job.provider,
+          image_pages: job.imagePages,
+          total_pages: job.totalPages,
+        });
+      } catch (e: any) {
+        console.error("[credit-files:create]", e?.message ?? e);
+        res.status(400).json({ error: String(e?.message || "Upload failed").slice(0, 300) });
+      }
+    },
+  );
+
+  app.get(
+    "/api/admin/credit-files/:id",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const id = Number(req.params.id);
+      if (!id) return res.status(400).json({ error: "Invalid id" });
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, client_id, case_id, purpose, file_name, mime_type, provider,
+                status, model, extracted_json, issues_json, confidence,
+                image_pages, total_pages, error_message, created_at,
+                submitted_at, completed_at
+         FROM credit_file_extractions WHERE id = ? LIMIT 1`,
+        [id],
+      );
+      const r = rows[0];
+      if (!r) return res.status(404).json({ error: "Not found" });
+      const parse = (v: unknown) =>
+        v == null ? null : typeof v === "string" ? JSON.parse(v) : v;
+      res.json({
+        id: Number(r.id),
+        client_id: r.client_id,
+        case_id: r.case_id,
+        purpose: r.purpose,
+        file_name: r.file_name,
+        mime_type: r.mime_type,
+        provider: r.provider,
+        status: r.status,
+        model: r.model,
+        credit_file: parse(r.extracted_json),
+        issues: parse(r.issues_json) ?? [],
+        confidence: r.confidence != null ? Number(r.confidence) : null,
+        image_pages: r.image_pages,
+        total_pages: r.total_pages,
+        error_message: r.error_message,
+        created_at: r.created_at,
+        submitted_at: r.submitted_at,
+        completed_at: r.completed_at,
+      });
+    },
+  );
+
+  /** Load a ready extraction + build the analysis (shared by JSON + PDF). */
+  async function loadCreditFileAnalysis(id: number): Promise<
+    | { ok: true; analysis: CreditAnalysisData; clientName: string; lang: "en" | "es" }
+    | { ok: false; status: number; error: string }
+  > {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT e.status, e.extracted_json, e.error_message,
+              c.first_name, c.last_name, c.preferred_language,
+              ca.escrow_flag, ca.lender_score_model, ca.lender_score, ca.lender_target_score
+       FROM credit_file_extractions e
+       LEFT JOIN clients c ON c.id = e.client_id
+       LEFT JOIN credit_analyses ca ON ca.id = e.credit_analysis_id
+       WHERE e.id = ? LIMIT 1`,
+      [id],
+    );
+    const r = rows[0];
+    if (!r) return { ok: false, status: 404, error: "Not found" };
+    if (r.status !== "ready" || !r.extracted_json) {
+      return {
+        ok: false,
+        status: 409,
+        error:
+          r.status === "failed"
+            ? `Extraction failed: ${r.error_message || "unknown error"}`
+            : "Report is still being read — try again in a minute",
+      };
+    }
+    const file =
+      typeof r.extracted_json === "string" ? JSON.parse(r.extracted_json) : r.extracted_json;
+    return {
+      ok: true,
+      analysis: buildCreditAnalysis(file, {
+        // Agent flag wins; NULL = auto-detect from a recent mortgage pull.
+        escrow: r.escrow_flag === null || r.escrow_flag === undefined ? null : Number(r.escrow_flag) === 1,
+        lender:
+          r.lender_score != null
+            ? {
+                model: r.lender_score_model ? String(r.lender_score_model) : null,
+                score: Number(r.lender_score),
+                target: r.lender_target_score != null ? Number(r.lender_target_score) : null,
+              }
+            : null,
+      }),
+      clientName: `${r.first_name || ""} ${r.last_name || ""}`.trim() || "Client",
+      lang: r.preferred_language === "es" ? "es" : "en",
+    };
+  }
+
+  app.get(
+    "/api/admin/credit-files/:id/analysis",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const id = Number(req.params.id);
+      if (!id) return res.status(400).json({ error: "Invalid id" });
+      const out = await loadCreditFileAnalysis(id);
+      if (out.ok === false) return res.status(out.status).json({ error: out.error });
+      res.json({ analysis: out.analysis, client_name: out.clientName, lang: out.lang });
+    },
+  );
+
+  /** Render the enhanced analysis PDF for a ready extraction. */
+  async function renderCreditFileAnalysisPdf(
+    extractionId: number,
+    langOverride?: unknown,
+  ): Promise<
+    | { ok: true; buffer: Buffer; fileName: string }
+    | { ok: false; status: number; error: string }
+  > {
+    const out = await loadCreditFileAnalysis(extractionId);
+    if (out.ok === false) return out;
+    const lang =
+      langOverride === "es" || langOverride === "en"
+        ? (langOverride as "en" | "es")
+        : out.lang;
+    const [pkgs] = await pool.query<RowDataPacket[]>(
+      `SELECT slug, price_cents FROM packages WHERE slug IN ('standard','complex')`,
+    );
+    const price = (slug: string, fallback: number) => {
+      const cents = Number(pkgs.find((p) => p.slug === slug)?.price_cents ?? fallback);
+      return `$${(cents / 100).toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
+    };
+    const buffer = await generateOfgCreditAnalysisPdf(out.analysis, {
+      clientName: out.clientName,
+      lang,
+      logoPng: await loadOfgLogoBytes(),
+      program: {
+        standardPrice: price("standard", 149700),
+        complexPrice: price("complex", 249700),
+        enrollUrl: "optimum-financial-group.com/premium-plan-payment",
+        phone: "(949) 736-5644",
+        site: "optimum-financial-group.com",
+      },
+    });
+    const safe =
+      out.clientName.replace(/[^A-Za-z0-9]+/g, "_").replace(/^_|_$/g, "") || "Client";
+    return { ok: true, buffer, fileName: `${safe}_OFG_Credit_Analysis.pdf` };
+  }
+
+  app.get(
+    "/api/admin/credit-files/:id/analysis.pdf",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const id = Number(req.params.id);
+      if (!id) return res.status(400).json({ error: "Invalid id" });
+      const out = await renderCreditFileAnalysisPdf(id, req.query.lang);
+      if (out.ok === false) return res.status(out.status).json({ error: out.error });
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `inline; filename="${out.fileName}"`);
+      res.send(out.buffer);
+    },
+  );
+
+  // Background enhanced-read status for an existing Credit Analysis (panel
+  // polls this so the Download PDF click itself stays synchronous).
+  app.get(
+    "/api/admin/credit-analyses/:id/enhanced-status",
+    requireAdmin,
+    async (req: AuthedRequest, res) => {
+      const analysisId = Number(req.params.id);
+      if (!analysisId) return res.status(400).json({ error: "Invalid id" });
+      const [aRows] = await pool.query<RowDataPacket[]>(
+        `SELECT client_id FROM credit_analyses WHERE id = ? LIMIT 1`,
+        [analysisId],
+      );
+      if (!aRows[0]) return res.json({ status: null });
+      const scope = await getAffiliateScope(req.auth!.id);
+      if (scope && !(await assertClientInAffiliateScope(Number(aRows[0].client_id), scope))) {
+        return res.json({ status: null });
+      }
+      const [eRows] = await pool.query<RowDataPacket[]>(
+        `SELECT status FROM credit_file_extractions
+         WHERE credit_analysis_id = ? ORDER BY id DESC LIMIT 1`,
+        [analysisId],
+      );
+      const [ctx] = await pool.query<RowDataPacket[]>(
+        `SELECT escrow_flag, lender_score_model, lender_score, lender_target_score
+         FROM credit_analyses WHERE id = ? LIMIT 1`,
+        [analysisId],
+      );
+      const out: CreditAnalysisEnhancedStatusResponse = {
+        status: eRows[0]?.status ?? null,
+        context: creditAnalysisContextFromRow(ctx[0]),
+      };
+      res.json(out);
+    },
+  );
+
+  // Agent context for the enhanced analysis PDF: escrow flag + lender score.
+  app.patch(
+    "/api/admin/credit-analyses/:id/context",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const analysisId = Number(req.params.id);
+      if (!analysisId) return res.status(400).json({ error: "Invalid id" });
+      const body = (req.body ?? {}) as CreditAnalysisLenderContextUpdate;
+      const sets: string[] = [];
+      const args: unknown[] = [];
+      if ("escrow" in body) {
+        if (body.escrow !== null && typeof body.escrow !== "boolean") {
+          return res.status(400).json({ error: "escrow must be true, false or null (auto)" });
+        }
+        sets.push("escrow_flag = ?");
+        args.push(body.escrow === null ? null : body.escrow ? 1 : 0);
+      }
+      if ("lender_score_model" in body) {
+        sets.push("lender_score_model = ?");
+        args.push(body.lender_score_model ? String(body.lender_score_model).trim().slice(0, 40) : null);
+      }
+      for (const key of ["lender_score", "lender_target_score"] as const) {
+        if (!(key in body)) continue;
+        const v = body[key];
+        if (v !== null && (!Number.isInteger(v) || (v as number) < 300 || (v as number) > 900)) {
+          return res.status(400).json({ error: `${key} must be a score between 300 and 900, or null` });
+        }
+        sets.push(`${key} = ?`);
+        args.push(v ?? null);
+      }
+      if (!sets.length) return res.status(400).json({ error: "Nothing to update" });
+      const [r] = await pool.query<ResultSetHeader>(
+        `UPDATE credit_analyses SET ${sets.join(", ")} WHERE id = ?`,
+        [...args, analysisId],
+      );
+      if (!r.affectedRows) return res.status(404).json({ error: "Not found" });
+      const [ctx] = await pool.query<RowDataPacket[]>(
+        `SELECT escrow_flag, lender_score_model, lender_score, lender_target_score
+         FROM credit_analyses WHERE id = ? LIMIT 1`,
+        [analysisId],
+      );
+      res.json({ context: creditAnalysisContextFromRow(ctx[0]) });
+    },
+  );
+
+  // Existing Credit Analysis "Download PDF": enhanced PDF when the background
+  // read is ready; 404 { fallback: true } tells the client to keep today's
+  // printable report.
+  app.get(
+    "/api/admin/credit-analyses/:id/enhanced-pdf",
+    requireAdmin,
+    async (req: AuthedRequest, res) => {
+      const analysisId = Number(req.params.id);
+      if (!analysisId) return res.status(400).json({ error: "Invalid id" });
+      const [aRows] = await pool.query<RowDataPacket[]>(
+        `SELECT client_id FROM credit_analyses WHERE id = ? LIMIT 1`,
+        [analysisId],
+      );
+      if (!aRows[0]) return res.status(404).json({ error: "Not found", fallback: true });
+      const scope = await getAffiliateScope(req.auth!.id);
+      if (scope && !scope.hasPortalAccess) {
+        return res.status(403).json({ error: "Portal access required" });
+      }
+      if (scope && !(await assertClientInAffiliateScope(Number(aRows[0].client_id), scope))) {
+        return res.status(404).json({ error: "Not found", fallback: true });
+      }
+      const [eRows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, status FROM credit_file_extractions
+         WHERE credit_analysis_id = ? ORDER BY id DESC LIMIT 1`,
+        [analysisId],
+      );
+      if (!eRows[0] || eRows[0].status !== "ready") {
+        return res.status(404).json({
+          error: "Enhanced report not ready",
+          status: eRows[0]?.status ?? null,
+          fallback: true,
+        });
+      }
+      const out = await renderCreditFileAnalysisPdf(Number(eRows[0].id), req.query.lang);
+      if (out.ok === false) {
+        return res.status(404).json({ error: out.error, fallback: true });
+      }
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="${out.fileName}"`);
+      res.send(out.buffer);
+    },
+  );
+
+  // ── Prospect traffic light: manual signals (buttons / Claude) ───────────
+  app.post(
+    "/api/admin/clients/:id/lead-signals",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      const id = Number(req.params.id);
+      if (!id) return res.status(400).json({ error: "Invalid client id" });
+      const out = await applyLeadSignals(id, req.auth!.id, req.body || {});
+      if (out.ok === false) return res.status(out.status).json({ error: out.error });
+      res.json(out.data);
+    },
+  );
+
   // ── Delete client ────────────────────────────────────────────────────────
   app.delete(
     "/api/admin/clients/:id",
@@ -45339,6 +56303,184 @@ function buildApp() {
       return res.status(200).send(challenge);
     }
     res.status(403).send("Forbidden");
+  });
+
+  // ── WhatsApp 360dialog (Cloud API compatible) ─────────────────────────────
+  app.get("/api/webhooks/360dialog/whatsapp", (req, res) => {
+    if (!whatsapp360dialogEnabled()) {
+      return res.status(503).send("WhatsApp disabled");
+    }
+    const mode = String(req.query["hub.mode"] || "");
+    const token = String(req.query["hub.verify_token"] || "");
+    const challenge = String(req.query["hub.challenge"] || "");
+    const expected = whatsapp360dialogVerifyToken();
+    if (mode === "subscribe" && expected && token === expected && challenge) {
+      return res.status(200).send(challenge);
+    }
+    res.status(403).send("Forbidden");
+  });
+
+  app.post("/api/webhooks/360dialog/whatsapp", async (req, res) => {
+    if (!whatsapp360dialogEnabled()) {
+      return res.status(503).json({ error: "WhatsApp disabled" });
+    }
+    try {
+      const parsed = parseWhatsapp360WebhookPayload(req.body);
+      for (const st of parsed.statuses) {
+        const providerStatus = mapWhatsapp360ProviderStatus(st.status);
+        await pool.query(
+          `UPDATE conversation_messages
+           SET provider_status = ?,
+               error_message = COALESCE(?, error_message)
+           WHERE provider_message_id = ? AND channel = 'whatsapp'`,
+          [providerStatus, st.errors, st.providerMessageId],
+        );
+      }
+      if (parsed.messages.length === 0) {
+        return res.json({ ok: true, messages: 0 });
+      }
+      const assigneeId = await resolveWhatsappAssigneeAdminId();
+      if (!assigneeId) {
+        console.warn(
+          "[whatsapp:360dialog] No assignee (set WHATSAPP_ASSIGNED_ADMIN_ID or César profile phone)",
+        );
+        return res.json({ ok: true, messages: 0, skipped: "no_assignee" });
+      }
+      for (const msg of parsed.messages) {
+        if (!msg.fromE164) continue;
+        const [dup] = await pool.query<RowDataPacket[]>(
+          `SELECT id FROM conversation_messages
+           WHERE provider_message_id = ? LIMIT 1`,
+          [msg.providerMessageId],
+        );
+        if (dup[0]) continue;
+
+        const preview = (msg.textBody || `[${msg.type}]`).slice(0, 200);
+        const clientId = await findClientIdByPhone(msg.fromE164);
+        let conversationId = 0;
+        let notifyLabel =
+          String(msg.profileName || "").trim() || msg.fromE164;
+        let linkUrl = "/admin/conversations";
+        let realtimeType: "message" | "inbound_unknown" = "message";
+        let realtimePayload: Record<string, unknown> = {};
+
+        if (clientId) {
+          conversationId = await getOrCreateClientChannelConversation({
+            clientId,
+            channel: "whatsapp",
+            ofgNumberId: null,
+            assignedAdminId: assigneeId,
+            reopenIfClosed: true,
+          });
+          await pool.query(
+            `UPDATE conversations
+             SET status = 'open',
+                 assigned_admin_id = COALESCE(assigned_admin_id, ?)
+             WHERE id = ?`,
+            [assigneeId, conversationId],
+          );
+          linkUrl = `/admin/conversations?client=${clientId}`;
+          realtimePayload = {
+            client_id: clientId,
+            conversation_id: conversationId,
+            contact: await conversationClientContactSnapshot(conversationId),
+          };
+          const snap = realtimePayload.contact as
+            | { display_name?: string }
+            | undefined;
+          if (snap?.display_name) notifyLabel = String(snap.display_name);
+        } else {
+          const crmContactId = await findContactIdByPhone(msg.fromE164);
+          if (crmContactId) {
+            conversationId = await getOrCreateCrmContactChannelConversation({
+              crmContactId,
+              channel: "whatsapp",
+              ofgNumberId: null,
+              assignedAdminId: assigneeId,
+              reopenIfClosed: true,
+            });
+            linkUrl = `/admin/conversations?contact=${crmContactId}`;
+            const contactSnap = await crmContactHubSnapshot(crmContactId);
+            realtimePayload = {
+              contact_id: crmContactId,
+              conversation_id: conversationId,
+              contact: contactSnap,
+            };
+            notifyLabel =
+              String(contactSnap?.display_name || "").trim() || msg.fromE164;
+          } else {
+            const { unknownId } = await findOrCreateOpenUnknownContact({
+              phoneRaw: msg.fromE164,
+              ofgNumberId: null,
+              assignedAdminId: assigneeId,
+            });
+            conversationId = await getOrCreateUnknownSmsConversation({
+              unknownContactId: unknownId,
+              ofgNumberId: null,
+              assignedAdminId: assigneeId,
+              reopenIfClosed: true,
+              channel: "whatsapp",
+            });
+            await pool.query(
+              `UPDATE conversation_unknown_contacts
+               SET last_message_at = NOW(), last_message_preview = ?,
+                   unread_count = unread_count + 1
+               WHERE id = ?`,
+              [preview, unknownId],
+            );
+            linkUrl = `/admin/conversations?unknown=${unknownId}`;
+            realtimeType = "inbound_unknown";
+            realtimePayload = {
+              unknown_contact_id: unknownId,
+              conversation_id: conversationId,
+              contact: await unknownContactSnapshot(unknownId),
+            };
+          }
+        }
+
+        await pool.query(
+          `INSERT INTO conversation_messages
+             (conversation_id, direction, channel, body,
+              from_address, to_address, provider_message_id, provider_status,
+              metadata_json)
+           VALUES (?, 'inbound', 'whatsapp', ?, ?, NULL, ?, 'received', ?)`,
+          [
+            conversationId,
+            msg.textBody || null,
+            msg.fromE164,
+            msg.providerMessageId,
+            JSON.stringify({
+              provider: "360dialog",
+              wa_type: msg.type,
+              profile_name: msg.profileName || null,
+            }),
+          ],
+        );
+        await pool.query(
+          `UPDATE conversations
+           SET last_message_at = NOW(), last_message_preview = ?,
+               unread_count = unread_count + 1, status = 'open'
+           WHERE id = ?`,
+          [preview, conversationId],
+        );
+        await publishConversationRealtime({
+          type: realtimeType,
+          adminIds: [assigneeId],
+          payload: realtimePayload,
+        });
+        await notifyAdminInboundSms({
+          adminId: assigneeId,
+          fromLabel: `WhatsApp · ${notifyLabel}`,
+          preview,
+          linkUrl,
+          providerMessageId: msg.providerMessageId,
+        });
+      }
+      res.json({ ok: true, messages: parsed.messages.length });
+    } catch (e: any) {
+      console.error("[whatsapp:360dialog:webhook]", e?.message || e);
+      res.status(500).json({ error: "Webhook failed" });
+    }
   });
 
   /**
@@ -46352,13 +57494,23 @@ function buildApp() {
           lang,
         });
         try {
-          await sendEmail({
+          await sendEmailLogged(
+            {
             to: clientEmail,
             subject: tpl.subject,
             html: tpl.html,
             attachments:
               attachPdf && pdfAttachment ? [pdfAttachment] : undefined,
-          });
+          },
+            {
+              kind: "round_report",
+              recipientType: "client",
+              clientId,
+              caseId: null,
+              roundNumber,
+              sentByAdminId: adminId,
+            },
+          );
           emailSent = true;
         } catch (e: any) {
           return res.status(500).json({
@@ -46375,6 +57527,8 @@ function buildApp() {
           alsoSms: true,
           portalUrl: securePdfUrl,
           smsFromAdminId: adminId,
+          roundNumber,
+          staffInitiated: true,
         }).catch((e: any) => {
           console.error("[round-pdf-resend] sms", e?.message ?? e);
           return { sent: false, reason: "error" as string };
@@ -46386,6 +57540,8 @@ function buildApp() {
         partnersEmailed = await emailLinkedReferrerPartnersRoundPdf({
           clientId,
           roundNumber,
+          caseId: null,
+          sentByAdminId: adminId,
           clientName: clientName || "Client",
           langFallback: lang,
           pdfAttachment,
@@ -47300,11 +58456,13 @@ function buildApp() {
         let messages: RowDataPacket[] = [];
         if (convIds.length) {
           const [m] = await pool.query<RowDataPacket[]>(
-            `SELECT m.*, CONCAT(a.first_name,' ',a.last_name) AS sent_by_admin_name
-             FROM conversation_messages m
-             LEFT JOIN admins a ON a.id = m.sent_by_admin_id
-             WHERE m.conversation_id IN (?)
-             ORDER BY m.id ASC LIMIT 500`,
+            `SELECT * FROM (
+               SELECT m.*, CONCAT(a.first_name,' ',a.last_name) AS sent_by_admin_name
+               FROM conversation_messages m
+               LEFT JOIN admins a ON a.id = m.sent_by_admin_id
+               WHERE m.conversation_id IN (?)
+               ORDER BY m.id DESC LIMIT 500
+             ) newest ORDER BY newest.id ASC` /* newest 500, oldest→newest */,
             [convIds],
           );
           messages = m;
@@ -47336,11 +58494,13 @@ function buildApp() {
         let messages: RowDataPacket[] = [];
         if (convIds.length) {
           const [m] = await pool.query<RowDataPacket[]>(
-            `SELECT m.*, CONCAT(a.first_name,' ',a.last_name) AS sent_by_admin_name
-             FROM conversation_messages m
-             LEFT JOIN admins a ON a.id = m.sent_by_admin_id
-             WHERE m.conversation_id IN (?)
-             ORDER BY m.id ASC LIMIT 500`,
+            `SELECT * FROM (
+               SELECT m.*, CONCAT(a.first_name,' ',a.last_name) AS sent_by_admin_name
+               FROM conversation_messages m
+               LEFT JOIN admins a ON a.id = m.sent_by_admin_id
+               WHERE m.conversation_id IN (?)
+               ORDER BY m.id DESC LIMIT 500
+             ) newest ORDER BY newest.id ASC` /* newest 500, oldest→newest */,
             [convIds],
           );
           messages = m;
@@ -47382,11 +58542,13 @@ function buildApp() {
       let messages: RowDataPacket[] = [];
       if (convIds.length) {
         const [m] = await pool.query<RowDataPacket[]>(
-          `SELECT m.*, CONCAT(a.first_name,' ',a.last_name) AS sent_by_admin_name
-           FROM conversation_messages m
-           LEFT JOIN admins a ON a.id = m.sent_by_admin_id
-           WHERE m.conversation_id IN (?)
-           ORDER BY m.id ASC LIMIT 500`,
+          `SELECT * FROM (
+             SELECT m.*, CONCAT(a.first_name,' ',a.last_name) AS sent_by_admin_name
+             FROM conversation_messages m
+             LEFT JOIN admins a ON a.id = m.sent_by_admin_id
+             WHERE m.conversation_id IN (?)
+             ORDER BY m.id DESC LIMIT 500
+           ) newest ORDER BY newest.id ASC` /* newest 500, oldest→newest */,
           [convIds],
         );
         messages = m;
@@ -47488,11 +58650,16 @@ function buildApp() {
             .json({ error: "Recording not available yet" });
         }
 
-        // Force re-queue even from ready (e.g. transcript-only, Claude retry).
+        // Force re-queue even from ready. Drop the prior Twilio job id so
+        // Retry submits a new transcription instead of polling a finished one.
         await pool.query(
           `UPDATE conversation_messages
            SET call_insights_status = 'pending',
                call_insights_error = NULL,
+               metadata_json = JSON_REMOVE(
+                 COALESCE(metadata_json, JSON_OBJECT()),
+                 '$.twilio_transcription_id'
+               ),
                call_insights_updated_at = NOW()
            WHERE id = ? AND channel = 'call'`,
           [messageId],
@@ -47723,7 +58890,7 @@ function buildApp() {
           return res.status(404).json({ error: msg });
         }
         if (
-          /required|unsupported|internal notes|invalid media|expired|exceeds/i.test(
+          /required|unsupported|internal notes|invalid media|expired|exceeds|WhatsApp not enabled/i.test(
             msg,
           )
         ) {
@@ -47751,16 +58918,28 @@ function buildApp() {
           channel,
           is_internal_note,
         } = req.body || {};
+        const ch = String(channel || "sms");
+        const isWhatsapp = ch === "whatsapp";
         if (!phoneRaw) {
           return res.status(400).json({ error: "phone is required" });
         }
         if (!textBody.trim() && !media_url) {
           return res.status(400).json({ error: "body or media required" });
         }
+        if (isWhatsapp && media_url) {
+          return res
+            .status(400)
+            .json({ error: "Media attachments are SMS only" });
+        }
         if (!normalizePhoneLast10(phoneRaw)) {
           return res.status(400).json({
             error: "phone must include at least 10 digits",
           });
+        }
+        if (isWhatsapp && !(await adminMayUseWhatsapp(req.auth!.id))) {
+          return res
+            .status(403)
+            .json({ error: "WhatsApp not enabled for this account" });
         }
         const assigned = await listAssignedPhoneNumbers(req.auth!.id);
         const ofgNumberId =
@@ -47770,8 +58949,9 @@ function buildApp() {
               ? Number(assigned[0].id)
               : null;
         if (
-          !ofgNumberId ||
-          !assigned.some((n) => Number(n.id) === ofgNumberId)
+          !isWhatsapp &&
+          (!ofgNumberId ||
+            !assigned.some((n) => Number(n.id) === ofgNumberId))
         ) {
           return res.status(400).json({
             error: "No OFG phone number assigned — cannot send SMS",
@@ -47781,19 +58961,20 @@ function buildApp() {
           media_url != null && String(media_url).trim()
             ? String(media_url).trim()
             : null;
-        const mediaUrl = mediaUrlRaw
-          ? await resolveConversationOutboundMedia(mediaUrlRaw)
-          : null;
+        const mediaUrl =
+          !isWhatsapp && mediaUrlRaw
+            ? await resolveConversationOutboundMedia(mediaUrlRaw)
+            : null;
 
         const existingClientId = await findClientIdByPhone(phoneRaw);
         if (existingClientId) {
           const result = await deliverHubConversationMessage({
             adminId: req.auth!.id,
             clientId: existingClientId,
-            channel: String(channel || "sms"),
+            channel: isWhatsapp ? "whatsapp" : String(channel || "sms"),
             textBody,
             isInternalNote: !!is_internal_note,
-            ofgNumberId,
+            ofgNumberId: isWhatsapp ? null : ofgNumberId,
             mediaUrl,
             mediaContentType: media_content_type,
           });
@@ -47805,9 +58986,9 @@ function buildApp() {
           const result = await deliverHubConversationMessage({
             adminId: req.auth!.id,
             crmContactId: existingContactId,
-            channel: "sms",
+            channel: isWhatsapp ? "whatsapp" : "sms",
             textBody,
-            ofgNumberId,
+            ofgNumberId: isWhatsapp ? null : ofgNumberId,
             mediaUrl,
             mediaContentType: media_content_type,
           });
@@ -47817,16 +58998,16 @@ function buildApp() {
         const { unknownId, created, phoneE164 } =
           await findOrCreateOpenUnknownContact({
             phoneRaw,
-            ofgNumberId,
+            ofgNumberId: isWhatsapp ? null : ofgNumberId,
             assignedAdminId: req.auth!.id,
           });
         // deliverHub owns getOrCreate (with reopenIfClosed:false) after closed gate
         const result = await deliverHubConversationMessage({
           adminId: req.auth!.id,
           unknownContactId: unknownId,
-          channel: "sms",
+          channel: isWhatsapp ? "whatsapp" : "sms",
           textBody,
-          ofgNumberId,
+          ofgNumberId: isWhatsapp ? null : ofgNumberId,
           mediaUrl,
           mediaContentType: media_content_type,
         });
@@ -47847,7 +59028,11 @@ function buildApp() {
         if (/not found/i.test(msg)) {
           return res.status(404).json({ error: msg });
         }
-        if (/required|invalid media|expired|digits|exceeds/i.test(msg)) {
+        if (
+          /required|invalid media|expired|digits|exceeds|WhatsApp not enabled/i.test(
+            msg,
+          )
+        ) {
           return res.status(400).json({ error: msg });
         }
         console.error("[conversations:start]", msg);
@@ -51542,6 +62727,22 @@ function buildApp() {
   // ============================================================
   // WEBHOOKS — Twilio inbound SMS / voice
   // ============================================================
+  app.post("/api/webhooks/twilio/call-transcript", async (req, res) => {
+    if (!process.env.TWILIO_AUTH_TOKEN && IS_PROD) {
+      return res.status(503).json({ ok: false });
+    }
+    if (!isValidTwilioJsonWebhook(req)) {
+      console.warn("[twilio:call-transcript] Invalid or missing signature");
+      return res.status(403).json({ ok: false });
+    }
+    try {
+      await applyTwilioCallTranscriptPayload(req.body);
+    } catch (e: any) {
+      console.warn("[twilio:call-transcript]", e?.message ?? e);
+    }
+    return res.status(200).json({ ok: true });
+  });
+
   app.post("/api/webhooks/twilio/sms", async (req, res) => {
     if (!process.env.TWILIO_AUTH_TOKEN && IS_PROD) {
       res.set("Content-Type", "text/xml");
@@ -51653,6 +62854,31 @@ function buildApp() {
             contact: contactSnap,
           },
         });
+        const contactFromLabel =
+          String(contactSnap?.display_name || "").trim() || from;
+        scheduleInboundAiWork(async () => {
+          const aiContact = await tryProcessInboundAiSms({
+            conversationId,
+            ofgNumberId,
+            assignedAdminId: assigneeId,
+            crmContactId,
+            fromE164: from,
+            toE164: to,
+            inboundBody: body,
+            fromLabel: contactFromLabel,
+            linkUrl: `/admin/conversations?contact=${crmContactId}`,
+            providerMessageId: sid || null,
+          });
+          if (!aiContact.tookOver && assigneeId) {
+            await notifyAdminInboundSms({
+              adminId: assigneeId,
+              fromLabel: contactFromLabel,
+              preview,
+              linkUrl: `/admin/conversations?contact=${crmContactId}`,
+              providerMessageId: sid || null,
+            });
+          }
+        });
         return res.type("text/xml").send("<Response></Response>");
       }
       // Unknown queue
@@ -51746,18 +62972,30 @@ function buildApp() {
         },
       });
 
-      if (assigneeId) {
-        await notifyAdminInboundSms({
-          adminId: assigneeId,
+      scheduleInboundAiWork(async () => {
+        const aiUnknown = await tryProcessInboundAiSms({
+          conversationId,
+          ofgNumberId,
+          assignedAdminId: assigneeId,
+          unknownContactId: unknownId,
+          fromE164: from,
+          toE164: to,
+          inboundBody: body,
           fromLabel: from,
-          preview,
           linkUrl: `/admin/conversations?unknown=${unknownId}`,
           providerMessageId: sid || null,
-          unknownContactId: unknownId,
-        }).catch((e) =>
-          console.warn("[notify:inbound_sms:unknown]", e?.message ?? e),
-        );
-      }
+        });
+        if (!aiUnknown.tookOver && assigneeId) {
+          await notifyAdminInboundSms({
+            adminId: assigneeId,
+            fromLabel: from,
+            preview,
+            linkUrl: `/admin/conversations?unknown=${unknownId}`,
+            providerMessageId: sid || null,
+            unknownContactId: unknownId,
+          });
+        }
+      });
 
       res.set("Content-Type", "text/xml");
       return res.send("<Response/>");
@@ -51838,24 +63076,42 @@ function buildApp() {
       },
     });
 
-    if (notifyAdmin) {
-      const [clRows] = await pool.query<RowDataPacket[]>(
-        `SELECT first_name, last_name FROM clients WHERE id = ? LIMIT 1`,
-        [clientId],
-      );
-      const fromLabel =
-        String(
-          `${clRows[0]?.first_name || ""} ${clRows[0]?.last_name || ""}`,
-        ).trim() || from;
-      await notifyAdminInboundSms({
-        adminId: notifyAdmin,
+    const [clRows] = await pool.query<RowDataPacket[]>(
+      `SELECT first_name, last_name FROM clients WHERE id = ? LIMIT 1`,
+      [clientId],
+    );
+    const fromLabel =
+      String(
+        `${clRows[0]?.first_name || ""} ${clRows[0]?.last_name || ""}`,
+      ).trim() || from;
+
+    scheduleInboundAiWork(async () => {
+      // Gate AI on OFG line owner (assigneeId), not conversation.assigned_admin_id —
+      // a reassigned thread must not run AI on Lecca/Angel lines during César-only rollout,
+      // and must not skip AI on César's line when the thread assignee differs.
+      const aiClient = await tryProcessInboundAiSms({
+        conversationId,
+        ofgNumberId,
+        assignedAdminId: assigneeId,
+        clientId,
+        fromE164: from,
+        toE164: to,
+        inboundBody: body,
         fromLabel,
-        preview,
         linkUrl: `/admin/conversations?client=${clientId}`,
         providerMessageId: sid || null,
-        clientId,
-      }).catch((e) => console.warn("[notify:inbound_sms]", e?.message ?? e));
-    }
+      });
+      if (!aiClient.tookOver && notifyAdmin) {
+        await notifyAdminInboundSms({
+          adminId: notifyAdmin,
+          fromLabel,
+          preview,
+          linkUrl: `/admin/conversations?client=${clientId}`,
+          providerMessageId: sid || null,
+          clientId,
+        });
+      }
+    });
 
     res.set("Content-Type", "text/xml");
     res.send("<Response/>");
@@ -51960,7 +63216,8 @@ function buildApp() {
        ORDER BY FIELD(rf.trigger_event,
          'payment_confirmed','docs_ready',
          'round_1_complete','round_2_complete','round_3_complete',
-         'round_4_complete','round_5_complete','completed')`,
+         'round_4_complete','round_5_complete','round_extended_complete',
+         'completed','payment_due','event_registered')`,
       );
       const flows = rows.map((r) => ({
         ...r,
@@ -52043,7 +63300,10 @@ function buildApp() {
         "round_3_complete",
         "round_4_complete",
         "round_5_complete",
+        "round_extended_complete",
         "completed",
+        "payment_due",
+        "event_registered",
       ];
       if (!allowed.includes(trigger_event))
         return res.status(400).json({ error: "Invalid trigger_event" });
@@ -52505,6 +63765,25 @@ function buildApp() {
                 : "";
             const triggerEvent =
               triggerEventExplicit || "payment_confirmed";
+            // paused / blocked: drop queued client-facing reminders (never
+            // staff alerts that merely reference the client).
+            const hold = clientId > 0 ? await getClientAutomationHold(clientId) : null;
+            if (
+              hold &&
+              hold.email &&
+              String(row.to_address || "").trim().toLowerCase() === hold.email
+            ) {
+              await pool.query<ResultSetHeader>(
+                `UPDATE notification_queue
+                 SET status = 'cancelled',
+                     provider_message_id = NULL,
+                     error_message = ?
+                 WHERE id = ?`,
+                [`Skipped: client is ${hold.status} (automations on hold)`, qid],
+              );
+              suppressed++;
+              continue;
+            }
             // Soft-skip Day 2/3 upload nudges once Get Started is submitted
             // (pending QC) or the case has left New Client — do not SMS either.
             if (
@@ -52723,6 +64002,20 @@ function buildApp() {
         console.error("[cron:call-insights]", e?.message ?? e);
       }
 
+      let creditFiles = { submitted: 0, completed: 0, failed: 0 };
+      try {
+        creditFiles = await processCreditFileExtractions();
+      } catch (e: any) {
+        console.error("[cron:credit-files]", e?.message ?? e);
+      }
+
+      let prospectTemperature = { checked: 0, changed: 0, alerts: 0 };
+      try {
+        prospectTemperature = await recomputeProspectTemperatures();
+      } catch (e: any) {
+        console.error("[cron:prospect-temperature]", e?.message ?? e);
+      }
+
       return res.json({
         ok: true,
         processed: rows.length,
@@ -52734,6 +64027,8 @@ function buildApp() {
         work_due_notified: workDueNotified,
         mms_expired_deleted: mmsExpiredDeleted,
         call_insights: callInsights,
+        credit_files: creditFiles,
+        prospect_temperature: prospectTemperature,
       });
     } catch (e: any) {
       console.error("[cron:process-queue]", e?.message ?? e);
@@ -54542,6 +65837,23 @@ function buildApp() {
         progressAfter.completed >= progressAfter.required;
       if (isReady && !wasReady) {
         try {
+          const reviewTask = await openDocsReviewWorkTask({
+            clientId,
+            caseId: activeCaseId,
+          });
+          if (reviewTask?.assigneeId) {
+            void notifyWorkTaskAssignee({
+              assigneeId: reviewTask.assigneeId,
+              title: reviewTask.title,
+              // 0 = system (never equals a real admin, so the assignee is notified)
+              assignerId: 0,
+              taskId: reviewTask.taskId,
+            });
+          }
+        } catch (e: any) {
+          console.error("[docs-review-task:open]", e?.message ?? e);
+        }
+        try {
           await notifyAdminsClientSubmission({
             clientId,
             caseId: activeCaseId,
@@ -56068,6 +67380,29 @@ function buildApp() {
           [beforePdfId, afterPdfId, sessionId],
         );
 
+        // Enhancement: read Before + After at account level in the background
+        // so Preview / Publish can append the account-detail pages. Never
+        // changes this request's response or timing.
+        for (const [purpose, buf, name] of [
+          ["progress_before", beforeBuffer, beforeFileName],
+          ["progress_after", afterFile.buffer, afterFile.originalname],
+        ] as const) {
+          waitUntil(
+            createCreditFileExtraction({
+              buffer: buf,
+              mimeType: "application/pdf",
+              fileName: name || `${purpose}.pdf`,
+              clientId,
+              caseId,
+              reportWizardSessionId: sessionId,
+              purpose,
+              adminId: req.auth!.id,
+            }).catch((e: any) =>
+              console.error("[report-wizard:enhanced-queue]", sessionId, purpose, e?.message ?? e),
+            ),
+          );
+        }
+
         if (stagedBeforeConsumedId) {
           await pool.query(
             `UPDATE report_wizard_staged_pdfs SET consumed_at = NOW() WHERE id = ?`,
@@ -56377,10 +67712,16 @@ function buildApp() {
       }
 
       try {
-        const { buffer, fileName } = await generateOfgProgressReportPdf(
+        const v2 = await renderProgressReportV2ForSession(
+          sessionId,
           data,
-          `${data.client.firstName}_OFG_Preview.pdf`,
+          Number(session.round_number) || 1,
         );
+        const fileName = v2.fileName;
+        const buffer = v2.buffer;
+        // Review flags (validation layer) for the wizard; delivery is gated on publish.
+        res.set("X-Report-Review-Flags", encodeURIComponent(JSON.stringify(v2.flags)));
+        res.set("Access-Control-Expose-Headers", "X-Report-Review-Flags, X-Compliance-Warnings");
         res.set("Content-Type", "application/pdf");
         res.set("Content-Disposition", `inline; filename="${fileName}"`);
         res.set("Cache-Control", "no-store");
@@ -56524,6 +67865,28 @@ function buildApp() {
       const roundNumber = session.round_number as number;
       const adminId = req.auth!.id;
 
+      // Progress Report v2: generate first (never stops), then gate delivery.
+      // Review flags → only the language owner (EN Lecca / ES Angel) or a
+      // super admin may publish; internal notes go to the client file.
+      const v2 = await renderProgressReportV2ForSession(sessionId, data, roundNumber);
+      const blocking = v2.flags.filter((f) => f.code !== "internal_note");
+      if (blocking.length) {
+        const reportLang = data.locale === "es" ? "es" : "en";
+        const ownerId = await resolveLanguageOwnerAdminId(reportLang);
+        const [meRows] = await pool.query<RowDataPacket[]>(
+          `SELECT role FROM admins WHERE id = ? LIMIT 1`,
+          [adminId],
+        );
+        const approver = adminId === ownerId || meRows[0]?.role === "super_admin";
+        if (!approver) {
+          return res.status(409).json({
+            error: `Needs review before delivery — ${reportLang === "es" ? "Spanish reports are approved by the Spanish owner" : "English reports are approved by the English owner"}`,
+            code: "needs_review",
+            issues: blocking.map((f) => f.message),
+          });
+        }
+      }
+
       const [lockResult] = await pool.query<ResultSetHeader>(
         `UPDATE report_wizard_sessions
          SET status = 'generating', updated_at = NOW()
@@ -56545,10 +67908,17 @@ function buildApp() {
       let newStage = "";
 
       try {
-        const pdfResult = await generateOfgProgressReportPdf(
-          data,
-          `${data.client.firstName}_OFG_Progress_Report_${new Date().toISOString().slice(0, 7)}.pdf`,
-        );
+        const pdfResult = { fileName: v2.fileName, buffer: v2.buffer };
+        // Internal notes (re-reports, new inquiries, late-count increases,
+        // unverified movement) → client file, never the client PDF.
+        const notes = v2.flags.filter((f) => f.code === "internal_note" || f.code === "unverified_movement");
+        if (notes.length) {
+          await appendClientAdminNote(
+            clientId,
+            adminId,
+            `Progress Report R${roundNumber} internal notes: ${notes.map((f) => f.message).join(" | ")}`,
+          ).catch((e) => console.warn("[report-v2:notes]", e?.message ?? e));
+        }
         fileName = pdfResult.fileName;
         const {
           encrypted,
@@ -56915,6 +68285,8 @@ function buildApp() {
           partnersEmailedCount = await emailLinkedReferrerPartnersRoundPdf({
             clientId,
             roundNumber,
+            caseId: Number(session.case_id) || null,
+            sentByAdminId: adminId,
             clientName,
             langFallback:
               session.preferred_language === "es" ? "es" : "en",
@@ -56981,12 +68353,22 @@ function buildApp() {
             lang,
           });
           if (session.email) {
-            await sendEmail({
-              to: session.email as string,
-              subject: tpl.subject,
-              html: tpl.html,
-              attachments: pdfAttachment ? [pdfAttachment] : undefined,
-            }).catch(() => null);
+            await sendEmailLogged(
+              {
+                to: session.email as string,
+                subject: tpl.subject,
+                html: tpl.html,
+                attachments: pdfAttachment ? [pdfAttachment] : undefined,
+              },
+              {
+                kind: "round_report",
+                recipientType: "client",
+                clientId,
+                caseId: Number(session.case_id) || null,
+                roundNumber,
+                sentByAdminId: adminId,
+              },
+            ).catch(() => null);
           }
           if (session.phone) {
             await maybeSendClientReminderSms({
@@ -56995,6 +68377,7 @@ function buildApp() {
               alsoSms: true,
               portalUrl: downloadCta,
               smsFromAdminId: adminId,
+              roundNumber,
             }).catch(() => null);
           }
           clientNotify = "safety_fallback";
@@ -57041,6 +68424,16 @@ function buildApp() {
             console.error("[progress_report_alerts]", e?.message ?? e),
           );
         }
+
+        notifyRoundAuditAlert({
+          clientId,
+          caseId,
+          roundNumber,
+          maxRounds,
+          clientName:
+            `${profile.first_name || ""} ${profile.last_name || ""}`.trim() ||
+            `Client #${clientId}`,
+        }).catch((e: any) => console.error("[round-audit-alert]", e?.message ?? e));
 
         if (process.env.CRC_SYNC_STAGES !== "false") {
           crcSyncClient(clientId).catch((e) =>
@@ -57242,6 +68635,8 @@ function buildApp() {
 // ============================================================================
 
 export {
+  progressReportV2PdfFromReview,
+  recomputeProspectTemperatures,
   pipelineStageAfterRoundReport,
   validatePdfUploadPair,
   validatePublishRound,
@@ -57276,6 +68671,7 @@ export {
   adminAiBuildCrmHref,
   resolveLanguageOwnerAdminId,
   matchStaffAdmins,
+  flushInboundAiJobs,
   isDuplicateKeyError,
   mapFriendlyError,
   classifyNegativeLine,
@@ -57382,10 +68778,11 @@ type VoiceRouteDeps = {
     ofgNumberId?: number | null;
     assignedAdminId?: number | null;
     reopenIfClosed?: boolean;
+    channel?: "sms" | "whatsapp";
   }) => Promise<number>;
   findOrCreateOpenUnknownContact: (opts: {
     phoneRaw: string;
-    ofgNumberId: number;
+    ofgNumberId?: number | null;
     assignedAdminId: number;
   }) => Promise<{ unknownId: number; created: boolean; phoneE164: string }>;
   publishConversationRealtime: (event: {
@@ -57763,6 +69160,7 @@ async function getOrCreateCallConversation(
 ): Promise<{
   conversationId: number;
   clientId: number | null;
+  contactId: number | null;
   unknownContactId: number | null;
 }> {
   const reopenIfClosed = opts.reopenIfClosed !== false;
@@ -57775,7 +69173,12 @@ async function getOrCreateCallConversation(
       assignedAdminId: opts.assignedAdminId,
       reopenIfClosed,
     });
-    return { conversationId, clientId, unknownContactId: null };
+    return {
+      conversationId,
+      clientId,
+      contactId: null,
+      unknownContactId: null,
+    };
   }
 
   const crmContactId = await findContactIdByPhone(opts.callerPhone);
@@ -57790,6 +69193,7 @@ async function getOrCreateCallConversation(
     return {
       conversationId,
       clientId: null,
+      contactId: crmContactId,
       unknownContactId: null,
     };
   }
@@ -57806,6 +69210,7 @@ async function getOrCreateCallConversation(
     return {
       conversationId: Number(ins.insertId),
       clientId: null,
+      contactId: null,
       unknownContactId: null,
     };
   }
@@ -57836,6 +69241,7 @@ async function getOrCreateCallConversation(
     return {
       conversationId: id,
       clientId: null,
+      contactId: null,
       unknownContactId: unknownId,
     };
   }
@@ -57860,8 +69266,79 @@ async function getOrCreateCallConversation(
   return {
     conversationId,
     clientId: null,
+    contactId: null,
     unknownContactId: unknownId,
   };
+}
+
+// ── Three-way calls (Twilio Conference) — pure helpers ──────────────────────
+
+export interface ThreeWayPreset {
+  label: string;
+  number: string;
+}
+
+/**
+ * Quick-dial third parties for "Add caller" (e.g. SmartCredit, MyFreeScoreNow
+ * support lines). VOICE_THREE_WAY_PRESETS = JSON [{"label":"…","number":"+1…"}].
+ * Invalid entries are dropped; never throws.
+ */
+export function parseThreeWayPresets(env: NodeJS.ProcessEnv = process.env): ThreeWayPreset[] {
+  try {
+    const raw = JSON.parse(String(env.VOICE_THREE_WAY_PRESETS || "[]"));
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .map((p: any) => ({
+        label: String(p?.label || "").trim().slice(0, 80),
+        number: normalizeThreeWayNumber(String(p?.number || "")) || "",
+      }))
+      .filter((p) => p.label && p.number)
+      .slice(0, 10);
+  } catch {
+    return [];
+  }
+}
+
+/** US/Canada E.164 only (+1 and 10 digits) for the third-party leg; else null. */
+export function normalizeThreeWayNumber(raw: string): string | null {
+  const digits = String(raw || "").replace(/\D/g, "");
+  if (digits.length === 10 && /^[2-9]/.test(digits)) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith("1") && /^[2-9]/.test(digits[1])) return `+${digits}`;
+  return null;
+}
+
+/** DTMF accepted by <Play digits>: 0-9 * # and w (half-second pause). */
+export function sanitizeThreeWayDigits(raw: string): string | null {
+  const d = String(raw || "").replace(/\s+/g, "");
+  return d && d.length <= 32 && /^[0-9*#w]+$/.test(d) ? d : null;
+}
+
+/** TwiML that puts a leg into the three-way conference (recorded). */
+export function threeWayConferenceTwiml(opts: {
+  name: string;
+  baseUrl: string;
+  endConferenceOnExit: boolean;
+}): string {
+  const VoiceResponse = twilio.twiml.VoiceResponse;
+  const twiml = new VoiceResponse();
+  const dial = twiml.dial();
+  dial.conference(
+    {
+      startConferenceOnEnter: true,
+      endConferenceOnExit: opts.endConferenceOnExit,
+      beep: "false",
+      waitUrl: "",
+      record: "record-from-start",
+      recordingStatusCallback: `${opts.baseUrl}/api/voice/three-way/recording-status`,
+      recordingStatusCallbackMethod: "POST",
+      recordingStatusCallbackEvent: ["completed"],
+      statusCallback: `${opts.baseUrl}/api/voice/three-way/conference-status`,
+      statusCallbackMethod: "POST",
+      statusCallbackEvent: ["start", "end"],
+    } as any,
+    opts.name,
+  );
+  return twiml.toString();
 }
 
 async function insertCallMessage(
@@ -58150,7 +69627,7 @@ async function notifyAssignedAdmin(
 }
 
 
-/** Call insights (answered calls + voicemails → STT → Claude resume).
+/** Call transcripts (Twilio batch STT). Insights/Claude are not generated.
  * Pure helpers below are inlined for Vercel — keep in sync with api/callInsights.ts
  * (unit tests import the sibling; do NOT runtime-import it from this file).
  */
@@ -58339,102 +69816,90 @@ type CallInsightsPayload = {
   generated_at?: string;
 };
 
-const CALL_INSIGHTS_SYSTEM = `You are Optimum Financial Group's call analyst for credit-repair staff.
-Given a call or voicemail transcript, return ONLY a JSON object (no markdown) with:
-{
-  "summary_bullets": ["...", "..."],
-  "sentiment": {
-    "label": "positive|neutral|negative|mixed|anxious|frustrated|hopeful|confused|angry",
-    "score": 0.0-1.0,
-    "feelings": ["...", "..."]
-  },
-  "topics": ["..."],
-  "action_items": ["..."],
-  "risk_flags": ["..."],
-  "interesting": ["..."]
+/** Recording SID from a Twilio recording URL. Keep in sync with api/callInsights.ts. */
+function twilioRecordingSidFromUrl(
+  url: string | null | undefined,
+): string | null {
+  const m = String(url || "").match(
+    /\/(RE[0-9a-f]{32})(?:\.[a-z0-9]+)?(?:[?#]|$)/i,
+  );
+  return m ? m[1] : null;
 }
-Rules:
-- Be factual; do not invent names, amounts, or promises not in the transcript.
-- Prefer the transcript language for feelings words; summary_bullets follow locale hint.
-- If transcript is empty/garbled, still return JSON with cautious neutral sentiment and one bullet noting poor audio.`;
 
-/** When STT produced no transcript yet, decide next pipeline status. */
-function decideMissingTranscriptOutcome(args: {
+/** Flatten Twilio batch `sentences` into a readable transcript. */
+function transcriptTextFromTwilioSentences(sentences: unknown): string {
+  if (!Array.isArray(sentences)) return "";
+  const rows: { start: number; index: number; line: string }[] = [];
+  sentences.forEach((s, i) => {
+    if (!s || typeof s !== "object") return;
+    const o = s as Record<string, unknown>;
+    const text = String(o.text || "").trim();
+    if (!text) return;
+    const ch = Number(o.audioChannelIndex ?? o.audio_channel_index);
+    const who = ch === 2 ? "Agent" : ch === 1 ? "Caller" : "";
+    const startRaw = Number(o.startTimeSeconds ?? o.start_time);
+    const indexRaw = Number(o.sentenceIndex ?? o.sentence_index);
+    rows.push({
+      start: Number.isFinite(startRaw) ? startRaw : i,
+      index: Number.isFinite(indexRaw) ? indexRaw : i,
+      line: who ? `${who}: ${text}` : text,
+    });
+  });
+  rows.sort((a, b) => a.start - b.start || a.index - b.index);
+  return rows
+    .map((r) => r.line)
+    .join("\n")
+    .slice(0, 65000);
+}
+
+/** Map a Twilio transcription HTTP error to a stable pipeline code. */
+function twilioTranscriptionErrorCode(
+  httpStatus: number,
+  body: unknown,
+): "twilio_ai_addendum" | "twilio_stt_failed" | null {
+  if (!(httpStatus >= 400)) return null;
+  const o =
+    body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+  const code = Number(o.code);
+  const message = String(o.message || "");
+  if (httpStatus === 403 && (code === 46009 || /addendum/i.test(message))) {
+    return "twilio_ai_addendum";
+  }
+  return "twilio_stt_failed";
+}
+
+/**
+ * When there is no transcript yet, decide whether to submit the recording,
+ * keep waiting on a voicemail callback, or stop.
+ * Keep in sync with api/callInsights.ts.
+ */
+function decideMissingRecordingOutcome(args: {
   isVoicemail: boolean;
-  hasOpenAi: boolean;
+  hasRecordingSid: boolean;
   ageMs: number;
   maxWaitMs?: number;
 }):
+  | { action: "transcribe" }
   | { action: "await_twilio" }
-  | { action: "fail"; status: "failed"; error: "stt_empty" }
-  | { action: "skip"; status: "skipped"; error: "missing_openai_stt" } {
+  | {
+      action: "fail";
+      status: "failed";
+      error: "invalid_recording" | "stt_empty";
+    } {
+  if (args.hasRecordingSid) return { action: "transcribe" };
   const maxWait = args.maxWaitMs ?? CALL_INSIGHTS_TWILIO_TRANSCRIPT_WAIT_MS;
-  if (args.isVoicemail && !args.hasOpenAi) {
-    if (Number.isFinite(args.ageMs) && args.ageMs < maxWait) {
-      return { action: "await_twilio" };
-    }
+  if (
+    args.isVoicemail &&
+    Number.isFinite(args.ageMs) &&
+    args.ageMs >= 0 &&
+    args.ageMs < maxWait
+  ) {
+    return { action: "await_twilio" };
   }
-  if (args.hasOpenAi) {
+  if (args.isVoicemail) {
     return { action: "fail", status: "failed", error: "stt_empty" };
   }
-  return { action: "skip", status: "skipped", error: "missing_openai_stt" };
-}
-
-function parseCallInsightsJson(
-  text: string,
-  locale: "en" | "es",
-): CallInsightsPayload | null {
-  const raw = String(text || "").trim();
-  if (!raw) return null;
-  const match = raw.match(/\{[\s\S]*\}/);
-  if (!match) return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(match[0]);
-  } catch {
-    return null;
-  }
-  if (!parsed || typeof parsed !== "object") return null;
-  const o = parsed as Record<string, unknown>;
-  const asStrArr = (v: unknown, max: number, maxLen: number): string[] =>
-    (Array.isArray(v) ? v : [])
-      .map((x) => String(x || "").trim().slice(0, maxLen))
-      .filter(Boolean)
-      .slice(0, max);
-  const sent = (o.sentiment || {}) as Record<string, unknown>;
-  const labelRaw = String(sent.label || "neutral").toLowerCase();
-  const allowed: CallInsightSentimentLabel[] = [
-    "positive",
-    "neutral",
-    "negative",
-    "mixed",
-    "anxious",
-    "frustrated",
-    "hopeful",
-    "confused",
-    "angry",
-  ];
-  const label = (
-    allowed.includes(labelRaw as CallInsightSentimentLabel)
-      ? labelRaw
-      : "neutral"
-  ) as CallInsightSentimentLabel;
-  let score = Number(sent.score);
-  if (!Number.isFinite(score)) score = 0.5;
-  score = Math.max(0, Math.min(1, score));
-  return {
-    locale,
-    summary_bullets: asStrArr(o.summary_bullets, 6, 220),
-    sentiment: {
-      label,
-      score,
-      feelings: asStrArr(sent.feelings, 5, 40),
-    },
-    topics: asStrArr(o.topics, 8, 80),
-    action_items: asStrArr(o.action_items, 6, 200),
-    risk_flags: asStrArr(o.risk_flags, 8, 60),
-    interesting: asStrArr(o.interesting, 5, 220),
-  };
+  return { action: "fail", status: "failed", error: "invalid_recording" };
 }
 
 async function pullAndAttachTwilioRecording(
@@ -58573,112 +70038,273 @@ async function enqueueCallInsightsByProviderId(
   if (rows[0]?.id) await enqueueAndProcessCallInsights(Number(rows[0].id));
 }
 
-async function whisperTranscribeCallAudio(
-  mp3Url: string,
-): Promise<string | null> {
-  const openaiKey = String(process.env.OPENAI_API_KEY || "").trim();
-  if (!openaiKey) return null;
+const TWILIO_TRANSCRIPTION_CONFIG_NAME = "ofg_call_transcript";
+let cachedTwilioTranscriptionConfigId: string | null = null;
+
+function twilioVoiceAuthHeader(): string | null {
+  const key = String(process.env.TWILIO_API_KEY || "").trim();
+  const secret = String(process.env.TWILIO_API_SECRET || "").trim();
+  if (key && secret) {
+    return `Basic ${Buffer.from(`${key}:${secret}`).toString("base64")}`;
+  }
   const sid = String(process.env.TWILIO_ACCOUNT_SID || "").trim();
   const token = String(process.env.TWILIO_AUTH_TOKEN || "").trim();
-  if (!sid || !token) return null;
-  const auth = Buffer.from(`${sid}:${token}`).toString("base64");
-  const audioRes = await axios.get(mp3Url, {
-    responseType: "arraybuffer",
-    headers: { Authorization: `Basic ${auth}` },
-    timeout: 90_000,
-    maxContentLength: 25 * 1024 * 1024,
-  });
-  const buf = Buffer.from(audioRes.data);
-  if (buf.length < 200) return null;
-  const boundary = `----OFGCallInsights${Date.now()}`;
-  const preamble = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="recording.mp3"\r\nContent-Type: audio/mpeg\r\n\r\n`;
-  const postamble = `\r\n--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-1\r\n--${boundary}--\r\n`;
-  const body = Buffer.concat([
-    Buffer.from(preamble, "utf8"),
-    buf,
-    Buffer.from(postamble, "utf8"),
-  ]);
-  const tr = await axios.post(
-    "https://api.openai.com/v1/audio/transcriptions",
-    body,
-    {
-      headers: {
-        Authorization: `Bearer ${openaiKey}`,
-        "Content-Type": `multipart/form-data; boundary=${boundary}`,
-      },
-      timeout: 120_000,
-      maxBodyLength: 30 * 1024 * 1024,
-    },
-  );
-  const text = String(tr.data?.text || "").trim();
-  return text || null;
-}
-
-async function generateCallInsightsWithClaude(
-  transcript: string,
-  locale: "en" | "es",
-): Promise<CallInsightsPayload | null> {
-  const apiKey = String(process.env.ANTHROPIC_API_KEY || "").trim();
-  if (!apiKey) return null;
-  const model =
-    String(process.env.ANTHROPIC_MODEL || "").trim() || "claude-sonnet-4-6";
-  const userPrompt =
-    (locale === "es"
-      ? "Idioma del resumen: español. Transcripción:\n\n"
-      : "Summary locale: English. Transcript:\n\n") +
-    transcript.slice(0, 24_000);
-  const res = await axios.post(
-    "https://api.anthropic.com/v1/messages",
-    {
-      model,
-      max_tokens: 1200,
-      system: CALL_INSIGHTS_SYSTEM,
-      messages: [{ role: "user", content: userPrompt }],
-    },
-    {
-      headers: {
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-      },
-      timeout: 60_000,
-      validateStatus: () => true,
-    },
-  );
-  if (res.status < 200 || res.status >= 300) {
-    const detail = String(
-      res.data?.error?.message ||
-        res.data?.error?.type ||
-        JSON.stringify(res.data || {}).slice(0, 180),
-    );
-    throw new Error(`anthropic_${res.status}: ${detail}`.slice(0, 480));
+  if (sid && token) {
+    return `Basic ${Buffer.from(`${sid}:${token}`).toString("base64")}`;
   }
-  const content = Array.isArray(res.data?.content) ? res.data.content : [];
-  const text = content
-    .filter((b: any) => b?.type === "text" && typeof b.text === "string")
-    .map((b: any) => b.text)
-    .join("\n");
-  const parsed = parseCallInsightsJson(text, locale);
-  if (!parsed) return null;
-  parsed.model = model;
-  parsed.generated_at = new Date().toISOString();
-  return parsed;
+  return null;
 }
 
-async function resolveCallInsightsLocale(
-  conversationId: number,
-): Promise<"en" | "es"> {
-  const [rows] = await pool.query<RowDataPacket[]>(
-    `SELECT c.preferred_language
-     FROM conversations cv
-     LEFT JOIN clients c ON c.id = cv.client_id
-     WHERE cv.id = ?
-     LIMIT 1`,
-    [conversationId],
+async function twilioVoiceJson<T>(
+  method: "GET" | "POST",
+  url: string,
+  body?: unknown,
+): Promise<{ status: number; data: T }> {
+  const auth = twilioVoiceAuthHeader();
+  if (!auth) {
+    const err = new Error("twilio_auth_missing") as Error & { code?: string };
+    err.code = "twilio_auth_missing";
+    throw err;
+  }
+  const res = await axios.request<T>({
+    method,
+    url,
+    data: body,
+    headers: {
+      Authorization: auth,
+      "Content-Type": "application/json",
+    },
+    timeout: 25_000,
+    validateStatus: () => true,
+  });
+  return { status: res.status, data: res.data };
+}
+
+async function ensureTwilioTranscriptionConfigId(): Promise<string> {
+  if (cachedTwilioTranscriptionConfigId) return cachedTwilioTranscriptionConfigId;
+  const list = await twilioVoiceJson<{
+    content?: Array<{ id?: string; unique_name?: string }>;
+    code?: number;
+    message?: string;
+  }>(
+    "GET",
+    "https://voice.twilio.com/v2/Configurations/Transcription?pageSize=50",
   );
-  return String(rows[0]?.preferred_language || "en").toLowerCase() === "es"
-    ? "es"
-    : "en";
+  if (list.status >= 400) {
+    const err = new Error(
+      twilioTranscriptionErrorCode(list.status, list.data) || "twilio_stt_failed",
+    ) as Error & { code?: string };
+    err.code = err.message;
+    throw err;
+  }
+  const found = (list.data?.content || []).find(
+    (c) => c.unique_name === TWILIO_TRANSCRIPTION_CONFIG_NAME && c.id,
+  );
+  if (found?.id) {
+    cachedTwilioTranscriptionConfigId = found.id;
+    return found.id;
+  }
+  const created = await twilioVoiceJson<{
+    id?: string;
+    code?: number;
+    message?: string;
+  }>("POST", "https://voice.twilio.com/v2/Configurations/Transcription", {
+    unique_name: TWILIO_TRANSCRIPTION_CONFIG_NAME,
+    description: "OFG call recordings — transcript only, EN/ES auto",
+    configuration: {
+      configurationType: "Transcription",
+      transcriptionEngine: "deepgram",
+      speechModel: "nova-3",
+      language: "multi",
+      transcriptionStatusCallback: {
+        url: `${mmsPublicBaseUrl()}/api/webhooks/twilio/call-transcript`,
+        method: "POST",
+      },
+      participantDefaults: [
+        { audioChannelIndex: 1, type: "CUSTOMER" },
+        { audioChannelIndex: 2, type: "HUMAN_AGENT" },
+      ],
+    },
+  });
+  if (created.status >= 400 || !created.data?.id) {
+    const err = new Error(
+      twilioTranscriptionErrorCode(created.status, created.data) ||
+        "twilio_stt_failed",
+    ) as Error & { code?: string };
+    err.code = err.message;
+    throw err;
+  }
+  cachedTwilioTranscriptionConfigId = created.data.id;
+  return created.data.id;
+}
+
+type TwilioTranscriptSync =
+  | { action: "ready"; text: string; jobId: string }
+  | { action: "pending"; jobId: string }
+  | { action: "skip"; error: "twilio_ai_addendum"; jobId: string | null }
+  | { action: "fail"; error: string; jobId: string | null };
+
+/** Submit or poll a Twilio batch transcription for one recording. */
+async function syncTwilioRecordingTranscript(args: {
+  recordingSid: string;
+  existingJobId: string | null;
+}): Promise<TwilioTranscriptSync> {
+  // Integration tests insert fake recording URLs and also claim live pending
+  // rows. Never call Twilio from the test suite.
+  if (process.env.VITEST === "true") {
+    return { action: "pending", jobId: args.existingJobId || "" };
+  }
+  try {
+    const configId = await ensureTwilioTranscriptionConfigId();
+    let jobId = args.existingJobId;
+    if (!jobId) {
+      const created = await twilioVoiceJson<Record<string, unknown>>(
+        "POST",
+        "https://voice.twilio.com/v3/Transcriptions",
+        {
+          transcriptionConfigurationId: configId,
+          sourceId: args.recordingSid,
+        },
+      );
+      if (created.status >= 400) {
+        const code = twilioTranscriptionErrorCode(created.status, created.data);
+        if (code === "twilio_ai_addendum") {
+          return { action: "skip", error: "twilio_ai_addendum", jobId: null };
+        }
+        return { action: "fail", error: code || "twilio_stt_failed", jobId: null };
+      }
+      const nested = created.data?.transcription as
+        | Record<string, unknown>
+        | undefined;
+      jobId = String(
+        created.data?.id || nested?.id || created.data?.operationId || "",
+      ).trim();
+      if (!jobId) {
+        return { action: "fail", error: "twilio_stt_failed", jobId: null };
+      }
+    }
+    const got = await twilioVoiceJson<Record<string, unknown>>(
+      "GET",
+      `https://voice.twilio.com/v3/Transcriptions/${encodeURIComponent(jobId)}`,
+    );
+    const nested = got.data?.transcription as Record<string, unknown> | undefined;
+    const payload = nested && typeof nested === "object" ? nested : got.data;
+    const text = transcriptTextFromTwilioSentences(
+      payload?.sentences || got.data?.sentences,
+    );
+    if (text) return { action: "ready", text, jobId };
+    const status = String(payload?.status || got.data?.status || "").toLowerCase();
+    if (status === "failed") {
+      const errObj = (payload?.error || got.data?.error) as
+        | { message?: string }
+        | undefined;
+      const message = String(errObj?.message || "twilio_stt_failed").slice(0, 180);
+      return { action: "fail", error: message || "twilio_stt_failed", jobId };
+    }
+    return { action: "pending", jobId };
+  } catch (e: any) {
+    const code = String(e?.code || e?.message || "");
+    if (code === "twilio_ai_addendum") {
+      return { action: "skip", error: "twilio_ai_addendum", jobId: null };
+    }
+    if (code === "twilio_auth_missing") {
+      return { action: "fail", error: "twilio_auth_missing", jobId: null };
+    }
+    console.warn("[call-insights] twilio stt", e?.message ?? e);
+    return { action: "fail", error: "twilio_stt_failed", jobId: null };
+  }
+}
+
+/** Persist a Twilio batch transcription webhook onto the matching call row. */
+async function applyTwilioCallTranscriptPayload(body: unknown): Promise<void> {
+  if (!body || typeof body !== "object") return;
+  const o = body as Record<string, unknown>;
+  const accountId = String(o.accountId || o.account_sid || "").trim();
+  const ours = String(process.env.TWILIO_ACCOUNT_SID || "").trim();
+  if (ours && accountId && accountId !== ours) return;
+  const sourceId = String(o.sourceId || o.source_id || "").trim();
+  const jobId = String(o.id || "").trim();
+  const recordingSid = /^RE[0-9a-f]{32}$/i.test(sourceId) ? sourceId : "";
+  const safeJobId = /^voice_transcription_[a-z0-9]+$/i.test(jobId) ? jobId : "";
+  if (!recordingSid && !safeJobId) return;
+
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT id, conversation_id
+     FROM conversation_messages
+     WHERE channel = 'call'
+       AND (
+         (? <> '' AND recording_url LIKE ?)
+         OR (? <> '' AND metadata_json LIKE ?)
+       )
+     ORDER BY id DESC
+     LIMIT 1`,
+    [recordingSid, `%${recordingSid}%`, safeJobId, `%${safeJobId}%`],
+  );
+  const row = rows[0];
+  if (!row) return;
+
+  const status = String(o.status || "").toLowerCase();
+  const text = transcriptTextFromTwilioSentences(o.sentences);
+  const messageId = Number(row.id);
+  const conversationId = Number(row.conversation_id);
+  if (text) {
+    await pool.query(
+      `UPDATE conversation_messages
+       SET call_insights_status = 'ready',
+           call_transcript = ?,
+           call_insights_json = NULL,
+           call_insights_error = NULL,
+           metadata_json = IF(
+             ? = '',
+             metadata_json,
+             JSON_SET(
+               COALESCE(metadata_json, JSON_OBJECT()),
+               '$.twilio_transcription_id',
+               ?
+             )
+           ),
+           call_insights_updated_at = NOW()
+       WHERE id = ?`,
+      [text.slice(0, 65000), safeJobId, safeJobId, messageId],
+    );
+    await publishCallInsightsRealtime(conversationId, messageId, {
+      call_insights_status: "ready",
+      call_insights_json: null,
+      call_transcript: text,
+      call_insights_error: null,
+    });
+    await notifyCallTranscriptReady(messageId);
+    return;
+  }
+  if (status === "failed" || status === "completed") {
+    const errObj = o.error as { message?: string } | undefined;
+    const error =
+      status === "completed"
+        ? "stt_empty"
+        : String(errObj?.message || "twilio_stt_failed").slice(0, 180);
+    await pool.query(
+      `UPDATE conversation_messages
+       SET call_insights_status = 'failed',
+           call_insights_error = ?,
+           metadata_json = IF(
+             ? = '',
+             metadata_json,
+             JSON_SET(
+               COALESCE(metadata_json, JSON_OBJECT()),
+               '$.twilio_transcription_id',
+               ?
+             )
+           ),
+           call_insights_updated_at = NOW()
+       WHERE id = ?
+         AND (call_transcript IS NULL OR call_transcript = '')`,
+      [error, safeJobId, safeJobId, messageId],
+    );
+    await publishCallInsightsRealtime(conversationId, messageId, {
+      call_insights_status: "failed",
+      call_insights_error: error,
+    });
+  }
 }
 
 async function publishCallInsightsRealtime(
@@ -58702,7 +70328,7 @@ async function publishCallInsightsRealtime(
           ? { call_insights_json: patch.call_insights_json }
           : {}),
         ...(patch.call_transcript != null
-          ? { call_transcript: String(patch.call_transcript).slice(0, 4000) }
+          ? { call_transcript: String(patch.call_transcript).slice(0, 20000) }
           : {}),
         ...(patch.call_insights_error !== undefined
           ? {
@@ -58726,7 +70352,213 @@ type CallInsightsProcessCounters = {
   skipped: number;
 };
 
-/** Process one claimed call-insights row (Whisper → optional Claude). */
+function buildTranscriptReadyEmailHtml(params: {
+  adminName: string;
+  peerLabel: string;
+  durationLabel: string;
+  transcript: string;
+  conversationsUrl: string;
+  mcpConnected: boolean;
+  lang: "en" | "es";
+  truncated?: boolean;
+}): string {
+  const adminName = escapeHtml(params.adminName);
+  const peerLabel = escapeHtml(params.peerLabel);
+  const durationLabel = escapeHtml(params.durationLabel);
+  const conversationsUrl = escapeHtml(params.conversationsUrl);
+  const transcriptBlock = escapeHtml(params.transcript.trim()).replace(
+    /\n/g,
+    "<br/>",
+  );
+  const truncatedNote = params.truncated
+    ? params.lang === "es"
+      ? `<p style="margin:0 0 16px;color:#64748b;font-size:12px;">El correo muestra el inicio. La transcripción completa está en Conversaciones.</p>`
+      : `<p style="margin:0 0 16px;color:#64748b;font-size:12px;">This email shows the start. The full transcript is in Conversations.</p>`
+    : "";
+  const es = params.lang === "es";
+  const title = es ? "Transcripción lista" : "Transcript ready";
+  const hello = es
+    ? `Hola <strong>${adminName}</strong>, la transcripción de la llamada con <strong>${peerLabel}</strong> ya está lista.`
+    : `Hi <strong>${adminName}</strong>, the transcript for the call with <strong>${peerLabel}</strong> is ready.`;
+  const mcp = params.mcpConnected
+    ? es
+      ? `<p style="margin:0 0 16px;color:#334155;font-size:14px;">Tu asistente conectado también puede leer esta transcripción. Pídele el transcript de esta llamada.</p>`
+      : `<p style="margin:0 0 16px;color:#334155;font-size:14px;">Your connected assistant can read this transcript too. Ask it for the transcript of this call.</p>`
+    : "";
+  const open = es ? "Abrir Conversaciones" : "Open Conversations";
+  const durationWord = es ? "Duración" : "Duration";
+  return `<!DOCTYPE html>
+<html lang="${es ? "es" : "en"}"><head><meta charset="UTF-8"><title>${title}</title></head>
+<body style="margin:0;padding:0;background:#f1f5f9;font-family:Arial,Helvetica,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="padding:32px 16px;">
+    <tr><td align="center">
+      <table width="100%" style="max-width:600px;background:#fff;border-radius:16px;overflow:hidden;">
+        <tr><td style="background:#0f172a;padding:24px 32px;">
+          <p style="margin:0;color:#94a3b8;font-size:12px;font-weight:700;letter-spacing:1px;text-transform:uppercase;">Optimum</p>
+          <p style="margin:4px 0 0;color:#fff;font-size:20px;font-weight:700;">${title}</p>
+        </td></tr>
+        <tr><td style="padding:28px 32px;">
+          <p style="margin:0 0 16px;color:#475569;font-size:14px;">${hello}</p>
+          <p style="margin:0 0 16px;color:#0f172a;font-size:15px;"><strong>${durationWord}:</strong> ${durationLabel}</p>
+          ${mcp}
+          ${truncatedNote}
+          <div style="background:#f8fafc;border-left:4px solid #0f766e;padding:16px 20px;margin-bottom:24px;font-size:14px;color:#334155;line-height:1.7;">
+            ${transcriptBlock}
+          </div>
+          <p style="text-align:center;margin:0;">
+            <a href="${conversationsUrl}" style="display:inline-block;background:#0f766e;color:#fff;font-size:14px;font-weight:700;padding:12px 28px;border-radius:8px;text-decoration:none;">${open}</a>
+          </p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>`;
+}
+
+/** Email, short SMS, and in-app bell for the OFG line owner when a transcript is stored. */
+async function notifyCallTranscriptReady(messageId: number): Promise<void> {
+  if (!(messageId > 0)) return;
+  try {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT m.call_transcript, m.call_duration_sec,
+              c.client_id, c.assigned_admin_id,
+              p.assigned_admin_id AS line_owner_id,
+              cl.first_name AS client_first, cl.last_name AS client_last,
+              ct.first_name AS contact_first, ct.last_name AS contact_last,
+              u.display_name AS unknown_name, u.phone_e164 AS unknown_phone
+       FROM conversation_messages m
+       JOIN conversations c ON c.id = m.conversation_id
+       LEFT JOIN admin_phone_numbers p ON p.id = c.ofg_number_id
+       LEFT JOIN clients cl ON cl.id = c.client_id
+       LEFT JOIN contacts ct ON ct.id = c.contact_id
+       LEFT JOIN conversation_unknown_contacts u ON u.id = c.unknown_contact_id
+       WHERE m.id = ? AND m.channel = 'call'
+       LIMIT 1`,
+      [messageId],
+    );
+    const row = rows[0];
+    const transcript = String(row?.call_transcript || "").trim();
+    const ownerId = Number(row?.line_owner_id || row?.assigned_admin_id || 0);
+    if (!row || !transcript || !(ownerId > 0)) return;
+
+    const [admins] = await pool.query<RowDataPacket[]>(
+      `SELECT id, email, first_name, phone, preferred_language, notification_prefs_json, status
+       FROM admins WHERE id = ? LIMIT 1`,
+      [ownerId],
+    );
+    const admin = admins[0];
+    if (!admin || admin.status !== "active" || !admin.email) return;
+
+    const [claimed] = await pool.query<ResultSetHeader>(
+      `UPDATE conversation_messages
+       SET metadata_json = JSON_SET(
+             COALESCE(metadata_json, JSON_OBJECT()),
+             '$.transcript_ready_notified',
+             CAST('true' AS JSON)
+           )
+       WHERE id = ?
+         AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(metadata_json, '$.transcript_ready_notified')), 'false') NOT IN ('true', '1')
+         AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(metadata_json, '$.skip_transcript_notify')), 'false') NOT IN ('true', '1')`,
+      [messageId],
+    );
+    if (!Number(claimed.affectedRows || 0)) return;
+
+    const lang = admin.preferred_language === "es" ? "es" : "en";
+    const peer =
+      [row.client_first, row.client_last]
+        .map((v) => String(v || "").trim())
+        .filter(Boolean)
+        .join(" ") ||
+      [row.contact_first, row.contact_last]
+        .map((v) => String(v || "").trim())
+        .filter(Boolean)
+        .join(" ") ||
+      String(row.unknown_name || row.unknown_phone || "").trim() ||
+      (lang === "es" ? "un contacto" : "a contact");
+    const durationSec =
+      row.call_duration_sec != null ? Number(row.call_duration_sec) : null;
+    const durationLabel =
+      durationSec != null && durationSec > 0
+        ? `${Math.floor(durationSec / 60)}:${String(durationSec % 60).padStart(2, "0")}`
+        : "—";
+    const clientId = Number(row.client_id || 0);
+    const linkUrl =
+      clientId > 0
+        ? `/admin/conversations?client=${clientId}`
+        : "/admin/conversations";
+    const conversationsUrl = `${APP_URL}${linkUrl}`;
+    const prefs = parseAdminNotificationPrefs(admin.notification_prefs_json);
+    const emailOn = adminNotifyPrefOn(prefs, "email", "call_transcript");
+    const mcpConnected = await adminHasConnectedMcp(ownerId);
+    const subject =
+      lang === "es"
+        ? `Transcripción lista — ${peer}`
+        : `Transcript ready — ${peer}`;
+    const smsCore = emailOn
+      ? lang === "es"
+        ? `Optimum: la transcripción de ${peer} está lista. El texto completo está en tu correo.`
+        : `Optimum: transcript ready for ${peer}. The full text is in your email.`
+      : lang === "es"
+        ? `Optimum: la transcripción de ${peer} está lista. Ábrela en Conversaciones.`
+        : `Optimum: transcript ready for ${peer}. Open Conversations to read it.`;
+    const smsMcp = mcpConnected
+      ? lang === "es"
+        ? " También puedes pedírsela a tu asistente conectado."
+        : " You can also ask your connected assistant."
+      : "";
+    const inAppBody =
+      lang === "es"
+        ? `Transcripción lista para ${peer}.`
+        : `Transcript ready for ${peer}.`;
+    await deliverAdminNotificationChannels({
+      admin: {
+        id: Number(admin.id),
+        email: String(admin.email),
+        first_name: String(admin.first_name || "Admin"),
+        phone: admin.phone ? String(admin.phone) : null,
+        preferred_language: lang,
+        prefs,
+      },
+      eventKey: "call_transcript",
+      tpl: {
+        subject,
+        html: buildTranscriptReadyEmailHtml({
+          adminName: String(admin.first_name || "Admin"),
+          peerLabel: peer,
+          durationLabel,
+          transcript: transcript.slice(0, 20000),
+          conversationsUrl,
+          mcpConnected,
+          lang,
+          truncated: transcript.length > 20000,
+        }),
+        inAppTitle: lang === "es" ? "Transcripción lista" : "Transcript ready",
+        inAppBody,
+        linkUrl,
+        smsBody: `${smsCore}${smsMcp}`.slice(0, 320),
+      },
+    });
+  } catch (e: any) {
+    console.warn("[call-transcript:notify]", messageId, e?.message ?? e);
+  }
+}
+
+async function adminHasConnectedMcp(adminId: number): Promise<boolean> {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT id FROM mcp_oauth_tokens
+     WHERE admin_id = ?
+       AND revoked_at IS NULL
+       AND (
+         access_expires_at > NOW()
+         OR (refresh_expires_at IS NOT NULL AND refresh_expires_at > NOW())
+       )
+     LIMIT 1`,
+    [adminId],
+  );
+  return !!rows[0];
+}
+
+/** Process one claimed call row (Twilio batch transcript only). */
 async function processCallInsightRow(
   row: RowDataPacket,
   out: CallInsightsProcessCounters,
@@ -58783,19 +70615,16 @@ async function processCallInsightRow(
       if (pulled?.recordingUrl) recordingUrl = pulled.recordingUrl;
     }
 
-    if (!transcript && recordingUrl) {
-      transcript = (await whisperTranscribeCallAudio(recordingUrl)) || "";
-    }
     if (!transcript) {
-      const hasOpenAi = !!String(process.env.OPENAI_API_KEY || "").trim();
+      const recordingSid = twilioRecordingSidFromUrl(recordingUrl);
       const isVoicemail = !!meta.is_voicemail;
       const ageMs =
         row.created_at != null
           ? Date.now() - new Date(row.created_at).getTime()
           : 0;
-      const outcome = decideMissingTranscriptOutcome({
+      const outcome = decideMissingRecordingOutcome({
         isVoicemail,
-        hasOpenAi,
+        hasRecordingSid: !!recordingSid,
         ageMs,
       });
       if (outcome.action === "await_twilio") {
@@ -58810,61 +70639,127 @@ async function processCallInsightRow(
         out.skipped++;
         return "pending";
       }
-      await pool.query(
-        `UPDATE conversation_messages
-         SET call_insights_status = ?,
-             call_insights_error = ?,
-             call_insights_updated_at = NOW()
-         WHERE id = ?`,
-        [outcome.status, outcome.error, messageId],
-      );
-      if (outcome.action === "fail") out.failed++;
-      else out.skipped++;
-      await publishCallInsightsRealtime(conversationId, messageId, {
-        call_insights_status: outcome.status,
-        call_insights_error: outcome.error,
-      });
-      return outcome.status;
-    }
-
-    // Transcript-first: ready even when Claude is missing or fails.
-    let insights: CallInsightsPayload | null = null;
-    let claudeErr: string | null = null;
-    try {
-      const locale = await resolveCallInsightsLocale(conversationId);
-      insights = await generateCallInsightsWithClaude(transcript, locale);
-      if (!insights) {
-        claudeErr = String(process.env.ANTHROPIC_API_KEY || "").trim()
-          ? "claude_parse_failed"
-          : "claude_unavailable";
+      if (outcome.action === "fail") {
+        await pool.query(
+          `UPDATE conversation_messages
+           SET call_insights_status = ?,
+               call_insights_error = ?,
+               call_insights_updated_at = NOW()
+           WHERE id = ?`,
+          [outcome.status, outcome.error, messageId],
+        );
+        out.failed++;
+        await publishCallInsightsRealtime(conversationId, messageId, {
+          call_insights_status: outcome.status,
+          call_insights_error: outcome.error,
+        });
+        return "failed";
       }
-    } catch (e: any) {
-      claudeErr = String(e?.message || e).slice(0, 480);
-      insights = null;
+      const synced = await syncTwilioRecordingTranscript({
+        recordingSid: recordingSid!,
+        existingJobId: String(meta.twilio_transcription_id || "").trim() || null,
+      });
+      if (synced.jobId) meta.twilio_transcription_id = synced.jobId;
+      if (synced.action === "ready") {
+        transcript = synced.text;
+      } else if (synced.action === "pending") {
+        const jobId = synced.jobId || "";
+        await pool.query(
+          `UPDATE conversation_messages
+           SET call_insights_status = 'pending',
+               call_insights_error = 'awaiting_twilio_transcript',
+               metadata_json = IF(
+                 ? = '',
+                 metadata_json,
+                 JSON_SET(
+                   COALESCE(metadata_json, JSON_OBJECT()),
+                   '$.twilio_transcription_id',
+                   ?
+                 )
+               ),
+               call_insights_updated_at = NOW()
+           WHERE id = ?
+             AND call_insights_status <> 'ready'
+             AND (call_transcript IS NULL OR call_transcript = '')`,
+          [jobId, jobId, messageId],
+        );
+        out.skipped++;
+        return "pending";
+      } else if (synced.action === "skip") {
+        await pool.query(
+          `UPDATE conversation_messages
+           SET call_insights_status = 'skipped',
+               call_insights_error = ?,
+               call_insights_updated_at = NOW()
+           WHERE id = ?`,
+          [synced.error, messageId],
+        );
+        out.skipped++;
+        await publishCallInsightsRealtime(conversationId, messageId, {
+          call_insights_status: "skipped",
+          call_insights_error: synced.error,
+        });
+        return "skipped";
+      } else {
+        const jobId = synced.jobId || "";
+        const [failedUpd] = await pool.query<ResultSetHeader>(
+          `UPDATE conversation_messages
+           SET call_insights_status = 'failed',
+               call_insights_error = ?,
+               metadata_json = IF(
+                 ? = '',
+                 metadata_json,
+                 JSON_SET(
+                   COALESCE(metadata_json, JSON_OBJECT()),
+                   '$.twilio_transcription_id',
+                   ?
+                 )
+               ),
+               call_insights_updated_at = NOW()
+           WHERE id = ?
+             AND call_insights_status <> 'ready'
+             AND (call_transcript IS NULL OR call_transcript = '')`,
+          [synced.error, jobId, jobId, messageId],
+        );
+        if (!Number(failedUpd.affectedRows || 0)) return "ready";
+        out.failed++;
+        await publishCallInsightsRealtime(conversationId, messageId, {
+          call_insights_status: "failed",
+          call_insights_error: synced.error,
+        });
+        return "failed";
+      }
     }
 
+    // Transcript only. Staff read it in the thread collapse.
+    const storedJobId = String(meta.twilio_transcription_id || "");
     await pool.query(
       `UPDATE conversation_messages
        SET call_insights_status = 'ready',
            call_transcript = ?,
-           call_insights_json = ?,
-           call_insights_error = ?,
+           call_insights_json = NULL,
+           call_insights_error = NULL,
+           metadata_json = IF(
+             ? = '',
+             metadata_json,
+             JSON_SET(
+               COALESCE(metadata_json, JSON_OBJECT()),
+               '$.twilio_transcription_id',
+               ?
+             )
+           ),
            call_insights_updated_at = NOW()
        WHERE id = ?`,
-      [
-        transcript.slice(0, 65000),
-        insights ? JSON.stringify(insights) : null,
-        claudeErr,
-        messageId,
-      ],
+      [transcript.slice(0, 65000), storedJobId, storedJobId, messageId],
     );
     out.ready++;
     await publishCallInsightsRealtime(conversationId, messageId, {
       call_insights_status: "ready",
-      call_insights_json: insights,
+      call_insights_json: null,
       call_transcript: transcript,
-      call_insights_error: claudeErr,
+      call_insights_error: null,
     });
+    await notifyCallTranscriptReady(messageId);
     return "ready";
   } catch (e: any) {
     console.error("[call-insights] process", messageId, e?.message ?? e);
@@ -58973,6 +70868,57 @@ async function processCallInsightsBatch(limit = 5): Promise<{
     console.warn("[call-insights] reclaim", e?.message ?? e);
   }
 
+  // Old rows were skipped because OpenAI was required. Re-queue a few per
+  // cron once this process is the one that talks to Twilio. Tests must not
+  // submit live recordings.
+  if (process.env.VITEST !== "true") {
+    try {
+      const [reopened] = await pool.query<ResultSetHeader>(
+        `UPDATE conversation_messages
+         SET call_insights_status = 'pending',
+             call_insights_error = NULL,
+             metadata_json = JSON_SET(
+               COALESCE(metadata_json, JSON_OBJECT()),
+               '$.skip_transcript_notify',
+               CAST('true' AS JSON)
+             ),
+             call_insights_updated_at = NOW()
+         WHERE id IN (
+           SELECT id FROM (
+             SELECT id FROM conversation_messages
+             WHERE channel = 'call'
+               AND recording_url IS NOT NULL
+               AND (
+                 (
+                   call_insights_status = 'skipped'
+                   AND (
+                     call_insights_error = 'missing_openai_stt'
+                     OR (
+                       call_insights_error = 'twilio_ai_addendum'
+                       AND (
+                         call_insights_updated_at IS NULL
+                         OR call_insights_updated_at < NOW() - INTERVAL 30 MINUTE
+                       )
+                     )
+                   )
+                 )
+                 OR (
+                   call_insights_status IS NULL
+                   AND (call_transcript IS NULL OR call_transcript = '')
+                   AND created_at < NOW() - INTERVAL 1 DAY
+                 )
+               )
+             ORDER BY id ASC
+             LIMIT 5
+           ) reopen
+         )`,
+      );
+      out.reclaimed += Number(reopened.affectedRows || 0);
+    } catch (e: any) {
+      console.warn("[call-insights] reopen skipped", e?.message ?? e);
+    }
+  }
+
   const claimTag = `ci-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
   await pool.query(
     `UPDATE conversation_messages
@@ -58985,7 +70931,7 @@ async function processCallInsightsBatch(limit = 5): Promise<{
          WHERE channel = 'call'
            AND call_insights_status = 'pending'
            AND recording_url IS NOT NULL
-         ORDER BY id ASC
+         ORDER BY (call_insights_error = 'awaiting_twilio_transcript') ASC, id ASC
          LIMIT ?
        ) t
      )`,
@@ -59135,9 +71081,297 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
       recordingStatusCallbackMethod: "POST",
       answerOnBridge: true,
       trim: "trim-silence",
+      // Ends exactly as before (empty Response = hang up) unless staff pressed
+      // "Add caller": then this leg is moved into the three-way conference.
+      action: `${getVoiceBaseUrl(deps)}/api/voice/outbound-dial-end`,
+      method: "POST",
     } as any);
     dial.number({}, To);
     return res.send(twiml.toString());
+  });
+
+  // ── Three-way calls ─────────────────────────────────────────────────────
+  /** Session whose leg must be moved into the conference after its Dial ends. */
+  const findThreeWayForLeg = async (
+    callSid: string,
+    column: "customer_call_sid" | "staff_call_sid",
+  ): Promise<RowDataPacket | null> => {
+    if (!callSid) return null;
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT * FROM voice_three_way_sessions
+       WHERE ${column} = ? AND status IN ('moving','active')
+         AND created_at >= NOW() - INTERVAL 6 HOUR
+       ORDER BY id DESC LIMIT 1`,
+      [callSid],
+    );
+    return rows[0] ?? null;
+  };
+
+  app.post("/api/voice/outbound-dial-end", guard, async (req, res) => {
+    res.set("Content-Type", "text/xml");
+    const session = await findThreeWayForLeg(String(req.body?.CallSid || ""), "staff_call_sid").catch(() => null);
+    if (session) {
+      return res.send(
+        threeWayConferenceTwiml({
+          name: String(session.conference_name),
+          baseUrl: getVoiceBaseUrl(deps),
+          endConferenceOnExit: true,
+        }),
+      );
+    }
+    return res.send("<Response></Response>");
+  });
+
+  app.get("/api/voice/three-way/presets", ...withConvAccess, (_req, res) => {
+    res.json({ presets: parseThreeWayPresets() });
+  });
+
+  app.post("/api/voice/three-way/start", ...withConvAccess, async (req, res) => {
+    const adminId = (req as AuthedRequest).auth!.id;
+    const staffCallSid = String(req.body?.call_sid || "").trim();
+    const to = normalizeThreeWayNumber(String(req.body?.to || ""));
+    const label = String(req.body?.label || "").trim().slice(0, 80) || null;
+    if (!staffCallSid) return res.status(400).json({ error: "call_sid is required" });
+    if (!to) return res.status(400).json({ error: "Enter a valid US phone number" });
+    if (!twilioClient) return res.status(503).json({ error: "Twilio not configured" });
+    try {
+      const phones = await deps.listAssignedPhoneNumbers(adminId);
+      const fromE164 = phones[0]?.e164 ? String(phones[0].e164) : "";
+      if (!fromE164) {
+        return res.status(403).json({ error: "You need an assigned OFG line to add a caller" });
+      }
+      const staffLeg = await twilioClient.calls(staffCallSid).fetch();
+      const identity = `client:admin_${adminId}`;
+      if (staffLeg.to !== identity && staffLeg.from !== identity) {
+        return res.status(403).json({ error: "This call does not belong to you" });
+      }
+      if (staffLeg.status !== "in-progress") {
+        return res.status(409).json({ error: "The call is not connected" });
+      }
+      // Inbound: browser leg is the child of the client's call.
+      // Outbound: browser leg is the parent; the client is its child.
+      let direction: "inbound" | "outbound";
+      let customerCallSid: string;
+      if (staffLeg.parentCallSid) {
+        direction = "inbound";
+        customerCallSid = staffLeg.parentCallSid;
+      } else {
+        direction = "outbound";
+        const kids = await twilioClient.calls.list({
+          parentCallSid: staffCallSid,
+          status: "in-progress",
+          limit: 1,
+        });
+        if (!kids[0]) return res.status(409).json({ error: "The other side is not connected" });
+        customerCallSid = kids[0].sid;
+      }
+      const existing = await findThreeWayForLeg(customerCallSid, "customer_call_sid");
+      if (existing) {
+        return res.status(409).json({ error: "A third caller is already on this call", session_id: existing.id });
+      }
+      const conferenceName = `ofg3w_${customerCallSid}`.slice(0, 80);
+      const [ins] = await pool.query<ResultSetHeader>(
+        `INSERT INTO voice_three_way_sessions
+           (conference_name, direction, staff_call_sid, customer_call_sid, log_call_sid,
+            admin_id, from_e164, third_party_label, third_party_number, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'moving')`,
+        [
+          conferenceName,
+          direction,
+          staffCallSid,
+          customerCallSid,
+          direction === "inbound" ? customerCallSid : staffCallSid,
+          adminId,
+          fromE164,
+          label,
+          to,
+        ],
+      );
+      const sessionId = Number(ins.insertId);
+      const baseUrl = getVoiceBaseUrl(deps);
+      // Move the child leg; the parent's Dial ends and its action URL
+      // (dial-status / outbound-dial-end) joins it to the same conference.
+      const childSid = direction === "inbound" ? staffCallSid : customerCallSid;
+      await twilioClient.calls(childSid).update({
+        twiml: threeWayConferenceTwiml({ name: conferenceName, baseUrl, endConferenceOnExit: true }),
+      });
+      const participant = await twilioClient.conferences(conferenceName).participants.create({
+        from: fromE164,
+        to,
+        label: "third_party",
+        earlyMedia: true,
+        beep: "false",
+        endConferenceOnExit: false,
+        conferenceRecord: "record-from-start",
+        conferenceRecordingStatusCallback: `${baseUrl}/api/voice/three-way/recording-status`,
+        conferenceRecordingStatusCallbackEvent: ["completed"],
+        conferenceStatusCallback: `${baseUrl}/api/voice/three-way/conference-status`,
+        conferenceStatusCallbackEvent: ["start", "end"],
+      } as any);
+      await pool.query(
+        `UPDATE voice_three_way_sessions SET third_party_call_sid = ?, status = 'active' WHERE id = ?`,
+        [participant.callSid, sessionId],
+      );
+      return res.json({ session_id: sessionId, status: "active", third_party: { label, number: to } });
+    } catch (e: any) {
+      console.error("[voice:three-way:start]", e?.message ?? e);
+      await pool
+        .query(
+          `UPDATE voice_three_way_sessions SET status = 'failed', error_message = ?
+           WHERE staff_call_sid = ? AND status = 'moving'`,
+          [String(e?.message || e).slice(0, 500), staffCallSid],
+        )
+        .catch(() => null);
+      return res.status(502).json({ error: "Could not add the caller. Please try again." });
+    }
+  });
+
+  /** Load a session owned by the requesting admin. */
+  const ownThreeWaySession = async (req: Request): Promise<RowDataPacket | null> => {
+    const id = Number(req.body?.session_id || req.params?.id || 0);
+    if (!id) return null;
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT * FROM voice_three_way_sessions WHERE id = ? AND admin_id = ? LIMIT 1`,
+      [id, (req as AuthedRequest).auth!.id],
+    );
+    return rows[0] ?? null;
+  };
+
+  // Keypad for the third party's phone menu (e.g. "press 1 for …").
+  app.post("/api/voice/three-way/digits", ...withConvAccess, async (req, res) => {
+    const digits = sanitizeThreeWayDigits(String(req.body?.digits || ""));
+    if (!digits) return res.status(400).json({ error: "Digits must be 0-9, * or #" });
+    const session = await ownThreeWaySession(req);
+    if (!session || session.status !== "active" || !session.third_party_call_sid) {
+      return res.status(404).json({ error: "No active third caller" });
+    }
+    if (!twilioClient) return res.status(503).json({ error: "Twilio not configured" });
+    try {
+      await twilioClient
+        .conferences(String(session.conference_name))
+        .participants(String(session.third_party_call_sid))
+        .update({
+          announceUrl: `${getVoiceBaseUrl(deps)}/api/voice/three-way/dtmf?d=${encodeURIComponent(digits)}`,
+          announceMethod: "POST",
+        } as any);
+      return res.json({ ok: true });
+    } catch (e: any) {
+      console.error("[voice:three-way:digits]", e?.message ?? e);
+      return res.status(502).json({ error: "Could not send the digits" });
+    }
+  });
+
+  app.post("/api/voice/three-way/dtmf", guard, (req, res) => {
+    res.set("Content-Type", "text/xml");
+    const digits = sanitizeThreeWayDigits(String(req.query?.d || ""));
+    const VoiceResponse = twilio.twiml.VoiceResponse;
+    const twiml = new VoiceResponse();
+    if (digits) twiml.play({ digits } as any);
+    return res.send(twiml.toString());
+  });
+
+  app.post("/api/voice/three-way/remove", ...withConvAccess, async (req, res) => {
+    const session = await ownThreeWaySession(req);
+    if (!session || !session.third_party_call_sid) {
+      return res.status(404).json({ error: "No third caller on this call" });
+    }
+    if (!twilioClient) return res.status(503).json({ error: "Twilio not configured" });
+    try {
+      await twilioClient.calls(String(session.third_party_call_sid)).update({ status: "completed" });
+      return res.json({ ok: true });
+    } catch (e: any) {
+      console.error("[voice:three-way:remove]", e?.message ?? e);
+      return res.status(502).json({ error: "Could not remove the caller" });
+    }
+  });
+
+  app.post("/api/voice/three-way/conference-status", guard, async (req, res) => {
+    const event = String(req.body?.StatusCallbackEvent || "");
+    const name = String(req.body?.FriendlyName || "");
+    const confSid = String(req.body?.ConferenceSid || "");
+    if (name) {
+      if (event === "conference-start") {
+        await pool
+          .query(`UPDATE voice_three_way_sessions SET conference_sid = ? WHERE conference_name = ?`, [confSid, name])
+          .catch(() => null);
+      } else if (event === "conference-end") {
+        await pool
+          .query(
+            `UPDATE voice_three_way_sessions SET status = 'ended', conference_sid = COALESCE(conference_sid, ?)
+             WHERE conference_name = ?`,
+            [confSid, name],
+          )
+          .catch(() => null);
+      }
+    }
+    return res.sendStatus(204);
+  });
+
+  // Conference recording → its own call row in the same conversation, then
+  // the normal transcript / insights pipeline.
+  app.post("/api/voice/three-way/recording-status", guard, async (req, res) => {
+    try {
+      const { ConferenceSid, RecordingUrl, RecordingDuration, RecordingStatus } = req.body as Record<string, string>;
+      if (RecordingStatus !== "completed" || !ConferenceSid || !RecordingUrl) return res.sendStatus(204);
+      let [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM voice_three_way_sessions WHERE conference_sid = ? LIMIT 1`,
+        [ConferenceSid],
+      );
+      if (!rows[0] && twilioClient) {
+        const conf = await twilioClient.conferences(ConferenceSid).fetch().catch(() => null);
+        if (conf?.friendlyName) {
+          [rows] = await pool.query<RowDataPacket[]>(
+            `SELECT * FROM voice_three_way_sessions WHERE conference_name = ? LIMIT 1`,
+            [conf.friendlyName],
+          );
+        }
+      }
+      const session = rows[0];
+      if (!session || session.recording_message_id) return res.sendStatus(204);
+      const [orig] = await pool.query<RowDataPacket[]>(
+        `SELECT conversation_id, direction, from_address, to_address FROM conversation_messages
+         WHERE provider_message_id IN (?, ?) AND channel = 'call' ORDER BY id ASC LIMIT 1`,
+        [session.customer_call_sid, session.staff_call_sid],
+      );
+      if (!orig[0]) {
+        console.warn("[voice:three-way:recording] no original call row", session.id);
+        return res.sendStatus(204);
+      }
+      const mp3Url = RecordingUrl.endsWith(".mp3") ? RecordingUrl : `${RecordingUrl}.mp3`;
+      const label = session.third_party_label || session.third_party_number;
+      const inserted = await insertCallMessage(deps, {
+        conversationId: Number(orig[0].conversation_id),
+        direction: orig[0].direction === "inbound" ? "inbound" : "outbound",
+        body: `Three-way call with ${label}`,
+        fromAddress: orig[0].from_address ?? null,
+        toAddress: orig[0].to_address ?? null,
+        providerMessageId: `3way:${ConferenceSid}`,
+        providerStatus: "completed",
+        callDurationSec: RecordingDuration ? parseInt(RecordingDuration, 10) : null,
+        recordingUrl: mp3Url,
+        sentByAdminId: Number(session.admin_id),
+        metadata: { three_way: true, third_party: label, session_id: Number(session.id) },
+      });
+      if (inserted) {
+        await pool.query(`UPDATE voice_three_way_sessions SET recording_message_id = ? WHERE id = ?`, [
+          inserted.id,
+          session.id,
+        ]);
+        await publishConversationRealtime({
+          type: "call_recording",
+          payload: {
+            conversation_id: Number(orig[0].conversation_id),
+            message_id: inserted.id,
+            recording_url: mp3Url,
+          },
+        });
+        await enqueueAndProcessCallInsights(inserted.id);
+      }
+      return res.sendStatus(204);
+    } catch (err) {
+      console.error("[voice:three-way:recording-status]", err);
+      return res.sendStatus(500);
+    }
   });
 
   // ── POST /api/voice/availability ────────────────────────────────────────
@@ -59979,6 +72213,24 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
         }),
       );
 
+      // "Add caller" moved the staff leg into a conference: join the client's
+      // leg to it instead of ending the call. All other calls: unchanged.
+      const threeWay = await findThreeWayForLeg(callSid, "customer_call_sid").catch(() => null);
+      if (threeWay) {
+        await pool.query(
+          `UPDATE conversation_messages SET provider_status = 'completed'
+           WHERE provider_message_id = ? AND channel = 'call'`,
+          [callSid],
+        );
+        return res.status(200).send(
+          threeWayConferenceTwiml({
+            name: String(threeWay.conference_name),
+            baseUrl: getVoiceBaseUrl(deps),
+            endConferenceOnExit: true,
+          }),
+        );
+      }
+
       if (
         callSid &&
         (dialCallStatus === "answered" || dialCallStatus === "completed")
@@ -60351,11 +72603,26 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
   });
 
   // ── POST /api/voice/call-screen (+ accept) ──────────────────────────────
-  app.post("/api/voice/call-screen", guard, (req, res) => {
+  app.post("/api/voice/call-screen", guard, async (req, res) => {
     res.set("Content-Type", "text/xml");
     const callerHint = String(
       req.query?.caller || req.body?.caller || "",
     ).trim();
+    // Prompt in the staff member's language (Spanish staff answer "¿Bueno?",
+    // not a keypress, unless told in Spanish to press a key).
+    const screenAdminId = Number(req.query?.admin || 0) || null;
+    let screenLang: "en" | "es" = "en";
+    if (screenAdminId) {
+      try {
+        const [aRows] = await pool.query<RowDataPacket[]>(
+          `SELECT preferred_language FROM admins WHERE id = ? LIMIT 1`,
+          [screenAdminId],
+        );
+        if (aRows[0]?.preferred_language === "es") screenLang = "es";
+      } catch {
+        /* default en */
+      }
+    }
     console.log(
       "[voice:call-screen]",
       JSON.stringify({
@@ -60367,16 +72634,27 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
     );
     const VoiceResponse = twilio.twiml.VoiceResponse;
     const twiml = new VoiceResponse();
-    const gather = twiml.gather({
-      numDigits: 1,
-      timeout: 8,
-      action: `${getVoiceBaseUrl(deps)}/api/voice/call-screen-accept`,
-      method: "POST",
-    });
-    const sayText = callerHint
-      ? `Incoming Optimum Credit call from ${callerHint.replace(/\D/g, " ").trim()}. Press any key to answer.`
-      : "Incoming Optimum Credit call. Press any key to answer.";
-    gather.say({ voice: "Polly.Joanna" }, sayText);
+    const spokenCaller = callerHint.replace(/\D/g, " ").trim();
+    const sayText =
+      screenLang === "es"
+        ? spokenCaller
+          ? `Llamada de Optimum Credit del número ${spokenCaller}. Presione cualquier tecla para contestar.`
+          : "Llamada de Optimum Credit. Presione cualquier tecla para contestar."
+        : spokenCaller
+          ? `Incoming Optimum Credit call from ${spokenCaller}. Press any key to answer.`
+          : "Incoming Optimum Credit call. Press any key to answer.";
+    const voice = screenLang === "es" ? "Polly.Mia" : "Polly.Joanna";
+    // Two chances (~15s total) before releasing the leg, so personal
+    // voicemail still can't "answer" the client.
+    for (let i = 0; i < 2; i++) {
+      const gather = twiml.gather({
+        numDigits: 1,
+        timeout: 6,
+        action: `${getVoiceBaseUrl(deps)}/api/voice/call-screen-accept`,
+        method: "POST",
+      });
+      gather.say({ voice, language: screenLang === "es" ? "es-MX" : "en-US" } as any, sayText);
+    }
     twiml.hangup();
     return res.send(twiml.toString());
   });
@@ -60391,6 +72669,42 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
       }),
     );
     return res.send("<Response/>");
+  });
+
+  // ── POST /api/voice/forward-leg-status ─────────────────────────────────
+  // Status callback for the call-forwarding (cell) leg. On `failed`, look up
+  // the Twilio error and alert the staff member + super admins (once / 24h).
+  app.post("/api/voice/forward-leg-status", guard, async (req, res) => {
+    try {
+      const adminId = Number(req.query?.admin || 0) || null;
+      const callSid = String(req.body?.CallSid || "");
+      const status = String(req.body?.CallStatus || "");
+      if (!adminId || !callSid || status !== "failed") {
+        return res.sendStatus(204);
+      }
+      let errorCode: string | null = req.body?.ErrorCode
+        ? String(req.body.ErrorCode)
+        : null;
+      if (!errorCode && twilioClient) {
+        try {
+          const notes = await twilioClient
+            .calls(callSid)
+            .notifications.list({ limit: 1 });
+          errorCode = notes[0]?.errorCode ? String(notes[0].errorCode) : null;
+        } catch {
+          /* best effort */
+        }
+      }
+      console.warn(
+        "[voice:forward-leg-failed]",
+        JSON.stringify({ adminId, callSid, errorCode }),
+      );
+      await alertCallForwardingFailure({ adminId, errorCode });
+      return res.sendStatus(204);
+    } catch (err) {
+      console.error("[voice:forward-leg-status]", err);
+      return res.sendStatus(204);
+    }
   });
 
   // ── POST /api/voice/fix-call-setup ─────────────────────────────────────
@@ -60515,6 +72829,62 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
   );
 
   // ── Inbound voice (webhook + alias) ─────────────────────────────────────
+  const buildAssigneeDialTwiml = (opts: {
+    twiml: any;
+    assignedAdminId: number;
+    callerNumber: string;
+    calledNumber: string;
+    ofgE164: string;
+    fwdPhone: string | null;
+    softphoneOnline: boolean;
+  }) => {
+    const callerDigits = normalizePhoneDigits(opts.callerNumber);
+    const fwdDigits = opts.fwdPhone ? normalizePhoneDigits(opts.fwdPhone) : "";
+    const ringCell =
+      !!opts.fwdPhone && !!fwdDigits && fwdDigits !== callerDigits;
+    const ringSoftphone = opts.softphoneOnline || !ringCell;
+    const statusCallbackUrl = `${getVoiceBaseUrl(deps)}/api/voice/dial-status`;
+    const dialTimeout = ringCell ? 28 : 22;
+    const dialAttrs: Record<string, unknown> = {
+      timeout: dialTimeout,
+      action: statusCallbackUrl,
+      method: "POST",
+      record: "record-from-answer-dual",
+      recordingStatusCallback: `${getVoiceBaseUrl(deps)}/api/voice/recording-status`,
+      recordingStatusCallbackMethod: "POST",
+      trim: "trim-silence",
+    };
+    if (ringCell && opts.ofgE164.startsWith("+")) {
+      dialAttrs.callerId = opts.ofgE164;
+    }
+    const dial = opts.twiml.dial(dialAttrs as any);
+    if (ringSoftphone) {
+      dial.client(`admin_${opts.assignedAdminId}`);
+    }
+    if (ringCell && opts.fwdPhone) {
+      const screenQs = new URLSearchParams();
+      if (opts.callerNumber && opts.callerNumber !== "Unknown") {
+        screenQs.set("caller", opts.callerNumber);
+      }
+      screenQs.set("admin", String(opts.assignedAdminId));
+      const screenUrl = `${getVoiceBaseUrl(deps)}/api/voice/call-screen${
+        screenQs.toString() ? `?${screenQs.toString()}` : ""
+      }`;
+      dial.number(
+        {
+          url: screenUrl,
+          method: "POST",
+          // Detect forwarding that can never connect (e.g. 13227 no
+          // international permission) instead of silently missing calls.
+          statusCallback: `${getVoiceBaseUrl(deps)}/api/voice/forward-leg-status?admin=${opts.assignedAdminId}`,
+          statusCallbackEvent: ["completed"],
+          statusCallbackMethod: "POST",
+        } as any,
+        opts.fwdPhone,
+      );
+    }
+  };
+
   const handleVoiceIncoming: RequestHandler = async (req, res) => {
     res.setHeader("Content-Type", "text/xml");
     try {
@@ -60543,77 +72913,22 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
         return res.send(twiml.toString());
       }
 
-      const [fwdRows] = await pool.query<RowDataPacket[]>(
-        `SELECT call_forwarding_enabled, call_forwarding_phone, voice_available
-         FROM admins WHERE id = ? LIMIT 1`,
-        [assignedAdminId],
-      );
-      const fwdPhone =
-        fwdRows[0]?.call_forwarding_enabled && fwdRows[0]?.call_forwarding_phone
-          ? String(fwdRows[0].call_forwarding_phone)
-          : null;
-      const softphoneOnline = !!fwdRows[0]?.voice_available;
-      const callerDigits = normalizePhoneDigits(callerNumber);
-      const fwdDigits = fwdPhone ? normalizePhoneDigits(fwdPhone) : "";
-      // Cannot ring the same handset that is placing the call (self-test from cell).
-      const ringCell =
-        !!fwdPhone && !!fwdDigits && fwdDigits !== callerDigits;
-      // Softphone when Available, or when there is no useful cell leg to ring.
-      const ringSoftphone = softphoneOnline || !ringCell;
-
-      const statusCallbackUrl = `${getVoiceBaseUrl(deps)}/api/voice/dial-status`;
-      // Give softphone + optional cell call-screen (Gather ~8s) room to answer
-      const dialTimeout = ringCell ? 28 : 22;
-      const ofgE164 = ofg?.e164 ? String(ofg.e164) : String(calledNumber || "");
-      // CRITICAL: present the OFG number as CallerID on the cell leg. Using the
-      // original client CallerID causes many US carriers to return busy/no-ring
-      // (spam / Silence Unknown Callers) — staff get missed-call SMS with no ring.
-      const dialAttrs: Record<string, unknown> = {
-        timeout: dialTimeout,
-        action: statusCallbackUrl,
-        method: "POST",
-        record: "record-from-answer-dual",
-        recordingStatusCallback: `${getVoiceBaseUrl(deps)}/api/voice/recording-status`,
-        recordingStatusCallbackMethod: "POST",
-        trim: "trim-silence",
-      };
-      if (ringCell && ofgE164.startsWith("+")) {
-        dialAttrs.callerId = ofgE164;
-      }
-      const dial = twiml.dial(dialAttrs as any);
-
-      // Ring ONLY the assigned admin (softphone and/or forwarded cell).
-      if (ringSoftphone) {
-        dial.client(`admin_${assignedAdminId}`);
-      }
-      if (ringCell && fwdPhone) {
-        const screenQs = new URLSearchParams();
-        if (callerNumber && callerNumber !== "Unknown") {
-          screenQs.set("caller", callerNumber);
-        }
-        const screenUrl = `${getVoiceBaseUrl(deps)}/api/voice/call-screen${
-          screenQs.toString() ? `?${screenQs.toString()}` : ""
-        }`;
-        dial.number(
-          {
-            url: screenUrl,
-            method: "POST",
-          } as any,
-          fwdPhone,
-        );
-      }
-
-      const twimlOut = twiml.toString();
-      console.log("[voice:incoming] TwiML:", twimlOut);
-
-      // Await log BEFORE responding so serverless isolates don't freeze mid-write.
+      // Log call before TwiML so AI / dial paths share the same row.
+      let conversationIdForAi: number | null = null;
+      let clientIdForAi: number | null = null;
+      let contactIdForAi: number | null = null;
+      let unknownIdForAi: number | null = null;
       try {
-        const { conversationId, clientId, unknownContactId } =
+        const { conversationId, clientId, contactId, unknownContactId } =
           await getOrCreateCallConversation(deps, {
             callerPhone: callerNumber,
             ofgNumberId,
             assignedAdminId,
           });
+        conversationIdForAi = conversationId;
+        clientIdForAi = clientId;
+        contactIdForAi = contactId;
+        unknownIdForAi = unknownContactId;
         const body = `Incoming call from ${callerNumber}`;
         const pendingStatus = callSid ? takePendingDialStatus(callSid) : null;
         const pendingRec = callSid ? takePendingRecording(callSid) : null;
@@ -60650,6 +72965,7 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
               conversation_id: conversationId,
               message_id: inserted.id,
               client_id: clientId,
+              contact_id: contactId,
               unknown_contact_id: unknownContactId,
               channel: "call",
             },
@@ -60659,6 +72975,91 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
         console.error("[voice:incoming] log error:", logErr);
       }
 
+      // AI-first voice (gated). Falls through to human dial on escalate / failure.
+      // ?human=1 skips AI (used after AI handoff failure to avoid loops).
+      const forceHuman =
+        String(req.query.human || req.body?.human || "") === "1";
+      if (
+        !forceHuman &&
+        inboundAiVoiceEnabled() &&
+        inboundAiAnthropicReady("voice") &&
+        inboundAiMayRunOnAssignedLine(assignedAdminId)
+      ) {
+        const qs = new URLSearchParams();
+        qs.set("turns", "0");
+        if (conversationIdForAi) qs.set("cid", String(conversationIdForAi));
+        if (clientIdForAi) qs.set("client", String(clientIdForAi));
+        if (contactIdForAi) qs.set("contact", String(contactIdForAi));
+        if (unknownIdForAi) qs.set("unknown", String(unknownIdForAi));
+        qs.set("admin", String(assignedAdminId));
+        if (ofgNumberId) qs.set("ofg", String(ofgNumberId));
+        const aiAction = `${getVoiceBaseUrl(deps)}/api/voice/ai-turn?${qs.toString()}`;
+        const gatherLang =
+          clientIdForAi != null || contactIdForAi != null
+            ? await (async () => {
+                if (clientIdForAi) {
+                  const [lr] = await pool.query<RowDataPacket[]>(
+                    `SELECT preferred_language FROM clients WHERE id = ? LIMIT 1`,
+                    [clientIdForAi],
+                  );
+                  return lr[0]?.preferred_language === "es" ? "es-US" : "en-US";
+                }
+                const [lr] = await pool.query<RowDataPacket[]>(
+                  `SELECT preferred_language FROM contacts WHERE id = ? LIMIT 1`,
+                  [contactIdForAi],
+                );
+                return lr[0]?.preferred_language === "es" ? "es-US" : "en-US";
+              })()
+            : "en-US";
+        const gather = twiml.gather({
+          input: "speech dtmf",
+          timeout: 6,
+          speechTimeout: "auto",
+          language: gatherLang,
+          hints: "hours, documents, payment, cancel, agent, representative",
+          action: aiAction,
+          method: "POST",
+          numDigits: 1,
+        } as any);
+        gather.say(
+          {
+            voice: gatherLang.startsWith("es") ? "Polly.Mia" : "Polly.Joanna",
+          },
+          gatherLang.startsWith("es")
+            ? "Gracias por llamar a Optimum Credit. ¿En qué podemos ayudarle? También puede marcar cero para un compañero."
+            : "Thanks for calling Optimum Credit. How can we help you today? You can also press zero for a teammate.",
+        );
+        // No input → escalate to human dial via ai-turn empty path
+        twiml.redirect({ method: "POST" } as any, `${aiAction}&empty=1`);
+        const twimlOut = twiml.toString();
+        console.log("[voice:incoming:ai] TwiML:", twimlOut);
+        return res.send(twimlOut);
+      }
+
+      const [fwdRows] = await pool.query<RowDataPacket[]>(
+        `SELECT call_forwarding_enabled, call_forwarding_phone, voice_available
+         FROM admins WHERE id = ? LIMIT 1`,
+        [assignedAdminId],
+      );
+      const fwdPhone =
+        fwdRows[0]?.call_forwarding_enabled && fwdRows[0]?.call_forwarding_phone
+          ? String(fwdRows[0].call_forwarding_phone)
+          : null;
+      const softphoneOnline = !!fwdRows[0]?.voice_available;
+      const ofgE164 = ofg?.e164 ? String(ofg.e164) : String(calledNumber || "");
+
+      buildAssigneeDialTwiml({
+        twiml,
+        assignedAdminId,
+        callerNumber,
+        calledNumber,
+        ofgE164,
+        fwdPhone,
+        softphoneOnline,
+      });
+
+      const twimlOut = twiml.toString();
+      console.log("[voice:incoming] TwiML:", twimlOut);
       return res.send(twimlOut);
     } catch (err) {
       console.error("[voice:incoming]", err);
@@ -60671,8 +73072,365 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
     }
   };
 
+  const handleVoiceAiTurn: RequestHandler = async (req, res) => {
+    res.setHeader("Content-Type", "text/xml");
+    const VoiceResponse = twilio.twiml.VoiceResponse;
+    const twiml = new VoiceResponse();
+    try {
+      const turns = Math.max(0, Number(req.query.turns || 0) || 0);
+      const conversationId = Number(req.query.cid || 0) || null;
+      const clientId = Number(req.query.client || 0) || null;
+      const contactId = Number(req.query.contact || 0) || null;
+      const unknownContactId = Number(req.query.unknown || 0) || null;
+      let assignedAdminId = Number(req.query.admin || 0) || null;
+      const ofgNumberId = Number(req.query.ofg || 0) || null;
+      const calledNumber =
+        (req.body?.To as string) || (req.body?.Called as string) || "";
+      const callerNumber =
+        (req.body?.From as string) || (req.body?.Caller as string) || "Unknown";
+      const speech = String(req.body?.SpeechResult || "").trim();
+      const digits = String(req.body?.Digits || "").trim();
+      const empty = String(req.query.empty || "") === "1";
+
+      const ofg = calledNumber
+        ? await deps.resolveOfgNumberByToAddress(calledNumber)
+        : null;
+      if (!assignedAdminId && ofg?.assigned_admin_id != null) {
+        assignedAdminId = Number(ofg.assigned_admin_id);
+      }
+      const ofgE164 = ofg?.e164
+        ? String(ofg.e164)
+        : String(calledNumber || "");
+
+      const dialHuman = async (preSay?: string, reason?: string) => {
+        if (preSay) twiml.say({ voice: "Polly.Joanna" }, preSay);
+        // Caller name (client / CRM contact) for the staff alert.
+        let callerLabel = callerNumber;
+        let callerLang: "en" | "es" = "en";
+        const who = clientId
+          ? await pool.query<RowDataPacket[]>(
+              `SELECT first_name, last_name, preferred_language FROM clients WHERE id = ? LIMIT 1`,
+              [clientId],
+            )
+          : contactId
+            ? await pool.query<RowDataPacket[]>(
+                `SELECT first_name, last_name, preferred_language FROM contacts WHERE id = ? LIMIT 1`,
+                [contactId],
+              )
+            : null;
+        const w = who?.[0]?.[0];
+        if (w) {
+          const name = `${w.first_name || ""} ${w.last_name || ""}`.trim();
+          if (name) callerLabel = `${name} (${callerNumber})`;
+          if (w.preferred_language === "es") callerLang = "es";
+        }
+        // Escalation alert: assigned staffer, or ALL active staff if unassigned.
+        const originalAssignee = assignedAdminId;
+        const voiceLink = clientId
+          ? `/admin/conversations?client=${clientId}`
+          : contactId
+            ? `/admin/conversations?contact=${contactId}`
+            : unknownContactId
+              ? `/admin/conversations?unknown=${unknownContactId}`
+              : `/admin/conversations`;
+        if (conversationId) {
+          await insertInboundAiSystemNote(
+            conversationId,
+            inboundAiEscalatedSystemNote("voice_handoff", reason || "Connecting to staff"),
+            { inbound_ai: true, mode: "escalated", channel: "call" },
+          ).catch(() => undefined);
+        }
+        await notifyInboundAiEscalation({
+          assignedAdminId: originalAssignee,
+          fromLabel: callerLabel,
+          summary: reason || "Caller asked for a person",
+          linkUrl: voiceLink,
+          clientId,
+          unknownContactId,
+          channel: "voice",
+          fallbackFromE164: ofgE164 || null,
+        }).catch((e) => console.warn("[inbound-ai:voice:notify]", e?.message || e));
+        // Unassigned line: ring the same fallback person the SMS AI uses
+        // instead of hanging up on the caller.
+        if (!assignedAdminId) {
+          const staff = await resolveInboundAiFallbackStaffIds();
+          assignedAdminId =
+            pickFallbackEscalationAdminId({
+              languageOwnerId: await resolveLanguageOwnerAdminId(callerLang),
+              cesarId: staff.cesarId,
+              leccaId: staff.leccaId,
+              angelId: staff.angelId,
+              lang: callerLang,
+            }) || null;
+        }
+        if (!assignedAdminId) {
+          twiml.say(
+            { voice: "Polly.Joanna" },
+            "We are unable to take your call right now. Please try again later.",
+          );
+          twiml.hangup();
+          return;
+        }
+        const [fwdRows] = await pool.query<RowDataPacket[]>(
+          `SELECT call_forwarding_enabled, call_forwarding_phone, voice_available
+           FROM admins WHERE id = ? LIMIT 1`,
+          [assignedAdminId],
+        );
+        const fwdPhone =
+          fwdRows[0]?.call_forwarding_enabled &&
+          fwdRows[0]?.call_forwarding_phone
+            ? String(fwdRows[0].call_forwarding_phone)
+            : null;
+        const softphoneOnline = !!fwdRows[0]?.voice_available;
+        buildAssigneeDialTwiml({
+          twiml,
+          assignedAdminId,
+          callerNumber,
+          calledNumber,
+          ofgE164,
+          fwdPhone,
+          softphoneOnline,
+        });
+      };
+
+      if (
+        !inboundAiVoiceEnabled() ||
+        !inboundAiAnthropicReady("voice") ||
+        !inboundAiMayRunOnAssignedLine(assignedAdminId)
+      ) {
+        await dialHuman("Please hold while we connect you.", "AI unavailable on this line — routed to staff");
+        return res.send(twiml.toString());
+      }
+
+      // DTMF 0 or empty gather → human
+      if (digits === "0" || empty || (!speech && !digits)) {
+        await dialHuman("Connecting you with a teammate now.", "Caller pressed 0 / said nothing");
+        return res.send(twiml.toString());
+      }
+
+      const isUnknown = !clientId && !contactId && !!unknownContactId;
+      const hard = inboundAiHardEscalateReason(speech || digits, {
+        isUnknown: !!isUnknown,
+        aiTurnCount: turns,
+        maxTurns: INBOUND_AI_MAX_VOICE_TURNS,
+      });
+
+      let preferredLanguage: string | null = null;
+      let displayName = callerNumber;
+      let crmContext = isUnknown
+        ? "kind=unknown_contact"
+        : contactId
+          ? "kind=crm_contact"
+          : "";
+      if (clientId) {
+        const [crows] = await pool.query<RowDataPacket[]>(
+          `SELECT first_name, last_name, status, pipeline_stage, preferred_language
+           FROM clients WHERE id = ? LIMIT 1`,
+          [clientId],
+        );
+        if (crows[0]) {
+          preferredLanguage = crows[0].preferred_language
+            ? String(crows[0].preferred_language)
+            : null;
+          displayName =
+            `${crows[0].first_name || ""} ${crows[0].last_name || ""}`.trim() ||
+            displayName;
+          crmContext = `status=${crows[0].status}; stage=${crows[0].pipeline_stage}; lang=${preferredLanguage || "?"}`;
+        }
+      } else if (contactId) {
+        const [crows] = await pool.query<RowDataPacket[]>(
+          `SELECT first_name, last_name, preferred_language FROM contacts
+           WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+          [contactId],
+        );
+        if (crows[0]) {
+          preferredLanguage = crows[0].preferred_language
+            ? String(crows[0].preferred_language)
+            : null;
+          displayName =
+            `${crows[0].first_name || ""} ${crows[0].last_name || ""}`.trim() ||
+            displayName;
+          crmContext = `kind=crm_contact; lang=${preferredLanguage || "?"}`;
+        }
+      }
+      const lang = inboundAiDetectLang(preferredLanguage, speech);
+
+      const voiceLinkUrl = clientId
+        ? `/admin/conversations?client=${clientId}`
+        : contactId
+          ? `/admin/conversations?contact=${contactId}`
+          : unknownContactId
+            ? `/admin/conversations?unknown=${unknownContactId}`
+            : `/admin/conversations`;
+
+      let decision: InboundAiDecision;
+      if (hard) {
+        decision = {
+          action: "escalate",
+          reply: "",
+          summary: `Hard escalate: ${hard}`,
+          confidence: 1,
+          escalate_reason: hard,
+        };
+      } else {
+        const faqContext = await loadInboundAiFaqContext(6);
+        decision = await callInboundAiClaude({
+          lang,
+          channel: "voice",
+          displayName,
+          inboundText: speech.slice(0, 800),
+          crmContext,
+          faqContext,
+          threadLines: `(voice turn ${turns + 1})`,
+          aiTurnCount: turns,
+          timeoutMs: INBOUND_AI_VOICE_TIMEOUT_MS,
+        });
+      }
+
+      if (decision.action === "escalate") {
+        await dialHuman(
+          lang === "es"
+            ? "Un momento, le conectamos con un miembro del equipo."
+            : "One moment — connecting you with a teammate.",
+          decision.summary || decision.escalate_reason || "AI escalated the call",
+        );
+        return res.send(twiml.toString());
+      }
+
+      // Max turns without resolve → human (don't hang up as fake resolve).
+      if (turns + 1 >= INBOUND_AI_MAX_VOICE_TURNS) {
+        await dialHuman(
+          lang === "es"
+            ? "Un momento, le conectamos con un miembro del equipo."
+            : "One moment — connecting you with a teammate.",
+          "AI reached the call turn limit without resolving",
+        );
+        return res.send(twiml.toString());
+      }
+
+      const sayText = decision.reply.slice(0, 500);
+      twiml.say(
+        { voice: lang === "es" ? "Polly.Mia" : "Polly.Joanna" },
+        sayText,
+      );
+
+      if (decision.action === "resolve") {
+        if (conversationId) {
+          await insertInboundAiSystemNote(
+            conversationId,
+            inboundAiResolvedSystemNote(decision.summary || sayText),
+            { inbound_ai: true, mode: "resolved", channel: "call" },
+          ).catch(() => undefined);
+          await pool.query(
+            `UPDATE conversations
+             SET status = 'closed', unread_count = 0,
+                 assigned_admin_id = COALESCE(?, assigned_admin_id)
+             WHERE id = ?`,
+            [assignedAdminId, conversationId],
+          );
+          if (assignedAdminId) {
+            await notifyInboundAiOutcome({
+              adminId: assignedAdminId,
+              mode: "resolved",
+              fromLabel: displayName,
+              summary: decision.summary || "AI handled the call",
+              linkUrl: voiceLinkUrl,
+              clientId,
+              unknownContactId,
+              channel: "voice",
+            }).catch(() => undefined);
+          }
+        }
+        twiml.say(
+          { voice: "Polly.Joanna" },
+          lang === "es"
+            ? "Gracias por llamar. Adiós."
+            : "Thanks for calling. Goodbye.",
+        );
+        twiml.hangup();
+        return res.send(twiml.toString());
+      }
+
+      const nextQs = new URLSearchParams();
+      nextQs.set("turns", String(turns + 1));
+      if (conversationId) nextQs.set("cid", String(conversationId));
+      if (clientId) nextQs.set("client", String(clientId));
+      if (contactId) nextQs.set("contact", String(contactId));
+      if (unknownContactId) nextQs.set("unknown", String(unknownContactId));
+      if (assignedAdminId) nextQs.set("admin", String(assignedAdminId));
+      if (ofgNumberId) nextQs.set("ofg", String(ofgNumberId));
+      const nextAction = `${getVoiceBaseUrl(deps)}/api/voice/ai-turn?${nextQs.toString()}`;
+      const gather = twiml.gather({
+        input: "speech dtmf",
+        timeout: 6,
+        speechTimeout: "auto",
+        language: lang === "es" ? "es-US" : "en-US",
+        action: nextAction,
+        method: "POST",
+        numDigits: 1,
+      } as any);
+      gather.say(
+        { voice: lang === "es" ? "Polly.Mia" : "Polly.Joanna" },
+        lang === "es"
+          ? "¿Algo más? O marque cero para un compañero."
+          : "Anything else? Or press zero for a teammate.",
+      );
+      twiml.redirect({ method: "POST" } as any, `${nextAction}&empty=1`);
+      return res.send(twiml.toString());
+    } catch (err) {
+      console.error("[voice:ai-turn]", err);
+      twiml.say(
+        { voice: "Polly.Joanna" },
+        "Please hold while we connect you with a teammate.",
+      );
+      try {
+        const calledNumber =
+          (req.body?.To as string) || (req.body?.Called as string) || "";
+        const callerNumber =
+          (req.body?.From as string) ||
+          (req.body?.Caller as string) ||
+          "Unknown";
+        let assignedAdminId = Number(req.query.admin || 0) || null;
+        const ofg = calledNumber
+          ? await deps.resolveOfgNumberByToAddress(calledNumber)
+          : null;
+        if (!assignedAdminId && ofg?.assigned_admin_id != null) {
+          assignedAdminId = Number(ofg.assigned_admin_id);
+        }
+        if (assignedAdminId) {
+          const [fwdRows] = await pool.query<RowDataPacket[]>(
+            `SELECT call_forwarding_enabled, call_forwarding_phone, voice_available
+             FROM admins WHERE id = ? LIMIT 1`,
+            [assignedAdminId],
+          );
+          buildAssigneeDialTwiml({
+            twiml,
+            assignedAdminId,
+            callerNumber,
+            calledNumber,
+            ofgE164: ofg?.e164
+              ? String(ofg.e164)
+              : String(calledNumber || ""),
+            fwdPhone:
+              fwdRows[0]?.call_forwarding_enabled &&
+              fwdRows[0]?.call_forwarding_phone
+                ? String(fwdRows[0].call_forwarding_phone)
+                : null,
+            softphoneOnline: !!fwdRows[0]?.voice_available,
+          });
+        } else {
+          twiml.hangup();
+        }
+      } catch {
+        twiml.hangup();
+      }
+      return res.send(twiml.toString());
+    }
+  };
+
   app.post("/api/voice/incoming", guard, handleVoiceIncoming);
   app.post("/api/webhooks/twilio/voice", guard, handleVoiceIncoming);
+  app.post("/api/voice/ai-turn", guard, handleVoiceAiTurn);
 }
 
 export function createServer() {

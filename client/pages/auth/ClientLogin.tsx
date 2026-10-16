@@ -14,6 +14,7 @@ import {
   Quote,
   BadgeCheck,
   PartyPopper,
+  ShieldAlert,
   Clock,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -48,6 +49,8 @@ export default function ClientLogin() {
     expiredOnboarding?: boolean;
     email?: string;
   };
+  const blockedNotice =
+    new URLSearchParams(location.search).get("blocked") === "1";
   const [resendIn, setResendIn] = useState(0);
   const { requestingOtp, verifyingOtp, error, otpSentTo } = useAppSelector(
     (s) => s.clientAuth,
@@ -151,6 +154,17 @@ export default function ClientLogin() {
           <div className="w-full max-w-sm mx-auto animate-fade-up">
             {/* Icon + heading */}
             <div className="flex flex-col items-center text-center mb-8">
+              {blockedNotice && step === "email" && !error && (
+                <div
+                  role="alert"
+                  className="w-full mb-5 flex items-start gap-3 bg-destructive/10 border border-destructive/30 rounded-xl px-4 py-3 text-left animate-fade-up"
+                >
+                  <ShieldAlert className="w-4 h-4 text-destructive mt-0.5 shrink-0" />
+                  <p className="text-sm text-foreground">
+                    {t("clientLogin.accountBlocked")}
+                  </p>
+                </div>
+              )}
               {locationState.justRegistered && step === "email" && (
                 <div className="w-full mb-5 flex items-start gap-3 bg-accent/10 border border-accent/30 rounded-xl px-4 py-3 text-left">
                   <PartyPopper className="w-4 h-4 text-accent mt-0.5 shrink-0" />

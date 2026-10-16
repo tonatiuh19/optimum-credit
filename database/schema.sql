@@ -366,7 +366,16 @@ CREATE TABLE IF NOT EXISTS `clients` (
   `anet_customer_profile_id` VARCHAR(64) DEFAULT NULL,
   `anet_payment_profile_id` VARCHAR(64) DEFAULT NULL,
   -- Status
-  `status` ENUM('prospect','funding','pending_payment','onboarding','active','paused','cancelled') NOT NULL DEFAULT 'pending_payment',
+  `status` ENUM('prospect','funding','pending_payment','onboarding','active','paused','blocked','cancelled') NOT NULL DEFAULT 'pending_payment',
+  -- Prospect traffic light (semáforo) — prospects / web leads only
+  `lead_temperature` ENUM('hot','warm','cold') DEFAULT NULL COMMENT 'Prospect traffic light; NULL for non-prospects',
+  `lead_temperature_reasons` VARCHAR(500) DEFAULT NULL COMMENT 'Comma-separated reason codes',
+  `lead_temperature_at` DATETIME DEFAULT NULL COMMENT 'When the color last changed',
+  `analysis_reviewed_at` DATETIME DEFAULT NULL COMMENT 'Credit analysis reviewed with the prospect (button or 5+ min call)',
+  `analysis_reviewed_by_admin_id` INT UNSIGNED DEFAULT NULL,
+  `call_scheduled_at` DATETIME DEFAULT NULL COMMENT 'Next scheduled call with the prospect',
+  `lead_hot_stale_alerted_at` DATETIME DEFAULT NULL COMMENT 'Last 3-days-no-movement alert to Cesar',
+  `lead_convert_suggested_at` DATETIME DEFAULT NULL COMMENT 'Ready-to-convert suggestion sent',
   `admin_notes` TEXT DEFAULT NULL COMMENT 'Internal notes visible only to admins',
   -- Credit Repair Cloud integration
   `crc_client_id` VARCHAR(64) DEFAULT NULL COMMENT 'Base64-encoded CRC lead/client ID from CRC API',
@@ -377,6 +386,7 @@ CREATE TABLE IF NOT EXISTS `clients` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_clients_email` (`email`),
   KEY `idx_clients_status` (`status`),
+  KEY `idx_clients_lead_temperature` (`lead_temperature`),
   KEY `idx_clients_pipeline_stage` (`pipeline_stage`),
   KEY `idx_clients_package` (`package_id`),
   KEY `idx_clients_affiliate` (`affiliate_id`),
@@ -984,7 +994,7 @@ CREATE TABLE IF NOT EXISTS `conversation_unknown_contacts` (
 CREATE TABLE IF NOT EXISTS `conversations` (
   `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
   `client_id` INT UNSIGNED DEFAULT NULL,
-  `channel` ENUM('sms','call','email','internal') NOT NULL DEFAULT 'sms',
+  `channel` ENUM('sms','call','email','internal','whatsapp') NOT NULL DEFAULT 'sms',
   `last_message_at` DATETIME DEFAULT NULL,
   `last_message_preview` VARCHAR(500) DEFAULT NULL,
   `unread_count` INT UNSIGNED NOT NULL DEFAULT 0,
@@ -1040,6 +1050,33 @@ CREATE TABLE IF NOT EXISTS `conversation_messages` (
   KEY `idx_messages_call_insights` (`channel`, `call_insights_status`),
   CONSTRAINT `fk_messages_conversation` FOREIGN KEY (`conversation_id`) REFERENCES `conversations`(`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_messages_admin` FOREIGN KEY (`sent_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Three-way calls (Twilio Conference, created on "Add caller")
+CREATE TABLE IF NOT EXISTS `voice_three_way_sessions` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `conference_name` VARCHAR(80) NOT NULL,
+  `conference_sid` VARCHAR(64) DEFAULT NULL,
+  `direction` ENUM('inbound','outbound') NOT NULL,
+  `staff_call_sid` VARCHAR(64) NOT NULL COMMENT 'Browser softphone leg',
+  `customer_call_sid` VARCHAR(64) NOT NULL COMMENT 'Client PSTN leg',
+  `log_call_sid` VARCHAR(64) DEFAULT NULL COMMENT 'CallSid of the existing conversation call row',
+  `admin_id` INT UNSIGNED NOT NULL,
+  `from_e164` VARCHAR(20) NOT NULL COMMENT 'OFG line used as caller ID',
+  `third_party_label` VARCHAR(80) DEFAULT NULL,
+  `third_party_number` VARCHAR(20) NOT NULL,
+  `third_party_call_sid` VARCHAR(64) DEFAULT NULL,
+  `status` ENUM('moving','active','ended','failed') NOT NULL DEFAULT 'moving',
+  `error_message` VARCHAR(500) DEFAULT NULL,
+  `recording_message_id` INT UNSIGNED DEFAULT NULL COMMENT 'conversation_messages row for the conference recording',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_3way_conference` (`conference_name`),
+  KEY `idx_3way_staff_call` (`staff_call_sid`),
+  KEY `idx_3way_customer_call` (`customer_call_sid`),
+  KEY `idx_3way_conference_sid` (`conference_sid`),
+  CONSTRAINT `fk_3way_admin` FOREIGN KEY (`admin_id`) REFERENCES `admins`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `mms_media` (
@@ -1259,6 +1296,34 @@ CREATE TABLE IF NOT EXISTS `notification_queue` (
 -- ============================================================================
 -- ADMIN IN-APP NOTIFICATIONS (profile bell)
 -- ============================================================================
+-- Opt-in outbound send log (progress reports, staff emails) for Admin Ask MCP
+CREATE TABLE IF NOT EXISTS `outbound_message_log` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `channel` ENUM('sms','email','whatsapp') NOT NULL,
+  `recipient_type` ENUM('client','partner','admin','contact','other') NOT NULL DEFAULT 'client',
+  `kind` VARCHAR(64) NOT NULL COMMENT 'e.g. round_report, staff_email',
+  `client_id` INT UNSIGNED DEFAULT NULL,
+  `case_id` INT UNSIGNED DEFAULT NULL,
+  `round_number` TINYINT UNSIGNED DEFAULT NULL,
+  `to_address` VARCHAR(255) NOT NULL,
+  `from_address` VARCHAR(255) DEFAULT NULL,
+  `subject` VARCHAR(255) DEFAULT NULL,
+  `body_preview` VARCHAR(1000) DEFAULT NULL,
+  `provider_message_id` VARCHAR(255) DEFAULT NULL,
+  `status` VARCHAR(30) NOT NULL DEFAULT 'sent' COMMENT 'sent | failed (SMS delivery status lives on conversation_messages)',
+  `error_message` VARCHAR(500) DEFAULT NULL,
+  `conversation_message_id` INT UNSIGNED DEFAULT NULL COMMENT 'SMS: thread row carrying live delivery status',
+  `sent_by_admin_id` INT UNSIGNED DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_outbound_log_created` (`created_at`),
+  KEY `idx_outbound_log_client_kind` (`client_id`, `kind`, `round_number`),
+  KEY `idx_outbound_log_channel` (`channel`, `created_at`),
+  CONSTRAINT `fk_outbound_log_client` FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_outbound_log_case` FOREIGN KEY (`case_id`) REFERENCES `credit_repair_cases`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_outbound_log_admin` FOREIGN KEY (`sent_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS `admin_notifications` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `admin_id` INT UNSIGNED NOT NULL,
@@ -1467,7 +1532,8 @@ INSERT INTO `section_locks` (`section_key`, `label`, `is_locked`, `lock_reason`)
   ('affiliates',       'Affiliates',                 0, NULL),
   ('affiliate-portal', 'My Affiliate',               0, NULL),
   ('my_tasks',         'My Tasks (Work Hub)',         0, NULL),
-  ('contacts',         'Contacts',                   0, NULL)
+  ('contacts',         'Contacts',                   0, NULL),
+  ('event-marketing',  'Event Marketing',            0, NULL)
 ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 
 -- ============================================================================
@@ -1477,7 +1543,7 @@ CREATE TABLE IF NOT EXISTS `reminder_flows` (
   `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
   `name` VARCHAR(200) NOT NULL,
   `description` TEXT DEFAULT NULL,
-  `trigger_event` ENUM('payment_confirmed','docs_ready','round_1_complete','round_2_complete','round_3_complete','round_4_complete','round_5_complete','round_extended_complete','completed','payment_due') NOT NULL,
+  `trigger_event` ENUM('payment_confirmed','docs_ready','round_1_complete','round_2_complete','round_3_complete','round_4_complete','round_5_complete','round_extended_complete','completed','payment_due','event_registered') NOT NULL,
   `is_active` TINYINT(1) NOT NULL DEFAULT 1,
   `required_label_slugs_json` JSON DEFAULT NULL COMMENT 'If set, flow only runs when client has ALL listed label slugs',
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -1815,6 +1881,49 @@ CREATE TABLE IF NOT EXISTS `client_labels` (
   CONSTRAINT `fk_client_labels_label` FOREIGN KEY (`label_id`) REFERENCES `labels`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Credit file extraction jobs (shared Analysis + Progress engine)
+CREATE TABLE IF NOT EXISTS `credit_file_extractions` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `client_id` INT UNSIGNED DEFAULT NULL,
+  `case_id` INT UNSIGNED DEFAULT NULL,
+  `credit_analysis_id` INT UNSIGNED DEFAULT NULL,
+  `report_wizard_session_id` INT UNSIGNED DEFAULT NULL,
+  `purpose` ENUM('analysis','progress_before','progress_after','other') NOT NULL DEFAULT 'other',
+  `file_name` VARCHAR(255) NOT NULL,
+  `mime_type` VARCHAR(100) NOT NULL,
+  `file_size` INT UNSIGNED NOT NULL,
+  `storage_key` VARCHAR(1000) NOT NULL COMMENT 'Encrypted file on CDN',
+  `enc_iv` CHAR(32) NOT NULL,
+  `enc_tag` CHAR(32) NOT NULL,
+  `provider` VARCHAR(40) NOT NULL DEFAULT 'unknown' COMMENT 'smartcredit | equifax_3b | unknown (any provider is accepted)',
+  `status` ENUM('queued','submitted','ready','failed') NOT NULL DEFAULT 'queued',
+  `model` VARCHAR(80) DEFAULT NULL,
+  `batch_id` VARCHAR(100) DEFAULT NULL,
+  `attempts` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `text_skeleton_json` JSON DEFAULT NULL COMMENT 'Text-parser cross-check (recognized formats only)',
+  `extracted_json` JSON DEFAULT NULL COMMENT 'CreditFile from Claude',
+  `issues_json` JSON DEFAULT NULL COMMENT 'Cross-check issues for staff review',
+  `confidence` DECIMAL(4,2) DEFAULT NULL,
+  `image_pages` SMALLINT UNSIGNED DEFAULT NULL,
+  `total_pages` SMALLINT UNSIGNED DEFAULT NULL,
+  `error_message` VARCHAR(500) DEFAULT NULL,
+  `created_by_admin_id` INT UNSIGNED DEFAULT NULL,
+  `submitted_at` DATETIME DEFAULT NULL,
+  `completed_at` DATETIME DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_cfe_status` (`status`, `created_at`),
+  KEY `idx_cfe_client` (`client_id`),
+  KEY `idx_cfe_case` (`case_id`),
+  KEY `idx_cfe_credit_analysis` (`credit_analysis_id`),
+  KEY `idx_cfe_wizard_session` (`report_wizard_session_id`),
+  KEY `idx_cfe_batch` (`batch_id`),
+  CONSTRAINT `fk_cfe_client` FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_cfe_case` FOREIGN KEY (`case_id`) REFERENCES `credit_repair_cases`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_cfe_admin` FOREIGN KEY (`created_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS `credit_analyses` (
   `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
   `client_id` INT UNSIGNED NOT NULL,
@@ -1840,6 +1949,10 @@ CREATE TABLE IF NOT EXISTS `credit_analyses` (
   `analysis_text` MEDIUMTEXT DEFAULT NULL,
   `email_opt_in` TINYINT(1) NOT NULL DEFAULT 0,
   `email_sent_at` DATETIME DEFAULT NULL,
+  `escrow_flag` TINYINT(1) DEFAULT NULL COMMENT 'NULL auto-detect | 1 in escrow (agent) | 0 not in escrow',
+  `lender_score_model` VARCHAR(40) DEFAULT NULL COMMENT 'Lender score model, e.g. FICO 2/4/5 (mortgage)',
+  `lender_score` SMALLINT UNSIGNED DEFAULT NULL COMMENT 'Lender middle score (agent-entered)',
+  `lender_target_score` SMALLINT UNSIGNED DEFAULT NULL COMMENT 'Score the lender needs',
   `generated_at` DATETIME DEFAULT NULL,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -1857,7 +1970,10 @@ INSERT INTO `labels` (`slug`, `name_en`, `name_es`, `layer`, `color`, `is_system
   ('get_credit_report', 'Get credit report', 'Obtener reporte de crédito', 'source', 'primary', 1, 25),
   ('golf_tournament_prospect', 'Golf tournament prospect', 'Prospecto torneo de golf', 'source', 'accent', 1, 26),
   ('las_vegas_event', 'Las Vegas Event', 'Evento Las Vegas', 'source', 'accent', 1, 27),
-  ('agent_submission', 'Agent submission', 'Envío de agente', 'source', 'accent', 1, 30),
+  ('event_marketing', 'Event marketing', 'Marketing de eventos', 'source', 'primary', 1, 28),
+  ('ofy', 'Options for Youth (OFY)', 'Options for Youth (OFY)', 'source', 'accent', 1, 29),
+  ('allegiance', 'Allegiance STEAM Academy', 'Allegiance STEAM Academy', 'source', 'accent', 1, 30),
+  ('agent_submission', 'Agent submission', 'Envío de agente', 'source', 'accent', 1, 31),
   ('referral', 'Referral', 'Referido', 'source', 'muted', 1, 40),
   ('realtor_broker', 'Realtor / Mortgage Broker', 'Agente inmobiliario / Broker hipotecario', 'source', 'accent', 1, 41),
   ('one_off_referral', 'One-off referral', 'Referido único', 'source', 'muted', 1, 42),
@@ -1946,4 +2062,118 @@ CREATE TABLE IF NOT EXISTS `admin_hubspot_permissions` (
     FOREIGN KEY (`admin_id`) REFERENCES `admins`(`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_hubspot_perm_granter`
     FOREIGN KEY (`granted_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================================
+-- EVENT MARKETING (CRM section — companies / series / sessions / forms / regs)
+-- Applied by: 20261001_171800_event_marketing.sql
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `event_companies` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `slug` VARCHAR(80) NOT NULL,
+  `name` VARCHAR(200) NOT NULL,
+  `name_es` VARCHAR(200) DEFAULT NULL,
+  `label_slug` VARCHAR(80) NOT NULL,
+  `is_active` TINYINT(1) NOT NULL DEFAULT 1,
+  `sort_order` INT NOT NULL DEFAULT 0,
+  `welcome_heading_en` VARCHAR(500) NOT NULL,
+  `welcome_heading_es` VARCHAR(500) NOT NULL,
+  `welcome_body_en` TEXT NOT NULL,
+  `welcome_body_es` TEXT NOT NULL,
+  `offer_free_report` TINYINT(1) NOT NULL DEFAULT 1,
+  `offer_comic` TINYINT(1) NOT NULL DEFAULT 0,
+  `class_link_url` VARCHAR(500) DEFAULT NULL,
+  `class_schedule_note_en` VARCHAR(500) DEFAULT NULL,
+  `class_schedule_note_es` VARCHAR(500) DEFAULT NULL,
+  `email_subject_en` VARCHAR(500) NOT NULL,
+  `email_subject_es` VARCHAR(500) NOT NULL,
+  `email_body_en` TEXT NOT NULL,
+  `email_body_es` TEXT NOT NULL,
+  `sms_body_en` VARCHAR(500) NOT NULL,
+  `sms_body_es` VARCHAR(500) NOT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_event_companies_slug` (`slug`),
+  KEY `idx_event_companies_active` (`is_active`, `sort_order`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `event_series` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `company_id` INT UNSIGNED NOT NULL,
+  `slug` VARCHAR(80) NOT NULL,
+  `name_en` VARCHAR(200) NOT NULL,
+  `name_es` VARCHAR(200) NOT NULL,
+  `kind` ENUM('in_person','online','hybrid') NOT NULL DEFAULT 'in_person',
+  `is_active` TINYINT(1) NOT NULL DEFAULT 1,
+  `sort_order` INT NOT NULL DEFAULT 0,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_event_series_company_slug` (`company_id`, `slug`),
+  KEY `idx_event_series_company` (`company_id`, `is_active`, `sort_order`),
+  CONSTRAINT `fk_event_series_company` FOREIGN KEY (`company_id`) REFERENCES `event_companies`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `event_sessions` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `company_id` INT UNSIGNED NOT NULL,
+  `series_id` INT UNSIGNED NOT NULL,
+  `short_code` VARCHAR(32) NOT NULL,
+  `title_en` VARCHAR(255) NOT NULL,
+  `title_es` VARCHAR(255) NOT NULL,
+  `starts_at` DATETIME NOT NULL COMMENT 'Wall time in America/Los_Angeles (stored as DATETIME)',
+  `ends_at` DATETIME DEFAULT NULL,
+  `location_en` VARCHAR(500) DEFAULT NULL,
+  `location_es` VARCHAR(500) DEFAULT NULL,
+  `capacity` INT UNSIGNED DEFAULT NULL,
+  `status` ENUM('scheduled','cancelled','completed') NOT NULL DEFAULT 'scheduled',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_event_sessions_short_code` (`short_code`),
+  KEY `idx_event_sessions_company_starts` (`company_id`, `status`, `starts_at`),
+  KEY `idx_event_sessions_series` (`series_id`, `starts_at`),
+  CONSTRAINT `fk_event_sessions_company` FOREIGN KEY (`company_id`) REFERENCES `event_companies`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_event_sessions_series` FOREIGN KEY (`series_id`) REFERENCES `event_series`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `event_form_fields` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `company_id` INT UNSIGNED NOT NULL,
+  `field_key` VARCHAR(64) NOT NULL,
+  `label_en` VARCHAR(200) NOT NULL,
+  `label_es` VARCHAR(200) NOT NULL,
+  `field_type` ENUM('text','email','phone','textarea','select','checkbox','language') NOT NULL DEFAULT 'text',
+  `options_json` JSON DEFAULT NULL,
+  `is_required` TINYINT(1) NOT NULL DEFAULT 0,
+  `is_system` TINYINT(1) NOT NULL DEFAULT 0,
+  `is_active` TINYINT(1) NOT NULL DEFAULT 1,
+  `sort_order` INT NOT NULL DEFAULT 0,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_event_form_fields_company_key` (`company_id`, `field_key`),
+  KEY `idx_event_form_fields_company` (`company_id`, `is_active`, `sort_order`),
+  CONSTRAINT `fk_event_form_fields_company` FOREIGN KEY (`company_id`) REFERENCES `event_companies`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `event_registrations` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `client_id` INT UNSIGNED NOT NULL,
+  `company_id` INT UNSIGNED NOT NULL,
+  `series_id` INT UNSIGNED DEFAULT NULL,
+  `session_id` INT UNSIGNED DEFAULT NULL,
+  `answers_json` JSON DEFAULT NULL,
+  `source_qr` ENUM('company','session') NOT NULL DEFAULT 'company',
+  `checked_in_at` DATETIME DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_event_reg_client` (`client_id`),
+  KEY `idx_event_reg_company` (`company_id`, `created_at`),
+  KEY `idx_event_reg_session` (`session_id`),
+  CONSTRAINT `fk_event_reg_client` FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_event_reg_company` FOREIGN KEY (`company_id`) REFERENCES `event_companies`(`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_event_reg_series` FOREIGN KEY (`series_id`) REFERENCES `event_series`(`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_event_reg_session` FOREIGN KEY (`session_id`) REFERENCES `event_sessions`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

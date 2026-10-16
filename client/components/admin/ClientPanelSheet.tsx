@@ -115,6 +115,9 @@ import {
 import api from "@/lib/api";
 import { LangBadge } from "@/components/ui/lang-badge";
 import { useToast } from "@/hooks/use-toast";
+import { ClientStatusNotesCard } from "@/components/admin/ClientStatusNotesCard";
+import { ClientHoldBadge } from "@/components/admin/ClientHoldBadge";
+import { LeadTemperatureCard } from "@/components/admin/LeadTemperatureCard";
 import OfGReportWizard, {
   suggestReportRound,
 } from "@/components/admin/OfgReportWizard";
@@ -1461,10 +1464,18 @@ function OverviewTab({ client, payments }: { client: any; payments: any[] }) {
 
   return (
     <div className="space-y-4">
+      {client?.id && isProspectLead(client) && <LeadTemperatureCard client={client} />}
       {client?.id && !isProspectLead(client) && (
         <ClientPreSaleAnalysisCard clientId={Number(client.id)} />
       )}
       <ClientLabelsEditor clientId={client.id} initialLabels={client.labels} />
+      {!isAffiliate && client?.id && (
+        <ClientStatusNotesCard
+          clientId={Number(client.id)}
+          status={String(client.status || "")}
+          adminNotes={client.admin_notes}
+        />
+      )}
       <div className="bg-muted/40 rounded-xl p-4 space-y-2.5">
         <div className="flex items-center justify-between gap-2">
           <h3 className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -2434,6 +2445,7 @@ export function ClientPanelSheet({
                         {pd.client.first_name} {pd.client.last_name}
                       </h2>
                       <LangBadge lang={pd.client.preferred_language} />
+                      <ClientHoldBadge status={pd.client.status} />
                       {pd.case_info?.case_number ? (
                         <span className="inline-flex items-center gap-1 font-mono text-[11px] font-bold bg-primary/10 text-primary border border-primary/25 px-2 py-0.5 rounded-md shrink-0">
                           <Hash className="w-3 h-3" />

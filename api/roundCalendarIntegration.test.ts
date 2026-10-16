@@ -29,7 +29,6 @@ let app: ReturnType<typeof createServer>;
 let adminId = 0;
 let adminEmail = "";
 let adminToken = "";
-let adminPrefsSnapshot: string | null = null;
 let clientId = 0;
 let caseId = 0;
 let referrerId = 0;
@@ -63,37 +62,18 @@ describe("round calendar — HTTP integration", () => {
     pool = createIntegrationTestPool();
     app = createServer();
 
-    const [admins] = await pool.query<RowDataPacket[]>(
-      `SELECT id, email, notification_prefs_json FROM admins
-       WHERE status = 'active' AND role IN ('super_admin','admin','agent')
-       ORDER BY id ASC LIMIT 1`,
+    adminEmail = `round-cal-${RUN_ID}@example.test`;
+    const [adminIns] = await pool.query<ResultSetHeader>(
+      `INSERT INTO admins
+         (email, first_name, last_name, role, status, preferred_language)
+       VALUES (?, 'Round', 'Calendar', 'admin', 'active', 'en')`,
+      [adminEmail],
     );
-    if (!admins[0]) throw new Error("No admin for tests");
-    adminId = Number(admins[0].id);
-    adminEmail = String(admins[0].email).toLowerCase();
-    adminPrefsSnapshot =
-      admins[0].notification_prefs_json == null
-        ? null
-        : typeof admins[0].notification_prefs_json === "string"
-          ? admins[0].notification_prefs_json
-          : JSON.stringify(admins[0].notification_prefs_json);
-    // ICS email respects admin notify prefs — force email.round_calendar on for this run
-    // so the suite does not flake when the first active admin has muted the event.
-    await pool.query(
-      `UPDATE admins
-          SET preferred_language = 'en',
-              status = 'active',
-              notification_prefs_json = JSON_SET(
-                COALESCE(notification_prefs_json, JSON_OBJECT()),
-                '$.email.round_calendar', true
-              )
-        WHERE id = ?`,
-      [adminId],
-    );
+    adminId = Number(adminIns.insertId);
     adminToken = await createSession(
       "admin",
       adminId,
-      String(admins[0].email),
+      adminEmail,
       "127.0.0.1",
       "vitest-round-calendar",
     );
@@ -162,10 +142,10 @@ describe("round calendar — HTTP integration", () => {
       await pool.query(`DELETE FROM referrers WHERE id = ?`, [id]);
     }
     if (adminId) {
-      await pool.query(
-        `UPDATE admins SET notification_prefs_json = ? WHERE id = ?`,
-        [adminPrefsSnapshot, adminId],
-      );
+      await pool.query(`DELETE FROM admin_sessions WHERE admin_id = ?`, [
+        adminId,
+      ]);
+      await pool.query(`DELETE FROM admins WHERE id = ?`, [adminId]);
     }
     await cleanupIntegrationTestClients(pool, {
       runId: RUN_ID,

@@ -1,11 +1,15 @@
 /**
- * Call insights cron edge cases — gate, reclaim, too_short, voicemail wait, Dial skip.
+ * Call transcript cron edge cases — gate, reclaim, too_short, voicemail wait, Dial SID.
  */
 import "dotenv/config";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import request from "supertest";
 import type { Pool, ResultSetHeader, RowDataPacket } from "mysql2/promise";
-import { createServer } from "./index";
+import {
+  __testClearEmailDryRuns,
+  __testGetEmailDryRuns,
+  createServer,
+} from "./index";
 import {
   cleanupIntegrationTestClients,
   createIntegrationTestPool,
@@ -18,7 +22,6 @@ let pool: Pool;
 let app: ReturnType<typeof createServer>;
 let prevCron: string | undefined;
 let prevEnabled: string | undefined;
-let prevOpenAi: string | undefined;
 let clientId = 0;
 let conversationId = 0;
 const messageIds: number[] = [];
@@ -74,11 +77,8 @@ describe("call insights cron", () => {
     }
     prevCron = process.env.CRON_SECRET;
     prevEnabled = process.env.CALL_INSIGHTS_ENABLED;
-    prevOpenAi = process.env.OPENAI_API_KEY;
     process.env.CRON_SECRET = VITEST_CRON_SECRET;
     process.env.CALL_INSIGHTS_ENABLED = "1";
-    // Force Dial/voicemail STT branches that do not need Whisper.
-    delete process.env.OPENAI_API_KEY;
 
     pool = createIntegrationTestPool();
     app = createServer();
@@ -105,8 +105,6 @@ describe("call insights cron", () => {
     else process.env.CRON_SECRET = prevCron;
     if (prevEnabled === undefined) delete process.env.CALL_INSIGHTS_ENABLED;
     else process.env.CALL_INSIGHTS_ENABLED = prevEnabled;
-    if (prevOpenAi === undefined) delete process.env.OPENAI_API_KEY;
-    else process.env.OPENAI_API_KEY = prevOpenAi;
 
     if (messageIds.length) {
       await pool
@@ -179,7 +177,7 @@ describe("call insights cron", () => {
        FROM conversation_messages WHERE id = ?`,
       [stuckId],
     );
-    // Reclaimed → pending → claimed → skipped (Dial, no OpenAI, no transcript).
+    // Reclaimed → pending → claimed → failed (placeholder recording URL).
     expect(["skipped", "pending", "failed"]).toContain(
       String(stuckRow[0]?.call_insights_status || ""),
     );
@@ -188,7 +186,7 @@ describe("call insights cron", () => {
     );
   }, 60_000);
 
-  it("awaits Twilio transcript for young voicemail without OpenAI", async () => {
+  it("awaits Twilio transcript for a young voicemail with no recording SID", async () => {
     const vmId = await insertCallMessage({
       body: `voicemail wait ${RUN_ID}`,
       duration: 25,
@@ -211,9 +209,9 @@ describe("call insights cron", () => {
     );
   }, 60_000);
 
-  it("skips Dial recording without OpenAI when no transcript", async () => {
+  it("fails a Dial recording that is not a Twilio recording SID", async () => {
     const dialId = await insertCallMessage({
-      body: `dial missing openai ${RUN_ID}`,
+      body: `dial invalid recording ${RUN_ID}`,
       duration: 55,
       status: "pending",
       metadata: { is_voicemail: false },
@@ -226,54 +224,95 @@ describe("call insights cron", () => {
        FROM conversation_messages WHERE id = ?`,
       [dialId],
     );
-    expect(row[0]?.call_insights_status).toBe("skipped");
-    expect(String(row[0]?.call_insights_error || "")).toBe(
-      "missing_openai_stt",
+    expect(row[0]?.call_insights_status).toBe("failed");
+    expect(String(row[0]?.call_insights_error || "")).toBe("invalid_recording");
+  }, 60_000);
+
+  it("stores a Twilio batch transcript from the status webhook", async () => {
+    const recordingSid = "RE00000000000000000000000000000001";
+    const hookId = await insertCallMessage({
+      body: `twilio hook ${RUN_ID}`,
+      duration: 40,
+      status: "skipped",
+      error: "missing_openai_stt",
+      metadata: { is_voicemail: false },
+    });
+    await pool.query(
+      `UPDATE conversation_messages
+       SET recording_url = ?
+       WHERE id = ?`,
+      [
+        `https://api.twilio.com/2010-04-01/Accounts/ACtest/Recordings/${recordingSid}.mp3`,
+        hookId,
+      ],
     );
-  }, 60_000);
 
-  it("marks transcript-ready without Claude when Anthropic unset", async () => {
-    const prevAnth = process.env.ANTHROPIC_API_KEY;
-    delete process.env.ANTHROPIC_API_KEY;
-    try {
-      const readyId = await insertCallMessage({
-        body: `transcript only ${RUN_ID}`,
-        duration: 48,
-        status: "pending",
-        transcript: `Client asked about Round 2 status. Feeling hopeful. RUN ${RUN_ID}.`,
-        metadata: { is_voicemail: false },
+    const res = await request(app)
+      .post("/api/webhooks/twilio/call-transcript")
+      .send({
+        id: "voice_transcription_testhook01",
+        accountId: process.env.TWILIO_ACCOUNT_SID || "",
+        status: "completed",
+        sourceId: recordingSid,
+        sentences: [
+          {
+            audioChannelIndex: 1,
+            sentenceIndex: 1,
+            startTimeSeconds: 0.2,
+            text: `Caller line ${RUN_ID}`,
+          },
+          {
+            audioChannelIndex: 2,
+            sentenceIndex: 2,
+            startTimeSeconds: 1.1,
+            text: "Agent line",
+          },
+        ],
       });
+    expect(res.status).toBe(200);
 
-      const res = await runCron();
-      expect(res.body.ok).toBe(true);
-      expect(Number(res.body.call_insights?.ready || 0)).toBeGreaterThanOrEqual(
-        1,
-      );
-
-      const [row] = await pool.query<RowDataPacket[]>(
-        `SELECT call_insights_status, call_transcript, call_insights_error,
-                call_insights_json
-         FROM conversation_messages WHERE id = ?`,
-        [readyId],
-      );
-      expect(row[0]?.call_insights_status).toBe("ready");
-      expect(String(row[0]?.call_transcript || "")).toContain(RUN_ID);
-      expect(String(row[0]?.call_insights_error || "")).toBe(
-        "claude_unavailable",
-      );
-      expect(row[0]?.call_insights_json == null).toBe(true);
-    } finally {
-      if (prevAnth === undefined) delete process.env.ANTHROPIC_API_KEY;
-      else process.env.ANTHROPIC_API_KEY = prevAnth;
-    }
+    const [row] = await pool.query<RowDataPacket[]>(
+      `SELECT call_insights_status, call_transcript, call_insights_json, call_insights_error
+       FROM conversation_messages WHERE id = ?`,
+      [hookId],
+    );
+    expect(String(row[0]?.call_insights_status || "")).toBe("ready");
+    expect(String(row[0]?.call_transcript || "")).toContain(`Caller: Caller line ${RUN_ID}`);
+    expect(String(row[0]?.call_transcript || "")).toContain("Agent: Agent line");
+    expect(row[0]?.call_insights_json == null).toBe(true);
+    expect(
+      row[0]?.call_insights_error == null || row[0]?.call_insights_error === "",
+    ).toBe(true);
   }, 60_000);
 
-  it("processes transcript rows via Claude path (ready with or without resume)", async () => {
-    if (!String(process.env.ANTHROPIC_API_KEY || "").trim()) {
-      // eslint-disable-next-line no-console
-      console.warn("[skip] ANTHROPIC_API_KEY unset — Claude path not exercised");
-      return;
-    }
+  it("marks transcript-ready without writing call insights", async () => {
+    const readyId = await insertCallMessage({
+      body: `transcript only ${RUN_ID}`,
+      duration: 48,
+      status: "pending",
+      transcript: `Client asked about Round 2 status. Feeling hopeful. RUN ${RUN_ID}.`,
+      metadata: { is_voicemail: false },
+    });
+
+    const res = await runCron();
+    expect(res.body.ok).toBe(true);
+    expect(Number(res.body.call_insights?.ready || 0)).toBeGreaterThanOrEqual(1);
+
+    const [row] = await pool.query<RowDataPacket[]>(
+      `SELECT call_insights_status, call_transcript, call_insights_error,
+              call_insights_json
+       FROM conversation_messages WHERE id = ?`,
+      [readyId],
+    );
+    expect(row[0]?.call_insights_status).toBe("ready");
+    expect(String(row[0]?.call_transcript || "")).toContain(RUN_ID);
+    expect(
+      row[0]?.call_insights_error == null || row[0]?.call_insights_error === "",
+    ).toBe(true);
+    expect(row[0]?.call_insights_json == null).toBe(true);
+  }, 60_000);
+
+  it("stores the transcript and does not write call insights", async () => {
     const readyId = await insertCallMessage({
       body: `ready path ${RUN_ID}`,
       duration: 48,
@@ -294,21 +333,100 @@ describe("call insights cron", () => {
       [readyId],
     );
     expect(String(row[0]?.call_insights_status || "")).toBe("ready");
-    // Transcript is always persisted (transcript-first).
     expect(String(row[0]?.call_transcript || "")).toContain(RUN_ID);
-    const raw = row[0]?.call_insights_json;
-    if (raw) {
-      const parsed =
-        typeof raw === "string"
-          ? JSON.parse(raw)
-          : (raw as Record<string, unknown>);
-      expect(Array.isArray(parsed?.summary_bullets)).toBe(true);
-      expect((parsed.summary_bullets as unknown[]).length).toBeGreaterThan(0);
-    } else {
-      // Live key may be expired/restricted — still ready with transcript.
-      expect(String(row[0]?.call_insights_error || "").length).toBeGreaterThan(
-        0,
-      );
-    }
+    expect(row[0]?.call_insights_json == null).toBe(true);
+    expect(
+      row[0]?.call_insights_error == null || row[0]?.call_insights_error === "",
+    ).toBe(true);
   }, 90_000);
+
+  it("emails and bells the line owner once, and skips the backlog flag", async () => {
+    const adminEmail = `call-tx-${RUN_ID}@example.test`;
+    const [adminIns] = await pool.query<ResultSetHeader>(
+      `INSERT INTO admins
+         (email, first_name, last_name, role, status, preferred_language, phone)
+       VALUES (?, 'Transcript', 'Owner', 'agent', 'active', 'en', '+15555550123')`,
+      [adminEmail],
+    );
+    const adminId = Number(adminIns.insertId);
+    const [convIns] = await pool.query<ResultSetHeader>(
+      `INSERT INTO conversations
+         (client_id, channel, status, assigned_admin_id, last_message_at)
+       VALUES (?, 'call', 'open', ?, NOW())`,
+      [clientId, adminId],
+    );
+    const ownedConversationId = Number(convIns.insertId);
+    try {
+      const [readyIns] = await pool.query<ResultSetHeader>(
+        `INSERT INTO conversation_messages
+           (conversation_id, direction, channel, body, provider_status,
+            call_duration_sec, recording_url, metadata_json,
+            call_insights_status, call_transcript, call_insights_updated_at, created_at)
+         VALUES (?, 'inbound', 'call', ?, 'completed', 40,
+             'https://api.twilio.com/2010-04-01/Accounts/ACtest/Recordings/REcall-ins-notify.mp3',
+             '{}', 'pending', ?, NOW(), NOW())`,
+        [
+          ownedConversationId,
+          `notify ready ${RUN_ID}`,
+          `Full transcript body ${RUN_ID}`,
+        ],
+      );
+      const readyId = Number(readyIns.insertId);
+      messageIds.push(readyId);
+
+      __testClearEmailDryRuns();
+      await runCron();
+
+      const [notes] = await pool.query<RowDataPacket[]>(
+        `SELECT id, title, body, link_url
+         FROM admin_notifications
+         WHERE admin_id = ? AND event_key = 'call_transcript'`,
+        [adminId],
+      );
+      expect(notes).toHaveLength(1);
+      expect(String(notes[0]?.body || "")).toContain(RUN_ID);
+      expect(String(notes[0]?.link_url || "")).toContain(
+        `/admin/conversations?client=${clientId}`,
+      );
+      const emails = __testGetEmailDryRuns().filter((e) =>
+        e.subject.includes(RUN_ID),
+      );
+      expect(emails).toHaveLength(1);
+      expect(emails[0]?.to).toBe(adminEmail);
+
+      await runCron();
+      const [notesAgain] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM admin_notifications
+         WHERE admin_id = ? AND event_key = 'call_transcript'`,
+        [adminId],
+      );
+      expect(notesAgain).toHaveLength(1);
+
+      const [skipIns] = await pool.query<ResultSetHeader>(
+        `INSERT INTO conversation_messages
+           (conversation_id, direction, channel, body, provider_status,
+            call_duration_sec, recording_url, metadata_json,
+            call_insights_status, call_transcript, call_insights_updated_at, created_at)
+         VALUES (?, 'inbound', 'call', ?, 'completed', 40,
+             'https://api.twilio.com/2010-04-01/Accounts/ACtest/Recordings/REcall-ins-skip.mp3',
+             JSON_OBJECT('skip_transcript_notify', CAST('true' AS JSON)),
+             'pending', ?, NOW(), NOW())`,
+        [
+          ownedConversationId,
+          `notify skip ${RUN_ID}`,
+          `Backlog transcript ${RUN_ID}`,
+        ],
+      );
+      messageIds.push(Number(skipIns.insertId));
+      await runCron();
+      const [notesAfterSkip] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM admin_notifications
+         WHERE admin_id = ? AND event_key = 'call_transcript'`,
+        [adminId],
+      );
+      expect(notesAfterSkip).toHaveLength(1);
+    } finally {
+      await pool.query(`DELETE FROM admins WHERE id = ?`, [adminId]);
+    }
+  }, 60_000);
 });

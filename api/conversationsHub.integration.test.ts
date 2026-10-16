@@ -15,7 +15,7 @@ import mysql, {
   type ResultSetHeader,
   type RowDataPacket,
 } from "mysql2/promise";
-import { createServer, createSession } from "./index";
+import { createServer, createSession, flushInboundAiJobs } from "./index";
 import { cleanupIntegrationTestClients, createIntegrationTestPool, uniqueTestE164, cleanupIntegrationTestAdmins } from "./testDbCleanup";
 
 const RUN_ID = `conv-${Date.now()}`;
@@ -869,6 +869,7 @@ describe("conversations contact hub", () => {
         MessageSid: sid,
       });
     expect(wh1.status).toBe(200);
+    await flushInboundAiJobs();
 
     const [rows1] = await pool.query<RowDataPacket[]>(
       `SELECT id, event_key, link_url FROM admin_notifications
@@ -898,6 +899,7 @@ describe("conversations contact hub", () => {
         MessageSid: sid,
       });
     expect(wh2.status).toBe(200);
+    await flushInboundAiJobs();
 
     const [rows2] = await pool.query<RowDataPacket[]>(
       `SELECT id FROM admin_notifications
@@ -934,6 +936,7 @@ describe("conversations contact hub", () => {
           MessageSid: sid,
         });
       expect(wh.status).toBe(200);
+      await flushInboundAiJobs();
       expect(
         logs.some(
           (l) =>

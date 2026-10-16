@@ -8,6 +8,7 @@ export const EMPTY_PIPELINE_FILTERS = {
   assigned_admin_id: "all",
   referral_category: "all",
   client_status: "all",
+  lead_temperature: "all",
   case_status: "all",
   payment_badge: "all",
   tasks: "all",
@@ -44,6 +45,8 @@ export function buildAdminPipelineQuery(
   if (filters.referral_category !== "all")
     q.referral_category = filters.referral_category;
   if (filters.client_status !== "all") q.client_status = filters.client_status;
+  if (filters.lead_temperature !== "all")
+    q.lead_temperature = filters.lead_temperature as AdminPipelineQuery["lead_temperature"];
   if (filters.case_status !== "all") q.case_status = filters.case_status;
   if (filters.payment_badge !== "all") q.payment_badge = filters.payment_badge;
   if (filters.tasks !== "all") q.tasks = filters.tasks;
@@ -86,6 +89,7 @@ export function countActivePipelineFilters(
       filters.assigned_admin_id !== "all",
       filters.referral_category !== "all",
       filters.client_status !== "all",
+      filters.lead_temperature !== "all",
       filters.case_status !== "all",
       filters.payment_badge !== "all",
       filters.tasks !== "all",
@@ -125,6 +129,11 @@ export function pipelineFilterChipLabel(
       completed: "Completed",
     },
     language: { en: "EN", es: "ES" },
+    lead_temperature: {
+      hot: t("adminPipeline.leadTemp.color.hot"),
+      warm: t("adminPipeline.leadTemp.color.warm"),
+      cold: t("adminPipeline.leadTemp.color.cold"),
+    },
     billing: {
       split_plan: "Split plan",
       overdue: "Has overdue",

@@ -53,7 +53,7 @@ export function filterPreviewRows(
   });
 }
 
-function csvEscapeCell(value: string | number | null | undefined): string {
+export function csvEscapeCell(value: string | number | null | undefined): string {
   if (value === null || value === undefined) return "";
   const s = String(value);
   if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;

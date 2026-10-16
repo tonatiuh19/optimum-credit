@@ -3,6 +3,8 @@ import { useFormik } from "formik";
 import * as Yup from "yup";
 import { useTranslation } from "react-i18next";
 import { Loader2, Mail, Monitor, PhoneForwarded, Voicemail, Wrench } from "lucide-react";
+import FieldHint from "@/components/admin/FieldHint";
+import { isInternationalForwardingNumber } from "@/lib/callForwarding";
 import {
   Dialog,
   DialogContent,
@@ -379,6 +381,16 @@ export default function ConversationVoiceSettingsModal({
                           {forwardingForm.errors.phone}
                         </p>
                       )}
+                    {isInternationalForwardingNumber(
+                      forwardingForm.values.phone,
+                    ) && (
+                      <FieldHint tone="warning">
+                        {t("conversations.voice.forwardIntlWarning")}
+                      </FieldHint>
+                    )}
+                    <FieldHint>
+                      {t("conversations.voice.forwardScreenHint")}
+                    </FieldHint>
                   </div>
                 )}
                 <Button

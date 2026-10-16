@@ -35,6 +35,7 @@ import {
   Repeat,
   Handshake,
   Banknote,
+  Megaphone,
 } from "lucide-react";
 import AdminThemeToggle from "@/components/AdminThemeToggle";
 import AdminNotificationBell from "@/components/admin/AdminNotificationBell";
@@ -194,6 +195,12 @@ const NAV_GROUPS = [
         icon: Zap,
         sectionKey: "reminder-flows",
       },
+      {
+        to: "/admin/event-marketing",
+        labelKey: "adminNav.eventMarketing",
+        icon: Megaphone,
+        sectionKey: "event-marketing",
+      },
     ],
   },
   {
@@ -329,7 +336,8 @@ export default function AdminLayout({ children }: Props) {
       if (
         eventKey === "inbound_sms" ||
         eventKey === "missed_call" ||
-        eventKey === "voicemail"
+        eventKey === "voicemail" ||
+        eventKey === "call_transcript"
       ) {
         dispatch(fetchConversationsNavBadge()).catch((e) =>
           logger.warn("conversations badge refresh failed", e),
@@ -337,7 +345,9 @@ export default function AdminLayout({ children }: Props) {
       }
       // SMS chime stays on conversations channel; bell chime for voice events only
       if (
-        (eventKey === "missed_call" || eventKey === "voicemail") &&
+        (eventKey === "missed_call" ||
+          eventKey === "voicemail" ||
+          eventKey === "call_transcript") &&
         shouldPlayAdminNotifyChime(
           eventKey,
           notifyChimePrefsRef.current,

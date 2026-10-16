@@ -15,7 +15,7 @@ import mysql, {
   type ResultSetHeader,
   type RowDataPacket,
 } from "mysql2/promise";
-import { cleanupIntegrationTestAffiliates, cleanupIntegrationTestClients, createIntegrationTestPool } from "./testDbCleanup";
+import { cleanupIntegrationTestAffiliates, cleanupIntegrationTestClients, createIntegrationTestPool, uniqueTestE164 } from "./testDbCleanup";
 
 // Must run before `./index` is loaded — imports below would hoist after this
 // in some runners; also re-set in beforeAll for safety.
@@ -309,7 +309,9 @@ describe("affiliates — HTTP integration", () => {
           email: LEAD_EMAIL,
           first_name: "Lead",
           last_name: "One",
-          phone: "+15555550111",
+          // Unique per run: a shared number collides with other suites' clients
+          // (phone-match dedupe attaches the lead to them instead).
+          phone: uniqueTestE164(`aff-lead-${Date.now()}`),
           ref: SLUG,
         });
       expect([200, 201]).toContain(res.status);

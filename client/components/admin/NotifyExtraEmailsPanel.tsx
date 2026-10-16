@@ -44,7 +44,10 @@ const CHANNELS: {
 ];
 
 /** Primary alert types shown in Settings (matches Resend / team emails). */
-const EVENT_ORDER: AdminNotifyEventKey[] = [...ADMIN_NOTIFY_EVENT_KEYS];
+/** Call transcripts go only to the OFG line owner, not extra inboxes. */
+const EVENT_ORDER: AdminNotifyEventKey[] = ADMIN_NOTIFY_EVENT_KEYS.filter(
+  (key) => key !== "call_transcript",
+);
 
 function extraAllowsEvent(
   row: AdminNotifyExtraEmail,

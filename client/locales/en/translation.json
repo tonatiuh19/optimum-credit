@@ -52,6 +52,7 @@
     "templates": "Templates",
     "education": "Education",
     "reminderFlows": "Reminder Flows",
+    "eventMarketing": "Event Marketing",
     "reports": "Reports",
     "settings": "Settings",
     "people": "People",
@@ -181,6 +182,10 @@
         "label": "Voicemail",
         "hint": "A caller left a voicemail on your OFG line"
       },
+      "call_transcript": {
+        "label": "Call transcript ready",
+        "hint": "Email includes the transcript. SMS is a short alert to your profile phone. In-app bell links to Conversations."
+      },
       "funding_doc_upload": {
         "label": "Funding document upload",
         "hint": "A funding applicant uploads a required document"
@@ -192,6 +197,14 @@
       "get_credit_report_lead": {
         "label": "Free credit report lead",
         "hint": "Someone submits the public /get-credit-report form"
+      },
+      "event_registration": {
+        "label": "Event registration",
+        "hint": "Someone registers on a public /e event landing"
+      },
+      "prospect_temperature": {
+        "label": "Prospect traffic light",
+        "hint": "A prospect moves up (Cold → Warm → Hot), a Hot prospect has no movement for 3 days, or a prospect is ready to convert"
       },
       "progress_report_alerts": {
         "label": "Progress report alerts",
@@ -282,7 +295,23 @@
     "title": "Clients",
     "description": "Manage and search all client accounts.",
     "importCsv": "Import CSV",
-    "addClient": "Add client"
+    "downloadCsv": "Download CSV",
+    "exportingCsv": "Downloading…",
+    "exportSuccessTitle": "CSV downloaded",
+    "exportSuccessBody": "Open the file and compare names + status to your tracker.",
+    "exportTruncatedBody": "Download hit the row limit — refine Filters and download again.",
+    "exportFailedTitle": "Download failed",
+    "exportFailedBody": "Could not export clients. Try again.",
+    "addClient": "Add client",
+    "stageFilter": {
+      "round6Plus": "Round 6+ (all extended)",
+      "roundN": "Round {{n}}"
+    },
+    "stageBadge": {
+      "round": "Round {{n}}",
+      "extended": "Extended",
+      "extendedHint": "Extended program — past the standard 5 rounds"
+    }
   },
   "adminContacts": {
     "title": "Contacts",
@@ -574,7 +603,8 @@
     "resendCode": "Resend code",
     "resendIn": "Resend in {{seconds}}s",
     "resendSending": "Sending…",
-    "accountNotFound": "No account found for that email."
+    "accountNotFound": "No account found for that email.",
+    "accountBlocked": "Your account is temporarily on hold. Please contact Optimum Financial Group support to restore access."
   },
   "adminLogin": {
     "heading": "Sign in to Console",
@@ -618,6 +648,28 @@
     "backToList": "Back to list",
     "conversation": "Conversation",
     "unknownBadge": "Unknown",
+    "callTranscript": {
+      "title": "Transcript",
+      "voicemail": "Voicemail",
+      "pending": "Transcribing this recording…",
+      "retry": "Retry transcription",
+      "errors": {
+        "too_short": "Recording too short to transcribe (under 3 seconds).",
+        "missing_openai_stt": "Twilio speech-to-text is not enabled for this account yet.",
+        "twilio_ai_addendum": "Twilio speech-to-text is not enabled for this account yet.",
+        "invalid_recording": "This call has no Twilio recording to transcribe.",
+        "twilio_stt_failed": "Twilio could not transcribe this recording.",
+        "stt_empty": "Could not hear clear speech in this recording.",
+        "awaiting_twilio_transcript": "Waiting for the Twilio transcript…",
+        "unknown": "No transcript for this recording yet."
+      },
+      "status": {
+        "pending": "Queued",
+        "processing": "Transcribing",
+        "failed": "Failed",
+        "skipped": "Unavailable"
+      }
+    },
     "callInsights": {
       "title": "Call insights",
       "voicemail": "Voicemail",
@@ -692,7 +744,8 @@
     "channels": {
       "sms": "SMS",
       "internal": "Note",
-      "call": "Call"
+      "call": "Call",
+      "whatsapp": "WhatsApp"
     },
     "hubChannels": {
       "sms": "SMS",
@@ -893,7 +946,25 @@
       "unknownNumber": "Unknown number",
       "client": "Client",
       "accept": "Accept",
-      "decline": "Decline"
+      "decline": "Decline",
+      "forwardIntlWarning": "This is an international number. Calls only reach it if that country is enabled in Twilio (Voice → Geo permissions); otherwise every call shows as missed. Admins are alerted if forwarding fails.",
+      "forwardScreenHint": "When your phone answers you'll hear “press any key to answer” in your language. Press a key to connect; this keeps calls out of your personal voicemail.",
+      "threeWay": {
+        "addCaller": "Add caller",
+        "onCallWith": "On the call with {{name}}",
+        "keypadHint": "Use the keypad for their phone menu",
+        "remove": "Remove {{name}}",
+        "calling": "Calling {{name}}…",
+        "call": "Call and add",
+        "recordedNote": "They join from your OFG line. The three-way call is recorded and transcribed like any call.",
+        "addError": "Could not add the caller",
+        "digitsError": "Could not send the digits",
+        "removeError": "Could not remove the caller",
+        "validation": {
+          "required": "Enter a phone number",
+          "invalid": "Enter a valid US phone number"
+        }
+      }
     },
     "phoneActions": {
       "choose": "Call or text this number",
@@ -1376,7 +1447,13 @@
     "itemsRemovedBadge": "{{count}} removed",
     "noReportYet": "No report yet — use Generate above to create the OFG progress report for this round.",
     "awaitingRound": "Awaiting this round",
-    "notInRounds": "Client not yet in rounds"
+    "notInRounds": "Client not yet in rounds",
+    "reviewFlags": {
+      "title": "Needs review before delivery",
+      "internal": "Internal notes (saved to the client file on publish, never in the PDF)",
+      "approver": "Flagged reports are published by the language owner (English: Lecca, Spanish: Angel) or a super admin.",
+      "none": "No review flags — the report can be delivered."
+    }
   },
   "infoRequests": {
     "title": "Info Requests",
@@ -1588,13 +1665,36 @@
     "downloadPdfError": "Could not open the PDF. Please try again.",
     "popupBlocked": "Allow pop-ups for this site to download the PDF.",
     "ctaRegister": "Ready to fix these? Get Started",
-    "trustNote": "Bank-level 256-bit encryption. Your report is never shared or sold."
+    "trustNote": "Bank-level 256-bit encryption. Your report is never shared or sold.",
+    "enhancedReady": "Enhanced report ready — Download PDF includes the full account-by-account analysis.",
+    "enhancedPreparing": "Preparing the enhanced report (1–3 min). Download PDF gives the standard report until it's ready.",
+    "enhancedDownloadError": "Could not download the enhanced report. Please try again.",
+    "context": {
+      "escrow": "Escrow / active loan",
+      "escrow_auto": "Auto-detect",
+      "escrow_on": "In escrow",
+      "escrow_off": "Not in escrow",
+      "escrowHint": "Auto turns on when the report has a mortgage pull in the last 45 days. In escrow: hold banner, loan inquiries excluded, tradelines after closing.",
+      "lender": "Lender score (optional)",
+      "model": "Score model",
+      "modelPlaceholder": "FICO (mortgage)",
+      "score": "Lender score",
+      "scorePlaceholder": "Score, e.g. 630",
+      "target": "Score needed",
+      "targetPlaceholder": "Needs, e.g. 660",
+      "scoreInvalid": "Scores must be whole numbers between 300 and 900.",
+      "lenderHint": "Shown in the analysis PDF next to the VantageScore figures.",
+      "save": "Save",
+      "saved": "Saved — the next PDF download uses it",
+      "saveError": "Could not save"
+    }
   },
   "getCreditReport": {
     "metaTitle": "Free Credit Report Snapshot",
     "metaDescription": "Get a free 1-bureau credit snapshot via our trusted partner. Soft pull — no score impact. We’ll email and text your link.",
     "heading": "Get Your Free Credit Report",
     "subheading": "Free 1-bureau soft-pull snapshot — no score impact. Leave your info and we’ll email and text your report link.",
+    "eventTonight": "Tonight with Options for Youth",
     "formTitle": "Your info",
     "formHint": "We’ll use this to send your free-report link by email and text.",
     "firstName": "First name",
@@ -1838,7 +1938,87 @@
     "paymentScheduleOptional": "Payment Schedule (optional)",
     "createCase": "Create Case",
     "dropProspectToConvert": "Drop here to convert → confirm package & calendar",
-    "convertResultLabel": "After convert"
+    "convertResultLabel": "After convert",
+    "statusNotesHeading": "Status & notes",
+    "pauseClient": "Pause client",
+    "resumeClient": "Resume",
+    "pauseDialogTitle": "Pause this client?",
+    "pauseDialogDescription": "Stops automated reminders and messages until someone resumes the file. The reason is saved in the notes.",
+    "pauseReasonPlaceholder": "Why is this client paused?",
+    "pauseConfirm": "Pause client",
+    "pauseReasons": {
+      "payment": "Blocked by payment",
+      "login": "Invalid login",
+      "monitoring": "Monitoring error"
+    },
+    "pausedToast": "Client paused",
+    "resumedToast": "Client resumed — now {{status}}",
+    "pauseError": "Could not update client status",
+    "notePlaceholder": "Add a note to this file…",
+    "addNote": "Add note",
+    "noteSaved": "Note added",
+    "noteSaveError": "Could not add note",
+    "notesEmpty": "No notes yet",
+    "notesShowAll": "Show all {{count}} notes",
+    "notesShowLess": "Show fewer",
+    "notesValidation": {
+      "required": "Please write something first.",
+      "tooLong": "That's too long — keep it shorter."
+    },
+    "clientStatus": {
+      "prospect": "Prospect",
+      "funding": "Funding",
+      "pending_payment": "Pending payment",
+      "onboarding": "Onboarding",
+      "active": "Active",
+      "paused": "Paused",
+      "cancelled": "Cancelled",
+      "blocked": "Blocked"
+    },
+    "blockClient": "Block",
+    "blockDialogTitle": "Block this client?",
+    "blockDialogDescription": "Stops every automated message and locks their portal login until someone resumes the file. The reason is saved in the notes.",
+    "blockConfirm": "Block client",
+    "blockedToast": "Client blocked — automations stopped and portal locked",
+    "leadTemp": {
+      "heading": "Traffic light",
+      "filter": "Traffic light (prospects)",
+      "all": "All colors",
+      "pending": "Calculating…",
+      "color": {
+        "hot": "Hot",
+        "warm": "Warm",
+        "cold": "Cold"
+      },
+      "hint": {
+        "hot": "Hot: close today — payment, documents and login",
+        "warm": "Warm: call to review the analysis and book with Cesar",
+        "cold": "Cold: automatic follow-up until they reply"
+      },
+      "action": {
+        "hot": "Close today",
+        "warm": "Call to review the analysis and book with Cesar",
+        "cold": "Automatic follow-up — no call until they reply"
+      },
+      "reason": {
+        "analysis_reviewed": "analysis reviewed",
+        "call_scheduled": "call scheduled",
+        "payment_started": "payment started",
+        "monitoring_login": "monitoring login saved",
+        "documents_uploaded": "documents uploaded",
+        "recent_reply": "replied in the last 14 days",
+        "has_credit_report": "has credit report / analysis",
+        "no_reply_14d": "no reply in 14+ days"
+      },
+      "analysisReviewed": "Analysis reviewed with Cesar",
+      "callScheduled": "Call date and time",
+      "scheduleCall": "Schedule call",
+      "clearCall": "Remove scheduled call",
+      "callOn": "Call scheduled: {{when}}",
+      "callSaved": "Call scheduled",
+      "pickDate": "Pick a date and time",
+      "saveError": "Could not update the prospect"
+    }
   },
   "adminHelpers": {
     "legendTitle": "What this means",
@@ -1847,7 +2027,8 @@
       "pending_payment": "Checkout started but payment not completed.",
       "onboarding": "Paid / converted — completing Get Started tasks.",
       "active": "Normal working client with portal access.",
-      "paused": "Temporarily held — do not advance work until resumed.",
+      "paused": "Temporarily held — no automated reminders or messages until resumed.",
+      "blocked": "Stopped for a problem (payment, invalid login, monitoring error) — no automated messages and portal login locked until resumed.",
       "cancelled": "Account closed. Prefer pipeline Cancelled for case workflow.",
       "prospect": "Lead only — no case yet. Convert before treating as a client.",
       "funding": "Business funding lane — separate from Credit Repair until staff converts."
@@ -2498,6 +2679,123 @@
       "bank_m4": "Bank statement — month 4",
       "bank_m5": "Bank statement — month 5",
       "bank_m6": "Bank statement — month 6"
+    }
+  },
+  "eventMarketing": {
+    "admin": {
+      "title": "Event Marketing",
+      "description": "Manage partner event landings, sessions, forms, QR codes, and check-ins.",
+      "addCompany": "Add company",
+      "emptyCompanies": "No event companies yet.",
+      "selectCompany": "Select a company to manage copy, sessions, and registrations.",
+      "inactive": "Inactive",
+      "copyLink": "Copy link",
+      "downloadQr": "Download QR",
+      "tabs": {
+        "copy": "Copy & offers",
+        "sessions": "Series & sessions",
+        "fields": "Form fields",
+        "registrations": "Registrations"
+      },
+      "fields": {
+        "slug": "URL slug",
+        "labelSlug": "CRM label slug",
+        "name": "Name (EN)",
+        "nameEn": "Name (EN)",
+        "nameEs": "Name (ES)",
+        "active": "Active",
+        "offerReport": "Offer free credit report",
+        "offerComic": "Offer comic book",
+        "headingEn": "Welcome heading (EN)",
+        "headingEs": "Welcome heading (ES)",
+        "bodyEn": "Welcome body (EN)",
+        "bodyEs": "Welcome body (ES)",
+        "classLink": "Class / Zoom link",
+        "scheduleNoteEn": "Schedule note (EN)",
+        "scheduleNoteEs": "Schedule note (ES)",
+        "emailSubjectEn": "Email subject (EN)",
+        "emailSubjectEs": "Email subject (ES)",
+        "emailBodyEn": "Email body (EN)",
+        "emailBodyEs": "Email body (ES)",
+        "smsBodyEn": "SMS body (EN)",
+        "smsBodyEs": "SMS body (ES)",
+        "kind": "Kind",
+        "series": "Series",
+        "shortCode": "Short code",
+        "titleEn": "Title (EN)",
+        "titleEs": "Title (ES)",
+        "startsAt": "Starts at (LA)",
+        "endsAt": "Ends at (LA)",
+        "locationEn": "Location (EN)",
+        "locationEs": "Location (ES)",
+        "capacity": "Capacity",
+        "status": "Status",
+        "fieldKey": "Field key",
+        "labelEn": "Label (EN)",
+        "labelEs": "Label (ES)",
+        "fieldType": "Field type",
+        "options": "Options (one per line)",
+        "sortOrder": "Sort order",
+        "required": "Required"
+      },
+      "welcomeTemplates": "Welcome email & SMS",
+      "templateTokens": "Tokens: {{first_name}}, {{session_title}}, {{session_when}}, {{session_location}}, {{class_note}}, {{comic_note}}, {{report_url}}, {{class_link}}",
+      "save": "Save",
+      "cancel": "Cancel",
+      "create": "Create",
+      "edit": "Edit",
+      "seriesTitle": "Series",
+      "sessionsTitle": "Sessions",
+      "fieldsTitle": "Registration form fields",
+      "addSeries": "Add series",
+      "editSeries": "Edit series",
+      "addSession": "Add session",
+      "editSession": "Edit session",
+      "addField": "Add field",
+      "editField": "Edit field",
+      "emptySeries": "No series yet — add one before creating sessions.",
+      "emptySessions": "No sessions yet.",
+      "emptyRegs": "No registrations yet.",
+      "systemField": "System",
+      "regsShort": "regs",
+      "checkIn": "Check in",
+      "checkedInAt": "Checked in {{when}}"
+    },
+    "public": {
+      "metaTitle": "Event registration",
+      "metaDescription": "Register for Optimum Financial Group partner events.",
+      "brandName": "Optimum Financial Group",
+      "fallbackHeading": "Event registration",
+      "noEvents": "No events are open for registration right now.",
+      "pickSession": "Choose your session",
+      "noSession": "No upcoming sessions",
+      "locationTbd": "Location details coming soon",
+      "submit": "Register",
+      "tryAgain": "Back to events",
+      "thanksTitle": "You're registered!",
+      "thanksBody": "We sent a confirmation by email and text with next steps.",
+      "checkEmail": "Check your email",
+      "checkSms": "Check your texts",
+      "emailPending": "Email confirmation pending",
+      "smsPending": "SMS confirmation pending",
+      "getReport": "Get your free credit report",
+      "langEn": "English",
+      "langEs": "Español",
+      "selectOption": "Select…"
+    },
+    "kind": {
+      "in_person": "In person",
+      "online": "Online",
+      "hybrid": "Hybrid"
+    },
+    "status": {
+      "scheduled": "Scheduled",
+      "cancelled": "Cancelled",
+      "completed": "Completed"
+    },
+    "source": {
+      "company": "Company QR",
+      "session": "Session QR"
     }
   }
 }

@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
-  CALL_INSIGHTS_SYSTEM,
-  decideMissingTranscriptOutcome,
+  decideMissingRecordingOutcome,
   isCallInsightsFeatureEnabled,
-  parseCallInsightsJson,
+  transcriptTextFromTwilioSentences,
+  twilioRecordingSidFromUrl,
+  twilioTranscriptionErrorCode,
 } from "./callInsights";
 
 describe("isCallInsightsFeatureEnabled", () => {
@@ -21,129 +22,106 @@ describe("isCallInsightsFeatureEnabled", () => {
   });
 });
 
-describe("decideMissingTranscriptOutcome", () => {
-  it("waits for Twilio on young voicemail without OpenAI", () => {
+describe("twilioRecordingSidFromUrl", () => {
+  it("reads a real recording SID and ignores placeholders", () => {
     expect(
-      decideMissingTranscriptOutcome({
+      twilioRecordingSidFromUrl(
+        "https://api.twilio.com/2010-04-01/Accounts/ACtest/Recordings/RE2eda2241638902fa581d125e463127b7.mp3",
+      ),
+    ).toBe("RE2eda2241638902fa581d125e463127b7");
+    expect(
+      twilioRecordingSidFromUrl(
+        "https://api.twilio.com/2010-04-01/Accounts/ACtest/Recordings/REcall-ins-1.mp3",
+      ),
+    ).toBeNull();
+    expect(twilioRecordingSidFromUrl("")).toBeNull();
+  });
+});
+
+describe("transcriptTextFromTwilioSentences", () => {
+  it("orders speakers and labels dual-channel lines", () => {
+    const text = transcriptTextFromTwilioSentences([
+      {
+        audioChannelIndex: 2,
+        sentenceIndex: 2,
+        startTimeSeconds: 1.4,
+        text: "This is the office.",
+      },
+      {
+        audioChannelIndex: 1,
+        sentenceIndex: 1,
+        startTimeSeconds: 0.2,
+        text: "Hi, I need help with my report.",
+      },
+    ]);
+    expect(text).toBe(
+      "Caller: Hi, I need help with my report.\nAgent: This is the office.",
+    );
+  });
+
+  it("returns empty for missing sentences", () => {
+    expect(transcriptTextFromTwilioSentences(null)).toBe("");
+    expect(transcriptTextFromTwilioSentences([{ text: "  " }])).toBe("");
+  });
+});
+
+describe("twilioTranscriptionErrorCode", () => {
+  it("maps the AI addendum block and other failures", () => {
+    expect(
+      twilioTranscriptionErrorCode(403, {
+        code: 46009,
+        message: "must accept addendum",
+      }),
+    ).toBe("twilio_ai_addendum");
+    expect(twilioTranscriptionErrorCode(500, { message: "nope" })).toBe(
+      "twilio_stt_failed",
+    );
+    expect(twilioTranscriptionErrorCode(201, {})).toBeNull();
+  });
+});
+
+describe("decideMissingRecordingOutcome", () => {
+  it("waits for a young voicemail that has no recording SID yet", () => {
+    expect(
+      decideMissingRecordingOutcome({
         isVoicemail: true,
-        hasOpenAi: false,
+        hasRecordingSid: false,
         ageMs: 5 * 60 * 1000,
       }),
     ).toEqual({ action: "await_twilio" });
   });
 
-  it("skips old voicemail without OpenAI after wait window", () => {
+  it("stops an old voicemail with no recording", () => {
     expect(
-      decideMissingTranscriptOutcome({
+      decideMissingRecordingOutcome({
         isVoicemail: true,
-        hasOpenAi: false,
+        hasRecordingSid: false,
         ageMs: 31 * 60 * 1000,
       }),
-    ).toEqual({
-      action: "skip",
-      status: "skipped",
-      error: "missing_openai_stt",
-    });
-  });
-
-  it("fails Dial/answered call when Whisper is configured but empty", () => {
-    expect(
-      decideMissingTranscriptOutcome({
-        isVoicemail: false,
-        hasOpenAi: true,
-        ageMs: 0,
-      }),
     ).toEqual({ action: "fail", status: "failed", error: "stt_empty" });
   });
 
-  it("skips Dial without OpenAI", () => {
+  it("submits Twilio transcription when a recording SID is present", () => {
     expect(
-      decideMissingTranscriptOutcome({
+      decideMissingRecordingOutcome({
         isVoicemail: false,
-        hasOpenAi: false,
+        hasRecordingSid: true,
+        ageMs: 0,
+      }),
+    ).toEqual({ action: "transcribe" });
+  });
+
+  it("fails a dial recording that is not a Twilio recording SID", () => {
+    expect(
+      decideMissingRecordingOutcome({
+        isVoicemail: false,
+        hasRecordingSid: false,
         ageMs: 0,
       }),
     ).toEqual({
-      action: "skip",
-      status: "skipped",
-      error: "missing_openai_stt",
+      action: "fail",
+      status: "failed",
+      error: "invalid_recording",
     });
-  });
-
-  it("uses Whisper path for voicemail when OpenAI is set (no await)", () => {
-    expect(
-      decideMissingTranscriptOutcome({
-        isVoicemail: true,
-        hasOpenAi: true,
-        ageMs: 1000,
-      }),
-    ).toEqual({ action: "fail", status: "failed", error: "stt_empty" });
-  });
-});
-
-describe("parseCallInsightsJson", () => {
-  it("parses Claude-shaped JSON with sentiment and bullets", () => {
-    const parsed = parseCallInsightsJson(
-      `Here you go:\n{"summary_bullets":["Client wants Round 2 update","Asked about FHA"],"sentiment":{"label":"hopeful","score":0.7,"feelings":["optimistic","curious"]},"topics":["FHA","Round 2"],"action_items":["Send Round 2 status SMS"],"risk_flags":["buy_ready"],"interesting":["Mentioned closing date next month"]}`,
-      "en",
-    );
-    expect(parsed).not.toBeNull();
-    expect(parsed!.summary_bullets).toHaveLength(2);
-    expect(parsed!.sentiment.label).toBe("hopeful");
-    expect(parsed!.sentiment.score).toBe(0.7);
-    expect(parsed!.action_items[0]).toContain("Round 2");
-    expect(parsed!.risk_flags).toContain("buy_ready");
-  });
-
-  it("falls back to neutral on bad label", () => {
-    const parsed = parseCallInsightsJson(
-      JSON.stringify({
-        summary_bullets: ["x"],
-        sentiment: { label: "weird", score: 2, feelings: [] },
-        topics: [],
-        action_items: [],
-        risk_flags: [],
-        interesting: [],
-      }),
-      "es",
-    );
-    expect(parsed!.sentiment.label).toBe("neutral");
-    expect(parsed!.sentiment.score).toBe(1);
-    expect(parsed!.locale).toBe("es");
-  });
-
-  it("returns null on empty / non-JSON", () => {
-    expect(parseCallInsightsJson("", "en")).toBeNull();
-    expect(parseCallInsightsJson("no json here", "en")).toBeNull();
-  });
-
-  it("clips oversized arrays and strings", () => {
-    const parsed = parseCallInsightsJson(
-      JSON.stringify({
-        summary_bullets: Array.from(
-          { length: 20 },
-          (_, i) => `b${i}-${"x".repeat(300)}`,
-        ),
-        sentiment: {
-          label: "angry",
-          score: -1,
-          feelings: Array.from({ length: 10 }, (_, i) => `f${i}`),
-        },
-        topics: Array.from({ length: 20 }, (_, i) => `t${i}`),
-        action_items: ["a"],
-        risk_flags: ["r"],
-        interesting: ["i"],
-      }),
-      "en",
-    );
-    expect(parsed!.summary_bullets).toHaveLength(6);
-    expect(parsed!.summary_bullets[0]!.length).toBeLessThanOrEqual(220);
-    expect(parsed!.sentiment.feelings).toHaveLength(5);
-    expect(parsed!.sentiment.score).toBe(0);
-    expect(parsed!.topics).toHaveLength(8);
-  });
-
-  it("exports a non-empty system prompt", () => {
-    expect(CALL_INSIGHTS_SYSTEM.length).toBeGreaterThan(80);
   });
 });

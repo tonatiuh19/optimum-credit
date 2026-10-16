@@ -18,10 +18,14 @@ import {
   FileText,
   ChevronDown,
   Upload,
+  Download,
+  Loader2,
 } from "lucide-react";
 import { useFormik } from "formik";
 import * as Yup from "yup";
 import { useTranslation } from "react-i18next";
+import { ClientStageBadge } from "@/components/admin/ClientStageBadge";
+import { ABSOLUTE_MAX_ROUNDS, DEFAULT_MAX_ROUNDS } from "@/lib/extendedRounds";
 import AdminPageHeader from "@/components/AdminPageHeader";
 import FieldHint from "@/components/admin/FieldHint";
 import NoEmailWarning from "@/components/admin/NoEmailWarning";
@@ -55,6 +59,7 @@ import {
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
   fetchAdminClients,
+  exportAdminClientsCsv,
   createAdminClient,
   updateAdminClient,
   deleteAdminClient,
@@ -63,6 +68,7 @@ import {
 import { fetchLabels } from "@/store/slices/prospectsSlice";
 import { openBulkImportWizard } from "@/store/slices/bulkImportSlice";
 import BulkImportWizard from "@/components/bulk-import/BulkImportWizard";
+import { downloadTextFile } from "@shared/bulkImport";
 import { LabelMultiSelect } from "@/components/admin/LabelMultiSelect";
 import { LabelChips } from "@/components/admin/LabelChips";
 import ClientReferrersEditor, {
@@ -192,6 +198,20 @@ const STAGES: (PipelineStage | "all")[] = [
   "cancelled",
 ];
 
+/**
+ * Extended OFG rounds (6–12) live on pipeline_stage `round_5`; the API
+ * resolves these filter values from published reports + case max_rounds.
+ */
+const EXTENDED_ROUND_STAGE_FILTERS = [
+  "round_6_plus",
+  ...Array.from({ length: ABSOLUTE_MAX_ROUNDS - DEFAULT_MAX_ROUNDS }, (_, i) => `round_${i + 6}`),
+];
+
+function extendedStageLabel(value: string, t: (k: string, o?: Record<string, unknown>) => string): string {
+  if (value === "round_6_plus") return t("adminClients.stageFilter.round6Plus");
+  return t("adminClients.stageFilter.roundN", { n: value.replace("round_", "") });
+}
+
 const CLIENT_STATUSES = [
   "prospect",
   "funding",
@@ -199,6 +219,7 @@ const CLIENT_STATUSES = [
   "onboarding",
   "active",
   "paused",
+  "blocked",
   "cancelled",
 ];
 
@@ -209,6 +230,7 @@ const STATUS_COLORS: Record<string, string> = {
   onboarding: "bg-primary/10 text-primary border-primary/20",
   active: "bg-accent/10 text-accent border-accent/20",
   paused: "bg-muted text-muted-foreground border-border",
+  blocked: "bg-destructive/10 text-destructive border-destructive/20",
   cancelled: "bg-destructive/10 text-destructive border-destructive/20",
 };
 
@@ -721,12 +743,12 @@ export default function AdminClients() {
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
   const { t } = useTranslation();
-  const { clients, clientsPagination, clientsLoading } = useAppSelector(
-    (s) => s.admin,
-  );
+  const { clients, clientsPagination, clientsLoading, clientsExporting } =
+    useAppSelector((s) => s.admin);
   const { labels } = useAppSelector((s) => s.prospects);
   const { user } = useAppSelector((s) => s.adminAuth);
   const isAffiliate = user?.role === "affiliate";
+  const { toast } = useToast();
 
   const [search, setSearch] = useState("");
   const [showFilters, setShowFilters] = useState(false);
@@ -836,6 +858,40 @@ export default function AdminClients() {
     }
   };
 
+  const handleExportCsv = async () => {
+    try {
+      const result = await dispatch(
+        exportAdminClientsCsv({
+          search: debouncedSearch || undefined,
+          stage: filters.stage === "all" ? undefined : filters.stage,
+          status: filters.status === "all" ? undefined : filters.status,
+          language: filters.language === "all" ? undefined : filters.language,
+          billing: filters.billing === "all" ? undefined : filters.billing,
+          joined_from: filters.joined_from || undefined,
+          joined_to: filters.joined_to || undefined,
+          has_notes:
+            filters.has_notes === "all" ? undefined : filters.has_notes,
+          labels: filters.labels.length > 0 ? filters.labels : undefined,
+          sort_by: sortBy,
+          sort_dir: sortDir,
+        }),
+      ).unwrap();
+      downloadTextFile(result.filename, result.csv);
+      toast({
+        title: t("adminClients.exportSuccessTitle"),
+        description: result.truncated
+          ? t("adminClients.exportTruncatedBody")
+          : t("adminClients.exportSuccessBody"),
+      });
+    } catch (err: any) {
+      toast({
+        title: t("adminClients.exportFailedTitle"),
+        description: String(err || t("adminClients.exportFailedBody")),
+        variant: "destructive",
+      });
+    }
+  };
+
   const handleDelete = async () => {
     if (!deletingClient) return;
     await dispatch(deleteAdminClient({ id: deletingClient.id }));
@@ -901,9 +957,7 @@ export default function AdminClients() {
       sortable: true,
       shrink: true,
       render: (c) => (
-        <span className="text-xs uppercase tracking-wide bg-primary/10 text-primary px-2 py-1 rounded-full border border-primary/20">
-          {c.pipeline_stage.replace(/_/g, " ")}
-        </span>
+        <ClientStageBadge stage={c.pipeline_stage} effectiveRound={c.effective_round} />
       ),
     },
     {
@@ -1000,6 +1054,21 @@ export default function AdminClients() {
         }
         actions={
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void handleExportCsv()}
+              disabled={clientsExporting}
+              className="inline-flex items-center gap-2 h-9 px-4 rounded-lg border border-input bg-background text-sm font-medium hover:bg-muted transition-colors disabled:opacity-60"
+            >
+              {clientsExporting ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Download className="w-4 h-4" />
+              )}
+              {clientsExporting
+                ? t("adminClients.exportingCsv")
+                : t("adminClients.downloadCsv")}
+            </button>
             {!isAffiliate && (
               <button
                 type="button"
@@ -1073,13 +1142,20 @@ export default function AdminClients() {
                   className="w-full h-9 pl-3 pr-7 rounded-lg border border-input bg-background text-sm text-foreground appearance-none focus:outline-none focus:ring-2 focus:ring-primary/50"
                 >
                   <option value="all">All stages</option>
-                  {STAGES.filter((s) => s !== "all").map((s) => (
+                  {STAGES.filter((s) => s !== "all").flatMap((s) => [
                     <option key={s} value={s}>
                       {s
                         .replace(/_/g, " ")
                         .replace(/\b\w/g, (c) => c.toUpperCase())}
-                    </option>
-                  ))}
+                    </option>,
+                    ...(s === "round_5"
+                      ? EXTENDED_ROUND_STAGE_FILTERS.map((x) => (
+                          <option key={x} value={x}>
+                            {extendedStageLabel(x, t)}
+                          </option>
+                        ))
+                      : []),
+                  ])}
                 </select>
                 <ChevronDown className="w-3.5 h-3.5 absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
               </div>
@@ -1292,7 +1368,12 @@ export default function AdminClients() {
           if (filters.stage !== "all")
             chips.push({
               key: "stage",
-              label: `Stage: ${STAGE_LABELS[filters.stage] ?? filters.stage}`,
+              label: `Stage: ${
+                STAGE_LABELS[filters.stage] ??
+                (EXTENDED_ROUND_STAGE_FILTERS.includes(filters.stage)
+                  ? extendedStageLabel(filters.stage, t)
+                  : filters.stage)
+              }`,
             });
           if (filters.status !== "all")
             chips.push({

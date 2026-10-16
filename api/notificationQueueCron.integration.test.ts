@@ -236,21 +236,14 @@ describe("notification queue cron", () => {
   }, 90_000);
 
   it("work_task_overdue cron sends branded email and stamps due_notified_at", async () => {
-    const [admins] = await pool.query<RowDataPacket[]>(
-      `SELECT id, email, first_name, notification_prefs_json FROM admins
-       WHERE status = 'active' AND email IS NOT NULL AND TRIM(email) <> ''
-       ORDER BY id ASC LIMIT 1`,
+    const assigneeEmail = `overdue-${RUN_ID}@example.test`;
+    const [adminIns] = await pool.query<ResultSetHeader>(
+      `INSERT INTO admins
+         (email, first_name, last_name, role, status, preferred_language)
+       VALUES (?, 'Overdue', 'Fixture', 'admin', 'active', 'en')`,
+      [assigneeEmail],
     );
-    if (!admins[0]) throw new Error("Need an active admin for overdue test");
-    const assigneeId = Number(admins[0].id);
-    const assigneeEmail = String(admins[0].email).toLowerCase();
-    const prevPrefs = admins[0].notification_prefs_json;
-
-    // Null prefs = all channels ON (legacy default)
-    await pool.query(
-      `UPDATE admins SET notification_prefs_json = NULL WHERE id = ?`,
-      [assigneeId],
-    );
+    const assigneeId = Number(adminIns.insertId);
 
     const [taskIns] = await pool.query<ResultSetHeader>(
       `INSERT INTO admin_work_tasks
@@ -296,31 +289,25 @@ describe("notification queue cron", () => {
       expect(row[0]?.due_notified_at).toBeTruthy();
     } finally {
       await pool.query(`DELETE FROM admin_work_tasks WHERE id = ?`, [taskId]);
-      await pool.query(
-        `UPDATE admins SET notification_prefs_json = ? WHERE id = ?`,
-        [prevPrefs ?? null, assigneeId],
-      );
+      await pool.query(`DELETE FROM admins WHERE id = ?`, [assigneeId]);
     }
   }, 60_000);
 
   it("work_task_overdue cron stamps muted-pref rows so they cannot starve the batch", async () => {
-    const [admins] = await pool.query<RowDataPacket[]>(
-      `SELECT id, notification_prefs_json FROM admins
-       WHERE status = 'active' AND email IS NOT NULL AND TRIM(email) <> ''
-       ORDER BY id ASC LIMIT 1`,
+    const [adminIns] = await pool.query<ResultSetHeader>(
+      `INSERT INTO admins
+         (email, first_name, last_name, role, status, preferred_language, notification_prefs_json)
+       VALUES (?, 'Muted', 'Fixture', 'admin', 'active', 'en', ?)`,
+      [
+        `overdue-muted-${RUN_ID}@example.test`,
+        JSON.stringify({
+          email: { work_task_overdue: false },
+          in_app: { work_task_overdue: false },
+          sms: { work_task_overdue: false },
+        }),
+      ],
     );
-    if (!admins[0]) throw new Error("Need an active admin for muted overdue test");
-    const assigneeId = Number(admins[0].id);
-    const prevPrefs = admins[0].notification_prefs_json;
-    const muted = JSON.stringify({
-      email: { work_task_overdue: false },
-      in_app: { work_task_overdue: false },
-      sms: { work_task_overdue: false },
-    });
-    await pool.query(
-      `UPDATE admins SET notification_prefs_json = ? WHERE id = ?`,
-      [muted, assigneeId],
-    );
+    const assigneeId = Number(adminIns.insertId);
 
     const [taskIns] = await pool.query<ResultSetHeader>(
       `INSERT INTO admin_work_tasks
@@ -344,19 +331,18 @@ describe("notification queue cron", () => {
       expect(row[0]?.due_notified_at).toBeTruthy();
     } finally {
       await pool.query(`DELETE FROM admin_work_tasks WHERE id = ?`, [taskId]);
-      await pool.query(
-        `UPDATE admins SET notification_prefs_json = ? WHERE id = ?`,
-        [prevPrefs ?? null, assigneeId],
-      );
+      await pool.query(`DELETE FROM admins WHERE id = ?`, [assigneeId]);
     }
   }, 60_000);
 
   it("after reminder email succeeds, also_sms logs Conversations SMS (Lecca From)", async () => {
-    const [admins] = await pool.query<RowDataPacket[]>(
-      `SELECT id FROM admins WHERE status = 'active' ORDER BY id ASC LIMIT 1`,
+    const [adminIns] = await pool.query<ResultSetHeader>(
+      `INSERT INTO admins
+         (email, first_name, last_name, role, status, preferred_language)
+       VALUES (?, 'Reminder', 'Fixture', 'admin', 'active', 'en')`,
+      [`remsms-admin-${RUN_ID}@example.test`],
     );
-    if (!admins[0]) throw new Error("Need an active admin");
-    const adminId = Number(admins[0].id);
+    const adminId = Number(adminIns.insertId);
 
     const ofgE164 = `+1949${String(Date.now()).slice(-7)}`;
     const [pIns] = await pool.query<ResultSetHeader>(
@@ -420,6 +406,7 @@ describe("notification queue cron", () => {
     );
     const queueId = Number(qIns.insertId);
 
+    try {
     // Master off → no SMS
     await pool.query(
       `UPDATE system_settings SET setting_value = '0'
@@ -474,7 +461,7 @@ describe("notification queue cron", () => {
         : msgs[0].metadata_json;
     expect(meta?.reminder_sms).toBe(true);
     expect(meta?.trigger_event).toBe("docs_ready");
-
+    } finally {
     // Cleanup conversations + restore settings
     await pool.query(
       `DELETE FROM conversation_messages WHERE conversation_id IN (
@@ -488,6 +475,7 @@ describe("notification queue cron", () => {
     await pool.query(`DELETE FROM admin_phone_numbers WHERE id = ?`, [
       phoneNumberId,
     ]);
+    await pool.query(`DELETE FROM admins WHERE id = ?`, [adminId]);
     if (prevSignupVal != null) {
       await pool.query(
         `UPDATE system_settings SET setting_value = ?
@@ -511,6 +499,7 @@ describe("notification queue cron", () => {
         `DELETE FROM system_settings
          WHERE setting_key = 'client_reminder_sms_enabled'`,
       );
+    }
     }
   }, 90_000);
 

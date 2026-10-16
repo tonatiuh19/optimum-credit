@@ -1,59 +1,13 @@
 /**
- * Pure call-insights helpers (no DB, no Express).
+ * Pure call-transcript helpers (no DB, no Express).
  *
  * Production entry remains `api/index.ts` (no runtime imports from sibling
  * api modules). Tests import from this file. Keep in sync with the inlined
  * copies in api/index.ts.
  */
 
-export type CallInsightSentimentLabel =
-  | "positive"
-  | "neutral"
-  | "negative"
-  | "mixed"
-  | "anxious"
-  | "frustrated"
-  | "hopeful"
-  | "confused"
-  | "angry";
-
-export type CallInsightsPayload = {
-  locale: "en" | "es";
-  summary_bullets: string[];
-  sentiment: {
-    label: CallInsightSentimentLabel;
-    score: number;
-    feelings: string[];
-  };
-  topics: string[];
-  action_items: string[];
-  risk_flags: string[];
-  interesting: string[];
-  model?: string;
-  generated_at?: string;
-};
-
-/** Max age to wait for Twilio voicemail transcription before giving up (no Whisper). */
+/** Max age to wait for a Twilio voicemail transcript before giving up. */
 export const CALL_INSIGHTS_TWILIO_TRANSCRIPT_WAIT_MS = 30 * 60 * 1000;
-
-export const CALL_INSIGHTS_SYSTEM = `You are Optimum Financial Group's call analyst for credit-repair staff.
-Given a call or voicemail transcript, return ONLY a JSON object (no markdown) with:
-{
-  "summary_bullets": ["...", "..."],
-  "sentiment": {
-    "label": "positive|neutral|negative|mixed|anxious|frustrated|hopeful|confused|angry",
-    "score": 0.0-1.0,
-    "feelings": ["...", "..."]
-  },
-  "topics": ["..."],
-  "action_items": ["..."],
-  "risk_flags": ["..."],
-  "interesting": ["..."]
-}
-Rules:
-- Be factual; do not invent names, amounts, or promises not in the transcript.
-- Prefer the transcript language for feelings words; summary_bullets follow locale hint.
-- If transcript is empty/garbled, still return JSON with cautious neutral sentiment and one bullet noting poor audio.`;
 
 export function isCallInsightsFeatureEnabled(
   raw?: string | null,
@@ -65,86 +19,87 @@ export function isCallInsightsFeatureEnabled(
   return !(v === "0" || v === "false" || v === "off" || v === "no");
 }
 
+/** Recording SID from a Twilio recording URL. Rejects test placeholders. */
+export function twilioRecordingSidFromUrl(
+  url: string | null | undefined,
+): string | null {
+  const m = String(url || "").match(
+    /\/(RE[0-9a-f]{32})(?:\.[a-z0-9]+)?(?:[?#]|$)/i,
+  );
+  return m ? m[1] : null;
+}
+
+/** Flatten Twilio batch `sentences` into a readable transcript. */
+export function transcriptTextFromTwilioSentences(sentences: unknown): string {
+  if (!Array.isArray(sentences)) return "";
+  const rows: { start: number; index: number; line: string }[] = [];
+  sentences.forEach((s, i) => {
+    if (!s || typeof s !== "object") return;
+    const o = s as Record<string, unknown>;
+    const text = String(o.text || "").trim();
+    if (!text) return;
+    const ch = Number(o.audioChannelIndex ?? o.audio_channel_index);
+    const who = ch === 2 ? "Agent" : ch === 1 ? "Caller" : "";
+    const startRaw = Number(o.startTimeSeconds ?? o.start_time);
+    const indexRaw = Number(o.sentenceIndex ?? o.sentence_index);
+    rows.push({
+      start: Number.isFinite(startRaw) ? startRaw : i,
+      index: Number.isFinite(indexRaw) ? indexRaw : i,
+      line: who ? `${who}: ${text}` : text,
+    });
+  });
+  rows.sort((a, b) => a.start - b.start || a.index - b.index);
+  return rows
+    .map((r) => r.line)
+    .join("\n")
+    .slice(0, 65000);
+}
+
+/** Map a Twilio transcription HTTP error to a stable pipeline code. */
+export function twilioTranscriptionErrorCode(
+  httpStatus: number,
+  body: unknown,
+): "twilio_ai_addendum" | "twilio_stt_failed" | null {
+  if (!(httpStatus >= 400)) return null;
+  const o =
+    body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+  const code = Number(o.code);
+  const message = String(o.message || "");
+  if (httpStatus === 403 && (code === 46009 || /addendum/i.test(message))) {
+    return "twilio_ai_addendum";
+  }
+  return "twilio_stt_failed";
+}
+
 /**
- * When STT produced no transcript yet, decide next pipeline status.
- * Voicemail without OpenAI Whisper waits for Twilio transcription webhook.
+ * When there is no transcript yet, decide whether to submit the recording,
+ * keep waiting on a voicemail callback, or stop.
  */
-export function decideMissingTranscriptOutcome(args: {
+export function decideMissingRecordingOutcome(args: {
   isVoicemail: boolean;
-  hasOpenAi: boolean;
+  hasRecordingSid: boolean;
   ageMs: number;
   maxWaitMs?: number;
 }):
+  | { action: "transcribe" }
   | { action: "await_twilio" }
-  | { action: "fail"; status: "failed"; error: "stt_empty" }
-  | { action: "skip"; status: "skipped"; error: "missing_openai_stt" } {
+  | {
+      action: "fail";
+      status: "failed";
+      error: "invalid_recording" | "stt_empty";
+    } {
+  if (args.hasRecordingSid) return { action: "transcribe" };
   const maxWait = args.maxWaitMs ?? CALL_INSIGHTS_TWILIO_TRANSCRIPT_WAIT_MS;
-  if (args.isVoicemail && !args.hasOpenAi) {
-    if (Number.isFinite(args.ageMs) && args.ageMs < maxWait) {
-      return { action: "await_twilio" };
-    }
+  if (
+    args.isVoicemail &&
+    Number.isFinite(args.ageMs) &&
+    args.ageMs >= 0 &&
+    args.ageMs < maxWait
+  ) {
+    return { action: "await_twilio" };
   }
-  if (args.hasOpenAi) {
+  if (args.isVoicemail) {
     return { action: "fail", status: "failed", error: "stt_empty" };
   }
-  return { action: "skip", status: "skipped", error: "missing_openai_stt" };
-}
-
-export function parseCallInsightsJson(
-  text: string,
-  locale: "en" | "es",
-): CallInsightsPayload | null {
-  const raw = String(text || "").trim();
-  if (!raw) return null;
-  const match = raw.match(/\{[\s\S]*\}/);
-  if (!match) return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(match[0]);
-  } catch {
-    return null;
-  }
-  if (!parsed || typeof parsed !== "object") return null;
-  const o = parsed as Record<string, unknown>;
-  const asStrArr = (v: unknown, max: number, maxLen: number): string[] =>
-    (Array.isArray(v) ? v : [])
-      .map((x) => String(x || "").trim().slice(0, maxLen))
-      .filter(Boolean)
-      .slice(0, max);
-
-  const sent = (o.sentiment || {}) as Record<string, unknown>;
-  const labelRaw = String(sent.label || "neutral").toLowerCase();
-  const allowed: CallInsightSentimentLabel[] = [
-    "positive",
-    "neutral",
-    "negative",
-    "mixed",
-    "anxious",
-    "frustrated",
-    "hopeful",
-    "confused",
-    "angry",
-  ];
-  const label = (
-    allowed.includes(labelRaw as CallInsightSentimentLabel)
-      ? labelRaw
-      : "neutral"
-  ) as CallInsightSentimentLabel;
-  let score = Number(sent.score);
-  if (!Number.isFinite(score)) score = 0.5;
-  score = Math.max(0, Math.min(1, score));
-
-  return {
-    locale,
-    summary_bullets: asStrArr(o.summary_bullets, 6, 220),
-    sentiment: {
-      label,
-      score,
-      feelings: asStrArr(sent.feelings, 5, 40),
-    },
-    topics: asStrArr(o.topics, 8, 80),
-    action_items: asStrArr(o.action_items, 6, 200),
-    risk_flags: asStrArr(o.risk_flags, 8, 60),
-    interesting: asStrArr(o.interesting, 5, 220),
-  };
+  return { action: "fail", status: "failed", error: "invalid_recording" };
 }

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   isJunkNegativeAccountName,
   isNonTradelineNegativeNoise,
+  extractNegativeAccounts,
 } from "./index";
 
 describe("isJunkNegativeAccountName", () => {
@@ -32,5 +33,56 @@ describe("isNonTradelineNegativeNoise", () => {
     expect(
       isNonTradelineNegativeNoise("PORTFOLIO RECOVERY - Collection"),
     ).toBe(false);
+  });
+});
+
+describe("report field rows are not tradelines (Huiza CR-3036985)", () => {
+  it("drops table-of-contents headings, field rows and payment-status values", () => {
+    for (const line of [
+      "10. Collections 52",
+      "4.11 Possible Financial I (CLOSED) 42",
+      "30 Days Past Due 0 0 0",
+      "120 Days Past Due N/A 0 N/A",
+      "Included in Bankruptcy 0 0 0",
+      "Amount Past Due $0 $0 $0",
+      "CURRENT ACCOUNT/WAS 30 DAYS PAST DUE DATE TWO",
+    ]) {
+      expect(isNonTradelineNegativeNoise(line)).toBe(true);
+    }
+  });
+
+  it("keeps real creditors, including ones starting with digits", () => {
+    expect(
+      isNonTradelineNegativeNoise("PORTFOLIO RECOVERY - Collection $512"),
+    ).toBe(false);
+    expect(isNonTradelineNegativeNoise("21ST MORTGAGE - Late Payment")).toBe(
+      false,
+    );
+  });
+
+  it("extracts no accounts from a clean report's summary rows", () => {
+    const text = [
+      "TransUnion Experian Equifax",
+      "10. Collections 52",
+      "30 Days Past Due 0 0 0",
+      "60 Days Past Due 0 0 0",
+      "Included in Bankruptcy 0 0 0",
+      "Amount Past Due $0 $0 $0",
+      "CURRENT ACCOUNT/WAS 30 DAYS PAST DUE DATE TWO",
+    ].join("\n");
+    expect(extractNegativeAccounts(text)).toEqual([]);
+  });
+
+  it("names status rows after the numbered tradeline heading", () => {
+    const text = [
+      "TransUnion Experian Equifax",
+      "4.7 Kashable Llc",
+      "30 Days Past Due 1 2 1",
+      "Account Status Over 120 Days Past Due Over 120 Days Past Due Over 120 Days Past Due",
+      "Status Over 120 Days Past Due Over 120 Days Past Due Over 120 Days Past Due",
+    ].join("\n");
+    expect(extractNegativeAccounts(text).map((a) => a.label)).toEqual([
+      "Kashable Llc — Late Payment",
+    ]);
   });
 });

@@ -1,3 +1,5 @@
+import { CreditAnalysisLenderContextCard } from "@/components/credit/CreditAnalysisLenderContextCard";
+import { useEffect } from "react";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import {
@@ -8,6 +10,8 @@ import {
   RefreshCw,
   Download,
   Languages,
+  Loader2,
+  Sparkles,
 } from "lucide-react";
 import type { CreditAnalysisResult } from "@shared/api";
 import { creditAnalysisPdfFileName } from "@/lib/creditAnalysisDownload";
@@ -18,6 +22,15 @@ import {
 } from "@/lib/creditAnalysisReportLabels";
 import { parseCreditAnalysisView } from "@/lib/creditAnalysisResultModel";
 import { useToast } from "@/hooks/use-toast";
+import { useAppDispatch, useAppSelector } from "@/store/hooks";
+import {
+  downloadEnhancedCreditAnalysisPdf,
+  fetchCreditAnalysisEnhancedStatus,
+} from "@/store/slices/creditAnalysisSlice";
+
+/** Re-check a pending enhanced read every 20s for up to 15 minutes. */
+const ENHANCED_POLL_MS = 20_000;
+const ENHANCED_POLL_MAX = 45;
 
 function ScoreGauge({
   label,
@@ -89,6 +102,11 @@ export interface CreditAnalysisResultPanelProps {
   showRegisterCta?: boolean;
   /** Used for PDF filename / header subtitle */
   clientName?: string;
+  /**
+   * Staff views only: when the background enhanced read is ready, Download
+   * PDF serves the enhanced report; otherwise it behaves exactly as before.
+   */
+  staffEnhancedPdf?: boolean;
 }
 
 function resolveReportLanguage(result: CreditAnalysisResult): "en" | "es" {
@@ -100,9 +118,37 @@ export default function CreditAnalysisResultPanel({
   onStartOver,
   showRegisterCta = false,
   clientName,
+  staffEnhancedPdf = false,
 }: CreditAnalysisResultPanelProps) {
   const { t } = useTranslation();
   const { toast } = useToast();
+  const dispatch = useAppDispatch();
+  const analysisId = Number(result.id) || 0;
+  const enhancedStatus = useAppSelector((s) =>
+    staffEnhancedPdf && analysisId
+      ? s.creditAnalysis.enhancedStatusById[analysisId]
+      : undefined,
+  );
+  const enhancedDownloading = useAppSelector(
+    (s) => !!analysisId && s.creditAnalysis.enhancedDownloadingId === analysisId,
+  );
+
+  useEffect(() => {
+    if (!staffEnhancedPdf || !analysisId) return;
+    let polls = 0;
+    let timer: number | undefined;
+    const check = async () => {
+      const res = await dispatch(fetchCreditAnalysisEnhancedStatus(analysisId));
+      const st = fetchCreditAnalysisEnhancedStatus.fulfilled.match(res)
+        ? res.payload.status
+        : null;
+      if ((st === "queued" || st === "submitted") && polls++ < ENHANCED_POLL_MAX) {
+        timer = window.setTimeout(check, ENHANCED_POLL_MS);
+      }
+    };
+    void check();
+    return () => window.clearTimeout(timer);
+  }, [staffEnhancedPdf, analysisId, dispatch]);
   const reportLang = resolveReportLanguage(result);
   const L = creditAnalysisReportLabels(reportLang);
   const view = parseCreditAnalysisView(result, {
@@ -114,6 +160,30 @@ export default function CreditAnalysisResultPanel({
   });
 
   const handleDownloadPdf = () => {
+    // Enhanced report ready → download it; anything else → today's PDF.
+    if (staffEnhancedPdf && enhancedStatus === "ready" && analysisId) {
+      void (async () => {
+        const res = await dispatch(
+          downloadEnhancedCreditAnalysisPdf({ analysisId, lang: reportLang }),
+        );
+        if (downloadEnhancedCreditAnalysisPdf.fulfilled.match(res)) {
+          const url = URL.createObjectURL(res.payload.blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = res.payload.fileName;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+        } else {
+          toast({
+            title: t("creditAnalysis.enhancedDownloadError"),
+            variant: "destructive",
+          });
+        }
+      })();
+      return;
+    }
     if (view.weakExtraction && !result.scores) {
       toast({
         title: t("creditAnalysis.downloadPdfUnavailable"),
@@ -211,6 +281,27 @@ export default function CreditAnalysisResultPanel({
         </p>
       </div>
 
+      {staffEnhancedPdf && !weakExtraction && enhancedStatus && enhancedStatus !== "failed" && (
+        <p
+          className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground animate-in fade-in"
+          data-testid="credit-analysis-enhanced-status"
+        >
+          {enhancedStatus === "ready" ? (
+            <>
+              <Sparkles className="w-3.5 h-3.5 text-accent" />
+              {t("creditAnalysis.enhancedReady")}
+            </>
+          ) : (
+            <>
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              {t("creditAnalysis.enhancedPreparing")}
+            </>
+          )}
+        </p>
+      )}
+      {staffEnhancedPdf && analysisId > 0 && !weakExtraction && (
+        <CreditAnalysisLenderContextCard analysisId={analysisId} />
+      )}
       {(onStartOver || showRegisterCta || !weakExtraction) && (
         <div className="flex flex-col sm:flex-row flex-wrap gap-2 justify-center">
           {!weakExtraction && (
@@ -219,7 +310,11 @@ export default function CreditAnalysisResultPanel({
               onClick={handleDownloadPdf}
               className="btn-primary h-11 px-6 flex items-center justify-center gap-2"
             >
-              <Download className="w-4 h-4" />
+              {enhancedDownloading ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Download className="w-4 h-4" />
+              )}
               {t("creditAnalysis.downloadPdf")}
             </button>
           )}

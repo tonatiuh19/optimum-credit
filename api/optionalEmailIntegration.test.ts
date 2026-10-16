@@ -10,7 +10,7 @@ import mysql, {
   type RowDataPacket,
 } from "mysql2/promise";
 import { createServer, createSession } from "./index";
-import { cleanupIntegrationTestClients, createIntegrationTestPool, withDbRetry } from "./testDbCleanup";
+import { cleanupIntegrationTestClients, createIntegrationTestPool, uniqueTestE164, withDbRetry } from "./testDbCleanup";
 
 const RUN_ID = `opt-email-${Date.now()}`;
 
@@ -90,7 +90,7 @@ describe("optional client email — edges", () => {
       .send({
         first_name: "Phone",
         last_name: `Conv-${RUN_ID}`,
-        phone: "+15555550111",
+        phone: uniqueTestE164(`optional-email-${RUN_ID}`),
         status: "prospect",
         preferred_language: "en",
       })

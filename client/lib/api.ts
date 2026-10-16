@@ -64,6 +64,17 @@ api.interceptors.response.use(
         }
       }
     }
+    // Client blocked by staff mid-session: sign out to the login notice.
+    if (
+      err?.response?.status === 403 &&
+      err?.response?.data?.code === "account_blocked" &&
+      !isAdminApiPath(String(err?.config?.url || ""))
+    ) {
+      setClientToken(null);
+      if (!window.location.pathname.startsWith("/portal/login")) {
+        window.location.href = "/portal/login?blocked=1";
+      }
+    }
     return Promise.reject(err);
   },
 );

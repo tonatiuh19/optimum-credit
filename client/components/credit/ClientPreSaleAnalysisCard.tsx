@@ -39,7 +39,11 @@ export default function ClientPreSaleAnalysisCard({
           {t("prospectAnalysis.priorAnalysisHint")}
         </p>
       </div>
-      <CreditAnalysisResultPanel result={adminResult} showRegisterCta={false} />
+      <CreditAnalysisResultPanel
+        result={adminResult}
+        showRegisterCta={false}
+        staffEnhancedPdf
+      />
     </div>
   );
 }

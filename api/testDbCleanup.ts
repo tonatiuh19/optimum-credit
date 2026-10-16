@@ -610,6 +610,21 @@ export async function purgeAllIntegrationTestOrphans(
     }
   }
 
+  // CRM contacts seeded by tests (@example.test / @affiliate.test) + threads.
+  {
+    const testContacts = `SELECT id FROM contacts
+       WHERE email LIKE '%@example.test' OR email LIKE '%@affiliate.test'`;
+    await pool.query(
+      `DELETE FROM conversation_messages WHERE conversation_id IN (
+         SELECT id FROM conversations WHERE contact_id IN (${testContacts}))`,
+    );
+    await pool.query(`DELETE FROM conversations WHERE contact_id IN (${testContacts})`);
+    const [r] = await pool.query<ResultSetHeader>(
+      `DELETE FROM contacts WHERE email LIKE '%@example.test' OR email LIKE '%@affiliate.test'`,
+    );
+    bump("contacts", Number(r.affectedRows ?? 0));
+  }
+
   // Test OFG numbers + unknown contacts (+1555 only)
   await pool.query(
     `DELETE FROM conversation_unknown_contacts WHERE phone_e164 LIKE '+1555%'`,

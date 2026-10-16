@@ -25,6 +25,8 @@ import AffiliateRedirect from "./pages/public/AffiliateRedirect";
 import FreeScoreRedirect from "./pages/public/FreeScoreRedirect";
 import AffiliateJoin from "./pages/public/AffiliateJoin";
 import PrepaidOnboardJoin from "./pages/public/PrepaidOnboardJoin";
+import EventLanding from "./pages/public/EventLanding";
+import OfyChinoQrRedirect from "./pages/public/OfyChinoQrRedirect";
 
 import ClientLogin from "./pages/auth/ClientLogin";
 import AdminLogin from "./pages/auth/AdminLogin";
@@ -54,6 +56,7 @@ import AdminConversations from "./pages/admin/Conversations";
 import AdminTickets from "./pages/admin/Tickets";
 import AdminTemplates from "./pages/admin/Templates";
 import AdminVideos from "./pages/admin/Videos";
+import AdminEventMarketing from "./pages/admin/EventMarketing";
 import AdminReports from "./pages/admin/Reports";
 import AdminSettings from "./pages/admin/Settings";
 import AdminProfile from "./pages/admin/Profile";
@@ -125,6 +128,19 @@ function AppShell() {
 
         {/* Business funding wizard — public, standalone (OFG-style) */}
         <Route path="/funding" element={<Funding />} />
+
+        {/* Event Marketing CRM public landings */}
+        <Route path="/e" element={<EventLanding />} />
+        <Route path="/e/:companySlug" element={<EventLanding />} />
+        {/* Printed Chino sign QRs — must stay above the generic session route */}
+        <Route
+          path="/e/ofy/s/ofy-chino-1001"
+          element={<OfyChinoQrRedirect />}
+        />
+        <Route
+          path="/e/:companySlug/s/:sessionCode"
+          element={<EventLanding />}
+        />
 
         {/* Standalone pricing page — default landing for affiliate links */}
         <Route path="/pricing" element={wrap(Layout, Pricing)} />
@@ -287,6 +303,14 @@ function AppShell() {
           path="/admin/videos"
           element={
             <RequireStaff>{wrap(AdminLayout, AdminVideos)}</RequireStaff>
+          }
+        />
+        <Route
+          path="/admin/event-marketing"
+          element={
+            <RequireStaff>
+              {wrap(AdminLayout, AdminEventMarketing)}
+            </RequireStaff>
           }
         />
         <Route

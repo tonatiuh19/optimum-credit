@@ -57,6 +57,9 @@ import type {
   TradelineProductInput,
   ReferralCategory,
   RoundScheduleInput,
+  AdminClientNoteResponse,
+  AdminClientPauseResponse,
+  LeadSignalsResponse,
 } from "@shared/api";
 
 interface AdminState {
@@ -73,6 +76,7 @@ interface AdminState {
   clientsPagination: AdminClientsListResponse["pagination"] | null;
   clientsListQuery: AdminClientsListQuery | null;
   clientsLoading: boolean;
+  clientsExporting: boolean;
   pipelineClients: AdminClientListItem[];
   pipelineCases: CreditRepairCase[];
   pipelineProspects: Prospect[];
@@ -205,6 +209,7 @@ const initialState: AdminState = {
   clientsPagination: null,
   clientsListQuery: null,
   clientsLoading: false,
+  clientsExporting: false,
   pipelineClients: [],
   pipelineCases: [],
   pipelineProspects: [],
@@ -311,6 +316,45 @@ export const fetchAdminClients = createAsyncThunk<
   return data as AdminClientsListResponse;
 });
 
+/** Full CSV for Google Sheet reconcile — same filters as list, no page cap. */
+export const exportAdminClientsCsv = createAsyncThunk<
+  { csv: string; filename: string; truncated: boolean },
+  AdminClientsListQuery | undefined,
+  { rejectValue: string }
+>("admin/clients/exportCsv", async (args, { rejectWithValue }) => {
+  try {
+    const params: Record<string, string> = {};
+    if (args?.stage) params.stage = args.stage;
+    if (args?.search) params.search = args.search;
+    if (args?.status) params.status = args.status;
+    if (args?.language) params.language = args.language;
+    if (args?.billing) params.billing = args.billing;
+    if (args?.joined_from) params.joined_from = args.joined_from;
+    if (args?.joined_to) params.joined_to = args.joined_to;
+    if (args?.has_notes) params.has_notes = args.has_notes;
+    if (args?.labels && args.labels.length > 0)
+      params.labels = args.labels.join(",");
+    if (args?.sort_by) params.sort_by = args.sort_by;
+    if (args?.sort_dir) params.sort_dir = args.sort_dir;
+    const res = await api.get<string>("/admin/clients/export", {
+      params,
+      responseType: "text",
+    });
+    const disposition = String(res.headers?.["content-disposition"] || "");
+    const match = /filename="([^"]+)"/i.exec(disposition);
+    const filename =
+      match?.[1] ||
+      `ofg-clients-${new Date().toISOString().slice(0, 10)}.csv`;
+    const truncated =
+      String(res.headers?.["x-export-truncated"] || "") === "1";
+    return { csv: String(res.data ?? ""), filename, truncated };
+  } catch (err: any) {
+    return rejectWithValue(
+      formatAxiosError(err, "Could not download clients CSV."),
+    );
+  }
+});
+
 export const refetchAdminClients = createAsyncThunk<
   AdminClientsListResponse,
   void,
@@ -360,6 +404,7 @@ function pipelineQueryParams(
   if (args?.referral_category)
     params.referral_category = args.referral_category;
   if (args?.client_status) params.client_status = args.client_status;
+  if (args?.lead_temperature) params.lead_temperature = args.lead_temperature;
   if (args?.case_status) params.case_status = args.case_status;
   if (args?.stage) params.stage = args.stage;
   if (args?.payment_badge) params.payment_badge = args.payment_badge;
@@ -1262,6 +1307,66 @@ export const createAdminClient = createAsyncThunk<
   }
 });
 
+/** Prospect traffic light: mark analysis reviewed / schedule a call. */
+export const updateLeadSignals = createAsyncThunk<
+  LeadSignalsResponse,
+  { id: number; analysis_reviewed?: boolean; call_scheduled_at?: string | null },
+  { rejectValue: string }
+>("admin/clients/leadSignals", async ({ id, ...body }, { rejectWithValue }) => {
+  try {
+    const { data } = await api.post<LeadSignalsResponse>(
+      `/admin/clients/${id}/lead-signals`,
+      body,
+    );
+    return data;
+  } catch (err: unknown) {
+    return rejectWithValue(formatAxiosError(err, "Could not update the prospect"));
+  }
+});
+
+export const addAdminClientNote = createAsyncThunk<
+  AdminClientNoteResponse,
+  { id: number; note: string },
+  { rejectValue: string }
+>("admin/clients/addNote", async ({ id, note }, { rejectWithValue }) => {
+  try {
+    const { data } = await api.post<AdminClientNoteResponse>(
+      `/admin/clients/${id}/notes`,
+      { note },
+    );
+    return data;
+  } catch (err: unknown) {
+    return rejectWithValue(formatAxiosError(err, "Failed to add note"));
+  }
+});
+
+export const setAdminClientPaused = createAsyncThunk<
+  AdminClientPauseResponse,
+  {
+    id: number;
+    paused: boolean;
+    reason?: string;
+    /** When paused=true: which hold to apply (default paused). */
+    holdStatus?: "paused" | "blocked";
+  },
+  { rejectValue: string }
+>(
+  "admin/clients/setPaused",
+  async ({ id, paused, reason, holdStatus }, { rejectWithValue }) => {
+    try {
+      const { data } = await api.post<AdminClientPauseResponse>(
+        `/admin/clients/${id}/pause`,
+        { paused, reason: reason || "", hold_status: holdStatus || "paused" },
+      );
+      return data;
+    } catch (err: unknown) {
+      return rejectWithValue(
+        formatAxiosError(err, "Failed to update client status"),
+      );
+    }
+  },
+);
+
 export const updateAdminClient = createAsyncThunk<
   AdminClientListItem,
   {
@@ -1577,6 +1682,15 @@ const slice = createSlice({
     });
     b.addCase(fetchAdminClients.rejected, (s) => {
       s.clientsLoading = false;
+    });
+    b.addCase(exportAdminClientsCsv.pending, (s) => {
+      s.clientsExporting = true;
+    });
+    b.addCase(exportAdminClientsCsv.fulfilled, (s) => {
+      s.clientsExporting = false;
+    });
+    b.addCase(exportAdminClientsCsv.rejected, (s) => {
+      s.clientsExporting = false;
     });
     b.addCase(fetchAllDocuments.pending, (s) => {
       s.documentsLoading = true;

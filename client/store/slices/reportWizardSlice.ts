@@ -24,6 +24,8 @@ interface ReportWizardState {
   enhancing: boolean;
   error: string | null;
   previewUrl: string | null;
+  /** Progress Report v2 validation flags from the last preview. */
+  previewFlags: Array<{ code: string; message: string }>;
 }
 
 const initialState: ReportWizardState = {
@@ -42,6 +44,7 @@ const initialState: ReportWizardState = {
   enhancing: false,
   error: null,
   previewUrl: null,
+  previewFlags: [],
 };
 
 function normalizeSession(raw: ReportWizardSession): ReportWizardSession {
@@ -268,7 +271,7 @@ export const saveReportWizardReview = createAsyncThunk<
 });
 
 export const previewReportWizard = createAsyncThunk<
-  string,
+  { url: string; flags: Array<{ code: string; message: string }> },
   { sessionId: number; reviewedJson?: OfGReportData },
   { rejectValue: string }
 >("reportWizard/preview", async (args, { rejectWithValue }) => {
@@ -278,7 +281,14 @@ export const previewReportWizard = createAsyncThunk<
       args.reviewedJson ? { reviewed_json: args.reviewedJson } : {},
       { responseType: "blob" },
     );
-    return URL.createObjectURL(resp.data as Blob);
+    let flags: Array<{ code: string; message: string }> = [];
+    try {
+      const raw = resp.headers?.["x-report-review-flags"];
+      if (raw) flags = JSON.parse(decodeURIComponent(String(raw)));
+    } catch {
+      flags = [];
+    }
+    return { url: URL.createObjectURL(resp.data as Blob), flags };
   } catch (e: any) {
     if (e?.response?.data instanceof Blob) {
       try {
@@ -515,7 +525,8 @@ const reportWizardSlice = createSlice({
       .addCase(previewReportWizard.fulfilled, (state, action) => {
         state.previewing = false;
         if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
-        state.previewUrl = action.payload;
+        state.previewUrl = action.payload.url;
+        state.previewFlags = action.payload.flags;
       })
       .addCase(previewReportWizard.rejected, (state, action) => {
         state.previewing = false;

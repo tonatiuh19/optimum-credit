@@ -189,6 +189,13 @@ const TRIGGER_EVENT_META: Record<
     color: "text-amber-400 bg-amber-500/10 border-amber-500/25",
     icon: CheckCircle2,
   },
+  event_registered: {
+    label: "Event Registration",
+    description:
+      "Fires when a parent/student registers via Event Marketing (/e). Use required labels (ofy, allegiance) to scope follow-ups per school.",
+    color: "text-accent bg-accent/10 border-accent/25",
+    icon: Zap,
+  },
 };
 
 const STEP_TYPE_META: Record<

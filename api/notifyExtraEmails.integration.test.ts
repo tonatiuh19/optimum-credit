@@ -14,6 +14,7 @@ import {
 import {
   createServer,
   createSession,
+  flushInboundAiJobs,
   __testClearEmailDryRuns,
   __testGetEmailDryRuns,
 } from "./index";
@@ -218,6 +219,7 @@ describe("admin notify extra emails", () => {
         MessageSid: sid,
       });
     expect(wh.status).toBe(200);
+    await flushInboundAiJobs();
 
     const dry = __testGetEmailDryRuns();
     const toExtra = dry.filter(
@@ -245,6 +247,7 @@ describe("admin notify extra emails", () => {
         MessageSid: sid2,
       });
     expect(wh2.status).toBe(200);
+    await flushInboundAiJobs();
     const dry2 = __testGetEmailDryRuns();
     expect(
       dry2.filter((d) => String(d.to || "").toLowerCase() === EXTRA_EMAIL)
@@ -296,6 +299,7 @@ describe("admin notify extra emails", () => {
         MessageSid: sid,
       });
     expect(wh.status).toBe(200);
+    await flushInboundAiJobs();
 
     const dry = __testGetEmailDryRuns();
     const toExtra = dry.filter(

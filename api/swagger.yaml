@@ -31,6 +31,8 @@ tags:
     description: Public credit-analysis lead capture & prospect conversion
   - name: Funding
     description: Business funding public wizard, admin board, and portal resume
+  - name: Event Marketing
+    description: CRM Event Marketing — public landings /e and admin company CRUD
   - name: Portal
     description: Client portal — documents, dashboard
   - name: Admin
@@ -459,6 +461,297 @@ paths:
         "400":
           description: Missing/invalid fields or file
 
+  /admin/credit-files:
+    post:
+      tags: [Admin, Credit Analysis]
+      summary: Upload a credit report for account-level extraction (any provider)
+      description: >-
+        Accepts a PDF or an image (JPG, PNG, WebP, GIF) from any provider
+        (SmartCredit, IdentityIQ, MyFreeScoreNow, bureau reports, scans/photos).
+        Stores it encrypted and queues a Claude extraction (ANTHROPIC_MODEL)
+        that runs from the queue cron via the Message Batches API (usually
+        1–3 minutes). Recognized text PDFs also get a text cross-check.
+        Returns 202; poll GET /admin/credit-files/{id}. Staff only.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+                purpose:
+                  type: string
+                  enum: [analysis, progress_before, progress_after, other]
+                client_id: { type: integer }
+                case_id: { type: integer }
+      responses:
+        "202": { description: Queued (id, status, provider, image_pages, total_pages) }
+        "400": { description: Missing file / unsupported type }
+        "404": { description: Client not found }
+        "413": { description: File over the platform upload limit }
+  /admin/credit-files/{id}:
+    get:
+      tags: [Admin, Credit Analysis]
+      summary: Credit file extraction status + result
+      description: >-
+        status queued → submitted → ready | failed. When ready, credit_file
+        holds scores, every account per bureau (lean fields), inquiries;
+        issues lists cross-check findings for staff review.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200": { description: Job (see CreditFileExtractionResponse in shared/api.ts) }
+        "404": { description: Not found }
+  /admin/credit-files/{id}/analysis:
+    get:
+      tags: [Admin, Credit Analysis]
+      summary: Credit analysis data built from a ready extraction
+      description: >-
+        Deterministic rules over the extracted credit file: per-bureau
+        overview, missing-bureau flags, negatives with round (R2 collections,
+        R3 cross-bureau inconsistencies, R4 charge-offs/lates), legal basis,
+        HOLD for consumer-dispute remarks, inquiries (dispute / ages off /
+        permissible), utilization incl. vs excl. AU cards, projections
+        (estimates), 5-factor file strength, Standard/Complex program.
+        409 while the extraction is not ready.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200": { description: "{ analysis, client_name, lang }" }
+        "404": { description: Not found }
+        "409": { description: Extraction not ready or failed }
+  /admin/credit-files/{id}/analysis.pdf:
+    get:
+      tags: [Admin, Credit Analysis]
+      summary: Branded Credit Analysis PDF (same brand as the Progress Report)
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+        - in: query
+          name: lang
+          schema: { type: string, enum: [en, es] }
+          description: Defaults to the client's preferred language
+      responses:
+        "200":
+          description: PDF
+          content:
+            application/pdf: {}
+        "409": { description: Extraction not ready or failed }
+  /admin/credit-analyses/{id}/enhanced-status:
+    get:
+      tags: [Admin, Credit Analysis]
+      summary: Background enhanced-read status behind an existing analysis
+      description: >-
+        Staff uploads via POST /admin/clients/{id}/credit-analysis also queue
+        an account-level read (same file, background). The analysis panel
+        polls this so its existing Download PDF can serve the enhanced report.
+        null = no enhanced read (Download PDF keeps today's report).
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: >-
+            { status: queued | submitted | ready | failed | null, context:
+            { escrow: boolean | null, lender_score_model, lender_score,
+            lender_target_score } }
+  /admin/credit-analyses/{id}/context:
+    patch:
+      tags: [Admin, Credit Analysis]
+      summary: Escrow flag + lender score used by the enhanced analysis PDF
+      description: >-
+        escrow null = auto-detect (mortgage pull in the last 45 days), true =
+        in escrow (hold banner, loan inquiries excluded, tradelines after
+        closing), false = not in escrow. Lender score / target (300-900) are
+        shown next to the VantageScore figures. Affiliates are denied.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                escrow: { type: boolean, nullable: true }
+                lender_score_model: { type: string, nullable: true, maxLength: 40 }
+                lender_score: { type: integer, nullable: true, minimum: 300, maximum: 900 }
+                lender_target_score: { type: integer, nullable: true, minimum: 300, maximum: 900 }
+      responses:
+        "200": { description: "{ context }" }
+        "400": { description: Invalid value / nothing to update }
+        "404": { description: Not found }
+  /admin/credit-analyses/{id}/enhanced-pdf:
+    get:
+      tags: [Admin, Credit Analysis]
+      summary: Enhanced Credit Analysis PDF for an existing analysis
+      description: >-
+        200 PDF (attachment) when the enhanced read is ready; otherwise 404
+        with fallback=true so the client keeps today's printable report.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+        - in: query
+          name: lang
+          schema: { type: string, enum: [en, es] }
+      responses:
+        "200":
+          description: PDF
+          content:
+            application/pdf: {}
+        "404": { description: "Not ready / not found — { fallback: true }" }
+  /admin/clients/{id}/lead-signals:
+    post:
+      tags: [Admin, Clients]
+      summary: Prospect traffic light — manual Hot signals
+      description: >-
+        Mark the credit analysis as reviewed with Cesar and/or set the next
+        scheduled call; the traffic light (hot / warm / cold) is recomputed
+        immediately. The platform also recomputes every prospect each cron tick
+        from replies (14 days), credit report/analysis, payments, monitoring
+        login and documents; a 5+ minute call after the analysis counts as
+        reviewed. Alerts: upgrades → language owner (EN Lecca, ES Ángel); Hot
+        with no movement for 3 days → LEAD_HOT_STALE_ALERT_ADMIN_IDS (default
+        Cesar); first successful payment → ready-to-convert suggestion (staff
+        confirm; never automatic).
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                analysis_reviewed: { type: boolean }
+                call_scheduled_at: { type: string, format: date-time, nullable: true }
+      responses:
+        "200": { description: "LeadSignalsResponse (shared/api.ts)" }
+        "400": { description: Nothing to update / invalid date }
+        "404": { description: Client not found }
+  /admin/clients/{id}/notes:
+    post:
+      tags: [Admin, Clients]
+      summary: Append a staff note to a client file
+      description: >-
+        Appends one line `[YYYY-MM-DD HH:mm UTC — Admin Name] note` to
+        clients.admin_notes (never overwrites). Staff only (affiliates 403).
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [note]
+              properties:
+                note: { type: string, maxLength: 1500 }
+      responses:
+        "200":
+          description: Note appended
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  admin_notes: { type: string, nullable: true }
+        "400": { description: Missing or too-long note }
+        "404": { description: Client not found }
+  /admin/clients/{id}/pause:
+    post:
+      tags: [Admin, Clients]
+      summary: Pause, block or resume a client
+      description: >-
+        paused=true puts the client on hold (reason required): hold_status
+        `paused` (default) or `blocked`. Both stop every automated client
+        message (reminder flows, queued reminders, payment nudges, reminder
+        SMS); `blocked` also locks portal login (client endpoints return 403
+        `{ code: account_blocked }`). Reason + previous status are logged in
+        admin_notes. paused=false resumes from paused or blocked to prospect
+        (no enrolled case), onboarding (case still new_client) or active.
+        Staff only (affiliates 403).
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [paused]
+              properties:
+                paused: { type: boolean }
+                hold_status:
+                  type: string
+                  enum: [paused, blocked]
+                  default: paused
+                  description: Which hold to apply when paused=true
+                reason:
+                  type: string
+                  maxLength: 1000
+                  description: Required when paused=true
+      responses:
+        "200":
+          description: Status updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  status: { type: string }
+                  admin_notes: { type: string, nullable: true }
+        "400": { description: Invalid body / missing reason }
+        "404": { description: Client not found }
+        "422": { description: Already in that hold / cancelled, or not on hold when resuming }
   /admin/clients/{id}/credit-analysis:
     get:
       tags: [Admin, Credit Analysis]
@@ -674,6 +967,313 @@ paths:
           description: Missing/invalid fields
         "429":
           description: Rate limited
+
+  /public/event-marketing:
+    get:
+      tags: [Event Marketing]
+      summary: List active event companies (public tabs)
+      responses:
+        "200":
+          description: Active companies for landing tabs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  companies:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer }
+                        slug: { type: string }
+                        name: { type: string }
+                        name_es: { type: string, nullable: true }
+                        sort_order: { type: integer }
+        "429":
+          description: Rate limited
+
+  /public/event-marketing/{slug}:
+    get:
+      tags: [Event Marketing]
+      summary: Event company landing (sessions + form fields)
+      description: |
+        Returns company copy, scheduled sessions, active form fields,
+        `next_session_id` (auto-pick), optional `selected_session_id` when
+        `?session=short_code` matches, and `mfsn_url` for free-report CTA.
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema: { type: string }
+        - name: session
+          in: query
+          required: false
+          schema: { type: string }
+          description: Session short_code to preselect
+      responses:
+        "200":
+          description: Landing payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicEventLandingResponse"
+        "404":
+          description: Company not found / inactive
+        "429":
+          description: Rate limited
+
+  /public/event-marketing/register:
+    post:
+      tags: [Event Marketing]
+      summary: Register for an event (prospect + welcome email/SMS)
+      description: |
+        Rate-limited public registration. Upserts prospect by email/phone,
+        attaches labels `event_marketing` + company `label_slug` +
+        `web_lead_review`, inserts `event_registrations`, enforces session
+        capacity, sends templated welcome email + SMS (César From /
+        `GET_CREDIT_REPORT_SMS_FROM_E164`), notifies team
+        `event_registration`, triggers reminder flow `event_registered`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [company_slug, answers]
+              properties:
+                company_slug: { type: string }
+                session_id: { type: integer, nullable: true }
+                source_qr: { type: string, enum: [company, session] }
+                answers:
+                  type: object
+                  additionalProperties: true
+      responses:
+        "200":
+          description: Registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicEventRegisterResponse"
+        "400":
+          description: Validation error
+        "409":
+          description: Session full
+        "429":
+          description: Rate limited
+
+  /admin/event-marketing/companies:
+    get:
+      tags: [Event Marketing, Admin]
+      summary: List event companies
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Companies with registration counts
+    post:
+      tags: [Event Marketing, Admin]
+      summary: Create event company (+ default form fields)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                slug: { type: string }
+                label_slug: { type: string }
+                name_es: { type: string }
+                is_active: { type: boolean }
+                sort_order: { type: integer }
+                offer_free_report: { type: boolean }
+                offer_comic: { type: boolean }
+      responses:
+        "201":
+          description: Created company detail
+        "409":
+          description: Duplicate slug
+
+  /admin/event-marketing/companies/{id}:
+    get:
+      tags: [Event Marketing, Admin]
+      summary: Company detail (series, sessions, fields, registrations)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Full company detail
+        "404":
+          description: Not found
+    put:
+      tags: [Event Marketing, Admin]
+      summary: Update event company
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Updated detail
+        "404":
+          description: Not found
+
+  /admin/event-marketing/companies/{id}/series:
+    post:
+      tags: [Event Marketing, Admin]
+      summary: Create event series under company
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name_en]
+              properties:
+                name_en: { type: string }
+                name_es: { type: string }
+                slug: { type: string }
+                kind: { type: string, enum: [in_person, online, hybrid] }
+                is_active: { type: boolean }
+                sort_order: { type: integer }
+      responses:
+        "201":
+          description: Series created
+
+  /admin/event-marketing/series/{id}:
+    put:
+      tags: [Event Marketing, Admin]
+      summary: Update event series
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Series updated
+
+  /admin/event-marketing/companies/{id}/sessions:
+    post:
+      tags: [Event Marketing, Admin]
+      summary: Create event session
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [series_id, title_en, starts_at]
+              properties:
+                series_id: { type: integer }
+                title_en: { type: string }
+                title_es: { type: string }
+                short_code: { type: string }
+                starts_at: { type: string, description: "LA wall clock DATETIME" }
+                ends_at: { type: string, nullable: true }
+                location_en: { type: string }
+                location_es: { type: string }
+                capacity: { type: integer, nullable: true }
+                status: { type: string, enum: [scheduled, cancelled, completed] }
+      responses:
+        "201":
+          description: Session created
+
+  /admin/event-marketing/sessions/{id}:
+    put:
+      tags: [Event Marketing, Admin]
+      summary: Update event session
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Session updated
+
+  /admin/event-marketing/companies/{id}/form-fields:
+    post:
+      tags: [Event Marketing, Admin]
+      summary: Create custom form field
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "201":
+          description: Field created
+
+  /admin/event-marketing/form-fields/{id}:
+    put:
+      tags: [Event Marketing, Admin]
+      summary: Update form field
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Field updated
+    delete:
+      tags: [Event Marketing, Admin]
+      summary: Delete form field (blocks system fields)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Deleted
+        "400":
+          description: System field cannot be deleted
+
+  /admin/event-marketing/registrations/{id}/check-in:
+    post:
+      tags: [Event Marketing, Admin]
+      summary: Check in a registration
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Registration checked in
 
   /go/free-score:
     get:
@@ -1802,11 +2402,50 @@ paths:
         `X-Forwarded-*`, www/apex ofgllc.com) so proxy host mismatches do not
         cause Twilio error 11200.
         Resolves the To address against `admin_phone_numbers`, matches From to a
-        client (else unknown queue), opens/reopens the channel thread, stores the
+        client (else CRM contact / unknown queue), opens/reopens the channel thread, stores the
         message idempotently by MessageSid, and publishes Ably when configured.
+        When `INBOUND_AI_SMS_ENABLED=1` (independent of `ADMIN_AI_ENABLED`), and the
+        OFG line has an assigned admin (optional `INBOUND_AI_ADMIN_IDS` allowlist,
+        e.g. `90001` for César-only; unset = all assigned), the webhook acks Twilio
+        immediately then runs inbound AI via `waitUntil`: STOP/HELP/START short-circuit
+        without Claude; FAQ reply/resolve/escalate uses `ANTHROPIC_SMS_API_KEY` when set,
+        otherwise `ANTHROPIC_API_KEY`.
+        Read-only: the AI only returns text (no tools) — it never changes client
+        data, payments, rounds or documents. It sees the client's round status
+        (current round, next round date, latest report) plus the portal reports
+        link and a fresh 72h secure PDF link to the latest report. Every reply
+        passes a code-level guard before sending: only those links, no $ amounts,
+        scores or dates absent from the CRM/FAQ context, no deletion/guarantee
+        promises — otherwise the client gets the hold message and staff get the
+        draft. First AI reply in a thread is prefixed with the automated-assistant
+        disclosure; AI-handled threads stay open; billing answers are flagged for
+        staff review.
+        Claude auth, HTTP, timeout, and invalid JSON still send the escalation hold SMS
+        once per failure streak (staff note names the failure). That hold does not
+        count toward the 3-turn limit. A failed send is retried on the next inbound.
+        Allowlist does not change Twilio SMS routing for other staff lines. Default OFF.
+        Enable Twilio Messaging Service Advanced Opt-Out on OFG numbers in console.
       responses:
         "200":
           description: TwiML / accepted
+        "403":
+          description: Invalid signature
+        "503":
+          description: Twilio not configured (production)
+
+  /webhooks/twilio/call-transcript:
+    post:
+      tags: [CRC]
+      summary: Twilio batch call transcript callback
+      description: |
+        Twilio Voice batch transcription posts the finished transcript here
+        (`sentences[].text`). `X-Twilio-Signature` is validated against the raw
+        JSON body with `TWILIO_AUTH_TOKEN`. The recording SID is matched to
+        `conversation_messages.recording_url`. A completed payload stores
+        `call_transcript` and sets status `ready`. Call insights stay empty.
+      responses:
+        "200":
+          description: Accepted
         "403":
           description: Invalid signature
         "503":
@@ -1836,9 +2475,12 @@ paths:
       tags: [Conversations]
       summary: Twilio inbound voice webhook (alias of /voice/incoming)
       description: |
-        Signature-validated Twilio Voice webhook. Rings only the admin assigned
-        to the dialled OFG number (`admin_{id}` client identity) plus optional
-        call-forwarding with call-screen. Same rules as `/webhooks/twilio/sms`.
+        Signature-validated Twilio Voice webhook. Default: rings only the admin
+        assigned to the dialled OFG number (`admin_{id}` client identity) plus
+        optional call-forwarding with call-screen. When `INBOUND_AI_VOICE_ENABLED=1`
+        + `ANTHROPIC_API_KEY`, answers with AI Gather first (`/api/voice/ai-turn`);
+        press 0 / escalate / max turns dials the assignee. Same signature rules
+        as `/webhooks/twilio/sms`.
       responses:
         "200":
           description: TwiML response
@@ -2019,13 +2661,126 @@ paths:
         "204":
           description: Accepted
 
+  /voice/three-way/presets:
+    get:
+      tags: [Conversations]
+      summary: Quick-dial third parties for "Add caller" (VOICE_THREE_WAY_PRESETS)
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { description: "{ presets: [{ label, number }] }" }
+  /voice/three-way/start:
+    post:
+      tags: [Conversations]
+      summary: Add a third caller to the staff member's live call (Twilio Conference)
+      description: >-
+        Staff with an OFG line only; the call must be theirs and connected.
+        Moves the call into a recorded conference (the other leg joins via
+        dial-status / outbound-dial-end) and dials the third party from the
+        staff member's OFG line. US/Canada numbers only.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [call_sid, to]
+              properties:
+                call_sid: { type: string, description: Browser softphone CallSid }
+                to: { type: string }
+                label: { type: string, nullable: true }
+      responses:
+        "200": { description: "{ session_id, status: active, third_party }" }
+        "400": { description: Missing call / invalid number }
+        "403": { description: No OFG line, or not your call }
+        "409": { description: Call not connected or already has a third caller }
+        "502": { description: Twilio error }
+  /voice/three-way/digits:
+    post:
+      tags: [Conversations]
+      summary: Send keypad digits to the third caller (their phone menu)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session_id, digits]
+              properties:
+                session_id: { type: integer }
+                digits: { type: string, description: "0-9 * # (w = pause)" }
+      responses:
+        "200": { description: Sent }
+        "400": { description: Invalid digits }
+        "404": { description: No active third caller }
+  /voice/three-way/remove:
+    post:
+      tags: [Conversations]
+      summary: Hang up the third caller (client and staff stay connected)
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { description: Removed }
+        "404": { description: No third caller }
+  /voice/outbound-dial-end:
+    post:
+      tags: [Conversations]
+      summary: Outbound Dial action (Twilio webhook)
+      description: >-
+        Empty TwiML (call ends exactly as before) unless the call has an
+        "Add caller" session, then the staff leg joins the conference.
+      responses:
+        "200": { description: TwiML }
+  /voice/three-way/conference-status:
+    post:
+      tags: [Conversations]
+      summary: Conference start/end callback (Twilio webhook)
+      responses:
+        "204": { description: Accepted }
+  /voice/three-way/recording-status:
+    post:
+      tags: [Conversations]
+      summary: Conference recording callback (Twilio webhook)
+      description: >-
+        Saves the three-way recording as its own call entry ("Three-way call
+        with …") in the same conversation and runs transcript/insights.
+      responses:
+        "204": { description: Accepted }
   /voice/call-screen:
     post:
       tags: [Conversations]
       summary: Call-forwarding keypress gate (avoid carrier VM)
+      description: >-
+        Prompt in the staff member's language (`admin` query → admins.preferred_language;
+        Spanish uses Polly.Mia). Two ~6s chances to press any key, then the cell leg is released.
+      parameters:
+        - in: query
+          name: admin
+          schema: { type: integer }
+        - in: query
+          name: caller
+          schema: { type: string }
       responses:
         "200":
           description: TwiML Gather
+
+  /voice/forward-leg-status:
+    post:
+      tags: [Conversations]
+      summary: Status callback for the call-forwarding (cell) leg
+      description: >-
+        Twilio webhook (signature-guarded). On CallStatus=failed, looks up the
+        Twilio error (e.g. 13227 no international permission) and alerts the
+        staff member + super admins via the missed_call channel, at most once
+        per 24h per staff member.
+      parameters:
+        - in: query
+          name: admin
+          required: true
+          schema: { type: integer }
+      responses:
+        "204":
+          description: Accepted
 
   /voice/call-screen-accept:
     post:
@@ -2050,9 +2805,30 @@ paths:
     post:
       tags: [Conversations]
       summary: Inbound voice TwiML (same as /webhooks/twilio/voice)
+      description: |
+        Rings the OFG line assignee (softphone and/or forwarded cell).
+        When `INBOUND_AI_VOICE_ENABLED=1` + `ANTHROPIC_API_KEY` (default OFF),
+        and the OFG line assignee passes optional `INBOUND_AI_ADMIN_IDS`, answers
+        with AI Gather first (`/api/voice/ai-turn`); otherwise dials the assignee
+        as before. Press 0 or escalate dials the assignee. Pass `?human=1` to skip
+        AI and dial immediately. Allowlist does not change non-AI voice routing.
       responses:
         "200":
           description: TwiML
+
+  /voice/ai-turn:
+    post:
+      tags: [Conversations]
+      summary: Inbound AI voice turn (Gather callback)
+      description: |
+        Gated by `INBOUND_AI_VOICE_ENABLED` + optional `INBOUND_AI_ADMIN_IDS`
+        (line assignee must be allowlisted when set). Speech/DTMF → Claude decide
+        reply / resolve / escalate-to-dial. Requires Twilio signature validation.
+      responses:
+        "200":
+          description: TwiML
+        "403":
+          description: Invalid signature
 
   /admin/conversations/lookup-contact:
     get:
@@ -2661,7 +3437,8 @@ paths:
         `list_clients_owing`, `list_round_schedule`, plus write tools
         `create_prospect`, `create_work_task`, `update_work_task`, `add_case_note`, `upload_case_document`, `send_email`,
         `send_round_report` (resend published Round PDF with secure download token + branded email + optional SMS),
-        `send_sms`, `send_text`, `send_contact_sms`, `send_contact_email`, `list_sms`, `get_texts`, `get_conversation`, `list_ofg_phone_numbers`,
+        `send_sms`, `send_text`, `send_whatsapp`, `send_wa`, `send_contact_sms`, `send_contact_whatsapp`, `send_contact_email`,
+        `list_sms`, `list_whatsapp`, `get_texts`, `get_conversation`, `list_ofg_phone_numbers`,
         `update_pipeline_stage`, `preview_convert_prospect`, `convert_prospect`
         (unconverted leads without an enrolled case), `update_client_status`
         (MCP blocks pending_payment/onboarding/active until enrolled),
@@ -2682,7 +3459,9 @@ paths:
         `send_round_report` mints `/api/public/round-report-pdf/:token`
         and sends the Round-complete template + optional twin SMS; `send_sms`/`send_text` texts via Twilio
         (`from_admin_*` / `from_phone_number_id` override the MCP-connected From line) into
-        Conversations + case note and returns message/SID/status for HubSpot; inbound SMS
+        Conversations + case note and returns message/SID/status for HubSpot; `send_whatsapp`/`send_wa`/
+        `send_contact_whatsapp` send 360dialog WhatsApp (César assignee; session-window text) into
+        Conversations channel=whatsapp; `list_whatsapp` filters that channel; inbound SMS
         auto-logs to the client file; `list_ofg_phone_numbers` lists active OFG numbers).
         Audits every turn to `admin_ai_audit_logs`. `admin` role is rate-limited (~30/hour);
         `super_admin` is not. Tool loop is capped (4 rounds / ~50s wall) to
@@ -2834,9 +3613,13 @@ paths:
               - send_round_report
               - send_sms
               - send_text
+              - send_whatsapp
+              - send_wa
               - send_contact_sms
+              - send_contact_whatsapp
               - send_contact_email
               - list_sms
+              - list_whatsapp
               - get_texts
               - get_conversation
               - list_ofg_phone_numbers
@@ -3175,7 +3958,7 @@ paths:
   /admin/conversations/send:
     post:
       tags: [Admin]
-      summary: Send SMS/MMS or internal note on a client or unknown contact
+      summary: Send SMS/MMS, WhatsApp (360dialog), or internal note
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -3187,27 +3970,30 @@ paths:
                 client_id: { type: integer }
                 unknown_contact_id:
                   type: integer
-                  description: Open unknown contact (SMS only; one of client_id or unknown_contact_id)
-                channel: { type: string, enum: [sms, internal] }
-                body: { type: string, maxLength: 1600, description: Text body (SMS max 1600 chars); optional when media_url is set for SMS/MMS }
+                  description: Open unknown contact (one of client_id, unknown_contact_id, or contact_id)
+                contact_id:
+                  type: integer
+                  description: CRM contact id
+                channel: { type: string, enum: [sms, internal, whatsapp] }
+                body: { type: string, description: Text body (SMS max 1600; WhatsApp max 4096); optional when media_url is set for SMS/MMS }
                 is_internal_note: { type: boolean }
-                ofg_number_id: { type: integer }
+                ofg_number_id: { type: integer, description: Required for SMS; ignored for WhatsApp }
                 media_url:
                   type: string
-                  description: Public MMS URL from POST /admin/conversations/media/upload
+                  description: Public MMS URL from POST /admin/conversations/media/upload (SMS only)
                 media_content_type: { type: string }
       responses:
         "200":
           description: Send result
         "403":
-          description: conversations_number_required
+          description: conversations_number_required or WhatsApp not enabled for this account
         "409":
           description: Reserved (closed threads auto-reopen on staff send)
 
   /admin/conversations/start:
     post:
       tags: [Admin]
-      summary: Cold outbound SMS to a phone number (client or unknown thread)
+      summary: Cold outbound SMS or WhatsApp to a phone number
       security: [{ bearerAuth: [] }]
       requestBody:
         required: true
@@ -3218,15 +4004,50 @@ paths:
               required: [phone, body]
               properties:
                 phone: { type: string }
-                body: { type: string, maxLength: 1600 }
-                ofg_number_id: { type: integer }
+                body: { type: string }
+                channel: { type: string, enum: [sms, internal, whatsapp], default: sms }
+                ofg_number_id: { type: integer, description: Required for SMS; ignored for WhatsApp }
                 media_url: { type: string }
                 media_content_type: { type: string }
       responses:
         "200":
-          description: "{ kind client|unknown, client_id?, unknown_contact_id?, ... }"
+          description: "{ kind client|unknown|contact, client_id?, unknown_contact_id?, ... }"
         "409":
           description: Reserved (closed threads auto-reopen on staff send)
+
+  /webhooks/360dialog/whatsapp:
+    get:
+      tags: [Webhooks]
+      summary: 360dialog / Meta webhook verification (hub.challenge)
+      parameters:
+        - in: query
+          name: hub.mode
+          schema: { type: string }
+        - in: query
+          name: hub.verify_token
+          schema: { type: string }
+        - in: query
+          name: hub.challenge
+          schema: { type: string }
+      responses:
+        "200":
+          description: Echo hub.challenge when WHATSAPP_360DIALOG_ENABLED + verify token match
+        "403":
+          description: Forbidden
+        "503":
+          description: WhatsApp disabled
+    post:
+      tags: [Webhooks]
+      summary: Inbound WhatsApp messages + delivery statuses (360dialog Cloud API)
+      description: |
+        Gated by WHATSAPP_360DIALOG_ENABLED + D360_API_KEY. Threads assign to
+        WHATSAPP_ASSIGNED_ADMIN_ID or the admin whose profile phone is (951) 378-3429.
+        Text-only outbound; inbound non-text stored as `[type]` placeholder.
+      responses:
+        "200":
+          description: "{ ok: true, messages: N }"
+        "503":
+          description: WhatsApp disabled
 
   /admin/conversations/suggest-replies:
     post:
@@ -3455,11 +4276,11 @@ paths:
   /admin/conversations/messages/{messageId}/retry-call-insights:
     post:
       tags: [Admin]
-      summary: Retry call insights (STT + optional Claude resume)
+      summary: Retry call transcription
       description: |
-        Re-queues and immediately processes call insights for a call/voicemail
-        message. Requires Conversations access and ACL on the thread.
-        Transcript-first: ready with transcript even when Claude is unavailable.
+        Re-queues and immediately transcribes a call or voicemail with Twilio
+        Batch Transcription. Requires Conversations access and ACL on the thread.
+        Stores the transcript only.
       security: [{ bearerAuth: [] }]
       parameters:
         - in: path
@@ -4739,7 +5560,10 @@ paths:
                       round_3_complete,
                       round_4_complete,
                       round_5_complete,
+                      round_extended_complete,
                       completed,
+                      payment_due,
+                      event_registered,
                     ]
                 required_label_slugs:
                   type: array
@@ -6055,6 +6879,73 @@ paths:
         "404":
           description: Not found or already converted
 
+  /admin/clients/export:
+    get:
+      tags: [Admin]
+      summary: Download clients CSV (tracker reconcile)
+      description: >-
+        Same filters as `GET /admin/clients` (no pagination). Returns UTF-8 CSV
+        with BOM for Excel/Sheets: `client_id`, `first_name`, `last_name`,
+        `name`, `status`, `pipeline_stage`, `email`, `phone`, `created_at`.
+        Capped at 20,000 rows (`X-Export-Truncated: 1` when hit).
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: stage
+          schema: { type: string }
+        - in: query
+          name: search
+          schema: { type: string }
+        - in: query
+          name: status
+          schema: { type: string }
+        - in: query
+          name: language
+          schema: { type: string, enum: [en, es] }
+        - in: query
+          name: billing
+          schema:
+            type: string
+            enum: [overdue, split_plan, paid_full, direct_paid, no_payment]
+        - in: query
+          name: joined_from
+          schema: { type: string, format: date }
+        - in: query
+          name: joined_to
+          schema: { type: string, format: date }
+        - in: query
+          name: has_notes
+          schema: { type: string, enum: [yes, no] }
+        - in: query
+          name: labels
+          schema: { type: string }
+        - in: query
+          name: sort_by
+          schema: { type: string }
+        - in: query
+          name: sort_dir
+          schema: { type: string, enum: [ASC, DESC] }
+      responses:
+        "200":
+          description: CSV attachment (`ofg-clients-YYYY-MM-DD.csv`)
+          content:
+            text/csv:
+              schema:
+                type: string
+          headers:
+            Content-Disposition:
+              schema: { type: string }
+            X-Export-Truncated:
+              schema: { type: string }
+              description: Set to `1` when the row cap was hit
+        "401":
+          description: Unauthorized
+        "403":
+          description: Affiliate without portal access
+        "500":
+          description: Export failed
+
   /admin/clients:
     get:
       tags: [Admin]
@@ -6066,6 +6957,13 @@ paths:
           name: stage
           schema:
             type: string
+          description: >-
+            Pipeline stage. Extended OFG rounds stay on `round_5`, so also
+            accepts `round_6`..`round_12` (that extended round, from published
+            reports + case max_rounds) and `round_6_plus` (any extended round).
+            `round_5` excludes clients already in an extended round. Same for
+            the CSV export. Each list row also returns `effective_round` (the real
+            round for `round_5` clients: 5–12; null for other stages).
         - in: query
           name: search
           schema:
@@ -7299,6 +8197,12 @@ paths:
     post:
       tags: [Admin]
       summary: Generate a non-persisted PDF preview from reviewed data
+      description: >-
+        Same 3-page progress PDF as before. Enhancement: when the background
+        account-level reads of this session's Before and After PDFs are both
+        ready (queued at session create), account-detail pages are appended
+        (summary tiles, REMOVED / PARTIAL per account, still reporting, what
+        moved the score). Otherwise the PDF is unchanged.
       security:
         - BearerAuth: []
       parameters:
@@ -7357,6 +8261,11 @@ paths:
       tags: [Admin]
       summary: Publish OFG report (generate PDF, advance pipeline, notify client)
       description: |
+        Round 6+ (ROUND_AUDIT_MIN_ROUND): also sends an SMS + in-app audit
+        alert to ROUND_AUDIT_ALERT_ADMIN_IDS (default Lecca), once per case + round.
+        Enhancement: the published PDF gets the same appended account-detail
+        pages as Preview when both enhanced reads are ready; otherwise it is the
+        unchanged 3-page report.
         Generates the progress-report PDF, advances the case round stage when
         appropriate, and notifies the client via the `round_N_complete` reminder
         flow only (no duplicate immediate email/SMS). The flow email attaches the
@@ -8779,7 +9688,10 @@ components:
               round_3_complete,
               round_4_complete,
               round_5_complete,
+              round_extended_complete,
               completed,
+              payment_due,
+              event_registered,
             ]
         is_active: { type: boolean }
         required_label_slugs:
@@ -8795,6 +9707,38 @@ components:
           description: Only present on the list endpoint
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+
+    PublicEventLandingResponse:
+      type: object
+      properties:
+        companies:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: integer }
+              slug: { type: string }
+              name: { type: string }
+              name_es: { type: string, nullable: true }
+              sort_order: { type: integer }
+        company: { type: object }
+        series: { type: array, items: { type: object } }
+        sessions: { type: array, items: { type: object } }
+        form_fields: { type: array, items: { type: object } }
+        next_session_id: { type: integer, nullable: true }
+        selected_session_id: { type: integer, nullable: true }
+        mfsn_url: { type: string }
+
+    PublicEventRegisterResponse:
+      type: object
+      properties:
+        ok: { type: boolean }
+        client_id: { type: integer }
+        registration_id: { type: integer }
+        event_kind: { type: string }
+        mfsn_url: { type: string }
+        email_sent: { type: boolean }
+        sms_sent: { type: boolean }
 
     ReminderFlowStep:
       type: object

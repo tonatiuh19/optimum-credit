@@ -52,6 +52,7 @@
     "templates": "Plantillas",
     "education": "Educación",
     "reminderFlows": "Recordatorios",
+    "eventMarketing": "Marketing de eventos",
     "reports": "Reportes",
     "settings": "Ajustes",
     "people": "Equipo",
@@ -181,6 +182,10 @@
         "label": "Buzón de voz",
         "hint": "Un caller dejó un mensaje de voz en tu línea OFG"
       },
+      "call_transcript": {
+        "label": "Transcripción de llamada lista",
+        "hint": "El correo incluye la transcripción. El SMS es una alerta corta a tu teléfono del perfil. La campana abre Conversaciones."
+      },
       "funding_doc_upload": {
         "label": "Documento de funding",
         "hint": "Un solicitante de funding sube un documento requerido"
@@ -192,6 +197,14 @@
       "get_credit_report_lead": {
         "label": "Lead de reporte de crédito gratis",
         "hint": "Alguien envía el formulario público /get-credit-report"
+      },
+      "event_registration": {
+        "label": "Registro de evento",
+        "hint": "Alguien se registra en una landing pública /e"
+      },
+      "prospect_temperature": {
+        "label": "Semáforo de prospectos",
+        "hint": "Un prospecto sube de color (Frío → Tibio → Caliente), un Caliente pasa 3 días sin movimiento, o un prospecto está listo para convertir"
       },
       "progress_report_alerts": {
         "label": "Alertas de reporte de progreso",
@@ -282,7 +295,23 @@
     "title": "Clientes",
     "description": "Administra y busca todas las cuentas de clientes.",
     "importCsv": "Importar CSV",
-    "addClient": "Agregar cliente"
+    "downloadCsv": "Descargar CSV",
+    "exportingCsv": "Descargando…",
+    "exportSuccessTitle": "CSV descargado",
+    "exportSuccessBody": "Abre el archivo y compara nombres + estado con tu tracker.",
+    "exportTruncatedBody": "La descarga alcanzó el límite de filas — ajusta Filtros y vuelve a descargar.",
+    "exportFailedTitle": "Error al descargar",
+    "exportFailedBody": "No se pudo exportar. Intenta de nuevo.",
+    "addClient": "Agregar cliente",
+    "stageFilter": {
+      "round6Plus": "Ronda 6+ (todas las extendidas)",
+      "roundN": "Ronda {{n}}"
+    },
+    "stageBadge": {
+      "round": "Ronda {{n}}",
+      "extended": "Extendido",
+      "extendedHint": "Programa extendido — más allá de las 5 rondas estándar"
+    }
   },
   "adminContacts": {
     "title": "Contactos",
@@ -574,7 +603,8 @@
     "resendCode": "Reenviar código",
     "resendIn": "Reenviar en {{seconds}}s",
     "resendSending": "Enviando…",
-    "accountNotFound": "No se encontró una cuenta con ese correo."
+    "accountNotFound": "No se encontró una cuenta con ese correo.",
+    "accountBlocked": "Tu cuenta está en pausa temporalmente. Comunícate con soporte de Optimum Financial Group para restablecer el acceso."
   },
   "adminLogin": {
     "heading": "Acceder a la Consola",
@@ -618,6 +648,28 @@
     "backToList": "Volver a la lista",
     "conversation": "Conversación",
     "unknownBadge": "Desconocido",
+    "callTranscript": {
+      "title": "Transcripción",
+      "voicemail": "Buzón de voz",
+      "pending": "Transcribiendo esta grabación…",
+      "retry": "Reintentar transcripción",
+      "errors": {
+        "too_short": "Grabación demasiado corta para transcribir (menos de 3 segundos).",
+        "missing_openai_stt": "La transcripción de Twilio aún no está activada en esta cuenta.",
+        "twilio_ai_addendum": "La transcripción de Twilio aún no está activada en esta cuenta.",
+        "invalid_recording": "Esta llamada no tiene una grabación de Twilio para transcribir.",
+        "twilio_stt_failed": "Twilio no pudo transcribir esta grabación.",
+        "stt_empty": "No se escuchó voz clara en esta grabación.",
+        "awaiting_twilio_transcript": "Esperando la transcripción de Twilio…",
+        "unknown": "Aún no hay transcripción para esta grabación."
+      },
+      "status": {
+        "pending": "En cola",
+        "processing": "Transcribiendo",
+        "failed": "Error",
+        "skipped": "No disponible"
+      }
+    },
     "callInsights": {
       "title": "Resumen de llamada",
       "voicemail": "Buzón de voz",
@@ -692,7 +744,8 @@
     "channels": {
       "sms": "SMS",
       "internal": "Nota",
-      "call": "Llamada"
+      "call": "Llamada",
+      "whatsapp": "WhatsApp"
     },
     "hubChannels": {
       "sms": "SMS",
@@ -893,7 +946,25 @@
       "unknownNumber": "Número desconocido",
       "client": "Cliente",
       "accept": "Contestar",
-      "decline": "Rechazar"
+      "decline": "Rechazar",
+      "forwardIntlWarning": "Este es un número internacional. Las llamadas solo llegan si ese país está activado en Twilio (Voice → Geo permissions); si no, todas aparecen como perdidas. Se avisa a los administradores si el reenvío falla.",
+      "forwardScreenHint": "Al contestar en tu celular escucharás “presione cualquier tecla para contestar” en tu idioma. Presiona una tecla para conectar; así las llamadas no caen en tu buzón personal.",
+      "threeWay": {
+        "addCaller": "Agregar llamada",
+        "onCallWith": "En la llamada con {{name}}",
+        "keypadHint": "Usa el teclado para su menú telefónico",
+        "remove": "Quitar a {{name}}",
+        "calling": "Llamando a {{name}}…",
+        "call": "Llamar y agregar",
+        "recordedNote": "Se une desde tu línea OFG. La llamada de tres vías se graba y transcribe como cualquier llamada.",
+        "addError": "No se pudo agregar la llamada",
+        "digitsError": "No se pudieron enviar los dígitos",
+        "removeError": "No se pudo quitar la llamada",
+        "validation": {
+          "required": "Escribe un número",
+          "invalid": "Escribe un número válido de EE. UU."
+        }
+      }
     },
     "phoneActions": {
       "choose": "Llamar o enviar mensaje a este número",
@@ -1251,7 +1322,7 @@
     "runExtraction": "Ejecutar extracción",
     "beforePdf": "PDF anterior",
     "afterPdf": "PDF actual",
-        "reExtract": "Re-extraer",
+    "reExtract": "Re-extraer",
     "reviewIntro": "Verifica puntajes e ítems antes de la vista previa. Claude puede haber redactado el plan de acción y la redacción de logros — edita lo que no cuadre.",
     "enhanceClaude": "Mejorar con Claude",
     "claudeDraftTitle": "Borrador narrativo de Claude aplicado",
@@ -1345,7 +1416,13 @@
     "itemsRemovedBadge": "{{count}} eliminados",
     "noReportYet": "Aún no hay informe — usa Generar arriba para crear el informe OFG de esta ronda.",
     "awaitingRound": "Esperando esta ronda",
-    "notInRounds": "El cliente aún no está en rondas"
+    "notInRounds": "El cliente aún no está en rondas",
+    "reviewFlags": {
+      "title": "Requiere revisión antes de enviar",
+      "internal": "Notas internas (se guardan en el expediente al publicar, nunca en el PDF)",
+      "approver": "Los informes con alertas los publica el responsable del idioma (inglés: Lecca, español: Angel) o un super admin.",
+      "none": "Sin alertas: el informe se puede enviar."
+    }
   },
   "infoRequests": {
     "title": "Solicitudes de información",
@@ -1557,13 +1634,36 @@
     "downloadPdfError": "No se pudo abrir el PDF. Intenta de nuevo.",
     "popupBlocked": "Permite ventanas emergentes en este sitio para descargar el PDF.",
     "ctaRegister": "¿Listo para arreglar esto? Comienza",
-    "trustNote": "Encriptación de nivel bancario de 256 bits. Tu reporte nunca se comparte ni se vende."
+    "trustNote": "Encriptación de nivel bancario de 256 bits. Tu reporte nunca se comparte ni se vende.",
+    "enhancedReady": "Reporte mejorado listo: Descargar PDF incluye el análisis completo cuenta por cuenta.",
+    "enhancedPreparing": "Preparando el reporte mejorado (1–3 min). Descargar PDF da el reporte estándar mientras tanto.",
+    "enhancedDownloadError": "No se pudo descargar el reporte mejorado. Inténtalo de nuevo.",
+    "context": {
+      "escrow": "Escrow / préstamo activo",
+      "escrow_auto": "Detectar",
+      "escrow_on": "En escrow",
+      "escrow_off": "Sin escrow",
+      "escrowHint": "Se activa solo si el reporte tiene una consulta de hipoteca en los últimos 45 días. En escrow: aviso de espera, consultas del préstamo excluidas, líneas comerciales después del cierre.",
+      "lender": "Puntaje del prestamista (opcional)",
+      "model": "Modelo",
+      "modelPlaceholder": "FICO (hipoteca)",
+      "score": "Puntaje del prestamista",
+      "scorePlaceholder": "Puntaje, ej. 630",
+      "target": "Puntaje necesario",
+      "targetPlaceholder": "Necesita, ej. 660",
+      "scoreInvalid": "Los puntajes deben ser números enteros entre 300 y 900.",
+      "lenderHint": "Aparece en el PDF del análisis junto a los puntajes VantageScore.",
+      "save": "Guardar",
+      "saved": "Guardado — la próxima descarga del PDF lo usa",
+      "saveError": "No se pudo guardar"
+    }
   },
   "getCreditReport": {
     "metaTitle": "Reporte de crédito gratis",
     "metaDescription": "Obtén un snapshot gratis de 1 buró con nuestro socio de confianza. Soft pull — sin impacto en tu score. Te enviamos el enlace por correo y SMS.",
     "heading": "Obtén tu reporte de crédito gratis",
     "subheading": "Snapshot gratis de 1 buró (soft pull — sin impacto en tu score). Déjanos tus datos y te enviamos el enlace por correo y SMS.",
+    "eventTonight": "Esta noche con Options for Youth",
     "formTitle": "Tus datos",
     "formHint": "Los usamos para enviarte el enlace del reporte gratis por correo y SMS.",
     "firstName": "Nombre",
@@ -1807,7 +1907,87 @@
     "paymentScheduleOptional": "Calendario de pagos (opcional)",
     "createCase": "Crear caso",
     "dropProspectToConvert": "Suelta aquí para convertir → confirma paquete y calendario",
-    "convertResultLabel": "Tras convertir"
+    "convertResultLabel": "Tras convertir",
+    "statusNotesHeading": "Estado y notas",
+    "pauseClient": "Pausar cliente",
+    "resumeClient": "Reanudar",
+    "pauseDialogTitle": "¿Pausar este cliente?",
+    "pauseDialogDescription": "Detiene los recordatorios y mensajes automáticos hasta que alguien reanude el expediente. La razón se guarda en las notas.",
+    "pauseReasonPlaceholder": "¿Por qué se pausa este cliente?",
+    "pauseConfirm": "Pausar cliente",
+    "pauseReasons": {
+      "payment": "Bloqueado por pago",
+      "login": "Login inválido",
+      "monitoring": "Error del monitoreo"
+    },
+    "pausedToast": "Cliente pausado",
+    "resumedToast": "Cliente reanudado — ahora {{status}}",
+    "pauseError": "No se pudo actualizar el estado del cliente",
+    "notePlaceholder": "Agrega una nota a este expediente…",
+    "addNote": "Agregar nota",
+    "noteSaved": "Nota agregada",
+    "noteSaveError": "No se pudo agregar la nota",
+    "notesEmpty": "Aún no hay notas",
+    "notesShowAll": "Ver las {{count}} notas",
+    "notesShowLess": "Ver menos",
+    "notesValidation": {
+      "required": "Escribe algo primero.",
+      "tooLong": "Es demasiado largo, hazlo más corto."
+    },
+    "clientStatus": {
+      "prospect": "Prospecto",
+      "funding": "Financiamiento",
+      "pending_payment": "Pago pendiente",
+      "onboarding": "Incorporación",
+      "active": "Activo",
+      "paused": "Pausado",
+      "cancelled": "Cancelado",
+      "blocked": "Bloqueado"
+    },
+    "blockClient": "Bloquear",
+    "blockDialogTitle": "¿Bloquear este cliente?",
+    "blockDialogDescription": "Detiene todos los mensajes automáticos y bloquea su acceso al portal hasta que alguien reanude el expediente. La razón se guarda en las notas.",
+    "blockConfirm": "Bloquear cliente",
+    "blockedToast": "Cliente bloqueado: automatizaciones detenidas y portal bloqueado",
+    "leadTemp": {
+      "heading": "Semáforo",
+      "filter": "Semáforo (prospectos)",
+      "all": "Todos los colores",
+      "pending": "Calculando…",
+      "color": {
+        "hot": "Caliente",
+        "warm": "Tibio",
+        "cold": "Frío"
+      },
+      "hint": {
+        "hot": "Caliente: cerrar hoy — pago, documentos y login",
+        "warm": "Tibio: llamar para revisar su análisis y agendar con Cesar",
+        "cold": "Frío: seguimiento automático hasta que conteste"
+      },
+      "action": {
+        "hot": "Cerrar hoy",
+        "warm": "Llamar para revisar su análisis y agendar con Cesar",
+        "cold": "Seguimiento automático — sin llamada hasta que conteste"
+      },
+      "reason": {
+        "analysis_reviewed": "análisis revisado",
+        "call_scheduled": "llamada agendada",
+        "payment_started": "pago iniciado",
+        "monitoring_login": "login de monitoreo guardado",
+        "documents_uploaded": "documentos subidos",
+        "recent_reply": "contestó en los últimos 14 días",
+        "has_credit_report": "tiene reporte / análisis",
+        "no_reply_14d": "sin respuesta en 14+ días"
+      },
+      "analysisReviewed": "Análisis revisado con Cesar",
+      "callScheduled": "Fecha y hora de la llamada",
+      "scheduleCall": "Agendar llamada",
+      "clearCall": "Quitar llamada agendada",
+      "callOn": "Llamada agendada: {{when}}",
+      "callSaved": "Llamada agendada",
+      "pickDate": "Elige fecha y hora",
+      "saveError": "No se pudo actualizar el prospecto"
+    }
   },
   "adminHelpers": {
     "legendTitle": "Qué significa",
@@ -1816,7 +1996,8 @@
       "pending_payment": "Checkout iniciado pero pago incompleto.",
       "onboarding": "Pagó / convertido — completando tareas de inicio.",
       "active": "Cliente en trabajo normal con acceso al portal.",
-      "paused": "En pausa temporal — no avances trabajo hasta reanudar.",
+      "paused": "En pausa temporal: sin recordatorios ni mensajes automáticos hasta reanudar.",
+      "blocked": "Detenido por un problema (pago, login inválido, error del monitoreo): sin mensajes automáticos y portal bloqueado hasta reanudar.",
       "cancelled": "Cuenta cerrada. Prefiere Cancelado en el pipeline para el flujo del caso.",
       "prospect": "Solo lead — aún sin caso. Convierte antes de tratarlo como cliente.",
       "funding": "Canal de financiamiento empresarial — separado de reparación de crédito hasta que el equipo convierta."
@@ -2467,6 +2648,123 @@
       "bank_m4": "Estado de cuenta — mes 4",
       "bank_m5": "Estado de cuenta — mes 5",
       "bank_m6": "Estado de cuenta — mes 6"
+    }
+  },
+  "eventMarketing": {
+    "admin": {
+      "title": "Marketing de eventos",
+      "description": "Administra landings de socios, sesiones, formularios, códigos QR y check-ins.",
+      "addCompany": "Agregar empresa",
+      "emptyCompanies": "Aún no hay empresas de eventos.",
+      "selectCompany": "Selecciona una empresa para gestionar copy, sesiones y registros.",
+      "inactive": "Inactiva",
+      "copyLink": "Copiar enlace",
+      "downloadQr": "Descargar QR",
+      "tabs": {
+        "copy": "Copy y ofertas",
+        "sessions": "Series y sesiones",
+        "fields": "Campos del formulario",
+        "registrations": "Registros"
+      },
+      "fields": {
+        "slug": "Slug de URL",
+        "labelSlug": "Slug de etiqueta CRM",
+        "name": "Nombre (EN)",
+        "nameEn": "Nombre (EN)",
+        "nameEs": "Nombre (ES)",
+        "active": "Activa",
+        "offerReport": "Ofrecer reporte de crédito gratis",
+        "offerComic": "Ofrecer cómic",
+        "headingEn": "Título de bienvenida (EN)",
+        "headingEs": "Título de bienvenida (ES)",
+        "bodyEn": "Cuerpo de bienvenida (EN)",
+        "bodyEs": "Cuerpo de bienvenida (ES)",
+        "classLink": "Enlace de clase / Zoom",
+        "scheduleNoteEn": "Nota de horario (EN)",
+        "scheduleNoteEs": "Nota de horario (ES)",
+        "emailSubjectEn": "Asunto del email (EN)",
+        "emailSubjectEs": "Asunto del email (ES)",
+        "emailBodyEn": "Cuerpo del email (EN)",
+        "emailBodyEs": "Cuerpo del email (ES)",
+        "smsBodyEn": "Cuerpo del SMS (EN)",
+        "smsBodyEs": "Cuerpo del SMS (ES)",
+        "kind": "Tipo",
+        "series": "Serie",
+        "shortCode": "Código corto",
+        "titleEn": "Título (EN)",
+        "titleEs": "Título (ES)",
+        "startsAt": "Inicia (LA)",
+        "endsAt": "Termina (LA)",
+        "locationEn": "Ubicación (EN)",
+        "locationEs": "Ubicación (ES)",
+        "capacity": "Cupo",
+        "status": "Estado",
+        "fieldKey": "Clave del campo",
+        "labelEn": "Etiqueta (EN)",
+        "labelEs": "Etiqueta (ES)",
+        "fieldType": "Tipo de campo",
+        "options": "Opciones (una por línea)",
+        "sortOrder": "Orden",
+        "required": "Requerido"
+      },
+      "welcomeTemplates": "Email y SMS de bienvenida",
+      "templateTokens": "Tokens: {{first_name}}, {{session_title}}, {{session_when}}, {{session_location}}, {{class_note}}, {{comic_note}}, {{report_url}}, {{class_link}}",
+      "save": "Guardar",
+      "cancel": "Cancelar",
+      "create": "Crear",
+      "edit": "Editar",
+      "seriesTitle": "Series",
+      "sessionsTitle": "Sesiones",
+      "fieldsTitle": "Campos del formulario de registro",
+      "addSeries": "Agregar serie",
+      "editSeries": "Editar serie",
+      "addSession": "Agregar sesión",
+      "editSession": "Editar sesión",
+      "addField": "Agregar campo",
+      "editField": "Editar campo",
+      "emptySeries": "Aún no hay series — agrega una antes de crear sesiones.",
+      "emptySessions": "Aún no hay sesiones.",
+      "emptyRegs": "Aún no hay registros.",
+      "systemField": "Sistema",
+      "regsShort": "regs",
+      "checkIn": "Check-in",
+      "checkedInAt": "Check-in {{when}}"
+    },
+    "public": {
+      "metaTitle": "Registro de evento",
+      "metaDescription": "Regístrate a eventos de socios de Optimum Financial Group.",
+      "brandName": "Optimum Financial Group",
+      "fallbackHeading": "Registro de evento",
+      "noEvents": "No hay eventos abiertos para registro en este momento.",
+      "pickSession": "Elige tu sesión",
+      "noSession": "No hay sesiones próximas",
+      "locationTbd": "Detalles de ubicación próximamente",
+      "submit": "Registrarme",
+      "tryAgain": "Volver a eventos",
+      "thanksTitle": "¡Estás registrado!",
+      "thanksBody": "Te enviamos una confirmación por correo y SMS con los siguientes pasos.",
+      "checkEmail": "Revisa tu correo",
+      "checkSms": "Revisa tus mensajes",
+      "emailPending": "Confirmación por correo pendiente",
+      "smsPending": "Confirmación por SMS pendiente",
+      "getReport": "Obtén tu reporte de crédito gratis",
+      "langEn": "English",
+      "langEs": "Español",
+      "selectOption": "Seleccionar…"
+    },
+    "kind": {
+      "in_person": "Presencial",
+      "online": "En línea",
+      "hybrid": "Híbrido"
+    },
+    "status": {
+      "scheduled": "Programada",
+      "cancelled": "Cancelada",
+      "completed": "Completada"
+    },
+    "source": {
+      "company": "QR de empresa",
+      "session": "QR de sesión"
     }
   }
 }

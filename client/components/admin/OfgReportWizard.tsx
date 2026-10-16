@@ -1,3 +1,4 @@
+import { ReportReviewFlags } from "@/components/admin/ReportReviewFlags";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -146,6 +147,7 @@ export default function OfGReportWizard({
     reExtracting,
     enhancing,
     previewUrl,
+    previewFlags,
     error,
   } = useAppSelector((s) => s.reportWizard);
 
@@ -1369,6 +1371,7 @@ export default function OfGReportWizard({
             <p className="text-sm text-muted-foreground">
               {t("reportWizard.previewIntro")}
             </p>
+            <ReportReviewFlags flags={previewFlags} />
             <iframe
               src={previewUrl}
               title={t("reportWizard.previewTitle")}

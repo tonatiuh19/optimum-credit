@@ -9,6 +9,7 @@ import {
   Loader2,
   Mail,
   MessageSquare,
+  MapPin,
 } from "lucide-react";
 import PageMeta from "@/components/PageMeta";
 import { Button } from "@/components/ui/button";
@@ -18,6 +19,7 @@ import {
   clearGetCreditReportLead,
 } from "@/store/slices/creditAnalysisSlice";
 import { GET_CREDIT_REPORT_URLS } from "@/lib/getCreditReportLinks";
+import { getCreditReportEventMeta } from "@/lib/getCreditReportEvent";
 import { LEGAL_PATHS } from "@/lib/legal";
 
 const schema = Yup.object({
@@ -63,6 +65,18 @@ export default function GetCreditReport() {
   });
 
   const mfsnUrl = gcrResult?.mfsn_url || GET_CREDIT_REPORT_URLS.free;
+  const todayEvent = getCreditReportEventMeta();
+  const isEs = i18n.language?.startsWith("es");
+  const eventPlace = todayEvent
+    ? isEs
+      ? todayEvent.placeEs
+      : todayEvent.placeEn
+    : null;
+  const eventDetail = todayEvent
+    ? isEs
+      ? todayEvent.detailEs
+      : todayEvent.detailEn
+    : null;
 
   return (
     <div className="w-full max-w-[100vw] overflow-x-hidden">
@@ -88,6 +102,28 @@ export default function GetCreditReport() {
           <p className="text-base md:text-lg text-muted-foreground max-w-xl mx-auto">
             {t("getCreditReport.subheading")}
           </p>
+          {todayEvent && eventPlace ? (
+            <div className="mt-5 mx-auto max-w-md rounded-2xl border border-primary/20 bg-primary/[0.06] px-4 py-3.5 text-left shadow-sm animate-fade-up">
+              <div className="flex items-start gap-3">
+                <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary">
+                  <MapPin className="h-4 w-4" aria-hidden />
+                </div>
+                <div className="min-w-0 space-y-0.5">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-primary">
+                    {t("getCreditReport.eventTonight")}
+                  </p>
+                  <p className="text-sm font-bold text-foreground leading-snug">
+                    {eventPlace}
+                  </p>
+                  {eventDetail ? (
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      {eventDetail}
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          ) : null}
         </div>
       </section>
 

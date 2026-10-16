@@ -1,6 +1,6 @@
 import "dotenv/config";
 
-import { spawn } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import { createInterface } from "readline/promises";
 import mysql from "mysql2/promise";
 import { checkApiIndexInline } from "./check-api-inline";
@@ -39,6 +39,31 @@ async function withDb<T>(fn: (conn: mysql.Connection) => Promise<T>): Promise<T>
   } finally {
     await conn.end().catch(() => undefined);
   }
+}
+
+let testsRunning = false;
+let interrupted = false;
+
+/**
+ * Ctrl+C during the test run: vitest is killed mid-suite, so its afterAll
+ * cleanups never run and test clients stay visible in the live admin. Wait
+ * for the children to stop, purge fixtures synchronously, then exit.
+ * A second Ctrl+C exits immediately.
+ */
+function installInterruptCleanup() {
+  const onSignal = (signal: NodeJS.Signals) => {
+    if (interrupted) process.exit(130);
+    interrupted = true;
+    if (!testsRunning) process.exit(130);
+    console.log(`\n⛔ ${signal} — stopping tests and cleaning up test data (Ctrl+C again to skip)...\n`);
+    setTimeout(() => {
+      const r = spawnSync("npm", ["run", "test:cleanup-fixtures"], { stdio: "inherit", env: process.env });
+      console.log(r.status === 0 ? "\n✅ Test data cleaned up. Deploy aborted.\n" : "\n⚠️ Cleanup failed — run: npm run test:cleanup-fixtures\n");
+      process.exit(130);
+    }, 1500); // let vitest workers exit first
+  };
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
 }
 
 async function runCommand(command: string, args: string[]) {
@@ -81,12 +106,20 @@ async function runPreDeployChecks() {
 
   await runCommand("npm", ["run", "typecheck"]);
   console.log("\n✅ Typecheck passed.\n");
-  await runCommand("npm", ["test"]);
-  console.log("\n✅ Tests passed.\n");
-  // Leave shared TiDB without vitest staff/clients so Settings/People stay clean.
-  console.log("🧹 Purging leftover integration-test fixtures...\n");
-  await runCommand("npm", ["run", "test:cleanup-fixtures"]);
-  console.log("\n✅ Fixture cleanup done. Continuing to deploy...\n");
+  // Tests write fixtures to the shared TiDB: purge them whether the tests
+  // pass, fail, or are interrupted (Ctrl+C → see installInterruptCleanup).
+  testsRunning = true;
+  try {
+    await runCommand("npm", ["test"]);
+    console.log("\n✅ Tests passed.\n");
+  } finally {
+    testsRunning = false;
+    if (!interrupted) {
+      console.log("🧹 Purging leftover integration-test fixtures...\n");
+      await runCommand("npm", ["run", "test:cleanup-fixtures"]);
+      console.log("\n✅ Fixture cleanup done.\n");
+    }
+  }
 }
 
 async function promptForVersion(
@@ -157,6 +190,7 @@ async function writeAppVersion(deployVersion: string): Promise<void> {
 }
 
 async function main() {
+  installInterruptCleanup();
   // Validate DB env early (before long typecheck/deploy).
   dbConfig();
 

@@ -6,7 +6,7 @@
 import "dotenv/config";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import request from "supertest";
-import type { Pool, ResultSetHeader, RowDataPacket } from "mysql2/promise";
+import type { Pool, ResultSetHeader } from "mysql2/promise";
 import { createServer } from "./index";
 import { createIntegrationTestPool, VITEST_CRON_SECRET } from "./testDbCleanup";
 
@@ -53,21 +53,32 @@ describe("admin morning digest cron", () => {
     pool = createIntegrationTestPool();
     app = createServer();
 
-    const [admins] = await pool.query<RowDataPacket[]>(
-      `SELECT id FROM admins
-       WHERE status = 'active'
-         AND role IN ('super_admin', 'admin', 'agent')
-         AND email IS NOT NULL AND TRIM(email) <> ''
-       ORDER BY id ASC
-       LIMIT 1`,
+    const [ins] = await pool.query<ResultSetHeader>(
+      `INSERT INTO admins
+         (email, first_name, last_name, role, status, preferred_language)
+       VALUES (?, 'Digest', 'Fixture', 'admin', 'active', 'en')`,
+      [`digest-${RUN_ID}@example.test`],
     );
-    if (!admins[0]) throw new Error("No active admin for morning digest fixture");
-    fixtureAdminId = Number(admins[0].id);
+    fixtureAdminId = Number(ins.insertId);
   }, 60_000);
 
   afterAll(async () => {
     if (prevCron === undefined) delete process.env.CRON_SECRET;
     else process.env.CRON_SECRET = prevCron;
+    if (fixtureAdminId) {
+      await pool.query(
+        `DELETE FROM audit_logs
+         WHERE actor_type = 'system'
+           AND action = 'morning_digest.sent'
+           AND entity_type = 'admin'
+           AND entity_id = ?`,
+        [fixtureAdminId],
+      );
+      await pool.query(`DELETE FROM admin_notifications WHERE admin_id = ?`, [
+        fixtureAdminId,
+      ]);
+      await pool.query(`DELETE FROM admins WHERE id = ?`, [fixtureAdminId]);
+    }
     await pool?.end().catch(() => undefined);
   });
 

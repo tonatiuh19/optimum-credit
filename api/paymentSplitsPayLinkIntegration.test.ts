@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import request from "supertest";
 import mysql, { type Pool, type ResultSetHeader, type RowDataPacket } from "mysql2/promise";
 import { createServer, createSession } from "./index";
-import { cleanupIntegrationTestClients, createIntegrationTestPool } from "./testDbCleanup";
+import { cleanupIntegrationTestClients, createIntegrationTestPool, uniqueTestE164 } from "./testDbCleanup";
 
 const RUN_ID = `split-pay-${Date.now()}`;
 const CLIENT_EMAIL = `${RUN_ID}@example.test`;
@@ -46,8 +46,8 @@ describe(
 
     const [clientIns] = await pool.query<ResultSetHeader>(
       `INSERT INTO clients (email, first_name, last_name, phone, preferred_language, status, pipeline_stage)
-       VALUES (?, 'Split', 'Pay', '+15555550111', 'en', 'active', 'new_client')`,
-      [CLIENT_EMAIL],
+       VALUES (?, 'Split', 'Pay', ?, 'en', 'active', 'new_client')`,
+      [CLIENT_EMAIL, uniqueTestE164(`split-pay-${CLIENT_EMAIL}`)],
     );
     clientId = clientIns.insertId;
 

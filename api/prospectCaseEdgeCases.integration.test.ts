@@ -15,6 +15,7 @@ import { createServer, createSession } from "./index";
 import { cleanupIntegrationTestClients, createIntegrationTestPool } from "./testDbCleanup";
 
 const RUN_ID = `pros-edge-${Date.now()}`;
+const STAFF_EMAIL = `edge-staff-${RUN_ID}@example.test`;
 
 let pool: Pool;
 let app: ReturnType<typeof createServer>;
@@ -63,15 +64,17 @@ describe("prospect-stage case edge cases — HTTP", () => {
     }
     pool = createIntegrationTestPool();
     app = createServer();
-    const [admins] = await pool.query<RowDataPacket[]>(
-      `SELECT id, email FROM admins ORDER BY id ASC LIMIT 1`,
+    const [staffIns] = await pool.query<ResultSetHeader>(
+      `INSERT INTO admins
+         (email, first_name, last_name, role, status, preferred_language)
+       VALUES (?, 'Edge', 'Staff', 'super_admin', 'active', 'en')`,
+      [STAFF_EMAIL],
     );
-    if (!admins[0]) throw new Error("No admin user in DB for integration tests");
-    adminId = Number(admins[0].id);
+    adminId = Number(staffIns.insertId);
     adminToken = await createSession(
       "admin",
       adminId,
-      String(admins[0].email),
+      STAFF_EMAIL,
       "127.0.0.1",
       "vitest-pros-edge",
     );
@@ -106,6 +109,12 @@ describe("prospect-stage case edge cases — HTTP", () => {
       runId: RUN_ID,
       clientIds,
     });
+    if (adminId) {
+      await pool.query(`DELETE FROM admin_sessions WHERE admin_id = ?`, [
+        adminId,
+      ]);
+      await pool.query(`DELETE FROM admins WHERE id = ?`, [adminId]);
+    }
     await pool?.end();
   }, 90_000);
 
@@ -429,25 +438,6 @@ describe("prospect-stage case edge cases — HTTP", () => {
       [clientId, txnId],
     );
 
-    // Shared TiDB: prefs suite mutes ephemeral *@example.test agents; other
-    // suites may mute real staff. Reset + exclude fixtures so fan-out matches
-    // teamAdminNotifyIntegration (see resetTeamAdminNotifyPrefs).
-    await pool.query(
-      `UPDATE admins SET notification_prefs_json = NULL
-       WHERE status = 'active'
-         AND role IN ('super_admin','admin','agent')
-         AND email IS NOT NULL AND TRIM(email) <> ''
-         AND email NOT LIKE '%@example.test'`,
-    );
-    const [teamAdmins] = await pool.query<RowDataPacket[]>(
-      `SELECT email FROM admins
-       WHERE status = 'active'
-         AND role IN ('super_admin', 'admin', 'agent')
-         AND email IS NOT NULL AND TRIM(email) <> ''
-         AND email NOT LIKE '%@example.test'`,
-    );
-    expect(teamAdmins.length).toBeGreaterThan(0);
-
     __testClearEmailDryRuns();
     await __testMarkPaymentSucceeded(clientId, txnId);
 
@@ -467,14 +457,17 @@ describe("prospect-stage case edge cases — HTTP", () => {
         e.subject.startsWith("New purchase —") ||
         e.subject.startsWith("Nueva compra —"),
     );
-    const purchaseRecipients = new Set(
-      purchaseMails.map((e) => String(e.to || "").trim().toLowerCase()),
+    const purchaseRecipients = [
+      ...new Set(
+        purchaseMails.map((e) => String(e.to || "").trim().toLowerCase()),
+      ),
+    ];
+    expect(purchaseRecipients).toContain(STAFF_EMAIL);
+    const realInboxes = purchaseRecipients.filter(
+      (email) =>
+        !email.endsWith("@example.test") && !email.endsWith("@affiliate.test"),
     );
-    for (const a of teamAdmins) {
-      expect(
-        purchaseRecipients.has(String(a.email).trim().toLowerCase()),
-      ).toBe(true);
-    }
+    expect(realInboxes).toEqual([]);
 
     // Idempotent: retry must not re-email the team
     __testClearEmailDryRuns();

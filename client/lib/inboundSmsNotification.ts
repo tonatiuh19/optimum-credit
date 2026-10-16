@@ -17,7 +17,11 @@ export function shouldPlayInboundSmsChime(
   return isInboundSmsInAppEnabled(prefs);
 }
 
-const VOICE_CHIME_EVENTS: AdminNotifyEventKey[] = ["missed_call", "voicemail"];
+const VOICE_CHIME_EVENTS: AdminNotifyEventKey[] = [
+  "missed_call",
+  "voicemail",
+  "call_transcript",
+];
 
 /** Whether an Ably bell event should play the notification chime. */
 export function shouldPlayAdminNotifyChime(

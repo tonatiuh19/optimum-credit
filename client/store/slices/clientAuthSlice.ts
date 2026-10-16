@@ -5,6 +5,14 @@ import {
 } from "@reduxjs/toolkit";
 import api, { getClientToken, setClientToken, formatAxiosError } from "@/lib/api";
 import type { ClientUser } from "@shared/api";
+import i18n from "@/i18n";
+
+/** Staff set clients.status = 'blocked' → API 403 { code: "account_blocked" }. */
+function blockedMessage(e: any): string | null {
+  return e?.response?.data?.code === "account_blocked"
+    ? i18n.t("clientLogin.accountBlocked")
+    : null;
+}
 
 interface ClientAuthState {
   user: ClientUser | null;
@@ -36,10 +44,11 @@ export const requestClientOtp = createAsyncThunk<
     return { email };
   } catch (e: any) {
     return rejectWithValue(
-      formatAxiosError(
-        e,
-        "Something went wrong sending your code. Check your connection and try again.",
-      ),
+      blockedMessage(e) ??
+        formatAxiosError(
+          e,
+          "Something went wrong sending your code. Check your connection and try again.",
+        ),
     );
   }
 });
@@ -54,7 +63,9 @@ export const verifyClientOtp = createAsyncThunk<
     setClientToken(data.token);
     return data;
   } catch (e: any) {
-    return rejectWithValue(formatAxiosError(e, "Invalid code"));
+    return rejectWithValue(
+      blockedMessage(e) ?? formatAxiosError(e, "Invalid code"),
+    );
   }
 });
 
@@ -84,7 +95,8 @@ export const redeemOnboardingToken = createAsyncThunk<
     return data;
   } catch (e: any) {
     return rejectWithValue(
-      e?.response?.data?.error || "Link has expired or already been used.",
+      blockedMessage(e) ??
+        (e?.response?.data?.error || "Link has expired or already been used."),
     );
   }
 });

@@ -2,6 +2,9 @@ import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
 import axios from "axios";
 import api, { formatAxiosError } from "@/lib/api";
 import type {
+  CreditAnalysisEnhancedStatusResponse,
+  CreditAnalysisLenderContext,
+  CreditAnalysisLenderContextUpdate,
   CreditAnalysisMode,
   CreditAnalysisResult,
   ProspectLeadPayload,
@@ -44,7 +47,7 @@ interface CreditAnalysisState {
     ok: boolean;
     mfsn_url: string;
     short_url?: string;
-    event_kind?: "golf" | "vegas" | null;
+    event_kind?: "golf" | "vegas" | "ofy" | null;
   } | null;
   adminLoading: boolean;
   adminSubmitting: boolean;
@@ -54,6 +57,12 @@ interface CreditAnalysisState {
   portalSubmitting: boolean;
   portalError: string | null;
   portalResult: CreditAnalysisResult | null;
+  /** Background enhanced-read status per analysis id (staff views). */
+  enhancedStatusById: Record<number, CreditAnalysisEnhancedStatusResponse["status"]>;
+  /** Escrow flag + lender score per analysis (enhanced PDF context). */
+  contextById: Record<number, CreditAnalysisLenderContext>;
+  contextSavingId: number | null;
+  enhancedDownloadingId: number | null;
 }
 
 const initialState: CreditAnalysisState = {
@@ -74,6 +83,10 @@ const initialState: CreditAnalysisState = {
   portalSubmitting: false,
   portalError: null,
   portalResult: null,
+  enhancedStatusById: {},
+  contextById: {},
+  contextSavingId: null,
+  enhancedDownloadingId: null,
 };
 
 export const submitCreditAnalysis = createAsyncThunk<
@@ -158,6 +171,66 @@ export const submitAdminClientCreditAnalysis = createAsyncThunk<
     );
   }
 });
+
+/** Status of the background enhanced read behind an existing analysis. */
+export const fetchCreditAnalysisEnhancedStatus = createAsyncThunk<
+  {
+    analysisId: number;
+    status: CreditAnalysisEnhancedStatusResponse["status"];
+    context?: CreditAnalysisLenderContext;
+  },
+  number,
+  { rejectValue: string }
+>("creditAnalysis/enhancedStatus", async (analysisId, { rejectWithValue }) => {
+  try {
+    const { data } = await api.get<CreditAnalysisEnhancedStatusResponse>(
+      `/admin/credit-analyses/${analysisId}/enhanced-status`,
+    );
+    return { analysisId, status: data.status, context: data.context };
+  } catch (err: unknown) {
+    return rejectWithValue(formatAxiosError(err, "Could not check report status"));
+  }
+});
+
+/** Save the escrow flag / lender score used by the enhanced analysis PDF. */
+export const updateCreditAnalysisContext = createAsyncThunk<
+  { analysisId: number; context: CreditAnalysisLenderContext },
+  { analysisId: number; patch: CreditAnalysisLenderContextUpdate },
+  { rejectValue: string }
+>("creditAnalysis/updateContext", async ({ analysisId, patch }, { rejectWithValue }) => {
+  try {
+    const { data } = await api.patch<{ context: CreditAnalysisLenderContext }>(
+      `/admin/credit-analyses/${analysisId}/context`,
+      patch,
+    );
+    return { analysisId, context: data.context };
+  } catch (err: unknown) {
+    return rejectWithValue(formatAxiosError(err, "Could not save"));
+  }
+});
+
+/** Download the enhanced analysis PDF (only called when status is ready). */
+export const downloadEnhancedCreditAnalysisPdf = createAsyncThunk<
+  { analysisId: number; blob: Blob; fileName: string },
+  { analysisId: number; lang?: "en" | "es" },
+  { rejectValue: string }
+>(
+  "creditAnalysis/enhancedDownload",
+  async ({ analysisId, lang }, { rejectWithValue }) => {
+    try {
+      const res = await api.get(`/admin/credit-analyses/${analysisId}/enhanced-pdf`, {
+        params: lang ? { lang } : undefined,
+        responseType: "blob",
+      });
+      const disposition = String(res.headers["content-disposition"] || "");
+      const fileName =
+        disposition.match(/filename="([^"]+)"/)?.[1] || "OFG_Credit_Analysis.pdf";
+      return { analysisId, blob: res.data as Blob, fileName };
+    } catch (err: unknown) {
+      return rejectWithValue(formatAxiosError(err, "Could not download the report"));
+    }
+  },
+);
 
 export interface PortalCreditAnalysisPayload {
   report_file: File;
@@ -244,7 +317,7 @@ export const submitGetCreditReportLead = createAsyncThunk<
     ok: boolean;
     mfsn_url: string;
     short_url?: string;
-    event_kind?: "golf" | "vegas" | null;
+    event_kind?: "golf" | "vegas" | "ofy" | null;
   },
   GetCreditReportLeadPayload,
   { rejectValue: string }
@@ -258,7 +331,7 @@ export const submitGetCreditReportLead = createAsyncThunk<
       ok: boolean;
       mfsn_url: string;
       short_url?: string;
-      event_kind?: "golf" | "vegas" | null;
+      event_kind?: "golf" | "vegas" | "ofy" | null;
     };
   } catch (err: unknown) {
     return rejectWithValue(
@@ -380,6 +453,29 @@ const slice = createSlice({
     b.addCase(submitPortalCreditAnalysis.rejected, (s, a) => {
       s.portalSubmitting = false;
       s.portalError = a.payload ?? "Something went wrong";
+    });
+    b.addCase(fetchCreditAnalysisEnhancedStatus.fulfilled, (s, a) => {
+      s.enhancedStatusById[a.payload.analysisId] = a.payload.status;
+      if (a.payload.context) s.contextById[a.payload.analysisId] = a.payload.context;
+    });
+    b.addCase(updateCreditAnalysisContext.pending, (s, a) => {
+      s.contextSavingId = a.meta.arg.analysisId;
+    });
+    b.addCase(updateCreditAnalysisContext.fulfilled, (s, a) => {
+      s.contextSavingId = null;
+      s.contextById[a.payload.analysisId] = a.payload.context;
+    });
+    b.addCase(updateCreditAnalysisContext.rejected, (s) => {
+      s.contextSavingId = null;
+    });
+    b.addCase(downloadEnhancedCreditAnalysisPdf.pending, (s, a) => {
+      s.enhancedDownloadingId = a.meta.arg.analysisId;
+    });
+    b.addCase(downloadEnhancedCreditAnalysisPdf.fulfilled, (s) => {
+      s.enhancedDownloadingId = null;
+    });
+    b.addCase(downloadEnhancedCreditAnalysisPdf.rejected, (s) => {
+      s.enhancedDownloadingId = null;
     });
   },
 });

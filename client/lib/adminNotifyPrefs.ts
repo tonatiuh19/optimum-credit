@@ -19,9 +19,12 @@ export const ADMIN_NOTIFY_EVENT_KEYS: AdminNotifyEventKey[] = [
   "inbound_sms",
   "missed_call",
   "voicemail",
+  "call_transcript",
   "funding_doc_upload",
   "funding_application_created",
   "get_credit_report_lead",
+  "event_registration",
+  "prospect_temperature",
   "progress_report_alerts",
   "morning_digest",
 ];

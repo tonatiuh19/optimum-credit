@@ -1018,8 +1018,19 @@ describe("admin AI tools", () => {
     expect(prospectDry.ok).toBe(true);
     if (prospectDry.ok) {
       expect((prospectDry.data as any).preview?.is_prospect).toBe(true);
-      expect((prospectDry.data as any).missing_fields).toContain("file_base64");
+      expect((prospectDry.data as any).missing_fields).toContain(
+        "source_credit_analysis_id or file_base64",
+      );
     }
+
+    // Re-run from a stored PDF: unknown analysis id is a clear error (no paste).
+    const noSource = await executeAdminAiTool(
+      "run_credit_analysis",
+      { client_id: prospectId, source_credit_analysis_id: 999999999 },
+      { adminId },
+    );
+    expect(noSource.ok).toBe(false);
+    if (noSource.ok === false) expect(noSource.error).toBe("not_found");
 
     await pool.query(`DELETE FROM credit_analyses WHERE client_id = ?`, [
       prospectId,
