@@ -200,3 +200,35 @@ describe("Claude extraction (lean fields)", () => {
     expect(issues.find((i) => i.code === "score_mismatch")?.severity).toBe("error");
   });
 });
+
+describe("extraction schema stays compilable (structured outputs limits)", () => {
+  it("has no nullable / union types and one shared tradeline shape", async () => {
+    const { CREDIT_FILE_EXTRACTION_SCHEMA } = await import("./creditFileExtract");
+    let unions = 0;
+    const walk = (n: unknown) => {
+      if (Array.isArray(n)) return n.forEach(walk);
+      if (n && typeof n === "object") {
+        const o = n as Record<string, unknown>;
+        if (Array.isArray(o.type) || o.anyOf || o.oneOf) unions++;
+        Object.values(o).forEach(walk);
+      }
+    };
+    walk(CREDIT_FILE_EXTRACTION_SCHEMA);
+    // Anthropic: max 16 union-typed params; >0 here already broke prod once.
+    expect(unions).toBe(0);
+    const acct = (CREDIT_FILE_EXTRACTION_SCHEMA.properties.accounts.items as any).properties;
+    expect(Object.keys(acct)).not.toContain("transunion");
+    // No enums either — they also blow up the compiled grammar ("too large").
+    const enums: string[] = [];
+    const findEnums = (n: unknown, at: string) => {
+      if (n && typeof n === "object") {
+        if ((n as any).enum) enums.push(at);
+        for (const [k, v] of Object.entries(n as object)) findEnums(v, `${at}.${k}`);
+      }
+    };
+    findEnums(CREDIT_FILE_EXTRACTION_SCHEMA, "");
+    expect(enums).toEqual([]);
+    expect(acct.tradelines.items.properties.bureau.description).toMatch(/transunion \| experian \| equifax/);
+    expect(acct.repository).toBeDefined();
+  });
+});

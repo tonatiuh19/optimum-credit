@@ -8,10 +8,7 @@ import {
   isForwardStageMove,
   isBackwardStageMove,
   pipelineStageIndex,
-  inferAnalysisLabelSlugs,
-  resolveExtractionStatus,
   isProspectClientRow,
-  buildProspectAnalysisHtml,
   missingRequiredLabelSlugs,
 } from "./index";
 
@@ -55,83 +52,6 @@ describe("prospect-stage case product rules (documented)", () => {
   });
 });
 
-describe("inferAnalysisLabelSlugs", () => {
-  it("maps housing / auto / card / collections language", () => {
-    const text = `
-      MORTGAGE LATE PAYMENT
-      AUTO LOAN CHARGE OFF
-      CREDIT CARD COLLECTION
-      STUDENT LOAN DELINQUENT
-      MEDICAL COLLECTION
-      BANKRUPTCY CHAPTER 7
-      HARD INQUIRY EXPERIAN
-    `;
-    const negatives = [
-      "Mortgage - late payment",
-      "Auto Loan - charge off",
-      "Capital One Credit Card - collection",
-      "Navient Student Loan - delinquent",
-      "Medical Collection Agency",
-      "Bankruptcy filing",
-      "Hard Inquiry from lender",
-    ];
-    const slugs = inferAnalysisLabelSlugs(negatives, text);
-    expect(slugs).toEqual(
-      expect.arrayContaining([
-        "housing",
-        "auto",
-        "credit_card",
-        "collections",
-        "student_loan",
-        "medical",
-        "bankruptcy",
-        "inquiry",
-      ]),
-    );
-  });
-
-  it("falls back to other_derogatory when nothing matches", () => {
-    const slugs = inferAnalysisLabelSlugs(
-      ["Unknown tradeline issue XYZ"],
-      "generic credit report text without keywords",
-    );
-    expect(slugs).toContain("other_derogatory");
-  });
-});
-
-describe("resolveExtractionStatus", () => {
-  it("flags non-PDF uploads as unsupported_type regardless of text", () => {
-    expect(resolveExtractionStatus("image/png", "", false)).toBe(
-      "unsupported_type",
-    );
-    expect(
-      resolveExtractionStatus("image/png", "some long extracted text here", false),
-    ).toBe("unsupported_type");
-  });
-
-  it("flags a thrown pdf-parse error as parse_failed even with no text", () => {
-    expect(resolveExtractionStatus("application/pdf", "", true)).toBe(
-      "parse_failed",
-    );
-  });
-
-  it("flags a pdf that parsed but yielded < 80 chars as empty", () => {
-    expect(resolveExtractionStatus("application/pdf", "short", false)).toBe(
-      "empty",
-    );
-    expect(
-      resolveExtractionStatus("application/pdf", "   \n  ", false),
-    ).toBe("empty");
-  });
-
-  it("returns ok for a pdf that parsed with substantial text", () => {
-    const longText = "A".repeat(200);
-    expect(resolveExtractionStatus("application/pdf", longText, false)).toBe(
-      "ok",
-    );
-  });
-});
-
 describe("isProspectClientRow", () => {
   it("accepts status=prospect or pipeline_stage=prospect", () => {
     expect(isProspectClientRow({ status: "prospect", pipeline_stage: "prospect" } as any)).toBe(true);
@@ -169,52 +89,5 @@ describe("missingRequiredLabelSlugs — reminder audience gate", () => {
     expect(
       missingRequiredLabelSlugs(["housing"], ["housing", "collections"]),
     ).toEqual(["collections"]);
-  });
-});
-
-describe("buildProspectAnalysisHtml — weak extraction messaging", () => {
-  const baseOpts = {
-    firstName: "Jamie",
-    scores: { transunion: null, experian: null, equifax: null },
-    negatives: [],
-    clientGoal: null,
-  };
-
-  it("shows the honest good-news message when extraction is ok and no negatives found", () => {
-    const { html, text } = buildProspectAnalysisHtml({
-      ...baseOpts,
-      weakExtraction: false,
-    });
-    expect(html).toMatch(/didn't detect any obvious negative items/i);
-    expect(text).toMatch(/didn't detect any obvious negative items/i);
-  });
-
-  it("never claims 'good news / no negatives' when extraction was weak", () => {
-    const { html, text } = buildProspectAnalysisHtml({
-      ...baseOpts,
-      weakExtraction: true,
-    });
-    expect(html).not.toMatch(/good news/i);
-    expect(html).not.toMatch(/didn't detect any obvious negative items/i);
-    expect(html).toMatch(/couldn't reliably read your report/i);
-    expect(html).toMatch(/text-based SmartCredit PDF/i);
-    expect(text).toMatch(/couldn't reliably read your report/i);
-  });
-
-  it("derives weakness from extractionStatus when weakExtraction is omitted", () => {
-    const { html } = buildProspectAnalysisHtml({
-      ...baseOpts,
-      extractionStatus: "parse_failed",
-    });
-    expect(html).toMatch(/couldn't reliably read your report/i);
-  });
-
-  it("shows the Spanish weak-extraction message when lang=es", () => {
-    const { html } = buildProspectAnalysisHtml({
-      ...baseOpts,
-      lang: "es",
-      weakExtraction: true,
-    });
-    expect(html).toMatch(/no pudimos leer tu informe/i);
   });
 });

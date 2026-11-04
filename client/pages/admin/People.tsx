@@ -226,7 +226,11 @@ function MemberDialog({
                 <option value="super_admin">Super Admin</option>
                 <option value="admin">Admin</option>
                 <option value="agent">Agent</option>
+                <option value="underwriter">{t("adminPeople.roleUnderwriter")}</option>
               </select>
+              {form.values.role === "underwriter" && (
+                <p className="mt-1 text-[11px] text-muted-foreground">{t("adminPeople.roleUnderwriterHint")}</p>
+              )}
             </div>
             <div>
               <label className="text-xs font-medium text-muted-foreground mb-1 block">

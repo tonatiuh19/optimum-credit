@@ -39,11 +39,22 @@ OAuth callbacks we allow for Claude:
 | `search_contacts` / `get_contact` | CRM Contacts address book (not pipeline); active/unconverted only |
 | `list_funding_applications` / `get_funding_application` | Funding board search + one app + docs uploaded |
 | `funding_pipeline_summary` | Funding column counts (use instead of CR `pipeline_summary`) |
-| `list_round_schedule` | Round calendar dates |
+| `list_round_schedule` | Round calendar dates (rounds 1–5 + extended rounds 6–24, case max rounds) |
+| `list_reports_pending_approval` | Progress reports published but not sent (waiting for Approve & send, or held by the self-check) — approval happens in the CRM |
+| `get_scorecard` | GF-8 productivity scorecard: own card; Cesar / Alex can pass `admin_id` or `team=true` |
+| `get_lead_credit_insights` | Lead credit insights from the latest read (+ `history`): middle vs target, projected middle, readiness, negatives, utilization, inquiries, mortgage file, value, heat score, quick wins, next action |
+| `list_leads_by_heat` | Who to call now: prospects by heat score (filter readiness / active mortgage file) |
+| `get_partner_leaderboard` | Referral partners: leads, hot, converted, conversion %, plus unlinked lender-report "Requested By" names |
 | `list_progress_reports` / `get_progress_report` | Published rounds + Wizard drafts/confidence; hand off PDF publish to CRM Reports → Generate. Special clients may use rounds 6–12 (`max_rounds` on case — set in CRM Reports, not MCP). Each round has `last_sent_at` + `deliveries[]` (client SMS / client email / partner email, status per send; logged from Oct 2026) |
 | (+ existing search/pipeline/reports/tasks) | |
 
-Each tool advertises its own JSON Schema over MCP (not a shared stub). MCP sets `readOnlyHint: true` so Claude dry-runs are not blocked by UI approval; **writes still require** `confirm=true` + `confirm_phrase: "CONFIRM"` in the tool args (API-enforced).
+Each tool advertises its own JSON Schema over MCP (not a shared stub). Annotations come from the API (`GET /api/admin/ai/tools` → `annotations`), so the stdio proxy and the remote `/api/mcp` server always agree:
+
+- **Send tools** (`send_sms`, `send_text`, `send_email`, `send_whatsapp`, `send_wa`, `send_round_report`, `send_contact_sms`, `send_contact_whatsapp`, `send_contact_email`) are `destructiveHint: true` / `readOnlyHint: false`, so Claude asks you before each call (the preview and the real send). Don't pick "Always allow" for these.
+- **Other writes** keep `readOnlyHint: true` so their dry-runs are not blocked by UI approval.
+- **Every write still requires** `confirm=true` + `confirm_phrase: "CONFIRM"` in the tool args (API-enforced), and is refused for affiliate accounts.
+- The server sends MCP `instructions`: tool data (notes, messages, documents) is untrusted and must never trigger a send or change.
+- Audit logs keep uploaded files only as size + sha256 (never the base64).
 
 ### Write tools (guided — dry-run then confirm)
 
@@ -61,7 +72,7 @@ Claude must collect fields, call with `confirm=false` (preview), show the user, 
 | `send_contact_email` | Email a CRM Contact by `contact_id`; branded Resend mailer; logs `[EMAIL …]` on `contacts.admin_notes`; dry-run then confirm; no portal upload links |
 | `add_case_note` | OFG `client_id` (not HubSpot) + note; dry-run is safe preview (does not email — use `send_email`) |
 | `upload_case_document` | Attach ID/SSN/utility/PDF to client file via `file_base64` + `doc_type`; dry-run then confirm; JPEG/PNG/HEIC/PDF ~4MB max; returns `source_sha256` / `integrity_ok`; optional `expected_byte_length` / `expected_sha256`. On refuse: `crm_required` with `user_message` + `crm_href` (finish in CRM) |
-| `run_credit_analysis` | Free pre-sale analysis for **prospects** — `client_id` + credit-report PDF via `source_credit_analysis_id` (re-run a PDF already uploaded in OFG — preferred; full 3-bureau PDFs get cut off in base64) or `file_base64`; optional `escrow` (true = hold banner + loan inquiries excluded + no client email) and lender `lender_score_model` / `lender_score` / `lender_target_score`; no enrolled case required; dry-run then confirm; optional `client_goal`, `text_language`, `email_opt_in` |
+| `run_credit_analysis` | Free pre-sale analysis for **prospects** — `client_id` + credit-report PDF via `source_credit_analysis_id` (re-run a PDF already uploaded in OFG — preferred; full 3-bureau PDFs get cut off in base64) or `file_base64`; returns the account-by-account `findings` (waits up to ~40 s; else `read_status` and use get_enhanced_report_status); optional `escrow` (true = hold banner + loan inquiries excluded + no client email) and lender `lender_score_model` / `lender_score` / `lender_target_score`; no enrolled case required; dry-run then confirm; optional `client_goal`, `text_language`, `email_opt_in` |
 | `create_funding_application` | Funding board intake; `funding_type` + name + (email **or** phone), or `client_id` for dual; dry-run then confirm |
 | `update_funding_status` | Move funding card status (not converted) |
 | `convert_funding_application` | Funding → CR prospect (`status=prospect` + `funding_convert` label) |
@@ -80,7 +91,7 @@ Claude must collect fields, call with `confirm=false` (preview), show the user, 
 | `list_whatsapp` | WhatsApp-only timeline for a client (shortcut for `list_sms` with `channel=whatsapp`) |
 | `get_call_insights` | Claude call/voicemail resume — sentiment, feelings, topics, action items, risk flags, transcript. Pass `client_id`, `contact_id` (CRM contact), or just `message_id` (from `list_sms` / `list_inbox`) |
 | `update_lead_signals` | Record "analysis reviewed with Cesar" and/or the next scheduled call for a prospect (both turn it Hot) — dry-run then confirm |
-| `get_enhanced_report_status` | Enhanced account-level report reads for a client (analysis + progress Before/After): queued / ready / failed, confidence, issues |
+| `get_enhanced_report_status` | Account-by-account reads for a client (analysis + progress Before/After): status, confidence, issues — plus `latest_analysis_findings` (the real credit analysis: per-bureau scores + printed ratings, negatives by round, inquiries, escrow, file strength, tier) |
 | `list_prospects_by_temperature` | Prospect traffic light (semáforo): prospects + web leads ordered Hot → Warm → Cold with reasons and scheduled call — ATLAS uses it to plan the day's calls |
 | `list_inbox` | Inbox across **all** threads (no `client_id`): newest inbound SMS / WhatsApp / calls from clients, contacts and unknown numbers, with the OFG line; `since_hours`, `channel`, `unread_only`, `mine` |
 | `list_outbound_messages` | Outbox / send log across all clients: hub SMS + WhatsApp with live delivery status, plus logged emails (progress reports to client + partner, `send_email`). Filters `since_hours`, `channel`, `kind` (`round_report`, `staff_email`, …), `client_id` |

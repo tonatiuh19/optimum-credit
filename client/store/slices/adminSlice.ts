@@ -1,4 +1,4 @@
-import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
+import { createAsyncThunk, createSlice, isPending, isRejected } from "@reduxjs/toolkit";
 import api, { formatAxiosError } from "@/lib/api";
 import { normalizeAdminCalendarResponse } from "@/lib/adminCalendarPayload";
 import { applyAdminNotifyPrefsPatch } from "@/lib/adminNotifyPrefs";
@@ -18,6 +18,10 @@ import type {
   AdminDashboardTicket,
   AdminDashboardPayment,
   AdminDashboardUpcomingRound,
+  AdminDashboardInboxItem,
+  AdminDashboardPulseWeek,
+  AdminDashboardActivity,
+  ReportDeliveryRound,
   AdminDashboardWorkTask,
   AdminCalendarResponse,
   CalendarSplit,
@@ -71,7 +75,18 @@ interface AdminState {
     recent_payments: AdminDashboardPayment[];
     upcoming_rounds: AdminDashboardUpcomingRound[];
     my_work_tasks: AdminDashboardWorkTask[];
+    scope: "everyone" | "mine";
+    is_super: boolean;
+    inbox: AdminDashboardInboxItem[];
+    pulse: { weeks: AdminDashboardPulseWeek[] } | null;
+    activity: AdminDashboardActivity[];
   };
+  /** Case panel: progress-report delivery timelines, by client id → round. */
+  reportDeliveries: Record<number, Record<number, ReportDeliveryRound>>;
+  reportDeliveriesLoading: Record<number, boolean>;
+  /** True once the dashboard has loaded at least once. */
+  dashboardLoaded: boolean;
+  dashboardRefreshing: boolean;
   clients: AdminClientListItem[];
   clientsPagination: AdminClientsListResponse["pagination"] | null;
   clientsListQuery: AdminClientsListQuery | null;
@@ -97,6 +112,8 @@ interface AdminState {
       report_compare_mode?: "baseline" | "chain";
       highest_published_round?: number;
       extended_rounds_legend?: string | null;
+      /** Engine Spec v1 PR-P2-3: case hygiene alerts (shown on the case, never in reports). */
+      hygiene_alerts?: Array<{ code: "status_behind_stage" | "proof_of_address_pending" | "no_round_schedule" | "id_docs_pending"; days?: number }>;
       available_rounds?: number[];
     };
     client: any;
@@ -204,7 +221,16 @@ const initialState: AdminState = {
     recent_payments: [],
     upcoming_rounds: [],
     my_work_tasks: [],
+    scope: "everyone",
+    is_super: false,
+    inbox: [],
+    pulse: null,
+    activity: [],
   },
+  reportDeliveries: {},
+  reportDeliveriesLoading: {},
+  dashboardLoaded: false,
+  dashboardRefreshing: false,
   clients: [],
   clientsPagination: null,
   clientsListQuery: null,
@@ -287,8 +313,8 @@ const initialState: AdminState = {
 
 export const fetchAdminDashboard = createAsyncThunk(
   "admin/dashboard",
-  async () => {
-    const { data } = await api.get("/admin/dashboard");
+  async (opts: { mine?: boolean } | void) => {
+    const { data } = await api.get("/admin/dashboard", { params: opts && opts.mine ? { mine: 1 } : {} });
     return data;
   },
 );
@@ -416,6 +442,7 @@ function pipelineQueryParams(
   if (args?.limit != null) params.limit = args.limit;
   if (args?.column) params.column = args.column;
   if (args?.offset != null) params.offset = args.offset;
+  if (args?.prospect_sort) params.prospect_sort = args.prospect_sort;
   return params;
 }
 
@@ -722,6 +749,20 @@ export type ResendRoundReportPdfResult = {
   notify_partners: boolean;
   secure_pdf_url?: string | null;
 };
+
+export const fetchRoundReportDeliveries = createAsyncThunk(
+  "admin/roundReportDeliveries",
+  async (clientId: number, { rejectWithValue }) => {
+    try {
+      const { data } = await api.get<{ client_id: number; rounds: Record<number, ReportDeliveryRound> }>(
+        `/admin/clients/${clientId}/round-report-deliveries`,
+      );
+      return { clientId, rounds: data.rounds ?? {} };
+    } catch (e) {
+      return rejectWithValue(formatAxiosError(e, "Failed to load report deliveries"));
+    }
+  },
+);
 
 export const resendRoundReportPdf = createAsyncThunk<
   ResendRoundReportPdfResult,
@@ -1766,8 +1807,15 @@ const slice = createSlice({
 
     b.addCase(fetchAdminDashboard.fulfilled, (s, a) => {
       s.loading = false;
+      s.dashboardLoaded = true;
+      s.dashboardRefreshing = false;
       s.dashboard = {
         ...a.payload,
+        scope: a.payload.scope ?? "everyone",
+        is_super: !!a.payload.is_super,
+        inbox: a.payload.inbox ?? [],
+        pulse: a.payload.pulse ?? null,
+        activity: a.payload.activity ?? [],
         upcoming_rounds: a.payload.upcoming_rounds ?? [],
         my_work_tasks: a.payload.my_work_tasks ?? [],
       };
@@ -2249,6 +2297,24 @@ const slice = createSlice({
       s.tradelineProducts = s.tradelineProducts.filter(
         (p) => p.id !== a.meta.arg,
       );
+    });
+    b.addCase(fetchRoundReportDeliveries.fulfilled, (s, a) => {
+      s.reportDeliveries[a.payload.clientId] = a.payload.rounds;
+      s.reportDeliveriesLoading[a.payload.clientId] = false;
+    });
+    // Report delivery timelines (case panel).
+    b.addMatcher(isPending(fetchRoundReportDeliveries), (s, a) => {
+      s.reportDeliveriesLoading[a.meta.arg] = true;
+    });
+    b.addMatcher(isRejected(fetchRoundReportDeliveries), (s, a) => {
+      s.reportDeliveriesLoading[a.meta.arg] = false;
+    });
+    // Dashboard refresh spinner (pending/rejected cases are registered by the loading loop above).
+    b.addMatcher(isPending(fetchAdminDashboard), (s) => {
+      s.dashboardRefreshing = true;
+    });
+    b.addMatcher(isRejected(fetchAdminDashboard), (s) => {
+      s.dashboardRefreshing = false;
     });
   },
 });

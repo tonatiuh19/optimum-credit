@@ -19,50 +19,55 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import axios, { type AxiosInstance } from "axios";
 import { z } from "zod";
 
+type ToolAnnotations = {
+  title: string;
+  readOnlyHint: boolean;
+  destructiveHint: boolean;
+  idempotentHint: boolean;
+  openWorldHint: boolean;
+};
+
 type ToolDef = {
   name: string;
   description: string;
   input_schema: Record<string, unknown>;
+  /** Served by the API (single source of truth); absent on older deploys. */
+  annotations?: ToolAnnotations;
 };
 
-/** Must match API ADMIN_AI_MCP_WRITE_TOOLS — writes are confirm-gated, not idempotent. */
-const WRITE_TOOLS = new Set([
-  "create_prospect",
-  "create_contact",
-  "update_contact",
-  "convert_contact",
+/** Fallback only when the API predates served annotations: sends must ask the
+ *  user (destructive); everything else stays dry-run friendly (readOnlyHint). */
+const FALLBACK_SEND_TOOLS = new Set([
   "send_contact_sms",
-  "send_contact_email",
   "send_contact_whatsapp",
-  "create_work_task",
-  "update_work_task",
-  "add_case_note",
-  "upload_case_document",
-  "run_credit_analysis",
+  "send_contact_email",
   "send_email",
   "send_round_report",
   "send_sms",
+  "send_text",
   "send_whatsapp",
   "send_wa",
-  "update_pipeline_stage",
-  "convert_prospect",
-  "update_client",
-  "update_client_status",
-  "upsert_progress_report",
-  "set_case_payment_plan",
-  "upsert_payment_splits",
-  "update_payment_split",
-  "create_coupon",
-  "update_funding_status",
-  "create_funding_application",
-  "convert_funding_application",
-  "upload_funding_document",
-  "update_referrer",
-  "attach_referrer",
-  "send_text",
-  "list_whatsapp",
-  "update_lead_signals",
 ]);
+
+function toolAnnotations(t: ToolDef): ToolAnnotations {
+  if (t.annotations) return t.annotations;
+  if (FALLBACK_SEND_TOOLS.has(t.name)) {
+    return {
+      title: `${t.name} (asks before sending)`,
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    };
+  }
+  return {
+    title: t.name,
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: false,
+  };
+}
 
 /** Convert API JSON Schema → Zod so MCP advertises real args per tool. */
 function inputSchemaToZod(
@@ -143,8 +148,14 @@ function createApi(): AxiosInstance {
   });
 }
 
-async function listTools(api: AxiosInstance): Promise<ToolDef[]> {
-  const res = await api.get<{ tools?: ToolDef[]; error?: string }>(
+async function listTools(
+  api: AxiosInstance,
+): Promise<{ tools: ToolDef[]; instructions?: string }> {
+  const res = await api.get<{
+    tools?: ToolDef[];
+    instructions?: string;
+    error?: string;
+  }>(
     "/api/admin/ai/tools",
   );
   if (res.status === 404) {
@@ -157,7 +168,13 @@ async function listTools(api: AxiosInstance): Promise<ToolDef[]> {
       res.data?.error || `Failed to list tools (HTTP ${res.status})`,
     );
   }
-  return Array.isArray(res.data?.tools) ? res.data.tools : [];
+  return {
+    tools: Array.isArray(res.data?.tools) ? res.data.tools : [],
+    instructions:
+      typeof res.data?.instructions === "string"
+        ? res.data.instructions
+        : undefined,
+  };
 }
 
 async function callTool(
@@ -198,8 +215,9 @@ async function callTool(
 async function main() {
   const api = createApi();
   let tools: ToolDef[];
+  let instructions: string | undefined;
   try {
-    tools = await listTools(api);
+    ({ tools, instructions } = await listTools(api));
   } catch (err: any) {
     console.error(
       "[optimum-admin-ask-mcp] cannot reach Admin AI tools:",
@@ -213,10 +231,10 @@ async function main() {
     process.exit(1);
   }
 
-  const server = new McpServer({
-    name: "optimum-admin-ask",
-    version: "1.0.0",
-  });
+  const server = new McpServer(
+    { name: "optimum-admin-ask", version: "1.0.0" },
+    instructions ? { instructions } : undefined,
+  );
 
   for (const t of tools) {
     server.registerTool(
@@ -225,18 +243,10 @@ async function main() {
         title: t.name,
         description: t.description,
         inputSchema: inputSchemaToZod(t.input_schema || {}),
-        annotations: {
-          // Dry-runs must not require Claude UI approval (see add_case_note /
-          // convert_prospect "No approval received" bugs).
-          // API still requires confirm_phrase=CONFIRM for writes.
-          title: WRITE_TOOLS.has(t.name)
-            ? `${t.name} (dry-run safe; confirm gated)`
-            : t.name,
-          readOnlyHint: true,
-          destructiveHint: false,
-          idempotentHint: !WRITE_TOOLS.has(t.name),
-          openWorldHint: false,
-        },
+        // Sends (SMS/WhatsApp/email) are destructive so Claude asks the user;
+        // other writes stay readOnlyHint so dry-runs are not blocked. The API
+        // still requires confirm=true + confirm_phrase=CONFIRM for every write.
+        annotations: toolAnnotations(t),
       },
       async (args) => {
         const result = await callTool(

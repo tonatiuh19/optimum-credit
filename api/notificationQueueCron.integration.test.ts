@@ -130,20 +130,21 @@ describe("notification queue cron", () => {
     const futureId = Number(futureIns.insertId);
 
     __testClearEmailDryRuns();
-    const res = await request(app)
-      .get("/api/cron/process-queue")
-      .set("Authorization", `Bearer ${VITEST_CRON_SECRET}`)
-      .expect(200);
-
-    expect(res.body.ok).toBe(true);
-    expect(res.body.stale_cancelled).toBeGreaterThanOrEqual(1);
-    // Bare emails (no payload_json) must send even when the client has no
-    // active case — suppress only applies to explicit payment_confirmed.
-    expect(
-      Number(res.body.sent || 0),
-      `expected send; body=${JSON.stringify(res.body)}`,
-    ).toBeGreaterThanOrEqual(1);
-    expect(Number(res.body.suppressed || 0)).toBe(0);
+    // Other test files run this cron in parallel and may claim these rows
+    // first — assert OUR rows' final state (re-run while still in flight).
+    for (let i = 0; i < 4; i++) {
+      const res = await request(app)
+        .get("/api/cron/process-queue")
+        .set("Authorization", `Bearer ${VITEST_CRON_SECRET}`)
+        .expect(200);
+      expect(res.body.ok).toBe(true);
+      const [st] = await pool.query<RowDataPacket[]>(
+        `SELECT status FROM notification_queue WHERE id IN (?, ?)`,
+        [staleId, dueId],
+      );
+      if (st.every((r) => r.status !== "pending" && r.status !== "processing")) break;
+      await new Promise((r) => setTimeout(r, 1500));
+    }
 
     const [staleRow] = await pool.query<RowDataPacket[]>(
       `SELECT status, error_message FROM notification_queue WHERE id = ?`,
@@ -443,18 +444,21 @@ describe("notification queue cron", () => {
       .set("Authorization", `Bearer ${VITEST_CRON_SECRET}`)
       .expect(200);
 
+    // The reminder SMS row specifically (other cron paths may also message this
+    // client in the same run — "latest outbound SMS" is not deterministic).
     const [msgs] = await pool.query<RowDataPacket[]>(
-      `SELECT m.body, m.metadata_json, m.from_address, m.to_address, m.provider_message_id
+      `SELECT m.body, m.metadata_json, m.from_address, m.to_address, m.provider_message_id, m.error_message
        FROM conversation_messages m
        JOIN conversations c ON c.id = m.conversation_id
        WHERE c.client_id = ? AND m.channel = 'sms' AND m.direction = 'outbound'
+         AND JSON_EXTRACT(m.metadata_json, '$.reminder_sms') = true
        ORDER BY m.id DESC LIMIT 1`,
       [clientId],
     );
     expect(msgs.length).toBe(1);
     expect(String(msgs[0].body || "")).toMatch(/docs are ready/i);
     expect(String(msgs[0].from_address || "")).toBe(ofgE164);
-    expect(String(msgs[0].provider_message_id || "")).toMatch(/^dry-run-/);
+    expect(String(msgs[0].provider_message_id || ""), String(msgs[0].error_message || "")).toMatch(/^dry-run-/);
     const meta =
       typeof msgs[0].metadata_json === "string"
         ? JSON.parse(msgs[0].metadata_json)

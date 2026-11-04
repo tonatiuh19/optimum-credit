@@ -154,6 +154,23 @@ describe("extended rounds — HTTP integration", () => {
     expect(res.body.highest_published_round).toBe(6);
   }, 30_000);
 
+  it("accepts max_rounds up to 24 and rejects 25 (Oct 23 2026)", async () => {
+    const { caseId } = await seedCompletedCase({ publishedRounds: 5, maxRounds: 5 });
+    const ok = await request(app)
+      .patch(`/api/admin/cases/${caseId}/extended-rounds`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ max_rounds: 24 });
+    expect(ok.status).toBe(200);
+    expect(ok.body.case.max_rounds).toBe(24);
+    expect(ok.body.case.available_rounds).toHaveLength(24);
+    const bad = await request(app)
+      .patch(`/api/admin/cases/${caseId}/extended-rounds`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ max_rounds: 25 });
+    expect(bad.status).toBe(400);
+    expect(String(bad.body.error)).toMatch(/5 and 24/);
+  });
+
   it("raises max_rounds, sets dispute date, reopens completed → round_5", async () => {
     const { clientId, caseId } = await seedCompletedCase({
       publishedRounds: 5,

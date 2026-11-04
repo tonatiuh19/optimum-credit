@@ -316,6 +316,26 @@ export default function Reports() {
                     )}
                   </div>
 
+                  {r.report_kind === "score_update" && (
+                    <div
+                      className="mb-4 rounded-xl border border-primary/25 bg-primary/5 px-3 py-2 text-xs text-foreground"
+                      data-testid="portal-score-update-note"
+                    >
+                      <span className="font-semibold text-primary">{t("reports.scoreUpdateTitle")}</span>{" "}
+                      {t("reports.scoreUpdateBody")}
+                    </div>
+                  )}
+
+                  {r.report_kind === "score_update" && (
+                    <div
+                      className="mb-4 rounded-xl border border-primary/25 bg-primary/5 px-3 py-2 text-xs text-foreground"
+                      data-testid="portal-score-update-note"
+                    >
+                      <span className="font-semibold text-primary">{t("reports.scoreUpdateTitle")}</span>{" "}
+                      {t("reports.scoreUpdateBody")}
+                    </div>
+                  )}
+
                   {parseBureauScores(r.bureau_scores_json) && (
                     <div className="grid grid-cols-3 gap-2 mb-4 text-xs">
                       {(
@@ -335,9 +355,9 @@ export default function Reports() {
                               {label}
                             </div>
                             <div>
-                              {b.before || "—"} →{" "}
+                              {b.before || t("reports.noScore")} →{" "}
                               <span className="text-accent font-medium">
-                                {b.after || "—"}
+                                {b.after || t("reports.noScore")}
                               </span>
                             </div>
                           </div>
@@ -475,7 +495,7 @@ export default function Reports() {
                     ) : (
                       <RoundStat
                         label={t("reports.itemsDisputed")}
-                        value={r.items_disputed || 0}
+                        value={r.items_disputed ?? "—"}
                       />
                     )}
                     <RoundStat

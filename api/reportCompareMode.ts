@@ -140,7 +140,7 @@ export function projectExtendedRoundDates(opts: {
   maxRounds: number;
   overrides?: Record<string, string> | null;
 }): Array<{ round: number; date: string }> {
-  const max = Math.min(12, Math.max(5, Math.floor(Number(opts.maxRounds) || 5)));
+  const max = Math.min(24, Math.max(5, Math.floor(Number(opts.maxRounds) || 5)));
   if (max <= 5) return [];
   const interval = Math.max(1, Math.floor(Number(opts.intervalDays) || 35));
   const base = parseYmd(opts.round5Date);

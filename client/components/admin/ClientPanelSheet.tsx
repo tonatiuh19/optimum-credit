@@ -27,8 +27,11 @@ import {
   Check,
   Trash2,
   Send,
+  AlertTriangle,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { RoundDeliveryTimeline } from "@/components/admin/RoundDeliveryTimeline";
+import { ReportApprovalCard } from "@/components/admin/report-approval/ReportApprovalCard";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
   fetchPanelCase,
@@ -39,6 +42,7 @@ import {
   updateCaseExtendedRounds,
   confirmRoundReportReset,
   resendRoundReportPdf,
+  fetchRoundReportDeliveries,
   fetchCaseSplits,
   createCaseSplit,
   fetchCaseDocuments,
@@ -118,6 +122,7 @@ import { useToast } from "@/hooks/use-toast";
 import { ClientStatusNotesCard } from "@/components/admin/ClientStatusNotesCard";
 import { ClientHoldBadge } from "@/components/admin/ClientHoldBadge";
 import { LeadTemperatureCard } from "@/components/admin/LeadTemperatureCard";
+import { LeadCreditInsightsCard } from "@/components/admin/lead-insights/LeadCreditInsightsCard";
 import OfGReportWizard, {
   suggestReportRound,
 } from "@/components/admin/OfgReportWizard";
@@ -633,6 +638,18 @@ function ReportsTab({
     reports.find((r: any) => r.round_number === round);
 
   const getPdfs = (round: number): any[] => getReport(round)?.pdfs ?? [];
+  // Long programs (up to 24 rounds): bring the current round into view.
+  const stripRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const strip = stripRef.current;
+    const target = Math.min(maxRounds, highestPublished + 1);
+    const cell = strip?.querySelector<HTMLElement>(`[data-round="${target}"]`);
+    if (strip && cell) strip.scrollLeft = Math.max(0, cell.offsetLeft - strip.clientWidth / 2 + cell.clientWidth / 2);
+  }, [maxRounds, highestPublished]);
+  const deliveries = useAppSelector((st) => st.admin.reportDeliveries[clientId]);
+  useEffect(() => {
+    if (clientId) void dispatch(fetchRoundReportDeliveries(clientId));
+  }, [dispatch, clientId]);
 
   const getSessions = (round: number) =>
     wizardSessions.filter((s) => Number(s.round_number) === round);
@@ -705,6 +722,7 @@ function ReportsTab({
         resendRoundReportPdf({ pdfId: pdf.id }),
       ).unwrap();
       setResendConfirmPdf(null);
+      void dispatch(fetchRoundReportDeliveries(clientId));
       toast({
         title: t("reportWizard.resendRoundSuccessTitle"),
         description: t("reportWizard.resendRoundSuccessBody", {
@@ -772,7 +790,7 @@ function ReportsTab({
         <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground mb-2.5">
           {t("reports.timelineTitle")}
         </p>
-        <div className="flex gap-1.5 overflow-x-auto pb-0.5">
+        <div ref={stripRef} className="flex gap-1.5 overflow-x-auto pb-0.5 scroll-smooth" data-testid="round-strip">
           {roundList.map((round) => {
             const active = isReportRoundActive(
               round,
@@ -786,8 +804,9 @@ function ReportsTab({
             return (
               <div
                 key={round}
+                data-round={round}
                 className={[
-                  "min-w-[72px] flex-1 rounded-lg border px-2 py-2 text-center",
+                  "relative min-w-[72px] flex-1 rounded-lg border px-2 py-2 text-center",
                   pdfs.length > 0
                     ? "border-accent/30 bg-accent/[0.06]"
                     : active
@@ -796,6 +815,14 @@ function ReportsTab({
                 ].join(" ")}
               >
                 <div className="text-xs font-bold">R{round}</div>
+                {round === maxRounds && (
+                  <span
+                    className="absolute -top-1.5 left-1/2 -translate-x-1/2 rounded-full bg-warning px-1.5 text-[8px] font-bold uppercase tracking-wide text-warning-foreground"
+                    data-testid="round-strip-final"
+                  >
+                    {t("reports.finalRound")}
+                  </span>
+                )}
                 {report?.score_after != null ? (
                   <div className="text-[10px] text-accent font-semibold mt-0.5">
                     {report.score_after}
@@ -1058,6 +1085,10 @@ function ReportsTab({
                     {t("reportWizard.noReportYet")}
                   </p>
                 )}
+                {report?.id && ["pending_approval", "needs_review", "sending"].includes(String(report.delivery_status)) && (
+                  <ReportApprovalCard reportId={Number(report.id)} />
+                )}
+                <RoundDeliveryTimeline round={deliveries?.[round]} />
               </div>
             )}
 
@@ -1465,6 +1496,7 @@ function OverviewTab({ client, payments }: { client: any; payments: any[] }) {
   return (
     <div className="space-y-4">
       {client?.id && isProspectLead(client) && <LeadTemperatureCard client={client} />}
+      {client?.id && <LeadCreditInsightsCard clientId={client.id} />}
       {client?.id && !isProspectLead(client) && (
         <ClientPreSaleAnalysisCard clientId={Number(client.id)} />
       )}
@@ -2547,6 +2579,21 @@ export function ClientPanelSheet({
                       </p>
                     </div>
                   </div>
+                </div>
+              )}
+
+              {/* Case hygiene (Engine Spec v1 PR-P2-3) — on the case, never in reports */}
+              {(pd.case_info?.hygiene_alerts?.length ?? 0) > 0 && (
+                <div className="flex flex-wrap gap-1.5 px-5 py-2 border-b border-border bg-warning/5 shrink-0" data-testid="case-hygiene-alerts">
+                  {pd.case_info!.hygiene_alerts!.map((h: { code: string; days?: number }) => (
+                    <span
+                      key={h.code}
+                      className="inline-flex items-center gap-1 rounded-full border border-warning/30 bg-warning/10 px-2 py-0.5 text-[10px] font-semibold text-foreground"
+                    >
+                      <AlertTriangle className="w-3 h-3 text-warning" />
+                      {t(`caseHygiene.${h.code}`, { days: h.days })}
+                    </span>
+                  ))}
                 </div>
               )}
 

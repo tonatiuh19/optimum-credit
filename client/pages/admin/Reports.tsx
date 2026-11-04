@@ -5,6 +5,7 @@ import { DataGrid } from "@/components/ui/data-grid";
 import type { DataGridColumn } from "@/components/ui/data-grid";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { fetchAdminReports } from "@/store/slices/adminSlice";
+import { PartnerLeaderboardCard } from "@/components/admin/lead-insights/PartnerLeaderboardCard";
 
 export default function AdminReports() {
   const dispatch = useAppDispatch();
@@ -60,6 +61,8 @@ export default function AdminReports() {
       <Card title="Package breakdown">
         <PackageBreakdownGrid data={reports.packageBreakdown} />
       </Card>
+
+      <PartnerLeaderboardCard />
     </div>
   );
 }

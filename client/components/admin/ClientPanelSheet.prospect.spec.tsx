@@ -44,6 +44,18 @@ vi.mock("@/store/slices/adminTasksSlice", async (importOriginal) => {
   };
 });
 
+vi.mock("@/store/slices/leadInsightsSlice", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/store/slices/leadInsightsSlice")>();
+  return {
+    ...actual,
+    fetchLeadInsights: Object.assign(
+      (arg: unknown) => ({ type: "leadInsights/client", payload: null, meta: { arg } }),
+      { pending: { type: "leadInsights/client/pending" }, fulfilled: { type: "leadInsights/client/fulfilled" }, rejected: { type: "leadInsights/client/rejected" }, typePrefix: "leadInsights/client" },
+    ),
+  };
+});
+
 function renderProspectPanel(opts: {
   caseId?: number | null;
   onConvert?: (prospect: Prospect) => void;
@@ -91,6 +103,7 @@ function renderProspectPanel(opts: {
         saving: false,
       }),
       prospects: () => ({ labels: [] }),
+      leadInsights: () => ({ byClient: {}, loading: {}, leaderboard: null, leaderboardLoading: false, backfilling: false, error: null }),
       adminAuth: () => ({
         user: {
           id: 1,

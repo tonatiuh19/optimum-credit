@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { useFormik } from "formik";
 import * as Yup from "yup";
 import { Link } from "react-router-dom";
@@ -17,6 +18,7 @@ import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
   submitGetCreditReportLead,
   clearGetCreditReportLead,
+  fetchGetCreditReportConfig,
 } from "@/store/slices/creditAnalysisSlice";
 import { GET_CREDIT_REPORT_URLS } from "@/lib/getCreditReportLinks";
 import { getCreditReportEventMeta } from "@/lib/getCreditReportEvent";
@@ -34,9 +36,16 @@ const schema = Yup.object({
 export default function GetCreditReport() {
   const { t, i18n } = useTranslation();
   const dispatch = useAppDispatch();
-  const { gcrSubmitting, gcrError, gcrResult } = useAppSelector(
+  const { gcrSubmitting, gcrError, gcrResult, gcrFreeReportEnabled } = useAppSelector(
     (s) => s.creditAnalysis,
   );
+
+  // Free report can be switched off in Settings → registration only (never shown until confirmed on).
+  useEffect(() => {
+    void dispatch(fetchGetCreditReportConfig());
+  }, [dispatch]);
+  const freeOn = gcrFreeReportEnabled === true;
+  const k = (free: string, register: string) => (freeOn ? free : register);
 
   const form = useFormik({
     initialValues: {
@@ -64,6 +73,7 @@ export default function GetCreditReport() {
     },
   });
 
+  const resultHasReport = gcrResult ? (gcrResult.free_report ?? freeOn) && !!gcrResult.mfsn_url : false;
   const mfsnUrl = gcrResult?.mfsn_url || GET_CREDIT_REPORT_URLS.free;
   const todayEvent = getCreditReportEventMeta();
   const isEs = i18n.language?.startsWith("es");
@@ -81,8 +91,8 @@ export default function GetCreditReport() {
   return (
     <div className="w-full max-w-[100vw] overflow-x-hidden">
       <PageMeta
-        title={t("getCreditReport.metaTitle")}
-        description={t("getCreditReport.metaDescription")}
+        title={t(k("getCreditReport.metaTitle", "getCreditReport.registerMetaTitle"))}
+        description={t(k("getCreditReport.metaDescription", "getCreditReport.registerMetaDescription"))}
         canonical="/get-credit-report"
         noIndex
       />
@@ -97,10 +107,10 @@ export default function GetCreditReport() {
 
         <div className="section-inner relative z-10 max-w-3xl mx-auto text-center px-4">
           <h1 className="text-3xl md:text-5xl font-extrabold tracking-tight text-foreground leading-tight mb-3">
-            {t("getCreditReport.heading")}
+            {t(k("getCreditReport.heading", "getCreditReport.registerHeading"))}
           </h1>
           <p className="text-base md:text-lg text-muted-foreground max-w-xl mx-auto">
-            {t("getCreditReport.subheading")}
+            {t(k("getCreditReport.subheading", "getCreditReport.registerSubheading"))}
           </p>
           {todayEvent && eventPlace ? (
             <div className="mt-5 mx-auto max-w-md rounded-2xl border border-primary/20 bg-primary/[0.06] px-4 py-3.5 text-left shadow-sm animate-fade-up">
@@ -135,32 +145,34 @@ export default function GetCreditReport() {
                 <CheckCircle2 className="w-7 h-7 text-accent shrink-0 mt-0.5" />
                 <div className="space-y-1 min-w-0">
                   <h2 className="text-lg font-bold text-foreground">
-                    {t("getCreditReport.thanksTitle")}
+                    {t(resultHasReport ? "getCreditReport.thanksTitle" : "getCreditReport.registerThanksTitle")}
                   </h2>
                   <p className="text-sm text-muted-foreground leading-relaxed">
-                    {t("getCreditReport.thanksBody")}
+                    {t(resultHasReport ? "getCreditReport.thanksBody" : "getCreditReport.registerThanksBody")}
                   </p>
                 </div>
               </div>
               <div className="grid gap-2 sm:grid-cols-2 text-sm">
                 <div className="flex items-center gap-2 rounded-lg border border-border bg-background/80 px-3 py-2.5">
                   <Mail className="w-4 h-4 text-primary shrink-0" />
-                  <span>{t("getCreditReport.checkEmail")}</span>
+                  <span>{t(resultHasReport ? "getCreditReport.checkEmail" : "getCreditReport.registerCheckEmail")}</span>
                 </div>
                 <div className="flex items-center gap-2 rounded-lg border border-border bg-background/80 px-3 py-2.5">
                   <MessageSquare className="w-4 h-4 text-primary shrink-0" />
-                  <span>{t("getCreditReport.checkSms")}</span>
+                  <span>{t(resultHasReport ? "getCreditReport.checkSms" : "getCreditReport.registerCheckSms")}</span>
                 </div>
               </div>
-              <Button
-                asChild
-                className="w-full h-12 text-base font-semibold gap-2"
-              >
-                <a href={mfsnUrl} rel="noopener noreferrer">
-                  {t("getCreditReport.openReportNow")}
-                  <ExternalLink className="w-4 h-4" />
-                </a>
-              </Button>
+              {resultHasReport && (
+                <Button
+                  asChild
+                  className="w-full h-12 text-base font-semibold gap-2"
+                >
+                  <a href={mfsnUrl} rel="noopener noreferrer">
+                    {t("getCreditReport.openReportNow")}
+                    <ExternalLink className="w-4 h-4" />
+                  </a>
+                </Button>
+              )}
               <button
                 type="button"
                 className="text-xs text-muted-foreground underline hover:text-foreground w-full text-center"
@@ -179,7 +191,7 @@ export default function GetCreditReport() {
                   {t("getCreditReport.formTitle")}
                 </h2>
                 <p className="text-sm text-muted-foreground">
-                  {t("getCreditReport.formHint")}
+                  {t(k("getCreditReport.formHint", "getCreditReport.registerFormHint"))}
                 </p>
               </div>
 
@@ -288,7 +300,7 @@ export default function GetCreditReport() {
                     {t("getCreditReport.submitting")}
                   </>
                 ) : (
-                  t("getCreditReport.submit")
+                  t(k("getCreditReport.submit", "getCreditReport.registerSubmit"))
                 )}
               </Button>
 
@@ -296,7 +308,7 @@ export default function GetCreditReport() {
                 <ShieldCheck className="w-3.5 h-3.5 mt-0.5 shrink-0 text-accent" />
                 <span>
                   <Trans
-                    i18nKey="getCreditReport.trustNote"
+                    i18nKey={k("getCreditReport.trustNote", "getCreditReport.registerTrustNote")}
                     components={{
                       privacy: (
                         <Link

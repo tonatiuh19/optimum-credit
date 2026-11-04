@@ -8,6 +8,7 @@ import {
   ExternalLink,
   Landmark,
   MessageSquare,
+  QrCode,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
@@ -29,6 +30,7 @@ import OfgPhoneNumbersPanel from "@/components/admin/OfgPhoneNumbersPanel";
 const FUNDING_SMS_SETTING_KEY = "funding_sms_from_phone_number_id";
 const SIGNUP_SMS_SETTING_KEY = "signup_notify_sms_from_phone_number_id";
 const CLIENT_REMINDER_SMS_SETTING_KEY = "client_reminder_sms_enabled";
+const GCR_FREE_REPORT_SETTING_KEY = "get_credit_report_free_report_enabled";
 
 export default function AdminSettings() {
   const { t } = useTranslation();
@@ -60,13 +62,17 @@ export default function AdminSettings() {
   const reminderSmsEnabled = ["1", "true", "on", "yes"].includes(
     String(reminderSmsRaw).trim().toLowerCase(),
   );
+  const gcrFreeRaw =
+    settings.find((s) => s.setting_key === GCR_FREE_REPORT_SETTING_KEY)?.setting_value ?? "1";
+  const gcrFreeEnabled = ["1", "true", "on", "yes"].includes(String(gcrFreeRaw).trim().toLowerCase());
   const visibleSettings = settings.filter(
     (s) =>
       s.setting_key !== "app_version" &&
       s.setting_key !== "contract_template_html" &&
       s.setting_key !== FUNDING_SMS_SETTING_KEY &&
       s.setting_key !== SIGNUP_SMS_SETTING_KEY &&
-      s.setting_key !== CLIENT_REMINDER_SMS_SETTING_KEY,
+      s.setting_key !== CLIENT_REMINDER_SMS_SETTING_KEY &&
+      s.setting_key !== GCR_FREE_REPORT_SETTING_KEY,
   );
 
   const [edits, setEdits] = useState<Record<string, string>>({});
@@ -75,6 +81,7 @@ export default function AdminSettings() {
   const [signupPhoneEdit, setSignupPhoneEdit] = useState<string | null>(null);
   const [signupPhoneSaving, setSignupPhoneSaving] = useState(false);
   const [reminderSmsSaving, setReminderSmsSaving] = useState(false);
+  const [gcrFreeSaving, setGcrFreeSaving] = useState(false);
   const [legalEdits, setLegalEdits] = useState<
     Record<string, { title: string; content_md: string; source_url: string }>
   >({});
@@ -146,6 +153,16 @@ export default function AdminSettings() {
       dispatch(fetchSettings());
     } finally {
       setSignupPhoneSaving(false);
+    }
+  };
+
+  const saveGcrFreeEnabled = async (enabled: boolean) => {
+    setGcrFreeSaving(true);
+    try {
+      await dispatch(saveSetting({ setting_key: GCR_FREE_REPORT_SETTING_KEY, setting_value: enabled ? "1" : "0" }));
+      dispatch(fetchSettings());
+    } finally {
+      setGcrFreeSaving(false);
     }
   };
 
@@ -349,6 +366,31 @@ export default function AdminSettings() {
             : t("adminSettings.reminderSmsOff")}
         </p>
         <FieldHint>{t("adminSettings.reminderSmsFieldHint")}</FieldHint>
+      </div>
+
+      {/* ── /get-credit-report free report (event QR banners) ───── */}
+      <div className="bg-card border border-border rounded-2xl p-5 space-y-3" data-testid="gcr-free-report-setting">
+        <div className="flex items-start gap-3">
+          <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
+            <QrCode className="w-5 h-5 text-primary" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="text-sm font-semibold text-foreground">{t("adminSettings.gcrFreeTitle")}</h2>
+            <p className="text-xs text-muted-foreground mt-0.5">{t("adminSettings.gcrFreeHint")}</p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {gcrFreeSaving ? <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" /> : null}
+            <Switch
+              checked={gcrFreeEnabled}
+              disabled={gcrFreeSaving}
+              onCheckedChange={(v) => void saveGcrFreeEnabled(v)}
+              aria-label={t("adminSettings.gcrFreeToggleAria")}
+            />
+          </div>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          {gcrFreeEnabled ? t("adminSettings.gcrFreeOn") : t("adminSettings.gcrFreeOff")}
+        </p>
       </div>
 
       {/* ── App Version ───────────────────────────────────────── */}

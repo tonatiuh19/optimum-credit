@@ -1,6 +1,10 @@
 import { ReportReviewFlags } from "@/components/admin/ReportReviewFlags";
+import { cn } from "@/lib/utils";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { ProgressReadsCard } from "@/components/admin/ProgressReadsCard";
+import { ReportApprovalCard } from "@/components/admin/report-approval/ReportApprovalCard";
+import { SelfCheckList } from "@/components/admin/report-approval/SelfCheckList";
 import {
   Loader2,
   Upload,
@@ -13,6 +17,8 @@ import {
   Eye,
   RefreshCw,
   Info,
+  AlertTriangle,
+  Gauge,
 } from "lucide-react";
 import {
   Dialog,
@@ -29,12 +35,14 @@ import {
   clearReportWizard,
   clearWizardSession,
   createReportWizardSession,
+  setScoreUpdateOffer,
   downloadReportWizardSourcePdf,
   fetchReportWizardBeforeContext,
   fetchReportWizardDrafts,
   fetchReportWizardSession,
   finalizeReportWizard,
   previewReportWizard,
+  fetchWizardNotifyDefault,
   reExtractReportWizard,
   enhanceReportWizardNarrative,
   saveReportWizardReview,
@@ -62,7 +70,7 @@ interface Props {
   /** Auto Spanish report locale from client preferred_language (César: ES auto). */
   clientPreferredLanguage?: "en" | "es" | null;
   suggestedRound: number;
-  /** Case max_rounds (5–12). Controls round dropdown. */
+  /** Case max_rounds (5–24). Controls round dropdown. */
   maxRounds?: number;
   /** baseline (default) = vs enrollment; chain = vs prior After. */
   compareMode?: "baseline" | "chain";
@@ -133,6 +141,7 @@ export default function OfGReportWizard({
   const dispatch = useAppDispatch();
   const maxRounds = clampMaxRounds(maxRoundsProp ?? DEFAULT_MAX_ROUNDS);
   const roundChoices = roundOptionsForMax(maxRounds);
+  // Publishing the case's last allowed round moves the client to Completed.
   const {
     session,
     drafts,
@@ -148,10 +157,15 @@ export default function OfGReportWizard({
     enhancing,
     previewUrl,
     previewFlags,
+    previewSelfCheck,
+    notifyDefault,
     error,
+    scoreUpdateOffer,
   } = useAppSelector((s) => s.reportWizard);
 
   const [step, setStep] = useState(1);
+  // Spec v1.1 P0-1: the published report waits for Approve & send.
+  const [publishReportId, setPublishReportId] = useState<number | null>(null);
   const [publishAlerts, setPublishAlerts] = useState<
     Array<{ type: string; severity: string; title: string; detail: string }>
   >([]);
@@ -161,7 +175,11 @@ export default function OfGReportWizard({
   const [publishPartnersPdfFailed, setPublishPartnersPdfFailed] =
     useState(false);
   const [roundNumber, setRoundNumber] = useState(suggestedRound);
+  const isFinalRound = roundNumber >= maxRounds;
+  // PR-P0-1: Preview / Publish only on both account-level reads.
+  const readsReady = useAppSelector((s) => !!s.reportWizard.reads?.ready);
   const [beforePdf, setBeforePdf] = useState<File | null>(null);
+  const [startingPoint, setStartingPoint] = useState(false);
   const [afterPdf, setAfterPdf] = useState<File | null>(null);
   const [reusePriorBefore, setReusePriorBefore] = useState(true);
   const [overrideBeforeUpload, setOverrideBeforeUpload] = useState(false);
@@ -173,6 +191,8 @@ export default function OfGReportWizard({
   const [complianceOk, setComplianceOk] = useState(false);
   const [scoreAnomalyOk, setScoreAnomalyOk] = useState(false);
   const [notifyPartners, setNotifyPartners] = useState(true);
+  /** GF-84: null until the server suggests a default for this round. */
+  const [notifyClient, setNotifyClient] = useState<boolean | null>(null);
 
   const clientReferrers = useAppSelector((s) => s.admin.clientReferrers);
   const clientReferrersLoading = useAppSelector(
@@ -230,6 +250,7 @@ export default function OfGReportWizard({
     setPublishPartnersPdfFailed(false);
     setPublishAlerts([]);
     setBeforePdf(null);
+    setStartingPoint(false);
     setAfterPdf(null);
     setReusePriorBefore(true);
     setOverrideBeforeUpload(false);
@@ -246,6 +267,7 @@ export default function OfGReportWizard({
     setReusePriorBefore(true);
     setOverrideBeforeUpload(false);
     setBeforePdf(null);
+    setStartingPoint(false);
   }, [open, caseId, roundNumber, dispatch]);
 
   useEffect(() => {
@@ -254,6 +276,9 @@ export default function OfGReportWizard({
     if (cid > 0) dispatch(fetchClientReferrers({ clientId: cid }));
   }, [open, step, session?.client_id, dispatch]);
 
+  /** Score update draft (incomplete SmartCredit print): scores + verified inquiries only. */
+  const isScoreUpdate = session?.options_json?.score_update === true;
+
   const canReusePrior =
     !loadingBeforeContext &&
     !!beforeContext?.can_reuse &&
@@ -261,7 +286,9 @@ export default function OfGReportWizard({
     reusePriorBefore &&
     !overrideBeforeUpload;
 
-  const beforeReady = canReusePrior || !!beforePdf;
+  // Round 1 with no earlier report: the one PDF (After) is the starting point.
+  const startingPointActive = startingPoint && roundNumber === 1;
+  const beforeReady = canReusePrior || !!beforePdf || startingPointActive;
   const canContinueUpload =
     !loadingBeforeContext && beforeReady && !!afterPdf;
 
@@ -284,6 +311,7 @@ export default function OfGReportWizard({
     setPublishPartnersPdfFailed(false);
     setPublishAlerts([]);
     setBeforePdf(null);
+    setStartingPoint(false);
     setAfterPdf(null);
     setReusePriorBefore(true);
     setOverrideBeforeUpload(false);
@@ -311,25 +339,29 @@ export default function OfGReportWizard({
     }
   };
 
-  const handleExtract = async () => {
+  /** scoreUpdate: continue an incomplete SmartCredit print as a Score update (server re-checks). */
+  const handleExtract = async (scoreUpdate = false) => {
     if (loadingBeforeContext) return;
     if (!afterPdf) return;
-    if (!canReusePrior && !beforePdf) return;
+    if (!canReusePrior && !beforePdf && !startingPointActive) return;
     const result = await dispatch(
       createReportWizardSession({
         caseId,
         roundNumber,
-        beforePdf: canReusePrior ? null : beforePdf,
+        beforePdf: canReusePrior || startingPointActive ? null : beforePdf,
         afterPdf,
-        reuseBeforeSessionId: canReusePrior
-          ? beforeContext?.prior_session_id
-          : null,
+        reuseBeforeSessionId:
+          canReusePrior && !startingPointActive
+            ? beforeContext?.prior_session_id
+            : null,
         options: {
           highlight_win: highlightWin.trim() || undefined,
           tradeline_rec: tradelineRec,
           funding_note: fundingNote,
           spanish,
           enhance_with_claude: enhanceWithClaude,
+          ...(scoreUpdate ? { score_update: true } : {}),
+          ...(startingPointActive ? { starting_point: true } : {}),
         },
       }),
     );
@@ -403,6 +435,16 @@ export default function OfGReportWizard({
     }
   };
 
+  // GF-84: suggest silent publish for old / backfilled rounds.
+  useEffect(() => {
+    if (step === 4 && session?.id) {
+      setNotifyClient(null);
+      void dispatch(fetchWizardNotifyDefault(session.id)).then((r) => {
+        if (fetchWizardNotifyDefault.fulfilled.match(r)) setNotifyClient(r.payload.notify_client);
+      });
+    }
+  }, [step, session?.id, dispatch]);
+
   const handlePublish = async () => {
     if (!session?.id || !reviewData || !complianceOk) return;
     if (scoreAnomalyWarnings.length > 0 && !scoreAnomalyOk) return;
@@ -415,6 +457,7 @@ export default function OfGReportWizard({
         acknowledgeScoreAnomalies:
           scoreAnomalyWarnings.length > 0 && scoreAnomalyOk,
         notifyPartners,
+        notifyClient: notifyClient ?? undefined,
       }),
     );
     if (finalizeReportWizard.fulfilled.match(result)) {
@@ -428,6 +471,7 @@ export default function OfGReportWizard({
             : null,
       );
       setPublishPartnersPdfFailed(!!result.payload.partners_pdf_load_failed);
+      setPublishReportId(result.payload.round_report_id ?? null);
       setStep(5);
       onPublished();
     }
@@ -457,7 +501,8 @@ export default function OfGReportWizard({
         next.bureauScores.equifax[key],
       ].filter((n) => n > 0);
       scores.sort((a, b) => a - b);
-      return scores.length ? scores[Math.floor(scores.length / 2)] : 0;
+      // A middle score needs all three bureaus, otherwise it stays "--" (0).
+      return scores.length === 3 ? scores[1] : 0;
     };
     next.middleScore = {
       before: calcMiddle("before"),
@@ -619,6 +664,21 @@ export default function OfGReportWizard({
 
         {step === 1 && (
           <div className="space-y-4">
+            {beforeContext?.reuse_blocked === "incomplete_source" && (
+              <p className="rounded-lg border border-primary/25 bg-primary/5 px-3 py-2 text-xs text-foreground flex items-start gap-2" data-testid="before-reuse-blocked">
+                <Info className="w-3.5 h-3.5 mt-px shrink-0 text-primary" />
+                {t("reportWizard.scoreUpdate.reuseBlocked")}
+              </p>
+            )}
+            {roundNumber === 1 && (
+              <label className="flex items-start gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs cursor-pointer" data-testid="starting-point-option">
+                <Checkbox className="mt-0.5" checked={startingPoint} onCheckedChange={(v) => setStartingPoint(!!v)} />
+                <span className="text-foreground">
+                  <span className="font-semibold">{t("reportWizard.startingPoint.label")}</span>{" "}
+                  {t("reportWizard.startingPoint.hint")}
+                </span>
+              </label>
+            )}
             {(loadingDrafts || loadingSession) && (
               <p className="text-xs text-muted-foreground flex items-center gap-2">
                 <Loader2 className="w-3 h-3 animate-spin" />
@@ -678,6 +738,7 @@ export default function OfGReportWizard({
                   {t("adminHelpers.roundOverrideWarn")}
                 </FieldHint>
               )}
+              {isFinalRound && <FinalRoundNotice round={roundNumber} />}
             </div>
 
             {loadingBeforeContext ? (
@@ -792,7 +853,7 @@ export default function OfGReportWizard({
             )}
 
             <div className="grid sm:grid-cols-2 gap-4">
-              {!(
+              {!startingPointActive && !(
                 beforeContext?.can_reuse &&
                 (beforeContext.source === "prior_round" ||
                   beforeContext.source === "enrollment")
@@ -967,7 +1028,9 @@ export default function OfGReportWizard({
               <>
                 <FileText className="w-10 h-10 mx-auto text-primary" />
                 <p className="text-sm">
-                  {canReusePrior && beforeContext?.source === "enrollment"
+                  {startingPointActive
+                    ? t("reportWizard.startingPoint.readyExtract", { after: afterPdf?.name })
+                    : canReusePrior && beforeContext?.source === "enrollment"
                     ? t("reportWizard.readyExtract", {
                         before: t("reportWizard.beforeReportEnrollment"),
                         after: afterPdf?.name,
@@ -983,14 +1046,35 @@ export default function OfGReportWizard({
                         })}
                 </p>
                 <div className="flex justify-center gap-2">
-                  <Button variant="outline" onClick={() => setStep(1)}>
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      dispatch(setScoreUpdateOffer(false));
+                      setStep(1);
+                    }}
+                  >
                     <ChevronLeft className="w-4 h-4 mr-1" />
                     {t("reportWizard.back")}
                   </Button>
-                  <Button onClick={handleExtract} disabled={loading}>
+                  <Button onClick={() => void handleExtract()} disabled={loading}>
                     {t("reportWizard.runExtraction")}
                   </Button>
                 </div>
+                {scoreUpdateOffer && (
+                  <div
+                    className="mx-auto max-w-md rounded-xl border border-primary/30 bg-primary/5 p-3 text-left space-y-2 animate-in fade-in slide-in-from-bottom-1"
+                    data-testid="score-update-offer"
+                  >
+                    <p className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                      <Gauge className="w-4 h-4 text-primary shrink-0" />
+                      {t("reportWizard.scoreUpdate.offerTitle")}
+                    </p>
+                    <p className="text-xs text-foreground">{t("reportWizard.scoreUpdate.offerBody")}</p>
+                    <Button size="sm" className="w-full sm:w-auto gap-1.5" disabled={loading} onClick={() => void handleExtract(true)} data-testid="score-update-offer-cta">
+                      <Gauge className="w-3.5 h-3.5" /> {t("reportWizard.scoreUpdate.offerCta")}
+                    </Button>
+                  </div>
+                )}
               </>
             )}
           </div>
@@ -1025,6 +1109,12 @@ export default function OfGReportWizard({
 
         {step === 3 && reviewData && (
           <div className="space-y-4">
+            {isScoreUpdate && (
+              <p className="rounded-lg border border-primary/25 bg-primary/5 px-3 py-2 text-xs text-foreground flex items-start gap-2" data-testid="score-update-review-note">
+                <Gauge className="w-3.5 h-3.5 mt-px shrink-0 text-primary" />
+                {t("reportWizard.scoreUpdate.reviewNote")}
+              </p>
+            )}
             <div className="flex flex-wrap gap-2">
               <Button
                 type="button"
@@ -1188,7 +1278,7 @@ export default function OfGReportWizard({
             <p className="text-sm">
               {t("reportWizard.middleScore")}:{" "}
               <strong>
-                {reviewData.middleScore.before} → {reviewData.middleScore.after}
+                {reviewData.middleScore.before || "--"} → {reviewData.middleScore.after || "--"}
               </strong>
               {" · "}
               {t("reportWizard.fileStrength")}:{" "}
@@ -1347,13 +1437,14 @@ export default function OfGReportWizard({
               />
               <span>{t("reportWizard.complianceAttestation")}</span>
             </label>
+            {session?.id && <ProgressReadsCard sessionId={session.id} onStartOver={handleStartOver} />}
             <div className="flex justify-between">
               <Button variant="outline" onClick={handleStartOver}>
                 {t("reportWizard.startOver")}
               </Button>
               <Button
                 onClick={handlePreview}
-                disabled={!complianceOk || previewing}
+                disabled={!complianceOk || previewing || !readsReady}
               >
                 {previewing ? (
                   <Loader2 className="w-4 h-4 animate-spin mr-2" />
@@ -1369,9 +1460,20 @@ export default function OfGReportWizard({
         {step === 4 && previewUrl && (
           <div className="space-y-4">
             <p className="text-sm text-muted-foreground">
-              {t("reportWizard.previewIntro")}
+              {isScoreUpdate ? t("reportWizard.scoreUpdate.previewIntro") : t("reportWizard.previewIntro")}
             </p>
             <ReportReviewFlags flags={previewFlags} />
+            {previewSelfCheck && (
+              <div
+                className={`rounded-xl border px-3 py-2.5 space-y-2 ${previewSelfCheck.pass ? "border-accent/30 bg-accent/5" : "border-destructive/40 bg-destructive/5"}`}
+                data-testid="preview-self-check"
+              >
+                <p className="text-xs font-semibold text-foreground">
+                  {previewSelfCheck.pass ? t("reportApproval.previewPass") : t("reportApproval.previewFail")}
+                </p>
+                <SelfCheckList checks={previewSelfCheck.checks} />
+              </div>
+            )}
             <iframe
               src={previewUrl}
               title={t("reportWizard.previewTitle")}
@@ -1395,9 +1497,33 @@ export default function OfGReportWizard({
               </label>
             )}
             <FieldHint>{t("adminHelpers.publishReportHint")}</FieldHint>
+            <label
+              className={cn(
+                "flex items-start gap-2 text-sm rounded-xl border p-3 transition-colors",
+                notifyClient === false ? "border-warning/40 bg-warning/10" : "border-border/70 bg-muted/30",
+              )}
+            >
+              <Checkbox
+                checked={notifyClient !== false}
+                onCheckedChange={(v) => setNotifyClient(!!v)}
+                className="mt-0.5"
+                data-testid="notify-client-checkbox"
+              />
+              <span>
+                <span className="font-medium text-foreground block">
+                  {t("reportWizard.notifyClient.label")}
+                </span>
+                <span className="text-[11px] text-muted-foreground leading-snug">
+                  {notifyDefault && !notifyDefault.notify_client
+                    ? t("reportWizard.notifyClient.oldRound", { reasons: notifyDefault.reasons.join("; ") })
+                    : t("reportWizard.notifyClient.hint")}
+                </span>
+              </span>
+            </label>
             <label className="flex items-start gap-2 text-sm rounded-xl border border-border/70 bg-muted/30 p-3">
               <Checkbox
-                checked={notifyPartners}
+                disabled={notifyClient === false}
+                checked={notifyPartners && notifyClient !== false}
                 onCheckedChange={(v) => setNotifyPartners(!!v)}
                 className="mt-0.5"
                 data-testid="notify-partners-checkbox"
@@ -1426,6 +1552,8 @@ export default function OfGReportWizard({
                 </p>
               </div>
             )}
+            {isFinalRound && <FinalRoundNotice round={roundNumber} />}
+            {session?.id && <ProgressReadsCard sessionId={session.id} onStartOver={handleStartOver} />}
             <div className="flex justify-between">
               <Button variant="outline" onClick={() => setStep(3)}>
                 <ChevronLeft className="w-4 h-4 mr-1" />
@@ -1435,6 +1563,7 @@ export default function OfGReportWizard({
                 onClick={handlePublish}
                 disabled={
                   publishing ||
+                  !readsReady ||
                   (scoreAnomalyWarnings.length > 0 && !scoreAnomalyOk)
                 }
               >
@@ -1450,11 +1579,16 @@ export default function OfGReportWizard({
         {step === 5 && (
           <div className="text-center py-8 space-y-3">
             <CheckCircle2 className="w-12 h-12 text-accent mx-auto" />
-            <p className="font-semibold">{t("reportWizard.publishedTitle")}</p>
+            <p className="font-semibold">{publishReportId ? t("reportApproval.publishedTitle") : t("reportWizard.publishedTitle")}</p>
             <p className="text-sm text-muted-foreground">
-              {t("reportWizard.publishedBody", { round: roundNumber })}
+              {publishReportId ? t("reportApproval.publishedBody", { round: roundNumber }) : t("reportWizard.publishedBody", { round: roundNumber })}
             </p>
-            {publishPartnersEmailed != null && (
+            {publishReportId && (
+              <div className="mx-auto max-w-md text-left">
+                <ReportApprovalCard reportId={publishReportId} />
+              </div>
+            )}
+            {!publishReportId && publishPartnersEmailed != null && (
               <p
                 className="text-[11px] text-muted-foreground"
                 data-testid="publish-partners-emailed"
@@ -1576,3 +1710,22 @@ function PdfDrop({
     </div>
   );
 }
+
+/** Shown when the selected round is the case's last one: publishing completes the program. */
+function FinalRoundNotice({ round }: { round: number }) {
+  const { t } = useTranslation();
+  return (
+    <div
+      className="mt-2 flex items-start gap-2 rounded-xl border border-warning/40 bg-warning/10 px-3 py-2.5"
+      data-testid="final-round-notice"
+      role="note"
+    >
+      <AlertTriangle className="w-4 h-4 text-warning shrink-0 mt-0.5" />
+      <div className="text-[11px] leading-snug text-foreground">
+        <p className="font-semibold">{t("reportWizard.finalRoundTitle", { n: round })}</p>
+        <p className="text-muted-foreground">{t("reportWizard.finalRoundBody", { n: round })}</p>
+      </div>
+    </div>
+  );
+}
+

@@ -8,6 +8,8 @@ import {
 } from "react-router-dom";
 import {
   LayoutDashboard,
+  Gauge,
+  Receipt,
   Users,
   BookUser,
   Workflow,
@@ -19,7 +21,7 @@ import {
   BarChart3,
   Settings,
   LogOut,
-  Menu,
+  MoreHorizontal,
   X,
   ShieldCheck,
   ChevronLeft,
@@ -47,6 +49,8 @@ import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { adminLogout, fetchAdminMe } from "@/store/slices/adminAuthSlice";
 import { fetchSectionLocks } from "@/store/slices/adminSlice";
 import { fetchWorkBadge } from "@/store/slices/workTasksSlice";
+import { fetchBillingAccess } from "@/store/slices/billingSlice";
+import { fetchProductivityAccess } from "@/store/slices/productivitySlice";
 import {
   fetchAdminInbox,
   fetchNotificationPrefs,
@@ -161,6 +165,13 @@ const NAV_GROUPS = [
         sectionKey: "my_tasks",
       },
       {
+        to: "/admin/productivity",
+        labelKey: "adminNav.productivity",
+        icon: Gauge,
+        productivityOnly: true,
+        sectionKey: "productivity",
+      },
+      {
         to: "/admin/tasks",
         labelKey: "adminNav.clientTasks",
         icon: ClipboardList,
@@ -221,6 +232,14 @@ const NAV_GROUPS = [
         sectionKey: "settings",
       },
       {
+        to: "/admin/billing",
+        labelKey: "adminNav.billing",
+        icon: Receipt,
+        superAdminOnly: true,
+        billingOnly: true,
+        sectionKey: "billing",
+      },
+      {
         to: "/admin/people",
         labelKey: "adminNav.people",
         icon: UserCog,
@@ -230,6 +249,9 @@ const NAV_GROUPS = [
     ],
   },
 ];
+
+/** Phones: preferred bottom-tab order (missing / locked sections are skipped). */
+const MOBILE_TAB_PATHS = ["/admin", "/admin/pipeline", "/admin/conversations", "/admin/my-tasks"];
 
 /** Sections affiliate-role users may still see in the admin shell (their scoped pipeline/clients view). */
 const AFFILIATE_ALLOWED_SECTION_KEYS = new Set(["dashboard", "pipeline", "clients"]);
@@ -243,6 +265,8 @@ export default function AdminLayout({ children }: Props) {
   const { sectionLocks, sectionLocksLoading, sectionLocksInitialized } =
     useAppSelector((s) => s.admin);
   const workBadge = useAppSelector((s) => s.workTasks.badge);
+  const canViewBilling = useAppSelector((s) => s.billing.canView);
+  const canViewScorecard = useAppSelector((s) => !!s.productivity.access?.canView);
   const conversationsNavBadge = useAppSelector((s) => s.conversations.navBadgeUnread);
   const notificationPrefs = useAppSelector((s) => s.adminNotifications.prefs);
   const inboundSmsChimeRef = useRef(true);
@@ -250,6 +274,8 @@ export default function AdminLayout({ children }: Props) {
   const isSuperAdmin = user?.role === "super_admin";
   const isAdmin = user?.role === "admin";
   const isAffiliate = user?.role === "affiliate";
+  // Outside funding partner: funding board only (API enforces the same).
+  const isUnderwriter = user?.role === "underwriter";
   const lockedKeys = useMemo(
     () =>
       new Set(
@@ -286,6 +312,14 @@ export default function AdminLayout({ children }: Props) {
   }, []);
 
   useEffect(() => {
+    if (isSuperAdmin) dispatch(fetchBillingAccess());
+  }, [dispatch, isSuperAdmin]);
+
+  useEffect(() => {
+    if (token) dispatch(fetchProductivityAccess());
+  }, [dispatch, token]);
+
+  useEffect(() => {
     // Always refresh /me so flags like conversations_enabled stay current
     // (login payload may omit them; number assignment can change mid-session).
     if (token) dispatch(fetchAdminMe());
@@ -296,14 +330,14 @@ export default function AdminLayout({ children }: Props) {
   }, [token, dispatch]);
 
   useEffect(() => {
-    if (token && user && user.role !== "affiliate") {
+    if (token && user && user.role !== "affiliate" && user.role !== "underwriter") {
       dispatch(fetchWorkBadge());
     }
   }, [token, user, dispatch]);
 
   // Conversations nav badge (unread SMS in your inbox).
   useEffect(() => {
-    if (!token || !user || user.role === "affiliate") return;
+    if (!token || !user || user.role === "affiliate" || user.role === "underwriter") return;
     if (conversationsLocked) return;
     dispatch(fetchConversationsNavBadge()).catch((e) =>
       logger.warn("conversations badge load failed", e),
@@ -377,7 +411,7 @@ export default function AdminLayout({ children }: Props) {
 
   // Conversations SMS realtime — nav badge + chime (shared Ably client).
   useEffect(() => {
-    if (!token || !user?.id || user.role === "affiliate") return;
+    if (!token || !user?.id || user.role === "affiliate" || user.role === "underwriter") return;
     if (conversationsLocked) return;
 
     let cancelled = false;
@@ -419,10 +453,20 @@ export default function AdminLayout({ children }: Props) {
     if (!mobileOpen) return;
     const prev = document.body.style.overflow;
     document.body.style.overflow = "hidden";
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMobileOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
     return () => {
       document.body.style.overflow = prev;
+      window.removeEventListener("keydown", onKey);
     };
   }, [mobileOpen]);
+
+  // Phones: the menu sheet closes whenever the route changes.
+  useEffect(() => {
+    setMobileOpen(false);
+  }, [location.pathname]);
 
   // Synchronously check if the current route is locked (no flash).
   // Use exact match for items with `end: true` (e.g. /admin dashboard) so the
@@ -444,6 +488,9 @@ export default function AdminLayout({ children }: Props) {
       (isAffiliatePortalRoute && lockedKeys.has("affiliate-portal")));
 
   if (isCurrentLocked) return <Navigate to="/admin" replace />;
+  if (isUnderwriter && !location.pathname.startsWith("/admin/funding")) {
+    return <Navigate to="/admin/funding" replace />;
+  }
 
   const handleLogout = async () => {
     await dispatch(adminLogout());
@@ -457,7 +504,14 @@ export default function AdminLayout({ children }: Props) {
 
   // Affiliate role gets a stripped-down shell: their scoped Pipeline/Clients
   // view plus a dedicated "My Affiliate" portal in place of everything else.
-  const navGroups = isAffiliate
+  const navGroups = isUnderwriter
+    ? [
+        {
+          labelKey: "adminNav.groups.overview",
+          items: NAV_GROUPS.flatMap((g) => g.items).filter((item) => item.to === "/admin/funding"),
+        },
+      ]
+    : isAffiliate
     ? [
         {
           labelKey: "adminNav.groups.overview",
@@ -476,30 +530,65 @@ export default function AdminLayout({ children }: Props) {
       ]
     : NAV_GROUPS;
 
+  // Phones: up to 4 primary tabs (preferred order, then nav order) from what this role can open.
+  const usableNav = navGroups
+    .flatMap((g) => g.items)
+    .filter((item) => {
+      if ((item as any).superAdminOnly && !isSuperAdmin) return false;
+      if ((item as any).billingOnly && !canViewBilling) return false;
+      if ((item as any).productivityOnly && !canViewScorecard) return false;
+      if ((item as any).affiliateManagersOnly && !isSuperAdmin && !isAdmin && !(isUnderwriter && item.to === "/admin/funding")) return false;
+      if (item.sectionKey && lockedKeys.has(item.sectionKey)) return false;
+      if (item.sectionKey === "conversations" && user != null && !user.conversations_enabled) return false;
+      return true;
+    });
+  const mobileTabs = [
+    ...MOBILE_TAB_PATHS.map((to) => usableNav.find((i) => i.to === to)).filter((i): i is (typeof usableNav)[number] => Boolean(i)),
+    ...usableNav.filter((i) => !MOBILE_TAB_PATHS.includes(i.to)),
+  ].slice(0, 4);
+
   return (
     <div className="h-[100dvh] overflow-hidden flex bg-background w-full max-w-[100vw]">
       {/* Mobile overlay */}
       {mobileOpen && (
         <div
-          className="md:hidden fixed inset-0 z-20 bg-black/70 backdrop-blur-sm"
+          className="md:hidden fixed inset-0 z-30 bg-black/60 backdrop-blur-sm animate-in fade-in"
           onClick={() => setMobileOpen(false)}
+          aria-hidden
         />
       )}
 
       {/* ── Sidebar ─────────────────────────────────────────── */}
       <aside
+        id="admin-nav-sheet"
+        aria-label={t("adminNav.menu")}
         className={[
-          "fixed md:relative top-0 left-0 z-30 h-full flex flex-col shrink-0",
-          "bg-[#0b0f1a] border-r border-white/[0.07]",
+          // Phones: bottom sheet above the tab bar. md+: classic left sidebar.
+          "fixed inset-x-0 bottom-0 z-40 h-[85dvh] w-full rounded-t-2xl shadow-2xl",
+          "md:relative md:inset-auto md:z-30 md:h-full md:rounded-none md:shadow-none",
+          "flex flex-col shrink-0",
+          "bg-[#0b0f1a] border-t md:border-t-0 md:border-r border-white/[0.07]",
           "transition-[width,transform] duration-300 ease-in-out overflow-hidden",
-          mobileOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0",
-          "w-72",
+          mobileOpen ? "translate-y-0" : "translate-y-full md:translate-y-0",
           collapsed ? "md:w-[68px]" : "md:w-[220px]",
         ].join(" ")}
       >
+        {/* Phone sheet header: grip + title + close */}
+        <div className="md:hidden relative flex items-center justify-between px-4 pt-3 pb-2 border-b border-white/[0.07] shrink-0">
+          <span className="absolute left-1/2 top-1.5 -translate-x-1/2 h-1 w-10 rounded-full bg-white/20" aria-hidden />
+          <strong className="mt-2 text-sm font-semibold text-white">{t("adminNav.menu")}</strong>
+          <button
+            type="button"
+            onClick={() => setMobileOpen(false)}
+            className="mt-2 grid place-items-center w-8 h-8 rounded-full text-slate-300 hover:bg-white/[0.08] transition-colors"
+            aria-label={t("adminNav.closeMenu")}
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
         {/* Logo + collapse toggle */}
         <div
-          className={`flex items-center h-[60px] border-b border-white/[0.07] shrink-0 transition-all duration-300 ${
+          className={`hidden md:flex items-center h-[60px] border-b border-white/[0.07] shrink-0 transition-all duration-300 ${
             collapsed ? "justify-center px-0" : "px-4"
           }`}
         >
@@ -568,10 +657,14 @@ export default function AdminLayout({ children }: Props) {
             navGroups.map((group) => {
               const visibleItems = group.items.filter((item) => {
                 if ((item as any).superAdminOnly && !isSuperAdmin) return false;
+                if ((item as any).billingOnly && !canViewBilling) return false;
+                if ((item as any).productivityOnly && !canViewScorecard) return false;
                 if (
                   (item as any).affiliateManagersOnly &&
                   !isSuperAdmin &&
-                  !isAdmin
+                  !isAdmin &&
+                  // Underwriters' only menu item is Funding.
+                  !(isUnderwriter && item.to === "/admin/funding")
                 )
                   return false;
                 return true;
@@ -795,30 +888,19 @@ export default function AdminLayout({ children }: Props) {
 
       {/* ── Main area ───────────────────────────────────────── */}
       <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-        {/* Mobile top bar */}
-        <header className="md:hidden shrink-0 z-20 flex items-center justify-between bg-[#0b0f1a] border-b border-white/[0.07] px-4 h-14">
-          <Link to="/admin" className="flex items-center gap-2">
-            <div className="w-7 h-7 bg-gradient-to-br from-primary to-primary-600 rounded-lg flex items-center justify-center shadow-sm">
-              <ShieldCheck className="w-4 h-4 text-white" />
-            </div>
-            <span className="font-bold text-foreground text-sm tracking-tight">
-              Optimum Admin
-            </span>
+        {/* Phone top bar */}
+        <header className="md:hidden shrink-0 z-20 flex items-center justify-between gap-3 bg-[#0b0f1a] border-b border-white/[0.07] px-4 h-14 pt-[env(safe-area-inset-top)]">
+          <Link to="/admin" className="flex items-center gap-2 min-w-0">
+            <img
+              src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white.png"
+              alt="Optimum Credit"
+              className="h-5 w-auto"
+            />
+            <span className="text-[10px] font-semibold uppercase tracking-widest text-slate-400 truncate">{t("adminNav.kicker")}</span>
           </Link>
           <div className="flex items-center gap-1">
-            <AdminNotificationBell compact />
+            {!isAffiliate && <AdminNotificationBell compact />}
             <AdminThemeToggle compact className="!w-auto" />
-            <button
-              onClick={() => setMobileOpen(!mobileOpen)}
-              className="p-2 rounded-lg hover:bg-white/[0.08] text-slate-300 transition-colors"
-              aria-label="Toggle menu"
-            >
-              {mobileOpen ? (
-                <X className="w-5 h-5" />
-              ) : (
-                <Menu className="w-5 h-5" />
-              )}
-            </button>
           </div>
         </header>
 
@@ -828,12 +910,68 @@ export default function AdminLayout({ children }: Props) {
               <div className="w-6 h-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
             </div>
           ) : (
-            <div className="app-page px-4 sm:px-6 lg:px-10 py-5 sm:py-6 md:py-8">
+            <div className="app-page px-4 sm:px-6 lg:px-10 pt-5 sm:pt-6 md:py-8 pb-[calc(5.5rem+env(safe-area-inset-bottom))] md:pb-8">
               {children}
             </div>
           )}
         </main>
       </div>
+      {/* Phone bottom tab bar: 4 primary sections + More (opens the menu sheet) */}
+      <nav
+        className="md:hidden fixed inset-x-0 bottom-0 z-50 grid grid-cols-5 bg-[#0b0f1a]/95 backdrop-blur border-t border-white/[0.07] pb-[env(safe-area-inset-bottom)]"
+        aria-label={t("adminNav.quickNav")}
+        data-testid="admin-tabbar"
+      >
+        {mobileTabs.map((item) => (
+          <NavLink
+            key={item.to}
+            to={item.to}
+            end={"end" in item ? item.end : undefined}
+            className={({ isActive }) =>
+              `relative flex flex-col items-center justify-center gap-0.5 py-2 text-[10px] font-semibold transition-colors ${
+                isActive && !mobileOpen ? "text-white" : "text-slate-500"
+              }`
+            }
+          >
+            {({ isActive }) => (
+              <>
+                {isActive && !mobileOpen && <span className="absolute top-0 h-0.5 w-8 rounded-full bg-primary" aria-hidden />}
+                <span className="relative">
+                  <item.icon className="w-5 h-5" />
+                  {item.sectionKey === "conversations" && conversationsNavBadge > 0 && (
+                    <span className="absolute -top-1.5 -right-2.5 min-w-[1rem] h-4 px-1 rounded-full bg-accent text-accent-foreground text-[9px] font-bold grid place-items-center">
+                      {conversationsNavBadge > 99 ? "99+" : conversationsNavBadge}
+                    </span>
+                  )}
+                  {item.sectionKey === "my_tasks" && workBadge.mine_open > 0 && (
+                    <span className="absolute -top-1.5 -right-2.5 min-w-[1rem] h-4 px-1 rounded-full bg-primary text-primary-foreground text-[9px] font-bold grid place-items-center">
+                      {workBadge.mine_open > 99 ? "99+" : workBadge.mine_open}
+                    </span>
+                  )}
+                </span>
+                <span className="truncate max-w-full px-1">{t(item.labelKey)}</span>
+              </>
+            )}
+          </NavLink>
+        ))}
+        <button
+          type="button"
+          onClick={() => {
+            setCollapsed(false);
+            setMobileOpen((v) => !v);
+          }}
+          aria-expanded={mobileOpen}
+          aria-controls="admin-nav-sheet"
+          className={`relative flex flex-col items-center justify-center gap-0.5 py-2 text-[10px] font-semibold transition-colors ${
+            mobileOpen ? "text-white" : "text-slate-500"
+          }`}
+          data-testid="admin-tabbar-more"
+        >
+          {mobileOpen && <span className="absolute top-0 h-0.5 w-8 rounded-full bg-primary" aria-hidden />}
+          <MoreHorizontal className="w-5 h-5" />
+          <span>{t("adminNav.more")}</span>
+        </button>
+      </nav>
       <AdminAskFab />
       <AdminAskDrawer />
       {user?.conversations_enabled && <GlobalVoiceManager />}

@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  decodeLiteralUnicodeEscapes,
-  runCreditAnalysisAlgorithm,
-} from "./index";
-import { mergeCreditAnalysisClaudeEnhancement } from "./creditAnalysisClaudeEnhance";
+import { decodeLiteralUnicodeEscapes } from "./index";
 import { mergeClaudeNarrativeEnhancement } from "./ofgReportClaudeEnhance";
 import type { OfGReportData } from "../shared/api";
 
@@ -22,27 +18,6 @@ describe("platform unicode decode (LLM double-escape)", () => {
     expect(
       decodeLiteralUnicodeEscapes("Hola \\u2014 listo.\\n\\nPaso 1"),
     ).toBe("Hola — listo.\n\nPaso 1");
-  });
-
-  it("credit analysis Claude merge decodes narrative strings", () => {
-    const base = runCreditAnalysisAlgorithm({
-      clientName: "Marta",
-      firstName: "Marta",
-      lastName: "Test",
-      language: "es",
-      clientGoal: "General Improvement",
-      scores: { transunion: 600, experian: 610, equifax: 605 },
-      negatives: [],
-      reportText: "TransUnion Experian Equifax\n600 610 605",
-    });
-    const out = mergeCreditAnalysisClaudeEnhancement(base, {
-      client_text_message: "Hola Marta \\u2014 solo dando seguimiento",
-      round_1_actions: "Disputar \\u00edtems",
-    });
-    expect(out.client_text_message).toBe(
-      "Hola Marta — solo dando seguimiento",
-    );
-    expect(out.round_1_actions).toBe("Disputar ítems");
   });
 
   it("progress report Claude merge decodes narrative strings", () => {

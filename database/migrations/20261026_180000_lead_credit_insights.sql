@@ -1,0 +1,35 @@
+-- Lead credit insights: one snapshot per credit report read (analysis or
+-- progress), saved on the lead so the pipeline can sort by "who to call now",
+-- plus the analysis history / stage alerts across reads. Pure rules live in
+-- api/leadCreditInsights.ts (inlined in api/index.ts).
+CREATE TABLE IF NOT EXISTS `lead_credit_insights` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `client_id` INT UNSIGNED NOT NULL,
+  `credit_file_extraction_id` INT UNSIGNED NOT NULL,
+  `credit_analysis_id` INT UNSIGNED DEFAULT NULL,
+  `purpose` VARCHAR(20) NOT NULL DEFAULT 'analysis' COMMENT 'analysis | progress_before | progress_after | other',
+  `report_date` DATE DEFAULT NULL,
+  `middle_score` SMALLINT UNSIGNED DEFAULT NULL,
+  `target_score` SMALLINT UNSIGNED DEFAULT NULL,
+  `points_to_target` SMALLINT UNSIGNED DEFAULT NULL,
+  `projected_middle` SMALLINT UNSIGNED DEFAULT NULL,
+  `readiness` ENUM('ready','close','long') DEFAULT NULL,
+  `negatives_total` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `utilization_pct` SMALLINT UNSIGNED DEFAULT NULL,
+  `inquiries_120d` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `active_loan_file` TINYINT(1) NOT NULL DEFAULT 0,
+  `requested_by` VARCHAR(150) DEFAULT NULL COMMENT 'Lender tri-merge "Requested By" (referral partner name)',
+  `est_value_usd` INT UNSIGNED NOT NULL DEFAULT 0,
+  `heat_score` TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '0-100',
+  `next_action` VARCHAR(40) DEFAULT NULL,
+  `insights_json` JSON NOT NULL,
+  `version` SMALLINT UNSIGNED NOT NULL DEFAULT 1,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_lead_insights_extraction` (`credit_file_extraction_id`),
+  KEY `idx_lead_insights_client` (`client_id`, `id`),
+  KEY `idx_lead_insights_heat` (`heat_score`),
+  KEY `idx_lead_insights_requested_by` (`requested_by`),
+  CONSTRAINT `fk_lead_insights_client` FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

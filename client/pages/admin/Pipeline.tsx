@@ -49,6 +49,7 @@ import { ClientSearchPicker } from "@/components/ui/client-search-picker";
 import { LangBadge } from "@/components/ui/lang-badge";
 import { ClientHoldBadge } from "@/components/admin/ClientHoldBadge";
 import { LeadTemperatureBadge } from "@/components/admin/LeadTemperatureBadge";
+import { LeadInsightChips } from "@/components/admin/lead-insights/LeadInsightChips";
 import { LabelChips } from "@/components/admin/LabelChips";
 import FieldHint from "@/components/admin/FieldHint";
 import {
@@ -458,6 +459,8 @@ function ProspectKanbanCard({
             {prospect.client_goal}
           </p>
         )}
+
+        <LeadInsightChips prospect={prospect} />
 
         <LabelChips labels={prospect.labels} max={3} className="mb-2" />
 

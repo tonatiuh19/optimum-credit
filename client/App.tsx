@@ -59,6 +59,8 @@ import AdminVideos from "./pages/admin/Videos";
 import AdminEventMarketing from "./pages/admin/EventMarketing";
 import AdminReports from "./pages/admin/Reports";
 import AdminSettings from "./pages/admin/Settings";
+import AdminBilling from "./pages/admin/Billing";
+import AdminProductivity from "./pages/admin/Productivity";
 import AdminProfile from "./pages/admin/Profile";
 import AdminMcpConsent from "./pages/admin/McpConsent";
 import AdminPeople from "./pages/admin/People";
@@ -75,6 +77,7 @@ import {
   RequireAdmin,
   RequireStaff,
   RequireStaffManager,
+  RequireFundingAccess,
   RequireClient,
   NoAuthAdmin,
   NoAuthClient,
@@ -270,9 +273,9 @@ function AppShell() {
         <Route
           path="/admin/funding"
           element={
-            <RequireStaffManager>
+            <RequireFundingAccess>
               {wrap(AdminLayout, AdminFunding)}
-            </RequireStaffManager>
+            </RequireFundingAccess>
           }
         />
         <Route
@@ -318,6 +321,22 @@ function AppShell() {
           element={
             <RequireSuperAdmin>
               {wrap(AdminLayout, AdminReports)}
+            </RequireSuperAdmin>
+          }
+        />
+        <Route
+          path="/admin/productivity"
+          element={
+            <RequireStaff>
+              {wrap(AdminLayout, AdminProductivity)}
+            </RequireStaff>
+          }
+        />
+        <Route
+          path="/admin/billing"
+          element={
+            <RequireSuperAdmin>
+              {wrap(AdminLayout, AdminBilling)}
             </RequireSuperAdmin>
           }
         />

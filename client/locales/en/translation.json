@@ -68,7 +68,14 @@
       "agent": "Agent",
       "affiliate": "Affiliate",
       "support": "Support"
-    }
+    },
+    "billing": "Billing",
+    "menu": "Menu",
+    "closeMenu": "Close menu",
+    "kicker": "Admin",
+    "quickNav": "Quick navigation",
+    "more": "More",
+    "productivity": "Scorecard"
   },
   "adminAsk": {
     "title": "Ask",
@@ -210,6 +217,10 @@
         "label": "Progress report alerts",
         "hint": "PII mismatch, closed accounts still reporting, or open hard inquiries after a round report"
       },
+      "credit_analysis_review": {
+        "label": "Credit analysis needs review",
+        "hint": "A credit analysis did not match the report's own totals or the Claude audit found a problem — review it before the client gets it"
+      },
       "morning_digest": {
         "label": "Weekday morning digest",
         "hint": "Claude-powered email brief each business morning (tasks, conversations, prospects, quote)"
@@ -271,7 +282,12 @@
     "ofgPhonesUnassigned": "Unassigned",
     "ofgPhonesAssigned": "Assigned",
     "ofgPhonesOwner": "Owner: {{name}}",
-    "ofgPhonesAssignError": "Could not update assignment"
+    "ofgPhonesAssignError": "Could not update assignment",
+    "gcrFreeTitle": "Free credit report on /get-credit-report",
+    "gcrFreeHint": "The event QR page (ofgllc.com/get-credit-report). On: registrants get the free MyFreeScoreNow report link on screen, by email and SMS. Off: registration only — they get a confirmation and a specialist follows up.",
+    "gcrFreeToggleAria": "Offer the free credit report on /get-credit-report",
+    "gcrFreeOn": "On — the free report link is offered after registering.",
+    "gcrFreeOff": "Off — registration form only; confirmation email + SMS with no report link. Links sent before keep working."
   },
   "adminReminderFlows": {
     "alsoSmsLabel": "Also SMS after email",
@@ -964,6 +980,12 @@
           "required": "Enter a phone number",
           "invalid": "Enter a valid US phone number"
         }
+      },
+      "keypad": {
+        "open": "Keypad",
+        "hint": "Tap or type 0-9 * #",
+        "error": "Couldn't send that key — try again",
+        "threeWay": "3-way call: keys go to the added caller"
       }
     },
     "phoneActions": {
@@ -1103,7 +1125,11 @@
     "before": "Before",
     "after": "After",
     "itemRemovedFallback": "Item removed",
-    "targetFallback": "Target item"
+    "targetFallback": "Target item",
+    "finalRound": "Final",
+    "scoreUpdateTitle": "Score update.",
+    "scoreUpdateBody": "This round shows your scores. Your full account-by-account review will be in your next report.",
+    "noScore": "No score"
   },
   "support": {
     "heading": "Support",
@@ -1453,6 +1479,66 @@
       "internal": "Internal notes (saved to the client file on publish, never in the PDF)",
       "approver": "Flagged reports are published by the language owner (English: Lecca, Spanish: Angel) or a super admin.",
       "none": "No review flags — the report can be delivered."
+    },
+    "notifyClient": {
+      "label": "Email and text the client",
+      "hint": "Sends the round report by email + SMS (and to linked partners if checked below).",
+      "oldRound": "Old round — publishing silently by default ({{reasons}}). The report still appears in the client portal. Check to notify anyway."
+    },
+    "finalRoundTitle": "Round {{n}} is this client's final round",
+    "finalRoundBody": "Publishing it completes the program and moves the client to Completed. To keep going past Round {{n}}, raise Max rounds on the Reports tab first.",
+    "reads": {
+      "title": "Reading both reports at account level",
+      "body": "Preview and Publish unlock when both reads are ready (usually 1-3 minutes; a report already read is instant). Wins and targets come only from these reads — never from a text summary.",
+      "before": "Before",
+      "after": "After",
+      "reused": "reused from the prior round",
+      "reportDate": "report date {{date}}",
+      "ready": "Both reports read at account level — ready to preview.",
+      "blockedTitle": "Blocked: data integrity",
+      "blockedBody": "{{reason}}. Upload the correct After pull to continue.",
+      "status": {
+        "missing": "waiting",
+        "queued": "queued",
+        "reading": "reading…",
+        "ready": "ready",
+        "failed": "failed — needs review"
+      },
+      "incomplete": {
+        "title": "{{which}} PDF is incomplete — SmartCredit was still loading",
+        "body": "The accounts were not loaded when this PDF was saved, so a report built from it would be wrong. Nothing was published.",
+        "steps": {
+          "open": "Open the report in SmartCredit.",
+          "wait": "Scroll to the bottom and wait until every account is visible (no spinning icons).",
+          "save": "Print → Save as PDF.",
+          "upload": "Click Start over and upload the new PDF(s)."
+        },
+        "cta": "Start over and upload again"
+      },
+      "background": "You can close this and work on another client — the reads keep running and this report will be ready when you come back.",
+      "mode": {
+        "reused": "Same file was already read — reused instantly.",
+        "batch": "Taking the backup route — this can take a few more minutes."
+      }
+    },
+    "scoreUpdate": {
+      "offerTitle": "Send a Score update instead?",
+      "offerBody": "This PDF is missing accounts, so the full report can't be built from it. A Score update sends the client's scores (and inquiries when the report shows them completely), with no account results, so there are no false wins. It still goes to approval first. The next round with complete PDFs shows all the account progress.",
+      "offerCta": "Continue as Score update",
+      "readsCta": "Send a Score update instead",
+      "modeTitle": "Score update",
+      "modeBody": "This report sends the scores and, when both reports show them completely, the removed inquiries. No account results. It goes to approval before the client gets it.",
+      "modeFullAvailable": "Both reports are complete now — switch back to the full progress report.",
+      "switchToFull": "Switch to full report",
+      "nextRoundNote": "Next round: upload complete PDFs. An incomplete PDF from this round is never reused.",
+      "reuseBlocked": "The saved PDF from the earlier round was incomplete (sent as a Score update). Upload a complete Before report.",
+      "reviewNote": "Score update: only the scores below are used (check them against the PDFs). Wins, targets and other account sections are not included.",
+      "previewIntro": "Review the one-page Score update before publishing. It goes to approval before the client gets it."
+    },
+    "startingPoint": {
+      "label": "No report from before we started.",
+      "hint": "Use one report as the starting point: upload it as After. It shows scores and items to dispute, with no changes yet.",
+      "readyExtract": "Ready to create the Round 1 starting point from {{after}}"
     }
   },
   "infoRequests": {
@@ -1536,7 +1622,102 @@
     "viewCalendar": "Calendar",
     "today": "Today",
     "tomorrow": "1d",
-    "inDays": "{{n}}d"
+    "inDays": "{{n}}d",
+    "cc": {
+      "morning": "Good morning, {{name}}",
+      "afternoon": "Good afternoon, {{name}}",
+      "evening": "Good evening, {{name}}",
+      "loading": "Loading your day…",
+      "summary_one": "{{count}} item needs your attention",
+      "summary_other": "{{count}} items need your attention",
+      "allClear": "All clear — nothing waiting on you.",
+      "allClearLong": "All clear. Nothing needs you right now.",
+      "scope": "Scope",
+      "everyone": "Everyone",
+      "mine": "Mine",
+      "refresh": "Refresh",
+      "quickActions": "Quick actions",
+      "qa": {
+        "clients": "Clients",
+        "pipeline": "Pipeline",
+        "conversations": "Conversations",
+        "documents": "Doc review",
+        "tasks": "My tasks",
+        "calendar": "Calendar",
+        "payments": "Payments"
+      },
+      "needsYou": "Needs you",
+      "inbox": {
+        "reports_approval_one": "{{count}} progress report to approve",
+        "reports_approval_other": "{{count}} progress reports to approve",
+        "tasks_overdue_one": "{{count}} overdue task",
+        "tasks_overdue_other": "{{count}} overdue tasks",
+        "analyses_review_one": "{{count}} credit analysis to review",
+        "analyses_review_other": "{{count}} credit analyses to review",
+        "conversations_unread_one": "{{count}} unread conversation",
+        "conversations_unread_other": "{{count}} unread conversations",
+        "docs_review_one": "{{count}} document to review",
+        "docs_review_other": "{{count}} documents to review",
+        "rounds_due_one": "{{count}} round due in 3 days",
+        "rounds_due_other": "{{count}} rounds due in 3 days",
+        "tickets_open_one": "{{count}} open support ticket",
+        "tickets_open_other": "{{count}} open support tickets",
+        "payments_pending_one": "{{count}} client pending payment",
+        "payments_pending_other": "{{count}} clients pending payment"
+      },
+      "inboxHint": {
+        "reports_approval": "Published — not sent until approved",
+        "tasks_overdue": "Past their due date",
+        "analyses_review": "Held by the accuracy gate before the client sees it",
+        "conversations_unread": "Clients waiting for a reply",
+        "docs_review": "IDs, proofs of address and agreements",
+        "rounds_due": "Dispute round targets coming up",
+        "tickets_open": "Open or in progress",
+        "payments_pending": "Enrollment payment not completed"
+      },
+      "today": "Today",
+      "daysLate": "{{n}}d late",
+      "pulse": "Pulse",
+      "last8w": "Last 8 weeks",
+      "completedTotal": "{{count}} completed all-time",
+      "kpi": {
+        "active": "Active clients",
+        "activeHint": "In the program now",
+        "new": "New clients",
+        "enrolled": "Enrolled",
+        "completed": "Completed"
+      },
+      "avgImprovement": "Average credit score improvement:",
+      "money": "Money",
+      "revenue30d": "Revenue (30 days)",
+      "revenue8w": "{{amount}} in the last 8 weeks",
+      "recentPayments": "Recent payments",
+      "noPayments": "No payments yet",
+      "trends": "Trends",
+      "funnel": "Pipeline funnel",
+      "openPipeline": "Open pipeline",
+      "stage": {
+        "prospect": "Prospect",
+        "new_client": "New client",
+        "docs_ready": "Docs ready",
+        "round_1": "Round 1",
+        "round_2": "Round 2",
+        "round_3": "Round 3",
+        "round_4": "Round 4",
+        "round_5": "Round 5+",
+        "completed": "Completed"
+      },
+      "activity": "Recent activity",
+      "noActivity": "No recent activity.",
+      "act": {
+        "client": "New client: {{name}}",
+        "contract": "{{name}} signed the agreement",
+        "document": "{{name}} uploaded a document",
+        "report": "Round {{detail}} progress report for {{name}}",
+        "analysis": "Credit analysis ready for {{name}}",
+        "payment": "{{name}} paid {{detail}}"
+      }
+    }
   },
   "languageSwitcher": {
     "label": "Language",
@@ -1687,6 +1868,56 @@
       "save": "Save",
       "saved": "Saved — the next PDF download uses it",
       "saveError": "Could not save"
+    },
+    "enhanced": {
+      "loading": "Loading the account-by-account analysis…",
+      "source": "Account-by-account analysis (same as Download PDF)",
+      "checkingNegatives": "Preliminary read — the account-by-account check is still running.",
+      "escrowTitle": "Active loan file — coordinate dispute timing with the loan officer",
+      "escrowBody": "The lender's inquiry is excluded, the primary line is held and AU lines wait until after closing.",
+      "model": "Scores: {{model}}",
+      "lender": "Lender {{model}}: {{score}} — needs {{target}}",
+      "negatives": "Negative items ({{count}})",
+      "noNegatives": "No negative items found on any bureau.",
+      "hold": "Hold",
+      "round1": "R1 inquiries + personal info: {{count}}",
+      "round2": "R2 collections: {{count}}",
+      "round3": "R3 late payments: {{count}}",
+      "round4": "R4 charge-offs: {{count}}",
+      "projected": "Projected middle score (est.)",
+      "strength": "File strength",
+      "program": "Program",
+      "tier_standard": "Standard Repair",
+      "tier_complex": "Complex Repair",
+      "readingTitle": "Analyzing the report account by account…",
+      "readingBody": "Reading every account on all 3 bureaus (about 1 minute). Results and the PDF appear here automatically.",
+      "failedTitle": "We couldn't read this report automatically",
+      "failedStaff": "The account-by-account read failed. Re-upload the PDF (or a clearer copy) to run it again.",
+      "failedPublic": "Our team will review your report and contact you with your analysis.",
+      "middle": "Middle score {{score}}",
+      "vantage": "VantageScore {{score}}",
+      "notItemized": "Not itemized",
+      "informational": "Informational (not dispute targets)",
+      "selfCheckTitle": "Needs review — the read doesn't match the report's own totals",
+      "selfCheckBody": "Check these before sending anything to the client:",
+      "selfCheckRow": "{{label}}: report {{expected}}, read {{actual}}"
+    },
+    "review": {
+      "checkingTitle": "Double-checking against the report…",
+      "checkingBody": "Totals are being reconciled and Claude is auditing the analysis against the PDF. The client gets it once it passes.",
+      "needsTitle": "Needs review — not sent to the client",
+      "needsBody": "The automatic checks found something to confirm. Fix the context or re-run; approve to release it to the client.",
+      "approve": "Approve and release",
+      "rerun": "Re-run checks",
+      "approved": "Approved by staff — released to the client",
+      "passed": "Passed the automatic checks — released to the client",
+      "reconciled": "{{count}} missing account(s) added from the report",
+      "auditorError": "The Claude auditor could not finish — review manually or re-run.",
+      "approvedToast": "Analysis approved and released",
+      "rerunToast": "Checks restarted",
+      "error": "Could not update the review",
+      "publicTitle": "We're reviewing your report",
+      "publicBody": "Our team is double-checking your credit analysis to make sure every detail is right. We'll send it to you shortly."
     }
   },
   "getCreditReport": {
@@ -1718,7 +1949,18 @@
     "openReportNow": "Open free report now",
     "submitAnother": "Submit another person",
     "redirectingToReport": "Opening your free credit report…",
-    "trustNote": "By getting your free report, you accept our <privacy>Privacy Policy</privacy> and <terms>Terms of Service</terms>."
+    "trustNote": "By getting your free report, you accept our <privacy>Privacy Policy</privacy> and <terms>Terms of Service</terms>.",
+    "registerMetaTitle": "Register with Optimum Financial Group",
+    "registerMetaDescription": "Leave your information and an Optimum Financial Group specialist will contact you about your credit.",
+    "registerHeading": "Register with Optimum Financial Group",
+    "registerSubheading": "Leave your information and a specialist will contact you about your credit and your options.",
+    "registerFormHint": "We'll use this to confirm your registration and contact you.",
+    "registerSubmit": "Register",
+    "registerThanksTitle": "You're registered!",
+    "registerThanksBody": "Thanks — we received your information. An Optimum Financial Group specialist will contact you soon.",
+    "registerCheckEmail": "Check your email for the confirmation",
+    "registerCheckSms": "We also sent a text confirmation",
+    "registerTrustNote": "By registering, you accept our <privacy>Privacy Policy</privacy> and <terms>Terms of Service</terms>."
   },
   "prepaidOnboard": {
     "pipelineCta": "Paid invite",
@@ -2640,6 +2882,34 @@
       "bank_m4": "Bank month 4",
       "bank_m5": "Bank month 5",
       "bank_m6": "Bank month 6"
+    },
+    "uw": {
+      "loading": "Loading documents…",
+      "identifiers": "SSN / EIN",
+      "reveal": "Reveal",
+      "revealLogged": "Every reveal and document view is logged.",
+      "view": "View",
+      "requestNew": "Request new",
+      "replace": "Replace",
+      "upload": "Upload",
+      "status_pending": "To review",
+      "status_approved": "Approved",
+      "status_rejected": "New one requested",
+      "requestedReason": "Requested: {{reason}}",
+      "reasonPlaceholder": "What's wrong / what to send (client sees this)",
+      "sendRequest": "Send request",
+      "cancel": "Cancel",
+      "requestHint": "Request new: the client gets an email + text with their upload link, and the application moves to Awaiting docs.",
+      "requested": "Request sent to the client",
+      "requestError": "Could not request the document",
+      "uploaded": "Document uploaded",
+      "uploadError": "Could not upload",
+      "openError": "Could not open the document",
+      "notes": "Underwriting notes",
+      "noNotes": "No notes yet.",
+      "notePlaceholder": "Add a note for the OFG team…",
+      "addNote": "Add note",
+      "noteError": "Could not save the note"
     }
   },
   "portalFunding": {
@@ -2796,6 +3066,781 @@
     "source": {
       "company": "Company QR",
       "session": "Session QR"
+    }
+  },
+  "adminPeople": {
+    "roleUnderwriter": "Underwriter (funding only)",
+    "roleUnderwriterHint": "Funding board only: documents, stages, notes, document requests. No clients, CRM or settings."
+  },
+  "billing": {
+    "title": "Billing",
+    "subtitle": "Your OFG platform plan, this month's invoice and usage.",
+    "managePayment": "Manage payment",
+    "stripeMissing": "Stripe is not connected yet — usage is being recorded, and invoices will be issued once STRIPE_SECRET_KEY is set.",
+    "prevMonth": "Previous month",
+    "nextMonth": "Next month",
+    "estimateTitle": "Estimated invoice this month",
+    "invoiceTitle": "Invoice for this month",
+    "startedOn": "Billing started {{date}}",
+    "notStarted": "Billing starts with the first production run after deploy",
+    "proratedHint": "{{days}} of {{total}} days × {{price}}/month",
+    "qtyHint": "{{qty}} × {{price}}",
+    "mcpCalls": "AI Assistant actions",
+    "claudeCost": "Claude provider cost",
+    "billedHint": "Billed per action",
+    "dailyTitle": "Daily activity",
+    "claudeTitle": "Claude usage",
+    "aiRowHint": "{{calls}} calls · {{input}} in / {{output}} out tokens",
+    "noUsage": "No usage yet for this month.",
+    "byStaffTitle": "Usage by staff",
+    "staffRow": "{{mcp}} MCP · {{ai}} Claude ({{cost}})",
+    "mcpToolsTitle": "Top AI assistant actions",
+    "pricesTitle": "Price list",
+    "pricesHint": "Measured cost is the real average provider cost over the last 30 days; suggested = cost × markup. Only billable rows go on the invoice.",
+    "calls30d_one": "{{count}} in last 30 days",
+    "calls30d_other": "{{count}} in last 30 days",
+    "measuredCost": "Measured cost",
+    "suggested": "Suggested ({{markup}}×)",
+    "billable": "Billable",
+    "priceAria": "Price for {{action}}",
+    "save": "Save",
+    "priceSaved": "Price saved",
+    "saveError": "Could not save",
+    "invoicesTitle": "Invoices",
+    "noInvoices": "No invoices yet — the first one is issued on the 1st of next month.",
+    "view": "View",
+    "retry": "Retry",
+    "retryDone": "Invoice issued",
+    "retryError": "Could not issue the invoice",
+    "portalError": "Could not open the billing portal",
+    "emailTitle": "Invoice email",
+    "emailHint": "Stripe sends invoices and receipts to this address.",
+    "emailSaved": "Invoice email saved",
+    "status": {
+      "in_progress": "In progress",
+      "pending": "Pending",
+      "open": "Open",
+      "paid": "Paid",
+      "failed": "Failed",
+      "void": "Void",
+      "uncollectible": "Uncollectible",
+      "issuing": "Issuing…"
+    },
+    "units": {
+      "month": "per month",
+      "call": "per action"
+    },
+    "actions": {
+      "mcp_tool_call": "AI Assistant Connector",
+      "ai_credit_report_read": "Credit report reads",
+      "ai_credit_review": "Credit analysis review (auditor)",
+      "ai_progress_report": "Progress report AI",
+      "ai_inbound_reply": "Inbound AI replies",
+      "ai_reply_suggestions": "Reply suggestions",
+      "ai_admin_chat": "Admin AI chat",
+      "ai_morning_digest": "Morning digest",
+      "suite_credit_intelligence": "Credit Intelligence Engine",
+      "suite_communications_hub": "Communications Hub",
+      "suite_crm_automations": "CRM, Pipeline & Automations",
+      "suite_cloud_infrastructure": "Cloud Infrastructure & Data",
+      "suite_security_compliance": "Security & Compliance",
+      "suite_managed_support": "Managed Support & Releases"
+    },
+    "pm": {
+      "title": "Payment method",
+      "autoHint": "Invoices are charged automatically on the 1st of each month.",
+      "emailHint": "No payment method saved — invoices are emailed with a payment link (due in 15 days).",
+      "autopay": "Autopay on",
+      "billedTo": "Billed to",
+      "bank": "Bank account",
+      "none": "Not added",
+      "secure": "Secured by Stripe — card details never touch our servers.",
+      "methods": "Credit or debit card — saved securely for automatic monthly billing.",
+      "add": "Add payment method",
+      "update": "Update payment method",
+      "save": "Save payment method",
+      "cancel": "Cancel",
+      "saved": "Payment method saved — autopay is on",
+      "error": "Could not save the payment method",
+      "notConfigured": "Stripe publishable key is missing (STRIPE_PUBLISHABLE_KEY)."
+    },
+    "ownerOnlyHint": "Provider cost · only you see this",
+    "staffRowMcp": "{{mcp}} AI assistant actions",
+    "projectedInline": "Projected month-end: {{amount}}",
+    "table": {
+      "title": "Pricing — {{month}}",
+      "hint": "Exactly what will be invoiced for this month, line by line.",
+      "empty": "No billable items for this month.",
+      "item": "Item",
+      "unit": "Unit",
+      "qty": "Quantity",
+      "rate": "Rate",
+      "amount": "Amount",
+      "fullMonth": "Full month ({{days}} days)",
+      "days": "{{days}} of {{total}} days",
+      "totalSoFar": "Total so far",
+      "projected": "Projected at month end",
+      "projectedRow": "{{item}}: ~{{qty}} → {{amount}}",
+      "projectedHint": "Projection extrapolates this month's daily pace; the invoice uses actual usage.",
+      "desc": {
+        "mcp_tool_call": "Actions executed by OFG's AI assistant inside the platform (MCP), billed per action.",
+        "suite_credit_intelligence": "AI-powered reading of every 3-bureau report and the full credit analysis workflow.",
+        "suite_communications_hub": "Every client conversation in one place, on any channel.",
+        "suite_crm_automations": "Run the business end-to-end, from lead to active client.",
+        "suite_cloud_infrastructure": "Fast, always-on cloud that scales with OFG.",
+        "suite_security_compliance": "Client data protected at every layer.",
+        "suite_managed_support": "A dedicated team keeping the platform improving."
+      },
+      "suiteGroup": "OFG Operating Suite — monthly subscription",
+      "usageGroup": "Usage",
+      "suiteSubtotal": "Suite subtotal"
+    },
+    "platform": {
+      "title": "Platform",
+      "subtitle": "What the platform fee includes — technical overview with live numbers",
+      "liveSince": "live since {{date}}",
+      "kpi": {
+        "clients": "Clients",
+        "activeClients": "Active clients",
+        "staff": "Staff users",
+        "affiliates": "Affiliates",
+        "apiRoutes": "API routes",
+        "dbTables": "Database tables",
+        "roles": "Access roles",
+        "jobs": "Scheduled jobs"
+      },
+      "activityTitle": "Activity — {{month}}",
+      "activity": {
+        "credit_report_reads": "Credit report reads",
+        "credit_analyses": "Credit analyses",
+        "progress_reports": "Progress reports",
+        "ai_calls": "AI model calls",
+        "mcp_calls": "MCP tool calls",
+        "sms_sent": "SMS sent",
+        "sms_received": "SMS received",
+        "calls": "Calls",
+        "call_minutes": "Call minutes",
+        "call_insights": "Call transcripts + insights",
+        "whatsapp_messages": "WhatsApp messages",
+        "emails": "Emails",
+        "tasks_created": "Tasks created"
+      },
+      "archTitle": "Technical architecture",
+      "arch": {
+        "frontend": {
+          "title": "Web application",
+          "body": "Single-page app in React 18 + TypeScript, built with Vite; Redux Toolkit state with async thunks; Tailwind design system with light/dark themes; fully responsive; English/Spanish i18n; installable PWA-style admin and client portals."
+        },
+        "api": {
+          "title": "API layer",
+          "body": "Node.js + Express 5 in TypeScript, deployed as serverless functions on a global edge network: {{routes}} routes in one bundle, up to {{seconds}} s per request for long AI reads, per-route rate limiting, OpenAPI (Swagger) contract."
+        },
+        "data": {
+          "title": "Database",
+          "body": "Distributed, MySQL 8–compatible serverless SQL database with {{tables}} tables, TLS-only connections, versioned migrations, transactional writes with retry on lock contention, automated backups."
+        },
+        "realtime": {
+          "title": "Realtime",
+          "body": "WebSocket pub/sub channels push new messages, calls, transcripts and notifications to every open screen instantly — no refresh."
+        },
+        "storage": {
+          "title": "Documents & files",
+          "body": "Client documents and credit reports encrypted at rest with AES-256-GCM (per-file IV + auth tag) before upload to private object storage; short-lived signed download links."
+        },
+        "security": {
+          "title": "Security & access",
+          "body": "Signed session tokens with server-side revocation, email/SMS one-time codes, {{roles}} role levels with section locks, CORS allow-list, webhook signature verification, full audit log of AI and MCP actions."
+        },
+        "jobs": {
+          "title": "Background jobs",
+          "body": "{{jobs}} scheduled jobs: a 5-minute queue worker (notifications, reminders, report reads, call insights, billing) and a weekday morning digest; idempotent claims so no job runs twice."
+        },
+        "ai": {
+          "title": "AI pipeline",
+          "body": "Credit reports read by a large language model with strict structured outputs, deterministic Spec v2.1 rules engine, self-check against report totals, double independent audit with consensus, and human review gate before release."
+        },
+        "voice": {
+          "title": "Voice & messaging",
+          "body": "Browser softphone (WebRTC) with recording, forwarding, voicemail, 3-way calling and keypad; two-way SMS/MMS and WhatsApp; automatic transcripts and call insights; E.164 phone normalization."
+        },
+        "observability": {
+          "title": "Quality & operations",
+          "body": "1,300+ automated tests (unit, integration, end-to-end), typed contracts shared between client and API, release notes generated on each deploy, structured logging."
+        }
+      },
+      "modulesTitle": "Modules included ({{count}})",
+      "modules": {
+        "crm": {
+          "title": "CRM & contacts",
+          "body": "Clients, prospects and address book with duplicate protection, labels, notes and full timeline."
+        },
+        "pipeline": {
+          "title": "Sales pipeline",
+          "body": "Stage-based board from prospect to active client, assignment and section locks."
+        },
+        "conversations": {
+          "title": "Conversations hub",
+          "body": "Unified inbox for SMS, MMS, WhatsApp, email and calls per client and per OFG number."
+        },
+        "voice": {
+          "title": "Voice",
+          "body": "Softphone, recordings, voicemail, forwarding, transcripts and AI call insights."
+        },
+        "creditAnalysis": {
+          "title": "Credit analysis engine",
+          "body": "Reads any 3-bureau report format, builds the 5-page analysis PDF with rounds, legal basis, tiers and projections, gated by an AI auditor."
+        },
+        "progressReports": {
+          "title": "Progress reports",
+          "body": "Round-by-round before/after reading and branded progress PDFs delivered to clients."
+        },
+        "docReview": {
+          "title": "Document review",
+          "body": "Intake and approval of client IDs, proofs of address and agreements."
+        },
+        "funding": {
+          "title": "Business funding",
+          "body": "Funding applications board with underwriting panel."
+        },
+        "tasks": {
+          "title": "Tasks",
+          "body": "Staff and client tasks with due dates, overdue alerts and assignment."
+        },
+        "payments": {
+          "title": "Payments & subscriptions",
+          "body": "Client payments, split payments and recurring plans."
+        },
+        "affiliates": {
+          "title": "Affiliates & referrals",
+          "body": "Referral partners, scoped affiliate pipeline and attribution."
+        },
+        "eventMarketing": {
+          "title": "Event marketing",
+          "body": "Event landing pages, QR registration and lead capture with staff alerts."
+        },
+        "education": {
+          "title": "Education",
+          "body": "Client learning content and templates."
+        },
+        "reminders": {
+          "title": "Reminder flows",
+          "body": "Automated SMS/email sequences for documents, payments and next steps."
+        },
+        "aiAssistant": {
+          "title": "Admin AI assistant",
+          "body": "Ask questions about clients, tasks and reports inside the app, with citations."
+        },
+        "mcp": {
+          "title": "MCP connector",
+          "body": "Secure OAuth connector so an AI assistant can search, read and update platform data, with full audit logging."
+        },
+        "clientPortal": {
+          "title": "Client portal",
+          "body": "Clients see progress, upload documents and sign agreements."
+        },
+        "notifications": {
+          "title": "Team notifications",
+          "body": "Per-staff email, in-app and SMS alerts with preferences."
+        },
+        "billing": {
+          "title": "Billing",
+          "body": "This page: plan, invoices, autopay and usage."
+        }
+      },
+      "integrationsTitle": "Integrations & who pays",
+      "owner": {
+        "included": "Included in plan",
+        "ofg": "OFG account"
+      },
+      "integrations": {
+        "hosting": {
+          "title": "Hosting & serverless compute",
+          "body": "Global edge network, functions, builds and deploys."
+        },
+        "database": {
+          "title": "Managed database",
+          "body": "Storage, compute and backups."
+        },
+        "realtime": {
+          "title": "Realtime messaging",
+          "body": "WebSocket channels for live updates."
+        },
+        "storage": {
+          "title": "Encrypted file storage / CDN",
+          "body": "Documents, PDFs and media."
+        },
+        "email": {
+          "title": "Transactional email",
+          "body": "Notifications, digests and reports."
+        },
+        "platformBilling": {
+          "title": "Platform billing",
+          "body": "Card/ACH processing for this invoice."
+        },
+        "telephony": {
+          "title": "Telephony & SMS carrier",
+          "body": "Numbers, SMS/MMS, minutes, recordings and transcription."
+        },
+        "ai": {
+          "title": "AI model provider",
+          "body": "Report reading, auditor, call insights and assistants."
+        },
+        "whatsapp": {
+          "title": "WhatsApp business messaging",
+          "body": "WhatsApp channel."
+        },
+        "crm": {
+          "title": "External CRM sync",
+          "body": "Contact and deal synchronization."
+        },
+        "creditSoftware": {
+          "title": "Credit-repair software sync",
+          "body": "Client and stage sync."
+        },
+        "clientPayments": {
+          "title": "Client payment gateway",
+          "body": "Payments collected from OFG's clients."
+        },
+        "creditMonitoring": {
+          "title": "Credit monitoring enrollment",
+          "body": "Client credit report enrollment links."
+        }
+      }
+    },
+    "suite": {
+      "eyebrow": "Your subscription",
+      "name": "OFG Operating Suite",
+      "tagline": "Six managed services that run OFG's credit repair operation — one monthly subscription.",
+      "services": {
+        "suite_credit_intelligence": {
+          "summary": "AI-powered reading of every 3-bureau report and the full credit analysis workflow.",
+          "features": [
+            "AI report reading (all major formats)",
+            "5-page credit analysis PDFs",
+            "Double-audit accuracy gate + review",
+            "Round progress reports & PDFs"
+          ]
+        },
+        "suite_communications_hub": {
+          "summary": "Every client conversation in one place, on any channel.",
+          "features": [
+            "Unified inbox: SMS, MMS, WhatsApp, email",
+            "Browser softphone, forwarding, voicemail",
+            "Call recordings, transcripts & insights",
+            "Smart routing per OFG number"
+          ]
+        },
+        "suite_crm_automations": {
+          "summary": "Run the business end-to-end, from lead to active client.",
+          "features": [
+            "Clients, contacts & pipeline board",
+            "Tasks, reminders & overdue alerts",
+            "Client and affiliate portals",
+            "Event landing pages & QR registration"
+          ]
+        },
+        "suite_cloud_infrastructure": {
+          "summary": "Fast, always-on cloud that scales with OFG.",
+          "features": [
+            "Global serverless hosting",
+            "Managed SQL database + backups",
+            "Realtime live updates",
+            "Encrypted document storage"
+          ]
+        },
+        "suite_security_compliance": {
+          "summary": "Client data protected at every layer.",
+          "features": [
+            "AES-256 encryption at rest, TLS in transit",
+            "Role-based access & section locks",
+            "Full audit log of AI and staff actions",
+            "Signed webhooks & monitoring"
+          ]
+        },
+        "suite_managed_support": {
+          "summary": "A dedicated team keeping the platform improving.",
+          "features": [
+            "Ongoing maintenance & bug fixes",
+            "New features every release",
+            "Priority support",
+            "Release notes on every deploy"
+          ]
+        }
+      }
+    }
+  },
+  "reportDelivery": {
+    "generated": "Report generated",
+    "by": "by {{name}}",
+    "opened_one": "Client opened the report",
+    "opened_other": "Client opened the report {{count}}×",
+    "linkIssued": "link sent {{date}}",
+    "partner": "Partner",
+    "channel": {
+      "email": "Email → {{who}}",
+      "sms": "SMS → {{who}}",
+      "whatsapp": "WhatsApp → {{who}}"
+    },
+    "recipient": {
+      "client": "Client",
+      "partner": "Partner",
+      "admin": "Staff",
+      "contact": "Contact",
+      "other": "Recipient"
+    },
+    "role": {
+      "realtor_broker": "Realtor",
+      "loan_officer": "Loan officer",
+      "one_off": "Referral",
+      "affiliate_partner": "Affiliate partner"
+    },
+    "status": {
+      "sent": "Sent",
+      "failed": "Failed",
+      "delivered": "Delivered",
+      "undelivered": "Undelivered",
+      "queued": "Queued",
+      "sending": "Sending",
+      "accepted": "Accepted",
+      "read": "Read"
+    },
+    "resend": "Resend",
+    "sentTo_one": "Sent to {{count}} recipient",
+    "sentTo_other": "Sent to {{count}} recipients",
+    "notSent": "Not sent yet",
+    "smsDelivered_one": "{{count}} SMS delivered",
+    "smsDelivered_other": "{{count}} SMS delivered",
+    "failed_one": "{{count}} failed",
+    "failed_other": "{{count}} failed",
+    "openedChip_one": "Opened 1×",
+    "openedChip_other": "Opened {{count}}×",
+    "notOpened": "Not opened yet",
+    "lastSent": "Last sent {{date}}"
+  },
+  "caseHygiene": {
+    "status_behind_stage": "Client status is behind the case stage",
+    "proof_of_address_pending": "Proof of address pending {{days}} days",
+    "no_round_schedule": "No round schedule set",
+    "id_docs_pending": "ID documents pending review ({{days}} days)"
+  },
+  "productivity": {
+    "noAccess": "The scorecard is available to scored staff and managers.",
+    "team": "Team today",
+    "ringLabel": "Today's grade {{grade}}",
+    "liveHint": "live · locks at 4:40 PM",
+    "streak": "Streak",
+    "streakHint": "days at B or better",
+    "week": "This week",
+    "trend": "Daily trend",
+    "refresh": "Refresh",
+    "levelNext": "{{days}}/{{needed}} days at B+ to unlock {{level}}",
+    "levelMax": "Every metric unlocked — keep it up!",
+    "unlocksAt": "Unlocks at {{level}}",
+    "points_one": "{{count}} pt",
+    "points_other": "{{count}} pts",
+    "nothingPending": "Nothing pending — not graded",
+    "slackNotConnected": "Slack not connected — not graded",
+    "slackSetupHint": "Slack metrics are not graded until the OFG Bot is connected.",
+    "details_one": "{{count}} item",
+    "details_other": "{{count}} items",
+    "progress": {
+      "ratio": "{{done}} of {{total}} done",
+      "count": "{{done}} of {{target}}",
+      "zero_one": "{{count}} correction",
+      "zero_other": "{{count}} corrections"
+    },
+    "levels": {
+      "bronze": "Bronze",
+      "silver": "Silver",
+      "gold": "Gold"
+    },
+    "profiles": {
+      "ops": "Operations",
+      "sales": "Sales"
+    },
+    "status": {
+      "graded": "Graded",
+      "day_off": "Day off — not graded",
+      "weekend": "Weekend — not graded",
+      "no_work": "Nothing to grade yet"
+    },
+    "cheer": {
+      "A": "Outstanding — you're crushing it! 🎉",
+      "B": "Great day — so close to an A!",
+      "C": "Solid — a few items left to close.",
+      "D": "Let's pick it up — check the open items.",
+      "F": "Tough day — start with the biggest metric."
+    },
+    "widget": {
+      "title": "My scorecard",
+      "team": "Team scorecards"
+    },
+    "daysOff": {
+      "title": "Days off",
+      "hint": "Days off are not graded and don't break streaks.",
+      "person": "Person",
+      "day": "Day",
+      "reason": "Reason (optional)",
+      "add": "Add day off",
+      "remove": "Remove",
+      "saved": "Day off saved",
+      "required": "Required"
+    },
+    "badges": {
+      "title": "Badges",
+      "hint": "{{earned}} of {{total}} earned",
+      "items": {
+        "first_a": {
+          "title": "First A",
+          "hint": "Score 90+ on a day"
+        },
+        "streak_5": {
+          "title": "On fire",
+          "hint": "5 days in a row at B or better"
+        },
+        "streak_10": {
+          "title": "Unstoppable",
+          "hint": "10 days in a row at B or better"
+        },
+        "level_silver": {
+          "title": "Silver",
+          "hint": "Unlock the Silver level"
+        },
+        "level_gold": {
+          "title": "Gold",
+          "hint": "Unlock the Gold level"
+        },
+        "perfect_week": {
+          "title": "Perfect week",
+          "hint": "A on all 5 workdays"
+        },
+        "inbox_zero": {
+          "title": "Inbox zero",
+          "hint": "Answer 5+ inbound in under 2 h in a day"
+        },
+        "same_day_hero": {
+          "title": "Same-day hero",
+          "hint": "3+ reports with partner copy in one day"
+        },
+        "closer": {
+          "title": "Closer",
+          "hint": "2 closes in a week"
+        },
+        "hot_hands": {
+          "title": "Hot hands",
+          "hint": "10 connected calls in a day"
+        }
+      }
+    },
+    "metrics": {
+      "daily_list": {
+        "title": "Daily list contacted",
+        "target": "Tasks + rounds due today, all contacted before 4 PM"
+      },
+      "inbound_reply": {
+        "title": "Inbound replies < 2 h",
+        "target": "Every inbound message or missed call answered within 2 hours"
+      },
+      "rounds_on_time": {
+        "title": "Rounds on time",
+        "target": "95% uploaded within 2 days of the calendar target"
+      },
+      "report_partner": {
+        "title": "Report + partner same day",
+        "target": "Client report and partner copy sent the same day"
+      },
+      "call_notes": {
+        "title": "Note after every call",
+        "target": "The call transcript or a thread note counts"
+      },
+      "corrections": {
+        "title": "Zero corrections",
+        "target": "No published round report reset this week"
+      },
+      "new_client_start": {
+        "title": "New client started < 1 day",
+        "target": "New clients moved into their first round within 24 h"
+      },
+      "slack_report": {
+        "title": "4 PM Slack report",
+        "target": "Posted in the team group DM by 4:15 PM"
+      },
+      "hot_warm": {
+        "title": "Hot & warm leads",
+        "target": "Hot leads contacted today, warm every 48 h (3 unanswered tries = done)"
+      },
+      "connected_calls": {
+        "title": "Connected calls",
+        "target": "5 answered calls over 2 minutes a day"
+      },
+      "closes": {
+        "title": "Closes",
+        "target": "2 prospects converted to clients a week (pro-rated)"
+      },
+      "spanish_reply": {
+        "title": "Spanish replies < 2 h",
+        "target": "Spanish-speaking leads answered within 2 hours"
+      },
+      "collections": {
+        "title": "Collections on time",
+        "target": "90% of installments paid by their due date"
+      },
+      "next_step": {
+        "title": "Next step on every lead",
+        "target": "A scheduled date + note on each hot/warm lead"
+      },
+      "daily_posts": {
+        "title": "Daily posts",
+        "target": "Facebook, Instagram and TikTok shared in #ofg-marketing"
+      }
+    }
+  },
+  "reportApproval": {
+    "checks": {
+      "account_totals": "Account totals vs the pull summary",
+      "balances": "Balances vs the pull summary",
+      "limits": "Revolving limits vs the pull summary",
+      "inquiries": "Inquiries vs the pull summary",
+      "public_records": "Collections / public records",
+      "scores": "Scores",
+      "chronology": "Report dates (After newer than Before)",
+      "contradictions": "One state per item per bureau",
+      "target_count": "Every target in the PDF",
+      "positives_in_targets": "No negative account in Positives",
+      "projection": "Projection caps (+100, 760)",
+      "pages_croa": "3 pages + CROA disclosure",
+      "language": "Facts-only language"
+    },
+    "notApplicable": "not printed on this pull",
+    "passedCount": "{{count}} of {{total}} checks passed",
+    "error": "Approval failed",
+    "sent": "Approved — report sent to the client",
+    "releasedSilent": "Approved — report released to the portal (no message sent)",
+    "reasonMin": "Write at least 10 characters explaining why it is safe to send",
+    "doneSent": "Sent to the client · approved by {{who}}",
+    "doneSilent": "Released to the portal (no message) · approved by {{who}}",
+    "legacy": "Sent at publish (before the approval step)",
+    "pendingTitle": "Waiting for approval — not sent yet",
+    "needsReviewTitle": "Self-check failed — held from the client",
+    "pendingBody": "The client and partners get nothing (and the portal stays hidden) until the language owner, Cesar or Alex approves.",
+    "pendingBodySilent": "Old round: approving releases it to the client portal without email or SMS.",
+    "needsReviewBody": "Fix the data below (usually: re-save the SmartCredit PDF after every account loads), reset the round and publish again.",
+    "approveSend": "Approve & send",
+    "approveRelease": "Approve & release",
+    "notApprover": "The language owner, Cesar or Alex can approve this report.",
+    "reasonPlaceholder": "Why it is safe to send despite the failed check (logged)",
+    "override": "Override and send",
+    "fixAndRepublish": "Only Cesar or Alex can override a failed self-check.",
+    "queueTitle_one": "{{count}} progress report waiting for approval",
+    "queueTitle_other": "{{count}} progress reports waiting for approval",
+    "failedCount_one": "{{count}} check failed",
+    "failedCount_other": "{{count}} checks failed",
+    "readyToSend": "Self-check passed — ready to send",
+    "previewPass": "Self-check passed — after publishing, Approve & send delivers it.",
+    "previewFail": "Self-check failed — publishing holds this report from the client.",
+    "publishedTitle": "Published — waiting for approval",
+    "publishedBody": "Round {{round}} is saved and the pipeline moved. Nothing was sent: the client sees it once it is approved."
+  },
+  "leadInsights": {
+    "title": "Credit insights",
+    "subtitle": "From the latest credit report read",
+    "empty": "No credit report read yet — insights appear after the first analysis.",
+    "heat": "Heat",
+    "heatTitle": "Heat score {{score}}/100 — how urgent and how good a fit this lead is",
+    "readiness": {
+      "ready": "Mortgage ready",
+      "close": "Close",
+      "long": "Long program"
+    },
+    "middleToTarget": "{{middle}} → {{target}}",
+    "pointsNeeded": "{{count}} pts to {{target}}",
+    "atTarget": "At or above {{target}}",
+    "projected": "Projected after Round 4",
+    "reachesIn": "Reaches {{target}} by Round {{round}} (est.)",
+    "notWithin": "Not within Round 4 (est.)",
+    "activeLoan": "Mortgage file",
+    "activeLoanBy": "Mortgage file · {{name}}",
+    "estValue": "Est. value",
+    "value": "~${{value}}",
+    "negatives": "Negatives",
+    "negDetail": "{{collections}} coll · {{chargeOffs}} CO · {{lates}} late",
+    "derogBalance": "Derogatory balance",
+    "utilization": "Card utilization",
+    "noOpenCard": "No open card in good standing",
+    "inquiries": "Inquiries",
+    "inquiriesDetail": "{{d120}} in 120 days · {{d12m}} in 12 months",
+    "sameDay": "{{count}} the same day",
+    "newAccount": "New account",
+    "fileStrength": "File Strength",
+    "program": "Program",
+    "tier": {
+      "standard": "Standard",
+      "complex": "Complex"
+    },
+    "plusAu": "+ AU line",
+    "quickWins": "Quick wins",
+    "quickWin": {
+      "duplicate_inquiries": "Duplicate inquiries",
+      "inquiries_aging_off": "Inquiries aging off",
+      "paid_collections": "Paid collections",
+      "accuracy_flags": "Accuracy flags",
+      "personal_info": "Personal-info variances"
+    },
+    "nextAction": "Next action",
+    "action": {
+      "call_partner_before_underwriting": "Call the partner — file before underwriting",
+      "call_today_active_loan": "Call today — loan file in progress",
+      "offer_au_after_closing": "Offer an AU line after closing",
+      "start_round1": "Enroll and start Round 1",
+      "pull_full_report": "Pull the full 3-bureau report",
+      "offer_au": "Offer an AU tradeline",
+      "ready_refer_lender": "Ready — refer back to the lender"
+    },
+    "reasonsTitle": "Why it is hot",
+    "reason": {
+      "active_loan_file": "Active mortgage file",
+      "partner_referred": "Partner referral",
+      "shopping_inquiries": "Shopping for credit",
+      "new_account_90d": "New account (90 days)",
+      "close_to_target": "Close to target",
+      "quick_wins": "Quick wins",
+      "needs_repair": "Has items to repair",
+      "already_ready": "Already at target"
+    },
+    "more": "More from the report",
+    "scoreFactors": "Score factors",
+    "oldest": "Oldest account",
+    "months": "{{count}} mo",
+    "thinFile": "Thin file",
+    "student": "Student loans",
+    "medical": "Medical collections",
+    "medicalDetail": "{{count}} · ${{balance}}",
+    "addresses": "Addresses",
+    "addressesDetail": "{{count}} · {{states}}",
+    "lenderSim": "Lender simulation",
+    "history": "Score history",
+    "historyEmpty": "One read so far — history builds with each new report.",
+    "estimate": "Estimates, not guarantees.",
+    "sortLabel": "Sort prospects",
+    "sortNewest": "Newest first",
+    "sortHeat": "Hottest first (credit insights)",
+    "leaderboard": {
+      "title": "Referral partner leaderboard",
+      "subtitle": "Leads, conversions and open pipeline by partner",
+      "days": "Last {{count}} days",
+      "partner": "Partner",
+      "leads": "Leads",
+      "hot": "Hot",
+      "converted": "Converted",
+      "avgMiddle": "Avg middle",
+      "pipeline": "Open pipeline",
+      "lastLead": "Last lead",
+      "empty": "No partner-referred leads in this period.",
+      "unlinked": "Requested By on lender reports — no partner linked yet",
+      "unlinkedHint": "Link these names to a partner so their leads and updates route to them.",
+      "backfill": "Build insights for past reports",
+      "backfilling": "Building…",
+      "backfillDone": "Built {{built}} of {{scanned}} reports"
     }
   }
 }

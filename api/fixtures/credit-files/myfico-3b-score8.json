@@ -1,0 +1,1373 @@
+{
+ "provider": "unknown",
+ "reportDate": "8/25/2026",
+ "scores": {
+  "TU": 510,
+  "EX": 545,
+  "EQ": 559
+ },
+ "accounts": [
+  {
+   "creditor": "Sun Loans",
+   "mask": "7000",
+   "section": "installment",
+   "headerStatus": null,
+   "bureaus": {
+    "TU": {
+     "accountNumber": null,
+     "highBalance": null,
+     "lastVerified": null,
+     "dateLastActivity": null,
+     "dateReported": "08/06/2026",
+     "dateOpened": "07/2026",
+     "balance": 2759,
+     "accountRating": null,
+     "description": null,
+     "disputeStatus": null,
+     "creditorType": null,
+     "accountStatus": "Open",
+     "paymentStatus": "Paid or paying as agreed",
+     "remarks": null,
+     "paymentAmount": null,
+     "lastPayment": null,
+     "termLength": null,
+     "pastDue": null,
+     "accountType": "Other",
+     "paymentFrequency": null,
+     "creditLimit": null,
+     "late30": null,
+     "late60": null,
+     "late90": null,
+     "closedDate": null,
+     "gridMarks": []
+    },
+    "EX": {
+     "accountNumber": null,
+     "highBalance": null,
+     "lastVerified": null,
+     "dateLastActivity": null,
+     "dateReported": "07/31/2026",
+     "dateOpened": "07/2026",
+     "balance": 2759,
+     "accountRating": null,
+     "description": null,
+     "disputeStatus": null,
+     "creditorType": null,
+     "accountStatus": "Open",
+     "paymentStatus": "This is an account in good standing",
+     "remarks": null,
+     "paymentAmount": null,
+     "lastPayment": null,
+     "termLength": null,
+     "pastDue": null,
+     "accountType": "Other",
+     "paymentFrequency": null,
+     "creditLimit": null,
+     "late30": null,
+     "late60": null,
+     "late90": null,
+     "closedDate": null,
+     "gridMarks": []
+    }
+   },
+   "confident": true
+  },
+  {
+   "creditor": "First Financial Of N",
+   "mask": "7001",
+   "section": "installment",
+   "headerStatus": null,
+   "bureaus": {
+    "EQ": {
+     "accountNumber": null,
+     "highBalance": null,
+     "lastVerified": null,
+     "dateLastActivity": "06/2026",
+     "dateReported": "07/31/2026",
+     "dateOpened": "07/2026",
+     "balance": 97759,
+     "accountRating": null,
+     "description": null,
+     "disputeStatus": null,
+     "creditorType": null,
+     "accountStatus": "Open",
+     "paymentStatus": "Pays account as agreed",
+     "remarks": null,
+     "paymentAmount": null,
+     "lastPayment": null,
+     "termLength": null,
+     "pastDue": null,
+     "accountType": "Vehicle Loan",
+     "paymentFrequency": null,
+     "creditLimit": null,
+     "late30": null,
+     "late60": null,
+     "late90": null,
+     "closedDate": null,
+     "gridMarks": []
+    },
+    "TU": {
+     "accountNumber": null,
+     "highBalance": null,
+     "lastVerified": null,
+     "dateLastActivity": "07/2026",
+     "dateReported": "07/31/2026",
+     "dateOpened": "07/2026",
+     "balance": 97759,
+     "accountRating": null,
+     "description": null,
+     "disputeStatus": null,
+     "creditorType": null,
+     "accountStatus": "Open",
+     "paymentStatus": "Paid or paying as agreed",
+     "remarks": null,
+     "paymentAmount": null,
+     "lastPayment": null,
+     "termLength": null,
+     "pastDue": null,
+     "accountType": "Vehicle Loan",
+     "paymentFrequency": null,
+     "creditLimit": null,
+     "late30": null,
+     "late60": null,
+     "late90": null,
+     "closedDate": null,
+     "gridMarks": []
+    },
+    "EX": {
+     "accountNumber": null,
+     "highBalance": null,
+     "lastVerified": null,
+     "dateLastActivity": null,
+     "dateReported": "07/31/2026",
+     "dateOpened": "07/2026",
+     "balance": 97759,
+     "accountRating": null,
+     "description": null,
+     "disputeStatus": null,
+     "creditorType": null,
+     "accountStatus": "Open",
+     "paymentStatus": "This is an account in good standing",
+     "remarks": null,
+     "paymentAmount": null,
+     "lastPayment": null,
+     "termLength": null,
+     "pastDue": null,
+     "accountType": "Vehicle Loan",
+     "paymentFrequency": null,
+     "creditLimit": null,
+     "late30": null,
+     "late60": null,
+     "late90": null,
+     "closedDate": null,
+     "gridMarks": []
+    }
+   },
+   "confident": true,
+   "joint": true
+  },
+  {
+   "creditor": "Together Loans",
+   "mask": "7002",
+   "section": "installment",
+   "headerStatus": null,
+   "bureaus": {
+    "EX": {
+     "accountNumber": null,
+     "highBalance": null,
+     "lastVerified": null,
+     "dateLastActivity": null,
+     "dateReported": "06/09/2026",
+     "dateOpened": "12/2025",
+     "balance": null,
+     "accountRating": null,
+     "description": null,
+     "disputeStatus": null,
+     "creditorType": null,
+     "accountStatus": "Closed",
+     "paymentStatus": "Account paid satisfactorily",
+     "remarks": null,
+     "paymentAmount": null,
+     "lastPayment": null,
+     "termLength": null,
+     "pastDue": null,
+     "accountType": "Other",
+     "paymentFrequency": null,
+     "creditLimit": null,
+     "late30": null,
+     "late60": null,
+     "late90": null,
+     "closedDate": null,
+     "gridMarks": []
+    }
+   },
+   "confident": true
+  },
+  {
+   "creditor": "Syncb/Mor Furniture",
+   "mask": "7003",
+   "section": "revolving",
+   "headerStatus": null,
+   "bureaus": {
+    "EQ": {
+     "accountNumber": null,
+     "highBalance": null,
+     "lastVerified": null,
+     "dateLastActivity": "04/2026",
+     "dateReported": "08/02/2026",
+     "dateOpened": "10/2025",
+     "balance": 0,
+     "accountRating": null,
+     "description": null,
+     "disputeStatus": null,
+     "creditorType": null,
+     "accountStatus": "Closed",
+     "paymentStatus": "Not more than three payments past due",
+     "remarks": "Account closed by credit grantor",
+     "paymentAmount": null,
+     "lastPayment": null,
+     "termLength": null,
+     "pastDue": null,
+     "accountType": "Charge Account",
+     "paymentFrequency": null,
+     "creditLimit": 250,
+     "late30": 1,
+     "late60": 1,
+     "late90": null,
+     "closedDate": "07/01/2026",
+     "gridMarks": [
+      "06/2026:30",
+      "07/2026:60"
+     ]
+    },
+    "TU": {
+     "accountNumber": null,
+     "highBalance": null,
+     "lastVerified": null,
+     "dateLastActivity": "07/2026",
+     "dateReported": "08/02/2026",
+     "dateOpened": "10/2025",
+     "balance": 0,
+     "accountRating": null,
+     "description": null,
+     "disputeStatus": null,
+     "creditorType": null,
+     "accountStatus": "Closed",
+     "paymentStatus": "60 days past due",
+     "remarks": "Account closed by credit grantor",
+     "paymentAmount": null,
+     "lastPayment": null,
+     "termLength": null,
+     "pastDue": null,
+     "accountType": "Charge Account",
+     "paymentFrequency": null,
+     "creditLimit": 250,
+     "late30": 1,
+     "late60": 1,
+     "late90": null,
+     "closedDate": "07/02/2026",
+     "gridMarks": [
+      "06/2026:30",
+      "07/2026:60"
+     ]
+    },
+    "EX": {
+     "accountNumber": null,
+     "highBalance": null,
+     "lastVerified": null,
+     "dateLastActivity": null,
+     "dateReported": "08/02/2026",
+     "dateOpened": "10/2025",
+     "balance": null,
+     "accountRating": null,
+     "description": null,
+     "disputeStatus": null,
+     "creditorType": null,
+     "accountStatus": "Closed",
+     "paymentStatus": "Paid account/was delinquent 60 days past due date",
+     "remarks": "Account Closed At Credit Grantor's Request",
+     "paymentAmount": null,
+     "lastPayment": null,
+     "termLength": null,
+     "pastDue": null,
+     "accountType": "Charge Account",
+     "paymentFrequency": null,
+     "creditLimit": 250,
+     "late30": 1,
+     "late60": 2,
+     "late90": null,
+     "closedDate": null,
+     "gridMarks": [
+      "06/2026:30",
+      "07/2026:60",
+      "08/2026:60"
+     ]
+    }
+   },
+   "confident": true
+  },
+  {
+   "creditor": "Sun Loan Company",
+   "mask": "7004",
+   "section": "installment",
+   "headerStatus": null,
+   "bureaus": {
+    "EX": {
+     "accountNumber": null,
+     "highBalance": null,
+     "lastVerified": null,
+     "dateLastActivity": null,
+     "dateReported": "07/31/2026",
+     "dateOpened": "09/2025",
+     "balance": null,
+     "accountRating": null,
+     "description": null,
+     "disputeStatus": null,
+     "creditorType": null,
+     "accountStatus": "Closed",
+     "paymentStatus": "Account paid satisfactorily",
+     "remarks": null,
+     "paymentAmount": null,
+     "lastPayment": null,
+     "termLength": null,
+     "pastDue": null,
+     "accountType": "Other",
+     "paymentFrequency": null,
+     "creditLimit": null,
+     "late30": null,
+     "late60": null,
+     "late90": null,
+     "closedDate": null,
+     "gridMarks": []
+    }
+   },
+   "confident": true
+  },
+  {
+   "creditor": "Regional Finance",
+   "mask": "7005",
+   "section": "installment",
+   "headerStatus": null,
+   "bureaus": {
+    "EQ": {
+     "accountNumber": null,
+     "highBalance": null,
+     "lastVerified": null,
+     "dateLastActivity": "05/2026",
+     "dateReported": "06/30/2026",
+     "dateOpened": "03/2025",
+     "balance": 1601,
+     "accountRating": null,
+     "description": null,
+     "disputeStatus": null,
+     "creditorType": null,
+     "accountStatus": "Open",
+     "paymentStatus": "Pays account as agreed",
+     "remarks": "Fixed rate",
+     "paymentAmount": null,
+     "lastPayment": null,
+     "termLength": null,
+     "pastDue": null,
+     "accountType": "Other",
+     "paymentFrequency": null,
+     "creditLimit": null,
+     "late30": null,
+     "late60": null,
+     "late90": null,
+     "closedDate": null,
+     "gridMarks": []
+    },
+    "TU": {
+     "accountNumber": null,
+     "highBalance": null,
+     "lastVerified": null,
+     "dateLastActivity": "06/2026",
+     "dateReported": "06/30/2026",
+     "dateOpened": "03/2025",
+     "balance": 1601,
+     "accountRating": null,
+     "description": null,
+     "disputeStatus": null,
+     "creditorType": null,
+     "accountStatus": "Open",
+     "paymentStatus": "Paid or paying as agreed",
+     "remarks": null,
+     "paymentAmount": null,
+     "lastPayment": null,
+     "termLength": null,
+     "pastDue": null,
+     "accountType": "Other",
+     "paymentFrequency": null,
+     "creditLimit": null,
+     "late30": null,
+     "late60": null,
+     "late90": null,
+     "closedDate": null,
+     "gridMarks": []
+    },
+    "EX": {
+     "accountNumber": null,
+     "highBalance": null,
+     "lastVerified": null,
+     "dateLastActivity": null,
+     "dateReported": "06/30/2026",
+     "dateOpened": "03/2025",
+     "balance": 1601,
+     "accountRating": null,
+     "description": null,
+     "disputeStatus": null,
+     "creditorType": null,
+     "accountStatus": "Open",
+     "paymentStatus": "This is an account in good standing",
+     "remarks": null,
+     "paymentAmount": null,
+     "lastPayment": null,
+     "termLength": null,
+     "pastDue": null,
+     "accountType": "Other",
+     "paymentFrequency": null,
+     "creditLimit": null,
+     "late30": null,
+     "late60": null,
+     "late90": null,
+     "closedDate": null,
+     "gridMarks": []
+    }
+   },
+   "confident": true
+  },
+  {
+   "creditor": "Ally Financial",
+   "mask": "7006",
+   "section": "installment",
+   "headerStatus": null,
+   "bureaus": {
+    "EQ": {
+     "accountNumber": null,
+     "highBalance": null,
+     "lastVerified": null,
+     "dateLastActivity": "02/2026",
+     "dateReported": "05/02/2026",
+     "dateOpened": "05/2023",
+     "balance": 0,
+     "accountRating": null,
+     "description": null,
+     "disputeStatus": null,
+     "creditorType": null,
+     "accountStatus": "Closed",
+     "paymentStatus": "Not more than two payments past due",
+     "remarks": "Consumer disputes after resolution,Fixed rate",
+     "paymentAmount": null,
+     "lastPayment": null,
+     "termLength": null,
+     "pastDue": null,
+     "accountType": "Vehicle Loan",
+     "paymentFrequency": null,
+     "creditLimit": null,
+     "late30": 5,
+     "late60": null,
+     "late90": null,
+     "closedDate": "05/01/2026",
+     "gridMarks": [
+      "03/2026:30",
+      "04/2025:30",
+      "05/2025:30",
+      "06/2025:30",
+      "11/2025:30",
+      "05/2024:30"
+     ]
+    },
+    "EX": {
+     "accountNumber": null,
+     "highBalance": null,
+     "lastVerified": null,
+     "dateLastActivity": null,
+     "dateReported": "04/09/2026",
+     "dateOpened": "05/2023",
+     "balance": null,
+     "accountRating": null,
+     "description": null,
+     "disputeStatus": null,
+     "creditorType": null,
+     "accountStatus": "Closed",
+     "paymentStatus": "Paid account/was 30 days past due date six times or more",
+     "remarks": "Dispute Resolved - Consumer Disagrees",
+     "paymentAmount": null,
+     "lastPayment": null,
+     "termLength": null,
+     "pastDue": null,
+     "accountType": "Vehicle Loan",
+     "paymentFrequency": null,
+     "creditLimit": null,
+     "late30": 6,
+     "late60": null,
+     "late90": null,
+     "closedDate": null,
+     "gridMarks": [
+      "03/2026:30",
+      "04/2025:30",
+      "05/2025:30",
+      "10/2025:30",
+      "02/2024:30",
+      "04/2024:30"
+     ]
+    }
+   },
+   "confident": true,
+   "joint": true
+  },
+  {
+   "creditor": "Regional Finance",
+   "mask": "7007",
+   "section": "installment",
+   "headerStatus": null,
+   "bureaus": {
+    "EQ": {
+     "accountNumber": null,
+     "highBalance": null,
+     "lastVerified": null,
+     "dateLastActivity": "01/2025",
+     "dateReported": "03/31/2025",
+     "dateOpened": "10/2022",
+     "balance": 0,
+     "accountRating": null,
+     "description": null,
+     "disputeStatus": null,
+     "creditorType": null,
+     "accountStatus": "Closed",
+     "paymentStatus": "Pays account as agreed",
+     "remarks": "Fixed rate",
+     "paymentAmount": null,
+     "lastPayment": null,
+     "termLength": null,
+     "pastDue": null,
+     "accountType": "Other",
+     "paymentFrequency": null,
+     "creditLimit": null,
+     "late30": null,
+     "late60": null,
+     "late90": null,
+     "closedDate": "02/01/2025",
+     "gridMarks": []
+    },
+    "EX": {
+     "accountNumber": null,
+     "highBalance": null,
+     "lastVerified": null,
+     "dateLastActivity": null,
+     "dateReported": "02/06/2025",
+     "dateOpened": "10/2022",
+     "balance": null,
+     "accountRating": null,
+     "description": null,
+     "disputeStatus": null,
+     "creditorType": null,
+     "accountStatus": "Closed",
+     "paymentStatus": "Account paid satisfactorily",
+     "remarks": null,
+     "paymentAmount": null,
+     "lastPayment": null,
+     "termLength": null,
+     "pastDue": null,
+     "accountType": "Other",
+     "paymentFrequency": null,
+     "creditLimit": null,
+     "late30": null,
+     "late60": null,
+     "late90": null,
+     "closedDate": null,
+     "gridMarks": []
+    }
+   },
+   "confident": true
+  },
+  {
+   "creditor": "Santa Fe Federal Cre",
+   "mask": "7008",
+   "section": "installment",
+   "headerStatus": null,
+   "bureaus": {
+    "EQ": {
+     "accountNumber": null,
+     "highBalance": null,
+     "lastVerified": null,
+     "dateLastActivity": "05/2026",
+     "dateReported": "06/30/2026",
+     "dateOpened": "10/2022",
+     "balance": 0,
+     "accountRating": null,
+     "description": null,
+     "disputeStatus": null,
+     "creditorType": null,
+     "accountStatus": "Closed",
+     "paymentStatus": "Pays account as agreed",
+     "remarks": "Fixed rate",
+     "paymentAmount": null,
+     "lastPayment": null,
+     "termLength": null,
+     "pastDue": null,
+     "accountType": "Vehicle Loan",
+     "paymentFrequency": null,
+     "creditLimit": null,
+     "late30": 5,
+     "late60": null,
+     "late90": null,
+     "closedDate": "06/01/2026",
+     "gridMarks": [
+      "03/2026:30",
+      "04/2026:30",
+      "05/2026:30",
+      "06/2024:30",
+      "11/2024:30"
+     ]
+    },
+    "EX": {
+     "accountNumber": null,
+     "highBalance": null,
+     "lastVerified": null,
+     "dateLastActivity": null,
+     "dateReported": "06/30/2026",
+     "dateOpened": "10/2022",
+     "balance": null,
+     "accountRating": null,
+     "description": null,
+     "disputeStatus": null,
+     "creditorType": null,
+     "accountStatus": "Closed",
+     "paymentStatus": "Paid account/was 30 days past due date six times or more",
+     "remarks": null,
+     "paymentAmount": null,
+     "lastPayment": null,
+     "termLength": null,
+     "pastDue": null,
+     "accountType": "Vehicle Loan",
+     "paymentFrequency": null,
+     "creditLimit": null,
+     "late30": 6,
+     "late60": null,
+     "late90": null,
+     "closedDate": null,
+     "gridMarks": [
+      "03/2026:30",
+      "04/2026:30",
+      "05/2026:30",
+      "02/2024:30",
+      "06/2024:30",
+      "11/2024:30"
+     ]
+    }
+   },
+   "confident": true
+  },
+  {
+   "creditor": "Ally Financial",
+   "mask": "7009",
+   "section": "installment",
+   "headerStatus": null,
+   "bureaus": {
+    "EQ": {
+     "accountNumber": null,
+     "highBalance": null,
+     "lastVerified": null,
+     "dateLastActivity": "09/2025",
+     "dateReported": "03/18/2026",
+     "dateOpened": "08/2022",
+     "balance": 0,
+     "accountRating": null,
+     "description": null,
+     "disputeStatus": null,
+     "creditorType": null,
+     "accountStatus": "Closed",
+     "paymentStatus": "Charge-off",
+     "remarks": "Paid charge off,Fixed rate",
+     "paymentAmount": null,
+     "lastPayment": null,
+     "termLength": null,
+     "pastDue": null,
+     "accountType": "Vehicle Loan",
+     "paymentFrequency": null,
+     "creditLimit": null,
+     "late30": 6,
+     "late60": 1,
+     "late90": 3,
+     "closedDate": null,
+     "gridMarks": [
+      "01/2025:30",
+      "02/2025:30",
+      "03/2025:30",
+      "11/2024:30",
+      "12/2024:30",
+      "11/2025:30",
+      "12/2025:60",
+      "01/2026:90",
+      "02/2026:90",
+      "11/2024:30",
+      "12/2024:30"
+     ]
+    },
+    "EX": {
+     "accountNumber": null,
+     "highBalance": null,
+     "lastVerified": null,
+     "dateLastActivity": null,
+     "dateReported": "03/18/2026",
+     "dateOpened": "08/2022",
+     "balance": null,
+     "accountRating": null,
+     "description": null,
+     "disputeStatus": null,
+     "creditorType": null,
+     "accountStatus": "Closed",
+     "paymentStatus": "Paid account/was a charge-off",
+     "remarks": null,
+     "paymentAmount": null,
+     "lastPayment": null,
+     "termLength": null,
+     "pastDue": null,
+     "accountType": "Vehicle Loan",
+     "paymentFrequency": null,
+     "creditLimit": null,
+     "late30": 6,
+     "late60": 1,
+     "late90": 3,
+     "closedDate": null,
+     "gridMarks": [
+      "01/2026:90",
+      "02/2026:120",
+      "03/2026:CO",
+      "01/2025:30",
+      "02/2025:30",
+      "03/2025:30",
+      "10/2025:30",
+      "11/2025:30",
+      "12/2025:60"
+     ]
+    }
+   },
+   "confident": true
+  },
+  {
+   "creditor": "Capital One Bank Usa",
+   "mask": "7010",
+   "section": "revolving",
+   "headerStatus": null,
+   "bureaus": {
+    "EQ": {
+     "accountNumber": null,
+     "highBalance": null,
+     "lastVerified": null,
+     "dateLastActivity": "07/2026",
+     "dateReported": "08/21/2026",
+     "dateOpened": "03/2015",
+     "balance": 1855,
+     "accountRating": null,
+     "description": null,
+     "disputeStatus": null,
+     "creditorType": null,
+     "accountStatus": "Open",
+     "paymentStatus": "Pays account as agreed",
+     "remarks": "Account previously in dispute - now resolved by data furnisher",
+     "paymentAmount": null,
+     "lastPayment": null,
+     "termLength": null,
+     "pastDue": null,
+     "accountType": "Credit Card",
+     "paymentFrequency": null,
+     "creditLimit": 2500,
+     "late30": null,
+     "late60": null,
+     "late90": null,
+     "closedDate": null,
+     "gridMarks": []
+    },
+    "EX": {
+     "accountNumber": null,
+     "highBalance": null,
+     "lastVerified": null,
+     "dateLastActivity": null,
+     "dateReported": "08/21/2026",
+     "dateOpened": "03/2015",
+     "balance": 1855,
+     "accountRating": null,
+     "description": null,
+     "disputeStatus": null,
+     "creditorType": null,
+     "accountStatus": "Open",
+     "paymentStatus": "This is an account in good standing",
+     "remarks": "Account Previously In Dispute - Now Resolved - Reported By Subscriber",
+     "paymentAmount": null,
+     "lastPayment": null,
+     "termLength": null,
+     "pastDue": null,
+     "accountType": "Credit Card",
+     "paymentFrequency": null,
+     "creditLimit": 2500,
+     "late30": null,
+     "late60": null,
+     "late90": null,
+     "closedDate": null,
+     "gridMarks": []
+    }
+   },
+   "confident": true
+  }
+ ],
+ "inquiries": [
+  {
+   "date": "07/19/2026",
+   "creditor": "Capital One",
+   "bureau": "EQ",
+   "matchedAccount": null
+  },
+  {
+   "date": "07/02/2026",
+   "creditor": "Rfc # 3 # 1009",
+   "bureau": "EQ",
+   "matchedAccount": null
+  },
+  {
+   "date": "07/19/2026",
+   "creditor": "Capital One",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "07/19/2026",
+   "creditor": "Capital One",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "07/18/2026",
+   "creditor": "Credit One Bank, Natio",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/13/2026",
+   "creditor": "Ally Financial",
+   "bureau": "EQ",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "Global Lending Servi",
+   "bureau": "EQ",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "Ally Financial",
+   "bureau": "EQ",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "American Credit Acce",
+   "bureau": "EQ",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "American Toyota",
+   "bureau": "EQ",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "American Credit Acce",
+   "bureau": "EQ",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "Consumer Portfolio S",
+   "bureau": "EQ",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "Global Lending Servi",
+   "bureau": "EQ",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "Gecu Federal Credit",
+   "bureau": "EQ",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "Gm Financial",
+   "bureau": "EQ",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "Ally Financial",
+   "bureau": "EQ",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/01/2026",
+   "creditor": "Power Ford",
+   "bureau": "EQ",
+   "matchedAccount": null
+  },
+  {
+   "date": "05/06/2026",
+   "creditor": "Rfc # 3 # 1009",
+   "bureau": "EQ",
+   "matchedAccount": null
+  },
+  {
+   "date": "01/23/2026",
+   "creditor": "Onemain",
+   "bureau": "EQ",
+   "matchedAccount": null
+  },
+  {
+   "date": "12/10/2025",
+   "creditor": "Rfc # 3 # 1009",
+   "bureau": "EQ",
+   "matchedAccount": null
+  },
+  {
+   "date": "10/06/2025",
+   "creditor": "Citibank N A",
+   "bureau": "EQ",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/18/2026",
+   "creditor": "Ncc/Melloy Dodge",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/13/2026",
+   "creditor": "Cbc/Corleys Albuquerque",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "Americredit",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "Toyota Motor Credit",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "Truist Dealer Services",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "Td Auto Finance",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "Regional Acceptance",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "Del Norte Credit Union",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "Ncc/Melloy Nissan",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "700Cr/American Toyota",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "Fifth Third Bank",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "Consumer Portfolio Servi",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "Credit Union Of Colorado",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "Credit Union Of Colorado",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "U.S. Eagle Fcu",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "Del Norte Credit Union",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "Zia Credit Union",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "Kirtland Federal Cr. Un.",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "Foursight Capital Llc",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "Td Auto Finance",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "Gm Financial",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "700Cr/Quality Buick Gmc",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "Gm Financial",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "700Cr/Quality Buick Gmc",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "03/21/2026",
+   "creditor": "Synchrony Financial",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "02/03/2026",
+   "creditor": "Promax/Jim Schmidt Ford,",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "01/23/2026",
+   "creditor": "Onemain Financial",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "12/10/2025",
+   "creditor": "Onemain Financial",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "10/05/2025",
+   "creditor": "Synchrony Financial",
+   "bureau": "TU",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/18/2026",
+   "creditor": "Nccinc/Melloy Dodge",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/13/2026",
+   "creditor": "Lincoln Automotive Fin",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/13/2026",
+   "creditor": "Informativ/Corleys Alb",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "Nissan Motor Acceptanc",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "Toyota Motor Credit Co",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "Pnc Bank",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "State Employees Cu/Nm",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "Jpmcb Auto",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "Global Lending Service",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "Cudl/Santa Fe Fcu",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "Exeter Finance Llc/Wcg",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "Wfbna Auto",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "Nccinc/Melloy Nissan",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "Cudl/First Finnancial",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "700/American Toyota",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "America First Credit U",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/08/2026",
+   "creditor": "Rio Grande Credit Unio",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "Bk Of Amer",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "State Employees Cu/Nm",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "Artesia Cu/Cudc",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "Jpmcb Auto",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "Global Lending Service",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "Nusenda Fcu",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "Sunward Fcu Fka Sandi/",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "Exeter Finance Llc/Wcg",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "700 Credit/Quality Bui",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "America First Credit U",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "Mountain America Cu",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/04/2026",
+   "creditor": "Rio Grande Credit Unio",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "06/03/2026",
+   "creditor": "Santa Fe Federal Cred",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "02/03/2026",
+   "creditor": "Ford Cred",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "12/10/2025",
+   "creditor": "Onemain",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "11/16/2025",
+   "creditor": "Wfbna Card",
+   "bureau": "EX",
+   "matchedAccount": null
+  },
+  {
+   "date": "11/13/2025",
+   "creditor": "Wellsfargo",
+   "bureau": "EX",
+   "matchedAccount": null
+  }
+ ],
+ "publicRecordsReported": false,
+ "imagePages": 0,
+ "totalPages": 0,
+ "confidence": 1,
+ "warnings": [],
+ "scoreModel": "FICO Score 8",
+ "scoreRatings": {
+  "TU": "Poor",
+  "EX": "Poor",
+  "EQ": "Poor"
+ },
+ "identityFlags": [
+  {
+   "bureau": "EQ",
+   "field": "name",
+   "detail": "Variance on file (anonymized)"
+  },
+  {
+   "bureau": "TU",
+   "field": "name",
+   "detail": "Variance on file (anonymized)"
+  },
+  {
+   "bureau": "EX",
+   "field": "name",
+   "detail": "Variance on file (anonymized)"
+  },
+  {
+   "bureau": "EX",
+   "field": "ssn",
+   "detail": "Variance on file (anonymized)"
+  }
+ ],
+ "unreadablePages": [],
+ "reportFormat": "per_bureau",
+ "borrowerName": "MARIA T SAMPLE",
+ "lender": null,
+ "vantageScores": {
+  "TU": null,
+  "EX": null,
+  "EQ": null
+ },
+ "scoreReasonCodes": [
+  "You have a serious delinquency (60 days past due or greater) or derogatory indicator on your credit report.",
+  "You recently missed a payment or had a derogatory indicator reported on your credit report.",
+  "You have an insufficient number of accounts that are currently paid as agreed.",
+  "There is insufficient or no recent activity on revolving and/or open-ended accounts.",
+  "You've made heavy use of your available revolving credit.",
+  "You have a short credit history.",
+  "You have one or more accounts showing missed payments or derogatory indicators."
+ ],
+ "summary": null
+}

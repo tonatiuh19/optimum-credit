@@ -5,6 +5,7 @@
  * multi-step jump) gets a clear, human-readable confirm prompt.
  */
 import type { PipelineStage } from "@shared/api";
+import { ABSOLUTE_MAX_ROUNDS } from "@/lib/extendedRounds";
 
 /** Ordered left-to-right as shown on the Pipeline board case columns
  * (Prospect is a virtual lead column; cases may also use pipeline_stage=prospect). */
@@ -49,7 +50,7 @@ export function isReportRoundActive(
   maxRounds: number = 5,
   highestPublished: number = 0,
 ): boolean {
-  const max = Math.min(12, Math.max(5, Math.floor(Number(maxRounds) || 5)));
+  const max = Math.min(ABSOLUTE_MAX_ROUNDS, Math.max(5, Math.floor(Number(maxRounds) || 5)));
   const published = Math.max(0, Math.floor(Number(highestPublished) || 0));
   if (roundNumber < 1 || roundNumber > max) return false;
   if (pipelineStage === "docs_ready") return roundNumber === 1;

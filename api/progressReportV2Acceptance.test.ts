@@ -11,7 +11,7 @@ import {
   pv2AsciiBar,
   pv2BuildPdfData,
   pv2Diff,
-  pv2FileStrength,
+  pv2FileStrengthParts,
   pv2MiddleScore,
   pv2Validate,
 } from "./progressReportV2";
@@ -124,14 +124,21 @@ describe("Progress Report v2 acceptance (Kathy file, spec Section 9)", () => {
     expect(pv2AsciiBar(607)).toBe("[===========         ]");
   });
 
-  it("wins: THD/CBNA removed TU/EX/EQ; CB/RH partial (TU remains); 5 inquiries", () => {
+  it("wins: THD/CBNA removed TU/EX/EQ; CB/RH partial (TU remains); 5 inquiries, one row each (v1.1 P1-5)", () => {
     const thd = d.wins.find((w) => w.item.startsWith("THD/CBNA"))!;
     expect(thd).toMatchObject({ status: "REMOVED", bureaus: ["TU", "EX", "EQ"] });
     const rh = d.wins.find((w) => w.item.startsWith("CB/RH"))!;
     expect(rh).toMatchObject({ status: "PARTIAL", bureaus: ["EX", "EQ"], remainsOn: ["TU"] });
-    const inq = d.wins.find((w) => w.kind === "inquiry")!;
-    expect(inq.item).toMatch(/TU x4 \/ EQ x1/);
-    for (const n of ["MB FIN SVCS", "HOUSE OF IMP", "CALSTAR MOTO", "PORSCHE OF D", "PORSCHEOFD"]) expect(inq.item).toContain(n);
+    // v1.1 P1-5: one row per company + date with its bureaus (PORSCHE OF D = PORSCHEOFD merged); counts = rows; no ellipses.
+    const inq = d.wins.filter((w) => w.kind === "inquiry");
+    expect(inq.map((w) => `${w.item} [${w.bureaus.join("/")}]`)).toEqual([
+      "MB FIN SVCS - Hard inquiry 02/02/2026 [TU]",
+      "HOUSE OF IMP - Hard inquiry 02/03/2026 [TU]",
+      "CALSTAR MOTO - Hard inquiry 02/03/2026 [TU]",
+      "PORSCHE OF D - Hard inquiry 02/04/2026 [TU/EQ]",
+    ]);
+    expect(inq.reduce((n, w) => n + w.bureaus.length, 0)).toBe(5);
+    expect(d.wins.some((w) => w.item.includes("..."))).toBe(false);
   });
 
   it("NOT wins: Comenity re-report, 2024 inquiries aged off, Best Buy -> CBNA rename", () => {
@@ -175,7 +182,7 @@ describe("Progress Report v2 acceptance (Kathy file, spec Section 9)", () => {
     expect(text).toMatch(/TU late count \+1 on PORSCHE FINANCIAL/);
   });
 
-  it("file strength 62 (+/- 5) and caps", () => {
+  it("file strength from components (Engine Spec v1 PR-P0-7) and caps", () => {
     const pdf = pv2BuildPdfData({
       diff: d,
       clientFirstName: "Client",
@@ -185,9 +192,17 @@ describe("Progress Report v2 acceptance (Kathy file, spec Section 9)", () => {
       phone: "(949) 736-5644",
       site: "optimum-financial-group.com",
     });
-    expect(Math.abs(pdf.fileStrength - 62)).toBeLessThanOrEqual(5);
-    // Alina-type file: 82-87% utilization can never be 100.
-    expect(pv2FileStrength({ openChargeOffsOrCollections: 0, lates24m: false, olderLates: false, overallUtil: 85, publicRecord: false, openRevolving: 5, anyDerogatory: false })).toBeLessThanOrEqual(70);
+    // Spec v1 components: payment history 20 (lates in 24m) + utilization 10 (53%)
+    // + negatives 2 (1 open charge-off, 4 late accounts) + age/mix 15 = 47.
+    expect(pdf.fileStrengthParts).toEqual({ paymentHistory: 20, utilization: 10, negatives: 2, ageMix: 15, total: 47 });
+    expect(pdf.fileStrength).toBe(47);
+    // Utilization over 75% caps that component at 5; active 90+ caps payment history at 10.
+    const capped = pv2FileStrengthParts({
+      lates24m: false, olderLates: false, activeSevereDelinquency: true, overallUtil: 85, openChargeOffsOrCollections: 0,
+      otherNegatives: 0, publicRecord: false, oldestYears: 12, hasRevolving: true, hasInstallment: true, openRevolving: 5,
+    });
+    expect(capped).toMatchObject({ paymentHistory: 10, utilization: 5 });
+    expect(capped.total).toBe(50); // 10 + 5 + 20 (no negatives) + 15
     // Projected goal is a range above current.
     expect(pdf.goal.low).toBeGreaterThan(607);
     expect(pdf.goal.high).toBeGreaterThan(pdf.goal.low);
@@ -240,9 +255,11 @@ describe("Progress Report v2 acceptance (Kathy file, spec Section 9)", () => {
       "What Came Off Your Report",
       "PARTIAL WIN (TU remains)",
       "Your progress too",
-      "Round 3 Targets",
+      "What Is Still On Your Report",
       "Credit Utilization",
-      "Pay to $10,500",
+      // v1.1 P2-3: amount to pay down (CBNA $30,748 → 30% of $35,000 = $10,500 → pay down $20,248).
+      "Pay down to 30%",
+      "CBNA $35,000 $33,050 $30,748 88% HIGH $20,248 $27,248",
       "Total revolving (TU) $80,390 $48,419 $42,746 53%",
       "Every bureau moved up, and your middle score climbed from 570 to 607",
       "What Is Working in Your Favor",
@@ -252,7 +269,9 @@ describe("Progress Report v2 acceptance (Kathy file, spec Section 9)", () => {
     ]) {
       expect(text, must).toContain(must);
     }
-    // Compliance: no statute citations other than CROA, never "FICO" on Vantage.
+    // Compliance: no statute citations other than CROA (verbatim, v1.1 P2-2), never "FICO" on Vantage.
     expect(text).not.toMatch(/FCRA|FDCPA|§611|FICO/);
+    expect(text).toContain("15 U.S.C. §1679 et seq.");
+    expect(text.match(/U\.S\.C/g)).toHaveLength(1);
   });
 });

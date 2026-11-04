@@ -403,19 +403,12 @@ describe("buildConfidence — suspicious identical scores", () => {
 });
 
 describe("middleScore / calcMiddleScore — edge cases", () => {
-  it("median with two values uses higher of sorted floor", () => {
-    // vals [600,700] → floor(1) = 700
-    expect(calcMiddleScore(600, 0, 700)).toBe(700);
-    expect(middleScore({ transunion: 600, experian: null, equifax: 700 })).toBe(
-      700,
-    );
-  });
-
-  it("single bureau only", () => {
-    expect(calcMiddleScore(0, 0, 640)).toBe(640);
-    expect(
-      middleScore({ transunion: null, experian: null, equifax: 640 }),
-    ).toBe(640);
+  it.each([
+    ["two bureaus", 600, 0, 700, { transunion: 600, experian: null, equifax: 700 }],
+    ["one bureau", 0, 0, 640, { transunion: null, experian: null, equifax: 640 }],
+  ])("%s: no middle score, it stays -- (Cesar, Nov 2 2026)", (_n, a, b, c, scores) => {
+    expect(calcMiddleScore(a as number, b as number, c as number)).toBe(0);
+    expect(middleScore(scores as any)).toBeNull();
   });
 });
 
@@ -529,12 +522,13 @@ describe("buildConfidence / computeFileStrengthScore — edges", () => {
   });
 
   it("clamps file strength 0–100", () => {
-    expect(computeFileStrengthScore(850, 20, 0)).toBeLessThanOrEqual(100);
-    expect(computeFileStrengthScore(300, 0, 50)).toBeGreaterThanOrEqual(0);
+    expect(computeFileStrengthScore({ targets: [], utilization: [] })).toBeLessThanOrEqual(100);
+    const many = Array.from({ length: 50 }, (_, i) => ({ item: `C${i} - Charge-off` }));
+    expect(computeFileStrengthScore({ targets: many, utilization: [{ limit: 100, balance: 500 }] })).toBeGreaterThanOrEqual(0);
   });
 
-  it("null afterMiddle still returns a number", () => {
-    const n = computeFileStrengthScore(null, 2, 2);
+  it("no utilization data still returns a number", () => {
+    const n = computeFileStrengthScore({ targets: [{ item: "X - Late payments" }], utilization: [] });
     expect(typeof n).toBe("number");
     expect(n).toBeGreaterThanOrEqual(0);
     expect(n).toBeLessThanOrEqual(100);

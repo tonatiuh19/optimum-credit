@@ -43,3 +43,7 @@ coverage
 .DS_Store
 Thumbs.db
 .env*.local
+
+# Real client reports generated during audits — never commit (PII)
+samples/Rice_OFG_Credit_Analysis_Oct2026.pdf
+samples/Joselton_Ramos_OFG_Credit_Analysis_NEW_ENGINE.pdf

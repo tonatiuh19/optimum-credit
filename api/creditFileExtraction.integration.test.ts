@@ -99,9 +99,23 @@ describe("credit file extraction jobs", () => {
           provider, status, extracted_json)
        VALUES ('analysis', 'r.pdf', 'application/pdf', 1, 'vitest://none',
                REPEAT('0',32), REPEAT('0',32), 'smartcredit', 'ready', ?)`,
-      [JSON.stringify(FILE)],
+      [JSON.stringify({ ...FILE, borrowerName: "MARIA T LEDESMA" })],
     );
     jobIds.push(ins.insertId);
+    // P0-1: a read with no borrower name and no client is never rendered (staff review).
+    const [noName] = await pool.query<ResultSetHeader>(
+      `INSERT INTO credit_file_extractions
+         (purpose, file_name, mime_type, file_size, storage_key, enc_iv, enc_tag,
+          provider, status, extracted_json)
+       VALUES ('analysis', 'r.pdf', 'application/pdf', 1, 'vitest://none',
+               REPEAT('0',32), REPEAT('0',32), 'smartcredit', 'ready', ?)`,
+      [JSON.stringify(FILE)],
+    );
+    jobIds.push(noName.insertId);
+    const blocked = await request(app)
+      .get(`/api/admin/credit-files/${noName.insertId}/analysis.pdf`)
+      .set("Authorization", `Bearer ${adminToken}`);
+    expect(blocked.status).toBe(409);
     const json = await request(app)
       .get(`/api/admin/credit-files/${ins.insertId}/analysis`)
       .set("Authorization", `Bearer ${adminToken}`);
@@ -179,7 +193,8 @@ describe("credit file extraction jobs", () => {
           res.on("end", () => cb(null, Buffer.concat(chunks)));
         });
       expect(pdf.status).toBe(200);
-      expect(pdf.headers["content-disposition"]).toMatch(/Enh_Pdf_OFG_Credit_Analysis\.pdf/);
+      // P2-3: [LastName]_OFG_Credit_Analysis_[MonYYYY].pdf
+      expect(pdf.headers["content-disposition"]).toMatch(/Pdf_OFG_Credit_Analysis_[A-Z][a-z]{2}\d{4}\.pdf/);
       expect((pdf.body as Buffer).subarray(0, 4).toString()).toBe("%PDF");
 
       // Agent context: escrow + lender score (validated; affects the PDF).
@@ -203,6 +218,30 @@ describe("credit file extraction jobs", () => {
         .get(`/api/admin/credit-analyses/${analysisId}/enhanced-status`)
         .set("Authorization", `Bearer ${adminToken}`);
       expect(status.body.context).toMatchObject({ escrow: null, lender_score: 630 });
+
+      // Public form / portal: new-engine result by secure token only.
+      const token = "b".repeat(32);
+      await pool.query(`UPDATE credit_analyses SET public_token = ? WHERE id = ?`, [token, analysisId]);
+      const pst = await request(app).get(`/api/public/credit-analyses/${token}/status`);
+      expect(pst.status).toBe(200);
+      expect(pst.body).toEqual({ status: "ready" });
+      const pan = await request(app).get(`/api/public/credit-analyses/${token}/analysis`);
+      expect(pan.status).toBe(200);
+      expect(Array.isArray(pan.body.analysis.negatives)).toBe(true);
+      expect(pan.body.analysis.lender).toBeNull(); // agent-only context hidden
+      const ppdf = await request(app)
+        .get(`/api/public/credit-analyses/${token}/pdf`)
+        .buffer(true)
+        .parse((r, cb) => {
+          const chunks: Buffer[] = [];
+          r.on("data", (c: Buffer) => chunks.push(c));
+          r.on("end", () => cb(null, Buffer.concat(chunks)));
+        });
+      expect(ppdf.status).toBe(200);
+      expect((ppdf.body as Buffer).subarray(0, 4).toString()).toBe("%PDF");
+      // Wrong / malformed token → 404, never another client's analysis.
+      expect((await request(app).get(`/api/public/credit-analyses/${"c".repeat(32)}/status`)).status).toBe(404);
+      expect((await request(app).get(`/api/public/credit-analyses/${analysisId}/analysis`)).status).toBe(404);
     } finally {
       await pool.query(`DELETE FROM clients WHERE id = ?`, [clientId]);
     }

@@ -150,7 +150,7 @@ describe("work tasks case link — calendar + dashboard", () => {
       .expect((res) => {
         expect(res.body.task.case_id).toBeNull();
       });
-  });
+  }, 120_000); // remote DB round trips (calendar + dashboard) under parallel suites
 
   it("supports server search and per-column pagination", async () => {
     const stamp = `${RUN_ID}-page`;

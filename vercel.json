@@ -5,7 +5,7 @@
   "outputDirectory": "dist",
   "functions": {
     "api/index.ts": {
-      "maxDuration": 60
+      "maxDuration": 800
     }
   },
   "crons": [
@@ -29,6 +29,14 @@
     },
     {
       "src": "/go/free-score",
+      "dest": "/api/index.ts"
+    },
+    {
+      "src": "/go/enroll-standard",
+      "dest": "/api/index.ts"
+    },
+    {
+      "src": "/go/enroll-complex",
       "dest": "/api/index.ts"
     },
     {

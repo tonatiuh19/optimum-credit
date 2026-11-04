@@ -11,9 +11,9 @@ import {
   extractAllScores,
   extractReportDate,
   middleScore,
-  progressReportV2PdfFromReview,
   toPdfSafeText,
 } from "./index";
+import { generateProgressReportV2Pdf, pv2BuildPdfData, pv2Diff } from "./progressReportV2";
 
 function expectScores(
   text: string,
@@ -473,144 +473,40 @@ describe("progress report PDF — WinAnsi / control-char matrix", () => {
     }
   });
 
-  it("generates PDF when every narrative field contains tabs/unicode", async () => {
-    const data: OfGReportData = {
-      client: { firstName: "Brian", lastName: "Avelar" },
-      reportDate: { before: "2024-03-06", after: "2024-08-09" },
-      bureauScores: {
-        transunion: { before: 576, after: 583 },
-        experian: { before: 567, after: 548 },
-        equifax: { before: 545, after: 517 },
-      },
-      middleScore: { before: 567, after: 548 },
-      wins: [
-        {
-          itemRemoved: "Credit Card\tNegative Closed — Late Payment",
-          bureaus: ["TU", "EX", "EQ"],
-          impact: "Removed → better",
-          status: "Deleted",
-          highlighted: true,
-        },
-        {
-          itemRemoved: "Derogatory\tDerogatory\tDerogatory",
-          bureaus: ["TU"],
-          impact: "• cleaned",
-          status: "Deleted",
-        },
-      ],
-      targets: [
-        {
-          item: "Closed Finance\t— Late Payment",
-          bureaus: ["TU", "EX", "EQ"],
-          detail: "Next dispute → cycle",
-          priority: "high",
-        },
-      ],
-      utilization: [
-        {
-          account: "CAP1/KOHLS\t639305",
-          limit: 300,
-          balance: 86,
-          pctUsed: 29,
-          payTo30: 0,
-          payTo10: 0,
-        },
-      ],
-      positiveAccounts: ["On-time\tpayments", "Utilización baja"],
-      actionNeeded: ["Keep balances\tunder 30%"],
-      roadmap: {
-        currentRound: 2,
-        nextRound: 3,
-        scoreGoal: 670,
-        gapRemaining: 122,
-        milestones: ["Round 2 → Round 3", "File strength\t100"],
-      },
-      actionPlan: [
-        {
-          step: 1,
-          description: "Continue on-time payments\ton all open accounts",
-          owner: "client",
-        },
-        {
-          step: 2,
-          description: "OFG will submit targeted disputes — no guarantee",
-          owner: "ofg",
-        },
-      ],
-      fileStrengthScore: 100,
-      tradelineRecommendation: {
-        code: "Focus\tcollections first",
-        projectedImpact: "File strength\t↑",
-      },
-      fundingReadinessNote: "On track → funding review",
-      croaDisclosure:
-        "Results vary — no specific outcome guaranteed. CROA disclosure.",
-      locale: "en",
-    };
+  // Engine Spec v1: the published PDF always comes from the account-level
+  // engine; these keep the WinAnsi / control-char guarantees on that path.
+  const tl = (o: Record<string, unknown>) => ({
+    accountNumber: null, highBalance: null, lastVerified: null, dateLastActivity: null, dateReported: null,
+    dateOpened: "01/2018", balance: 0, closedDate: null, accountRating: null, description: null, disputeStatus: null,
+    creditorType: null, accountStatus: "Open", paymentStatus: "Current", remarks: null, paymentAmount: null,
+    lastPayment: null, termLength: null, pastDue: 0, accountType: null, paymentFrequency: null, creditLimit: null,
+    late30: 0, late60: 0, late90: 0, gridMarks: [], ...o,
+  }) as any;
+  const file = (date: string, scores: Record<string, number>, accounts: any[]) =>
+    ({ provider: "smartcredit", reportDate: date, scores, accounts, inquiries: [], publicRecordsReported: false, imagePages: 0, totalPages: 0, confidence: 1, warnings: [] }) as any;
+  const accts = (withColl: boolean) => [
+    { creditor: "Médico\tABC — Colección", mask: "1234", section: "collection", headerStatus: null, confident: true,
+      bureaus: withColl ? { TU: tl({ paymentStatus: "Collection", balance: 500 }) } : {} },
+    { creditor: "Tarjeta “Óptima”\u0007", mask: "9999", section: "revolving", headerStatus: null, confident: true,
+      bureaus: { TU: tl({ creditLimit: 2000, balance: 900, accountType: "Credit Card" }), EX: tl({ creditLimit: 2000, balance: 900 }) } },
+  ];
+  const build = (lang: "en" | "es") => {
+    const diff = pv2Diff(file("01/01/2026", { TU: 580, EX: 590, EQ: 600 }, accts(true)), file("06/01/2026", { TU: 620, EX: 630, EQ: 640 }, accts(false)), lang);
+    return pv2BuildPdfData({
+      diff, clientFirstName: "José", clientName: "José García\tPérez", round: 2, lang,
+      scores: { TU: { before: 580, after: 620 }, EX: { before: 590, after: 630 }, EQ: { before: 600, after: 640 } },
+      phone: "(949) 674-0714", site: "ofgllc.com", address: "2717 W Coast Hwy, Ste C, Newport Beach, CA 92663",
+    });
+  };
 
-    const buffer = await progressReportV2PdfFromReview(data, 2);
+  it("generates PDF when names contain tabs / unicode / control chars", async () => {
+    const buffer = await generateProgressReportV2Pdf(build("en"));
     expect(buffer.length).toBeGreaterThan(2000);
-    const pdf = await PDFDocument.load(buffer);
-    expect(pdf.getPageCount()).toBe(3);
+    expect((await PDFDocument.load(buffer)).getPageCount()).toBe(3);
   });
 
   it("Spanish locale PDF with accents still builds", async () => {
-    const buffer = await progressReportV2PdfFromReview(
-      {
-        client: { firstName: "José", lastName: "García" },
-        reportDate: { before: "2026-01-01", after: "2026-06-01" },
-        bureauScores: {
-          transunion: { before: 580, after: 620 },
-          experian: { before: 590, after: 630 },
-          equifax: { before: 600, after: 640 },
-        },
-        middleScore: { before: 590, after: 630 },
-        wins: [
-          {
-            itemRemoved: "Colección — ABC Médico",
-            bureaus: ["TU"],
-            impact: "Eliminado",
-            status: "Deleted",
-          },
-        ],
-        targets: [
-          {
-            item: "Cargo cancelado aún reportando",
-            bureaus: ["EX", "EQ"],
-            detail: "Próximo ciclo",
-            priority: "high",
-          },
-        ],
-        utilization: [],
-        positiveAccounts: ["Historial positivo"],
-        actionNeeded: [],
-        roadmap: {
-          currentRound: 1,
-          nextRound: 2,
-          scoreGoal: 700,
-          gapRemaining: 70,
-          milestones: ["Ronda 1 → Ronda 2"],
-        },
-        actionPlan: [
-          {
-            step: 1,
-            description: "Continuar pagos a tiempo",
-            owner: "client",
-          },
-        ],
-        fileStrengthScore: 80,
-        croaDisclosure: "Divulgación CROA — resultados varían.",
-        locale: "es",
-      },
-      2,
-    );
-    const pdf = await PDFDocument.load(buffer);
-    expect(pdf.getPageCount()).toBe(3);
-    await import("pdf-parse/worker").catch(() => undefined);
-    const { PDFParse } = await import("pdf-parse");
-    const text = (await new PDFParse({ data: buffer }).getText()).text.replace(/\s+/g, " ");
-    // Spanish v2 labels + CROA in Spanish.
-    expect(text).toContain("INFORME DE PROGRESO DE CREDITO");
-    expect(text).toContain("Ley de Organizaciones de Reparacion de Credito (CROA)");
+    const buffer = await generateProgressReportV2Pdf(build("es"));
+    expect((await PDFDocument.load(buffer)).getPageCount()).toBe(3);
   });
 });

@@ -276,7 +276,7 @@ export default function Dashboard() {
                 />
                 <ReportStat
                   label="Items Disputed"
-                  value={latest.items_disputed || 0}
+                  value={latest.items_disputed ?? "—"}
                 />
                 <ReportStat
                   label="Score Before"

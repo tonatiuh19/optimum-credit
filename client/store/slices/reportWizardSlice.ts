@@ -1,4 +1,5 @@
 import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
+import type { ReportSelfCheck } from "@/store/slices/reportApprovalSlice";
 import api from "@/lib/api";
 import type {
   OfGReportData,
@@ -26,9 +27,49 @@ interface ReportWizardState {
   previewUrl: string | null;
   /** Progress Report v2 validation flags from the last preview. */
   previewFlags: Array<{ code: string; message: string }>;
+  /** Spec v1.1 §9 self-check from the last preview (failures hold delivery). */
+  previewSelfCheck: { pass: boolean; checks: ReportSelfCheck[] } | null;
+  /** GF-84: suggested "Notify client" for this round (old rounds = silent). */
+  notifyDefault: { notify_client: boolean; reasons: string[] } | null;
+  /** Engine Spec v1 PR-P0-1: account-level reads gate Preview / Publish. */
+  reads: WizardReadsStatus | null;
+  /** Upload was refused as an incomplete SmartCredit print — a Score update can continue it. */
+  scoreUpdateOffer: boolean;
+  /** Switching a draft between Score update and the full report. */
+  switchingScoreUpdate: boolean;
 }
 
+export type WizardReadState = {
+  status: "missing" | "queued" | "reading" | "ready" | "failed";
+  error: string | null;
+  reused: boolean;
+  /** SmartCredit PDF saved before the accounts loaded. */
+  code?: "incomplete_print";
+  /** Seconds since the read started (queued / reading). */
+  elapsedSec?: number | null;
+  /** How it ran: direct | chunked | batch | reused (ready), or batch while reading. */
+  mode?: string | null;
+};
+export type WizardReadsStatus = {
+  ready: boolean;
+  reads: { before: WizardReadState; after: WizardReadState };
+  blocked_data_integrity: string | null;
+  report_dates: { before: string | null; after: string | null };
+  /** This draft publishes a Score update (scores + verified inquiries only). */
+  score_update?: boolean;
+  /** Both reads settled and one is flagged incomplete — a Score update can be sent. */
+  score_update_available?: boolean;
+  incomplete_sides?: Array<"before" | "after">;
+  starting_point?: boolean;
+  /** The server filled the review scores from the reads (once per extraction). */
+  scores_from_reads?: boolean;
+  read_scores?: { before: Record<"TU" | "EX" | "EQ", number | null> | null; after: Record<"TU" | "EX" | "EQ", number | null> | null };
+};
+
 const initialState: ReportWizardState = {
+  reads: null,
+  scoreUpdateOffer: false,
+  switchingScoreUpdate: false,
   session: null,
   drafts: [],
   beforeContext: null,
@@ -45,6 +86,8 @@ const initialState: ReportWizardState = {
   error: null,
   previewUrl: null,
   previewFlags: [],
+  previewSelfCheck: null,
+  notifyDefault: null,
 };
 
 function normalizeSession(raw: ReportWizardSession): ReportWizardSession {
@@ -147,7 +190,7 @@ export const createReportWizardSession = createAsyncThunk<
     options?: OfGReportWizardOptions;
   },
   { rejectValue: string }
->("reportWizard/createSession", async (args, { rejectWithValue }) => {
+>("reportWizard/createSession", async (args, { rejectWithValue, dispatch }) => {
   const { assertEachFileUnderUploadLimit } = await import("@/lib/uploadLimits");
   const sizeCheck = assertEachFileUnderUploadLimit(
     [args.beforePdf, args.afterPdf].filter(Boolean) as File[],
@@ -195,6 +238,8 @@ export const createReportWizardSession = createAsyncThunk<
   if (args.options?.tradeline_rec) fd.append("tradeline_rec", "true");
   if (args.options?.funding_note) fd.append("funding_note", "true");
   if (args.options?.spanish) fd.append("spanish", "true");
+  if (args.options?.score_update) fd.append("score_update", "true");
+  if (args.options?.starting_point) fd.append("starting_point", "true");
   // Explicit true/false so API default-on stays in sync with the checkbox
   if (args.options?.enhance_with_claude === false) {
     fd.append("enhance_with_claude", "false");
@@ -209,9 +254,31 @@ export const createReportWizardSession = createAsyncThunk<
     );
     return normalizeSession(data.session);
   } catch (e: any) {
+    // Incomplete SmartCredit print: offer to continue it as a Score update.
+    if (e?.response?.data?.score_update_available === true) {
+      dispatch(reportWizardSlice.actions.setScoreUpdateOffer(true));
+    }
     return rejectWithValue(
       e?.response?.data?.error || "Failed to start report wizard",
     );
+  }
+});
+
+/** Score update on/off for a draft (server checks a read is flagged incomplete). */
+export const setReportWizardScoreUpdate = createAsyncThunk<
+  ReportWizardSession,
+  { sessionId: number; enabled: boolean },
+  { rejectValue: string }
+>("reportWizard/setScoreUpdate", async ({ sessionId, enabled }, { rejectWithValue, dispatch }) => {
+  try {
+    const { data } = await api.post<{ session: ReportWizardSession }>(
+      `/admin/report-wizard/sessions/${sessionId}/score-update`,
+      { enabled },
+    );
+    void dispatch(fetchWizardReads(sessionId));
+    return normalizeSession(data.session);
+  } catch (e: any) {
+    return rejectWithValue(e?.response?.data?.error || "Could not change the report type");
   }
 });
 
@@ -270,8 +337,50 @@ export const saveReportWizardReview = createAsyncThunk<
   }
 });
 
+/** GF-84: should publishing this round email/text the client? */
+export const fetchWizardNotifyDefault = createAsyncThunk<
+  { notify_client: boolean; reasons: string[] },
+  number,
+  { rejectValue: string }
+>("reportWizard/notifyDefault", async (sessionId, { rejectWithValue }) => {
+  try {
+    const { data } = await api.get<{ notify_client: boolean; reasons: string[] }>(
+      `/admin/report-wizard/sessions/${sessionId}/notify-default`,
+    );
+    return data;
+  } catch (e: any) {
+    return rejectWithValue(e?.response?.data?.error || "Could not check this round");
+  }
+});
+
+/** Read status (also (re)queues missing reads server-side). */
+/** Client mirror of the server's reviewDataWithReadScores (a side with no read scores is left alone). */
+function applyReadScores(data: OfGReportData, reads: NonNullable<WizardReadsStatus["read_scores"]>) {
+  const keys = { TU: "transunion", EX: "experian", EQ: "equifax" } as const;
+  for (const side of ["before", "after"] as const) {
+    const r = reads[side];
+    if (!r || !Object.values(r).some((v) => v != null)) continue;
+    for (const b of ["TU", "EX", "EQ"] as const) data.bureauScores[keys[b]][side] = r[b] ?? 0;
+    const vals = (["TU", "EX", "EQ"] as const).map((b) => r[b]).filter((v): v is number => v != null).sort((x, y) => x - y);
+    // A middle score needs all three bureaus, otherwise it stays "--" (0).
+    data.middleScore[side] = vals.length === 3 ? vals[1] : 0;
+  }
+}
+
+export const fetchWizardReads = createAsyncThunk<WizardReadsStatus, number, { rejectValue: string }>(
+  "reportWizard/reads",
+  async (sessionId, { rejectWithValue }) => {
+    try {
+      const { data } = await api.get<WizardReadsStatus>(`/admin/report-wizard/sessions/${sessionId}/reads`);
+      return data;
+    } catch (e: any) {
+      return rejectWithValue(e?.response?.data?.error || "Could not load read status");
+    }
+  },
+);
+
 export const previewReportWizard = createAsyncThunk<
-  { url: string; flags: Array<{ code: string; message: string }> },
+  { url: string; flags: Array<{ code: string; message: string }>; selfCheck: { pass: boolean; checks: ReportSelfCheck[] } | null },
   { sessionId: number; reviewedJson?: OfGReportData },
   { rejectValue: string }
 >("reportWizard/preview", async (args, { rejectWithValue }) => {
@@ -288,7 +397,14 @@ export const previewReportWizard = createAsyncThunk<
     } catch {
       flags = [];
     }
-    return { url: URL.createObjectURL(resp.data as Blob), flags };
+    let selfCheck: { pass: boolean; checks: ReportSelfCheck[] } | null = null;
+    try {
+      const raw = resp.headers?.["x-report-self-check"];
+      if (raw) selfCheck = JSON.parse(decodeURIComponent(String(raw)));
+    } catch {
+      selfCheck = null;
+    }
+    return { url: URL.createObjectURL(resp.data as Blob), flags, selfCheck };
   } catch (e: any) {
     if (e?.response?.data instanceof Blob) {
       try {
@@ -331,11 +447,17 @@ export const finalizeReportWizard = createAsyncThunk<
     partners_linked?: number;
     partners_with_email?: number;
     partners_pdf_load_failed?: boolean;
+    /** Spec v1.1 P0-1: publish never sends; the report waits for approval. */
+    round_report_id?: number;
+    delivery_status?: "pending_approval" | "needs_review";
+    self_check?: { pass: boolean; checks: ReportSelfCheck[] };
   },
   {
     sessionId: number;
     acknowledgeScoreAnomalies?: boolean;
     notifyPartners?: boolean;
+    /** GF-84: false = publish silently (old / backfilled round). */
+    notifyClient?: boolean;
   },
   { rejectValue: string }
 >("reportWizard/finalize", async (args, { rejectWithValue }) => {
@@ -355,10 +477,14 @@ export const finalizeReportWizard = createAsyncThunk<
       partners_linked?: number;
       partners_with_email?: number;
       partners_pdf_load_failed?: boolean;
+      round_report_id?: number;
+      delivery_status?: "pending_approval" | "needs_review";
+      self_check?: { pass: boolean; checks: ReportSelfCheck[] };
     }>(`/admin/report-wizard/sessions/${args.sessionId}/finalize`, {
       compliance_acknowledged: true,
       acknowledge_score_anomalies: !!args.acknowledgeScoreAnomalies,
       notify_partners: args.notifyPartners !== false,
+      ...(typeof args.notifyClient === "boolean" ? { notify_client: args.notifyClient } : {}),
     });
     return data;
   } catch (e: any) {
@@ -403,6 +529,9 @@ const reportWizardSlice = createSlice({
       state.previewing = false;
       state.reExtracting = false;
       state.previewUrl = null;
+      state.reads = null;
+      state.scoreUpdateOffer = false;
+      state.switchingScoreUpdate = false;
     },
     /** Start-over: drop active session/preview but keep draft list + beforeContext. */
     clearWizardSession(state) {
@@ -415,6 +544,12 @@ const reportWizardSlice = createSlice({
       state.previewing = false;
       state.reExtracting = false;
       state.downloadingSource = null;
+      state.reads = null;
+      state.scoreUpdateOffer = false;
+      state.switchingScoreUpdate = false;
+    },
+    setScoreUpdateOffer(state, action: { payload: boolean }) {
+      state.scoreUpdateOffer = action.payload;
     },
     setReviewedData(state, action: { payload: OfGReportData }) {
       if (state.session) {
@@ -482,6 +617,24 @@ const reportWizardSlice = createSlice({
       .addCase(createReportWizardSession.pending, (state) => {
         state.loading = true;
         state.error = null;
+        state.scoreUpdateOffer = false;
+      })
+      .addCase(setReportWizardScoreUpdate.pending, (state) => {
+        state.switchingScoreUpdate = true;
+        state.error = null;
+      })
+      .addCase(setReportWizardScoreUpdate.fulfilled, (state, action) => {
+        state.switchingScoreUpdate = false;
+        state.session = action.payload;
+        // Any earlier preview was the other report type.
+        if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
+        state.previewUrl = null;
+        state.previewSelfCheck = null;
+        state.previewFlags = [];
+      })
+      .addCase(setReportWizardScoreUpdate.rejected, (state, action) => {
+        state.switchingScoreUpdate = false;
+        state.error = action.payload || "Could not change the report type";
       })
       .addCase(createReportWizardSession.fulfilled, (state, action) => {
         state.loading = false;
@@ -518,6 +671,26 @@ const reportWizardSlice = createSlice({
       .addCase(saveReportWizardReview.fulfilled, (state, action) => {
         state.session = action.payload;
       })
+      .addCase(fetchWizardNotifyDefault.pending, (state) => {
+        state.notifyDefault = null;
+      })
+      .addCase(fetchWizardNotifyDefault.fulfilled, (state, action) => {
+        state.notifyDefault = action.payload;
+      })
+      .addCase(fetchWizardReads.fulfilled, (state, action) => {
+        // Ignore a late response for a session that is no longer open.
+        if (!state.session || state.session.id === action.meta.arg) state.reads = action.payload;
+        // This open draft was loaded before the server filled the scores from the reads:
+        // apply the same scores once. A reloaded draft already has them (and any staff edits).
+        const s = state.session;
+        const meta = s?.extraction_meta as Record<string, unknown> | null | undefined;
+        if (s && s.id === action.meta.arg && action.payload.scores_from_reads && action.payload.read_scores && !meta?.scores_from_reads) {
+          for (const data of [s.extracted_json, s.reviewed_json]) {
+            if (data) applyReadScores(data, action.payload.read_scores);
+          }
+          s.extraction_meta = { ...(meta ?? {}), scores_from_reads: true };
+        }
+      })
       .addCase(previewReportWizard.pending, (state) => {
         state.previewing = true;
         state.error = null;
@@ -527,6 +700,7 @@ const reportWizardSlice = createSlice({
         if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
         state.previewUrl = action.payload.url;
         state.previewFlags = action.payload.flags;
+        state.previewSelfCheck = action.payload.selfCheck;
       })
       .addCase(previewReportWizard.rejected, (state, action) => {
         state.previewing = false;
@@ -549,6 +723,6 @@ const reportWizardSlice = createSlice({
   },
 });
 
-export const { clearReportWizard, clearWizardSession, setReviewedData } =
+export const { clearReportWizard, clearWizardSession, setReviewedData, setScoreUpdateOffer } =
   reportWizardSlice.actions;
 export default reportWizardSlice.reducer;

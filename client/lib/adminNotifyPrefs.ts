@@ -26,6 +26,7 @@ export const ADMIN_NOTIFY_EVENT_KEYS: AdminNotifyEventKey[] = [
   "event_registration",
   "prospect_temperature",
   "progress_report_alerts",
+  "credit_analysis_review",
   "morning_digest",
 ];
 

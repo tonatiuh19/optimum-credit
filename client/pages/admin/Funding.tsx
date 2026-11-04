@@ -52,6 +52,7 @@ import type {
   FundingType,
 } from "@shared/api";
 import { FUNDING_REQUIRED_DOC_SLOTS } from "@shared/api";
+import { FundingUnderwritingPanel } from "@/components/admin/FundingUnderwritingPanel";
 import { cn } from "@/lib/utils";
 
 const BOARD_COLUMNS: FundingApplicationStatus[] = [
@@ -125,6 +126,7 @@ function FundingDetailSheet({
 }) {
   const { t } = useTranslation();
   const dispatch = useAppDispatch();
+  const isUnderwriterDetail = useAppSelector((s) => s.adminAuth.user?.role === "underwriter");
   const { adminDetail, adminDetailLoading, adminDetailError, adminActionLoading } =
     useAppSelector((s) => s.funding);
 
@@ -194,7 +196,10 @@ function FundingDetailSheet({
                       {t("adminFunding.fields.phone")}
                     </dt>
                     <dd>
-                      {app.phone ? (
+                      {app.phone && isUnderwriterDetail ? (
+                        // Underwriters can't use OFG calling / texting (API 403s).
+                        <span className="font-mono">{app.phone}</span>
+                      ) : app.phone ? (
                         <ContactPhoneActions
                           phone={app.phone}
                           clientId={
@@ -285,6 +290,9 @@ function FundingDetailSheet({
                   {t("adminFunding.docsTitle")}
                 </h3>
                 <DocChecklist uploaded={app.docs_uploaded} />
+                <div className="mt-4">
+                  <FundingUnderwritingPanel applicationId={app.id} locked={app.status === "converted"} />
+                </div>
                 {app.docs_complete ? (
                   <p className="text-xs text-accent mt-2 font-medium">
                     {t("adminFunding.docsComplete")}
@@ -319,7 +327,7 @@ function FundingDetailSheet({
                 </div>
               </div>
 
-              {app.status !== "converted" && app.status !== "cancelled" ? (
+              {app.status !== "converted" && app.status !== "cancelled" && !isUnderwriterDetail ? (
                 <Button
                   type="button"
                   className="w-full"
@@ -667,6 +675,8 @@ export default function AdminFunding() {
   } = useAppSelector((s) => s.funding);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [showNewFunding, setShowNewFunding] = useState(false);
+  // Underwriters review / move / request — creating & converting stay OFG-only.
+  const isUnderwriter = useAppSelector((s) => s.adminAuth.user?.role === "underwriter");
   const [search, setSearch] = useState("");
   const [showFilters, setShowFilters] = useState(false);
   const [filters, setFilters] =
@@ -753,14 +763,16 @@ export default function AdminFunding() {
         description={t("adminFunding.subtitle")}
         actions={
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setShowNewFunding(true)}
-              className="inline-flex items-center gap-1.5 text-xs font-medium text-primary-foreground bg-primary hover:bg-primary/90 px-3 py-2 rounded-lg transition-colors"
-            >
-              <Plus className="w-3.5 h-3.5" />{" "}
-              {t("adminFunding.newApplication")}
-            </button>
+            {!isUnderwriter && (
+              <button
+                type="button"
+                onClick={() => setShowNewFunding(true)}
+                className="inline-flex items-center gap-1.5 text-xs font-medium text-primary-foreground bg-primary hover:bg-primary/90 px-3 py-2 rounded-lg transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" />{" "}
+                {t("adminFunding.newApplication")}
+              </button>
+            )}
             <Button
               type="button"
               variant="outline"

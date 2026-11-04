@@ -1,600 +1,489 @@
-import { useEffect } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import {
-  AlertCircle,
+  Activity,
   ArrowRight,
+  BrainCircuit,
+  CalendarClock,
   CalendarDays,
   CheckCircle2,
   CheckSquare,
   CreditCard,
   DollarSign,
   FileCheck2,
+  FileSignature,
   FileText,
-  LayoutDashboard,
+  Inbox,
+  ShieldCheck,
+  KanbanSquare,
+  LifeBuoy,
   MessageSquare,
+  RefreshCw,
+  Sparkles,
   Target,
   TrendingUp,
+  UserPlus,
   Users,
+  type LucideIcon,
 } from "lucide-react";
-import AdminPageHeader from "@/components/AdminPageHeader";
+import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Sparkline } from "@/components/admin/dashboard/Sparkline";
+import { HBars } from "@/components/admin/dashboard/HBars";
+import { ScorecardWidget } from "@/components/productivity/ScorecardWidget";
+import { ReportApprovalQueue } from "@/components/admin/report-approval/ReportApprovalQueue";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { fetchAdminDashboard } from "@/store/slices/adminSlice";
-import type {
-  AdminDashboardTicket,
-  AdminDashboardPayment,
-} from "@shared/api";
-import { useTranslation } from "react-i18next";
+import type { AdminDashboardActivity, AdminDashboardInboxItem } from "@shared/api";
 
+const INBOX_ICON: Record<AdminDashboardInboxItem["key"], LucideIcon> = {
+  reports_approval: ShieldCheck,
+  tasks_overdue: CheckSquare,
+  analyses_review: BrainCircuit,
+  conversations_unread: MessageSquare,
+  docs_review: FileCheck2,
+  rounds_due: Target,
+  tickets_open: LifeBuoy,
+  payments_pending: CreditCard,
+};
+const TONE: Record<AdminDashboardInboxItem["tone"], string> = {
+  alert: "bg-destructive/10 text-destructive border-destructive/25",
+  warn: "bg-warning/15 text-warning border-warning/30",
+  info: "bg-primary/10 text-primary border-primary/20",
+};
+const ACT_ICON: Record<AdminDashboardActivity["kind"], LucideIcon> = {
+  client: UserPlus,
+  contract: FileSignature,
+  document: FileText,
+  report: TrendingUp,
+  analysis: BrainCircuit,
+  payment: DollarSign,
+};
+const FUNNEL = ["prospect", "new_client", "docs_ready", "round_1", "round_2", "round_3", "round_4", "round_5", "completed"] as const;
+
+const money = (cents: number) => (cents / 100).toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+
+/**
+ * Staff command center: what needs you now, today's agenda, pulse, money
+ * (super admins), trends and recent activity. Everyone / Mine scope; manual
+ * refresh. One column on mobile (priority order), two on desktop.
+ */
 export default function AdminDashboard() {
   const dispatch = useAppDispatch();
-  const { t } = useTranslation();
-  const { dashboard } = useAppSelector((s) => s.admin);
+  const { t, i18n } = useTranslation();
+  const { dashboard, dashboardLoaded, dashboardRefreshing } = useAppSelector((s) => s.admin);
+  const me = useAppSelector((s) => s.adminAuth.user);
+  const [mine, setMine] = useState(false);
 
+  const load = useCallback(() => void dispatch(fetchAdminDashboard({ mine })), [dispatch, mine]);
   useEffect(() => {
-    dispatch(fetchAdminDashboard());
-  }, [dispatch]);
+    load();
+  }, [load]);
 
   const s = dashboard.stats;
-  const upcoming = dashboard.upcoming_rounds ?? [];
-  const myTasks = dashboard.my_work_tasks ?? [];
-
-  const fmtMoney = (cents: number) =>
-    `$${(cents / 100).toLocaleString("en-US", { minimumFractionDigits: 0 })}`;
-
-  const priorityColor: Record<string, string> = {
-    urgent: "text-destructive bg-destructive/10",
-    high: "text-primary bg-primary/10",
-    normal: "text-muted-foreground bg-muted",
-    low: "text-muted-foreground bg-muted",
+  const weeks = dashboard.pulse?.weeks ?? [];
+  const totalNeeds = dashboard.inbox.reduce((n, i) => n + i.count, 0);
+  const hour = new Date().getHours();
+  const greeting = t(hour < 12 ? "adminDashboard.cc.morning" : hour < 18 ? "adminDashboard.cc.afternoon" : "adminDashboard.cc.evening", {
+    name: me?.first_name ?? "",
+  });
+  const sum = (k: "new_clients" | "enrolled" | "completed" | "revenue_cents") => weeks.reduce((n, w) => n + w[k], 0);
+  const rel = useMemo(() => new Intl.RelativeTimeFormat(i18n.language, { numeric: "auto" }), [i18n.language]);
+  const ago = (iso: string) => {
+    const diff = (new Date(iso).getTime() - Date.now()) / 1000;
+    const abs = Math.abs(diff);
+    if (abs < 3600) return rel.format(Math.round(diff / 60), "minute");
+    if (abs < 86400) return rel.format(Math.round(diff / 3600), "hour");
+    return rel.format(Math.round(diff / 86400), "day");
   };
+  const weekLabel = (ymd: string) =>
+    new Date(`${ymd}T12:00:00Z`).toLocaleDateString(i18n.language, { month: "short", day: "numeric", timeZone: "UTC" });
 
-  const ticketStatusLabel: Record<string, string> = {
-    open: "Open",
-    in_progress: "In Progress",
-    waiting_client: "Waiting",
-  };
+  // Affiliates only have Pipeline / Clients (scoped server-side); no scope switch.
+  const isAffiliate = me?.role === "affiliate";
+  const allActions: Array<{ to: string; icon: LucideIcon; label: string }> = [
+    { to: "/admin/clients", icon: Users, label: t("adminDashboard.cc.qa.clients") },
+    { to: "/admin/pipeline", icon: KanbanSquare, label: t("adminDashboard.cc.qa.pipeline") },
+    { to: "/admin/conversations", icon: MessageSquare, label: t("adminDashboard.cc.qa.conversations") },
+    { to: "/admin/documents", icon: FileCheck2, label: t("adminDashboard.cc.qa.documents") },
+    { to: "/admin/my-tasks", icon: CheckSquare, label: t("adminDashboard.cc.qa.tasks") },
+    { to: "/admin/calendar", icon: CalendarDays, label: t("adminDashboard.cc.qa.calendar") },
+    ...(dashboard.is_super ? [{ to: "/admin/payments", icon: CreditCard, label: t("adminDashboard.cc.qa.payments") }] : []),
+  ];
+  const actions = isAffiliate ? allActions.filter((a) => a.to === "/admin/clients" || a.to === "/admin/pipeline") : allActions;
+
+  const stageCount = (k: string) => Number(dashboard.stages.find((r) => r.pipeline_stage === k)?.count ?? 0);
 
   return (
-    <div className="space-y-6">
-      <AdminPageHeader
-        icon={LayoutDashboard}
-        title="Dashboard"
-        description="Operational overview at a glance."
-      />
-
-      {/* ── Stat cards ── */}
-      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <Stat
-          icon={Users}
-          label="Active clients"
-          value={s?.active_clients ?? "—"}
-          tint="from-primary/20"
-        />
-        <Stat
-          icon={TrendingUp}
-          label="New this month"
-          value={s?.new_clients_30d ?? "—"}
-          tint="from-accent/20"
-        />
-        <Stat
-          icon={CheckCircle2}
-          label="Completed"
-          value={s?.completed_clients ?? "—"}
-          tint="from-accent/20"
-        />
-        <Stat
-          icon={DollarSign}
-          label="Revenue (30d)"
-          value={
-            s?.revenue_cents_30d != null
-              ? fmtMoney(Number(s.revenue_cents_30d))
-              : "—"
-          }
-          tint="from-secondary/40"
-        />
-      </div>
-
-      {/* ── Action-needed row ── */}
-      <div className="grid sm:grid-cols-3 gap-4">
-        <ActionCard
-          icon={FileCheck2}
-          label="Pending doc reviews"
-          value={s?.pending_doc_reviews ?? "—"}
-          to="/admin/documents"
-          urgent={(s?.pending_doc_reviews ?? 0) > 0}
-        />
-        <ActionCard
-          icon={MessageSquare}
-          label="Open support tickets"
-          value={s?.open_tickets ?? "—"}
-          to="/admin/tickets"
-          urgent={(s?.open_tickets ?? 0) > 0}
-        />
-        <ActionCard
-          icon={CreditCard}
-          label="Pending payments"
-          value={s?.pending_payments ?? "—"}
-          to="/admin/payments"
-          urgent={(s?.pending_payments ?? 0) > 0}
-        />
-      </div>
-
-      {/* ── My open work tasks ── */}
-      <div className="bg-card rounded-2xl border border-border overflow-hidden">
-        <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-border bg-muted/30">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <div className="h-9 w-9 rounded-xl bg-secondary border border-border flex items-center justify-center shrink-0">
-              <CheckSquare className="w-4 h-4 text-foreground" />
-            </div>
-            <div className="min-w-0">
-              <h2 className="text-base font-semibold text-foreground">
-                {t("adminDashboard.myTasksTitle")}
-              </h2>
-              <p className="text-xs text-muted-foreground">
-                {t("adminDashboard.myTasksHint")}
-              </p>
-            </div>
-          </div>
-          <Link
-            to="/admin/my-tasks"
-            className="text-xs font-semibold text-primary inline-flex items-center gap-1 shrink-0"
-          >
-            {t("adminDashboard.viewMyTasks")}
-            <ArrowRight className="w-3 h-3" />
-          </Link>
-        </div>
-        {myTasks.length === 0 ? (
-          <div className="px-5 py-8 text-center text-sm text-muted-foreground">
-            {t("adminDashboard.myTasksEmpty")}
-          </div>
-        ) : (
-          <div className="divide-y divide-border">
-            {myTasks.map((task) => {
-              const dueLabel =
-                task.days_until == null
-                  ? t("adminDashboard.noDueDate")
-                  : task.days_until === 0
-                    ? t("adminDashboard.today")
-                    : task.days_until === 1
-                      ? t("adminDashboard.tomorrow")
-                      : task.days_until < 0
-                        ? null
-                        : t("adminDashboard.inDays", { n: task.days_until });
-              const overdueDays =
-                task.days_until != null && task.days_until < 0
-                  ? Math.abs(task.days_until)
-                  : null;
-              const href = task.client_id
-                ? `/admin/pipeline?client=${task.client_id}`
-                : "/admin/my-tasks";
-              return (
-                <Link
-                  key={task.id}
-                  to={href}
-                  className="flex items-center gap-3 px-5 py-3 hover:bg-muted/40 transition-colors"
-                >
-                  <div
-                    className={`h-10 w-10 rounded-full border flex flex-col items-center justify-center shrink-0 text-center ${
-                      task.overdue
-                        ? "bg-destructive/10 border-destructive/30"
-                        : "bg-secondary border-border"
-                    }`}
-                  >
-                    {overdueDays != null ? (
-                      <>
-                        <span className="text-[10px] font-bold tabular-nums leading-none text-destructive">
-                          {t("adminDashboard.inDays", { n: overdueDays })}
-                        </span>
-                        <span className="text-[8px] font-bold uppercase leading-none text-destructive/90 mt-0.5">
-                          {t("adminDashboard.late")}
-                        </span>
-                      </>
-                    ) : (
-                      <span
-                        className={`text-[10px] font-bold tabular-nums leading-tight px-0.5 ${
-                          task.overdue
-                            ? "text-destructive"
-                            : "text-foreground"
-                        }`}
-                      >
-                        {dueLabel}
-                      </span>
-                    )}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-semibold text-foreground truncate">
-                      {task.title}
-                    </p>
-                    <p className="text-xs text-muted-foreground truncate">
-                      {t(`myTasks.priority.${task.priority}`)}
-                      {task.case_number ? ` · ${task.case_number}` : ""}
-                      {task.client_first_name
-                        ? ` · ${task.client_first_name} ${task.client_last_name || ""}`
-                        : ""}
-                    </p>
-                  </div>
-                  <ArrowRight className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-                </Link>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      {/* ── Upcoming round targets ── */}
-      <div className="bg-card rounded-2xl border border-border overflow-hidden">
-        <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-border bg-muted/30">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <div className="h-9 w-9 rounded-xl bg-primary/15 border border-primary/20 flex items-center justify-center shrink-0">
-              <Target className="w-4 h-4 text-primary" />
-            </div>
-            <div className="min-w-0">
-              <h2 className="text-base font-semibold text-foreground">
-                {t("adminDashboard.upcomingRoundsTitle")}
-              </h2>
-              <p className="text-xs text-muted-foreground">
-                {t("adminDashboard.upcomingRoundsHint")}
-              </p>
-            </div>
-          </div>
-          <Link
-            to="/admin/calendar"
-            className="text-xs font-semibold text-primary inline-flex items-center gap-1 shrink-0"
-          >
-            <CalendarDays className="w-3.5 h-3.5" />
-            {t("adminDashboard.viewCalendar")}
-            <ArrowRight className="w-3 h-3" />
-          </Link>
-        </div>
-        {upcoming.length === 0 ? (
-          <div className="px-5 py-8 text-center text-sm text-muted-foreground">
-            {t("adminDashboard.upcomingRoundsEmpty")}
-          </div>
-        ) : (
-          <div className="divide-y divide-border">
-            {upcoming.map((r) => {
-              const extended = r.kind === "extended";
-              return (
-                <Link
-                  key={r.id}
-                  to={`/admin/pipeline?client=${r.client_id}`}
-                  className="flex items-center gap-3 px-5 py-3 hover:bg-muted/40 transition-colors"
-                >
-                  <div
-                    className={
-                      extended
-                        ? "h-10 w-10 rounded-full bg-accent/10 border border-accent/25 flex flex-col items-center justify-center shrink-0 text-center"
-                        : "h-10 w-10 rounded-full bg-primary/10 border border-primary/20 flex flex-col items-center justify-center shrink-0 text-center"
-                    }
-                  >
-                    <span
-                      className={
-                        extended
-                          ? "text-[9px] font-bold uppercase text-accent/80 leading-none"
-                          : "text-[9px] font-bold uppercase text-primary/70 leading-none"
-                      }
-                    >
-                      R{r.round_number}
-                      {extended ? "★" : ""}
-                    </span>
-                    <span
-                      className={
-                        extended
-                          ? "text-[10px] font-bold text-accent tabular-nums leading-none mt-0.5"
-                          : "text-[10px] font-bold text-primary tabular-nums leading-none mt-0.5"
-                      }
-                    >
-                      {r.days_until === 0
-                        ? t("adminDashboard.today")
-                        : r.days_until === 1
-                          ? t("adminDashboard.tomorrow")
-                          : t("adminDashboard.inDays", { n: r.days_until })}
-                    </span>
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-semibold text-foreground truncate">
-                      {r.first_name} {r.last_name}
-                      {extended ? (
-                        <span className="ml-1.5 text-[10px] font-bold uppercase tracking-wide text-accent">
-                          {t("adminCalendar.specialBadge")}
-                        </span>
-                      ) : null}
-                    </p>
-                    <p className="text-xs text-muted-foreground truncate">
-                      {r.case_number ?? "—"} ·{" "}
-                      {extended
-                        ? t("adminCalendar.extendedRoundN", {
-                            n: r.round_number,
-                          })
-                        : t("adminCalendar.roundN", { n: r.round_number })}{" "}
-                      ·{" "}
-                      {new Date(r.target_date + "T12:00:00").toLocaleDateString(
-                        undefined,
-                        { month: "short", day: "numeric" },
-                      )}
-                    </p>
-                  </div>
-                  <ArrowRight className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-                </Link>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      {/* ── Score improvement banner ── */}
-      {s?.avg_score_improvement != null &&
-        Number(s.avg_score_improvement) > 0 && (
-          <div className="bg-accent/10 border border-accent/30 rounded-2xl p-4 flex items-center gap-3">
-            <TrendingUp className="w-5 h-5 text-accent shrink-0" />
-            <p className="text-sm font-medium">
-              Average credit score improvement across all clients:{" "}
-              <span className="text-accent font-bold">
-                +{s.avg_score_improvement} pts
-              </span>
+    <div className="space-y-4 animate-in fade-in" data-testid="admin-dashboard">
+      {/* ── Hero ── */}
+      <header className="relative overflow-hidden rounded-2xl p-5 sm:p-6 text-primary-foreground bg-gradient-to-br from-primary via-primary/95 to-primary/80 shadow-lg">
+        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(120%_140%_at_100%_0%,hsl(var(--accent)/0.28),transparent_55%)]" />
+        <div className="relative grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto] gap-4">
+          <div className="min-w-0">
+            <p className="text-[11px] uppercase tracking-widest text-accent">
+              {new Intl.DateTimeFormat(i18n.language, { weekday: "long", month: "long", day: "numeric" }).format(new Date())}
+            </p>
+            <h1 className="mt-1 text-2xl sm:text-3xl font-bold leading-tight break-words">{greeting}</h1>
+            <p className="mt-1 text-sm opacity-85">
+              {!dashboardLoaded
+                ? t("adminDashboard.cc.loading")
+                : totalNeeds
+                  ? t("adminDashboard.cc.summary", { count: totalNeeds })
+                  : t("adminDashboard.cc.allClear")}
             </p>
           </div>
-        )}
-
-      {/* ── Main panels ── */}
-      <div className="grid lg:grid-cols-3 gap-4">
-        {/* Pipeline distribution */}
-        <div className="bg-card rounded-2xl border border-border p-6">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-base font-semibold">Pipeline distribution</h2>
-            <Link
-              to="/admin/pipeline"
-              className="text-xs text-primary inline-flex items-center gap-1"
+          <div className="order-first sm:order-none flex items-start justify-between sm:justify-end gap-2">
+            {!isAffiliate && (
+            <div className="inline-flex rounded-full bg-primary-foreground/10 p-1" role="radiogroup" aria-label={t("adminDashboard.cc.scope")}>
+              {[false, true].map((m) => (
+                <button
+                  key={String(m)}
+                  type="button"
+                  role="radio"
+                  aria-checked={mine === m}
+                  onClick={() => setMine(m)}
+                  className={`rounded-full px-3 py-1 text-xs font-semibold transition-colors ${
+                    mine === m ? "bg-accent text-accent-foreground shadow" : "text-primary-foreground/80 hover:text-primary-foreground"
+                  }`}
+                  data-testid={m ? "dashboard-scope-mine" : "dashboard-scope-everyone"}
+                >
+                  {t(m ? "adminDashboard.cc.mine" : "adminDashboard.cc.everyone")}
+                </button>
+              ))}
+            </div>
+            )}
+            <button
+              type="button"
+              onClick={load}
+              aria-label={t("adminDashboard.cc.refresh")}
+              title={t("adminDashboard.cc.refresh")}
+              className="grid place-items-center w-8 h-8 rounded-full border border-primary-foreground/25 hover:bg-primary-foreground/10 transition-colors"
+              data-testid="dashboard-refresh"
             >
-              View <ArrowRight className="w-3 h-3" />
-            </Link>
+              <RefreshCw className={`w-4 h-4 ${dashboardRefreshing ? "animate-spin" : ""}`} />
+            </button>
           </div>
-          <div className="space-y-3">
-            {dashboard.stages.map((row) => (
-              <div key={row.pipeline_stage} className="flex items-center gap-3">
-                <span className="text-xs capitalize w-28 text-muted-foreground truncate">
-                  {row.pipeline_stage.replace(/_/g, " ")}
-                </span>
-                <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-primary rounded-full"
-                    style={{
-                      width: `${Math.min(
-                        100,
-                        (Number(row.count) /
-                          Math.max(1, Number(s?.active_clients) || 1)) *
-                          100,
-                      )}%`,
-                    }}
-                  />
-                </div>
-                <span className="text-xs font-semibold w-8 text-right tabular-nums">
-                  {row.count}
-                </span>
-              </div>
+          <nav className="col-span-full grid grid-cols-2 sm:grid-cols-[repeat(auto-fill,minmax(9.5rem,1fr))] gap-2" aria-label={t("adminDashboard.cc.quickActions")}>
+            {actions.map((a) => (
+              <Link
+                key={a.to}
+                to={a.to}
+                className="flex items-center gap-2 min-w-0 rounded-xl border border-primary-foreground/15 bg-primary-foreground/10 px-3 py-2.5 text-sm font-semibold hover:bg-primary-foreground/20 hover:-translate-y-0.5 transition-all"
+              >
+                <a.icon className="w-4 h-4 shrink-0 text-accent" />
+                <span className="truncate">{a.label}</span>
+              </Link>
             ))}
-          </div>
+          </nav>
         </div>
+      </header>
 
-        {/* Recent open tickets */}
-        <div className="bg-card rounded-2xl border border-border p-6">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-base font-semibold">Open tickets</h2>
-            <Link
-              to="/admin/tickets"
-              className="text-xs text-primary inline-flex items-center gap-1"
-            >
-              View all <ArrowRight className="w-3 h-3" />
+      {!isAffiliate && <ReportApprovalQueue />}
+      {!isAffiliate && <ScorecardWidget />}
+
+      {/* ── Grid: one column in priority order on mobile, two columns on desktop ── */}
+      <div className="flex flex-col gap-4 lg:grid lg:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)] lg:items-start">
+        <div className="contents lg:flex lg:flex-col lg:gap-4">
+          {/* Needs you */}
+          <Card order="order-1" icon={Sparkles} title={t("adminDashboard.cc.needsYou")} testId="dashboard-inbox">
+            {!dashboardLoaded ? (
+              <Skeleton rows={4} />
+            ) : dashboard.inbox.length ? (
+              <ul className="space-y-1.5">
+                {dashboard.inbox.map((i) => {
+                  const Icon = INBOX_ICON[i.key] ?? Inbox;
+                  return (
+                    <li key={i.key}>
+                      <Link to={i.to} className="group flex items-center gap-3 rounded-xl px-2 py-2 hover:bg-muted/50 transition-colors">
+                        <span className={`grid place-items-center w-9 h-9 rounded-xl border shrink-0 ${TONE[i.tone]}`}>
+                          <Icon className="w-4 h-4" />
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-sm font-semibold text-foreground truncate">
+                            {t(`adminDashboard.cc.inbox.${i.key}`, { count: i.count })}
+                          </span>
+                          <span className="block text-xs text-muted-foreground truncate">{t(`adminDashboard.cc.inboxHint.${i.key}`)}</span>
+                        </span>
+                        <span className={`min-w-[2rem] text-center rounded-full border px-2 py-0.5 text-xs font-bold tabular-nums ${TONE[i.tone]}`}>
+                          {i.count}
+                        </span>
+                        <ArrowRight className="w-4 h-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+                      </Link>
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : (
+              <p className="flex items-center gap-2 py-6 justify-center text-sm text-muted-foreground">
+                <CheckCircle2 className="w-5 h-5 text-accent" /> {t("adminDashboard.cc.allClearLong")}
+              </p>
+            )}
+          </Card>
+
+          {/* Pulse */}
+          <Card order="order-3" icon={TrendingUp} title={t("adminDashboard.cc.pulse")} testId="dashboard-pulse">
+            <div className="grid grid-cols-2 gap-3">
+              <Kpi label={t("adminDashboard.cc.kpi.active")} value={s?.active_clients ?? "—"} hint={t("adminDashboard.cc.kpi.activeHint")} />
+              <Kpi
+                label={t("adminDashboard.cc.kpi.new")}
+                value={dashboardLoaded ? sum("new_clients") : "—"}
+                hint={t("adminDashboard.cc.last8w")}
+                spark={weeks.map((w) => w.new_clients)}
+              />
+              <Kpi
+                label={t("adminDashboard.cc.kpi.enrolled")}
+                value={dashboardLoaded ? sum("enrolled") : "—"}
+                hint={t("adminDashboard.cc.last8w")}
+                spark={weeks.map((w) => w.enrolled)}
+                accent
+              />
+              <Kpi
+                label={t("adminDashboard.cc.kpi.completed")}
+                value={dashboardLoaded ? sum("completed") : "—"}
+                hint={t("adminDashboard.cc.completedTotal", { count: Number(s?.completed_clients ?? 0) })}
+                spark={weeks.map((w) => w.completed)}
+                accent
+              />
+            </div>
+            {s?.avg_score_improvement != null && Number(s.avg_score_improvement) > 0 && (
+              <p className="mt-3 flex items-center gap-2 rounded-xl border border-accent/30 bg-accent/10 px-3 py-2 text-xs text-foreground">
+                <TrendingUp className="w-4 h-4 text-accent shrink-0" />
+                {t("adminDashboard.cc.avgImprovement")} <b className="text-accent">+{s.avg_score_improvement} pts</b>
+              </p>
+            )}
+          </Card>
+
+          {/* Trends */}
+          <Card order="order-5" icon={Activity} title={t("adminDashboard.cc.trends")} testId="dashboard-trends">
+            {weeks.length > 0 && (
+              <div className="h-48 -ml-2">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={weeks.map((w) => ({ ...w, label: weekLabel(w.week) }))} barGap={2}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
+                    <XAxis dataKey="label" tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} tickLine={false} axisLine={false} />
+                    <YAxis allowDecimals={false} tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} tickLine={false} axisLine={false} width={28} />
+                    <Tooltip contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))", borderRadius: 8, fontSize: 12 }} />
+                    <Legend wrapperStyle={{ fontSize: 11 }} iconType="circle" iconSize={8} />
+                    <Bar dataKey="new_clients" name={t("adminDashboard.cc.kpi.new")} fill="hsl(var(--primary))" radius={[4, 4, 0, 0]} />
+                    <Bar dataKey="enrolled" name={t("adminDashboard.cc.kpi.enrolled")} fill="hsl(var(--accent))" radius={[4, 4, 0, 0]} />
+                    <Bar dataKey="completed" name={t("adminDashboard.cc.kpi.completed")} fill="hsl(var(--muted-foreground))" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+            <h3 className="mt-4 mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{t("adminDashboard.cc.funnel")}</h3>
+            <HBars rows={FUNNEL.map((k) => ({ label: t(`adminDashboard.cc.stage.${k}`), value: stageCount(k) }))} />
+            <Link to="/admin/pipeline" className="mt-3 inline-flex items-center gap-1 text-xs font-semibold text-primary">
+              {t("adminDashboard.cc.openPipeline")} <ArrowRight className="w-3 h-3" />
             </Link>
-          </div>
-          {dashboard.recent_tickets.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-8 text-muted-foreground text-sm gap-2">
-              <CheckCircle2 className="w-8 h-8 text-accent/60" />
-              <span>No open tickets</span>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {dashboard.recent_tickets.map((t: AdminDashboardTicket) => (
-                <Link
-                  key={t.id}
-                  to="/admin/tickets"
-                  className="flex items-start gap-3 p-3 rounded-lg hover:bg-white/5 transition-colors"
-                >
-                  <span
-                    className={`mt-0.5 text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded shrink-0 ${priorityColor[t.priority] || priorityColor.normal}`}
-                  >
-                    {t.priority}
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium truncate">
-                      {t.subject}
-                    </div>
-                    <div className="text-xs text-muted-foreground">
-                      {t.first_name} {t.last_name} ·{" "}
-                      {ticketStatusLabel[t.status] ?? t.status}
-                    </div>
-                  </div>
-                </Link>
-              ))}
-            </div>
-          )}
+          </Card>
         </div>
 
-        {/* Recent payments */}
-        <div className="bg-card rounded-2xl border border-border p-6">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-base font-semibold">Recent payments</h2>
-            <Link
-              to="/admin/payments"
-              className="text-xs text-primary inline-flex items-center gap-1"
-            >
-              View all <ArrowRight className="w-3 h-3" />
-            </Link>
-          </div>
-          {dashboard.recent_payments.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-8 text-muted-foreground text-sm gap-2">
-              <DollarSign className="w-8 h-8 text-muted-foreground/40" />
-              <span>No payments yet</span>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {dashboard.recent_payments.map((p: AdminDashboardPayment) => (
-                <Link
-                  key={p.id}
-                  to="/admin/payments"
-                  className="flex items-center justify-between p-3 rounded-lg hover:bg-white/5 transition-colors"
-                >
-                  <div>
-                    <div className="text-sm font-medium">
-                      {p.first_name} {p.last_name}
-                    </div>
-                    <div className="text-xs text-muted-foreground">
-                      {p.paid_at
-                        ? new Date(p.paid_at).toLocaleDateString()
-                        : new Date(p.created_at).toLocaleDateString()}
-                    </div>
-                  </div>
-                  <span className="text-sm font-bold text-accent">
-                    {fmtMoney(Number(p.amount_cents))}
-                  </span>
-                </Link>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* ── Recent clients ── */}
-      <div className="bg-card rounded-2xl border border-border p-6">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-base font-semibold">Recently joined clients</h2>
-          <Link
-            to="/admin/clients"
-            className="text-sm text-primary inline-flex items-center gap-1"
-          >
-            View all <ArrowRight className="w-4 h-4" />
-          </Link>
-        </div>
-        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-2">
-          {dashboard.recent_clients.map((c) => (
-            <Link
-              key={c.id}
-              to={`/admin/clients/${c.id}`}
-              className="flex items-center justify-between p-3 rounded-lg hover:bg-white/5 transition-colors border border-transparent hover:border-border"
-            >
-              <div className="min-w-0">
-                <div className="font-medium text-sm truncate">
-                  {c.first_name} {c.last_name}
+        <div className="contents lg:flex lg:flex-col lg:gap-4">
+          {/* Today */}
+          <Card order="order-2" icon={CalendarClock} title={t("adminDashboard.cc.today")} testId="dashboard-today">
+            {!dashboardLoaded ? (
+              <Skeleton rows={3} />
+            ) : (
+              <div className="space-y-4">
+                <div>
+                  <SubHead title={t("adminDashboard.myTasksTitle")} to="/admin/my-tasks" cta={t("adminDashboard.viewMyTasks")} />
+                  {dashboard.my_work_tasks.length === 0 ? (
+                    <p className="text-xs text-muted-foreground py-2">{t("adminDashboard.myTasksEmpty")}</p>
+                  ) : (
+                    <ol className="space-y-1">
+                      {dashboard.my_work_tasks.slice(0, 5).map((task) => {
+                        const d = task.days_until;
+                        const when =
+                          d == null
+                            ? t("adminDashboard.noDueDate")
+                            : d < 0
+                              ? t("adminDashboard.cc.daysLate", { n: Math.abs(d) })
+                              : d === 0
+                                ? t("adminDashboard.today")
+                                : d === 1
+                                  ? t("adminDashboard.tomorrow")
+                                  : t("adminDashboard.inDays", { n: d });
+                        return (
+                          <li key={task.id}>
+                            <Link
+                              to={task.client_id ? `/admin/pipeline?client=${task.client_id}` : "/admin/my-tasks"}
+                              className="grid grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-3 rounded-lg px-2 py-1.5 hover:bg-muted/50 transition-colors"
+                            >
+                              <span className={`text-[11px] font-bold tabular-nums ${task.overdue ? "text-destructive" : "text-primary"}`}>{when}</span>
+                              <span className="min-w-0">
+                                <span className="block text-sm font-medium text-foreground truncate">{task.title}</span>
+                                <span className="block text-[11px] text-muted-foreground truncate">
+                                  {t(`myTasks.priority.${task.priority}`)}
+                                  {task.client_first_name ? ` · ${task.client_first_name} ${task.client_last_name || ""}` : ""}
+                                </span>
+                              </span>
+                            </Link>
+                          </li>
+                        );
+                      })}
+                    </ol>
+                  )}
                 </div>
-                <div className="text-xs text-muted-foreground truncate">
-                  {c.email}
+                <div>
+                  <SubHead title={t("adminDashboard.upcomingRoundsTitle")} to="/admin/calendar" cta={t("adminDashboard.viewCalendar")} />
+                  {dashboard.upcoming_rounds.length === 0 ? (
+                    <p className="text-xs text-muted-foreground py-2">{t("adminDashboard.upcomingRoundsEmpty")}</p>
+                  ) : (
+                    <ol className="space-y-1">
+                      {dashboard.upcoming_rounds.slice(0, 6).map((r) => (
+                        <li key={r.id}>
+                          <Link
+                            to={`/admin/pipeline?client=${r.client_id}`}
+                            className="grid grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-3 rounded-lg px-2 py-1.5 hover:bg-muted/50 transition-colors"
+                          >
+                            <span className={`text-[11px] font-bold tabular-nums ${r.kind === "extended" ? "text-accent" : "text-primary"}`}>
+                              {r.days_until === 0
+                                ? t("adminDashboard.today")
+                                : r.days_until === 1
+                                  ? t("adminDashboard.tomorrow")
+                                  : t("adminDashboard.inDays", { n: r.days_until })}
+                            </span>
+                            <span className="min-w-0">
+                              <span className="block text-sm font-medium text-foreground truncate">
+                                {r.first_name} {r.last_name}
+                              </span>
+                              <span className="block text-[11px] text-muted-foreground truncate">
+                                {r.case_number ?? "—"} ·{" "}
+                                {r.kind === "extended"
+                                  ? t("adminCalendar.extendedRoundN", { n: r.round_number })
+                                  : t("adminCalendar.roundN", { n: r.round_number })}
+                              </span>
+                            </span>
+                          </Link>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
                 </div>
               </div>
-              <span className="text-xs uppercase tracking-wide bg-white/5 px-2 py-1 rounded ml-2 shrink-0">
-                {c.pipeline_stage.replace(/_/g, " ")}
-              </span>
-            </Link>
-          ))}
-        </div>
-      </div>
+            )}
+          </Card>
 
-      {/* ── Quick actions ── */}
-      <div>
-        <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-3">
-          Quick actions
-        </h2>
-        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
-          {[
-            { icon: Users, label: "Manage clients", to: "/admin/clients" },
-            {
-              icon: FileText,
-              label: "Review documents",
-              to: "/admin/documents",
-            },
-            {
-              icon: MessageSquare,
-              label: "Support tickets",
-              to: "/admin/tickets",
-            },
-            { icon: CreditCard, label: "Payments", to: "/admin/payments" },
-          ].map(({ icon: Icon, label, to }) => (
-            <Link
-              key={to}
-              to={to}
-              className="flex items-center gap-3 p-4 rounded-xl border border-border hover:border-primary/40 hover:bg-primary/5 transition-all group"
-            >
-              <Icon className="w-5 h-5 text-primary/60 group-hover:text-primary transition-colors" />
-              <span className="text-sm font-medium">{label}</span>
-              <ArrowRight className="w-4 h-4 ml-auto text-muted-foreground group-hover:text-primary transition-colors" />
-            </Link>
-          ))}
+          {/* Money (super admins) */}
+          {dashboard.is_super && (
+            <Card order="order-4" icon={DollarSign} title={t("adminDashboard.cc.money")} testId="dashboard-money">
+              <div className="flex items-end justify-between gap-3">
+                <div>
+                  <p className="text-xs text-muted-foreground">{t("adminDashboard.cc.revenue30d")}</p>
+                  <p className="text-3xl font-bold tabular-nums text-foreground">{money(Number(s?.revenue_cents_30d ?? 0))}</p>
+                  <p className="text-[11px] text-muted-foreground">
+                    {t("adminDashboard.cc.revenue8w", { amount: money(sum("revenue_cents")) })}
+                  </p>
+                </div>
+                <Sparkline values={weeks.map((w) => w.revenue_cents)} label={t("adminDashboard.cc.revenue30d")} className="text-accent" />
+              </div>
+              <h3 className="mt-4 mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{t("adminDashboard.cc.recentPayments")}</h3>
+              {dashboard.recent_payments.length === 0 ? (
+                <p className="text-xs text-muted-foreground py-2">{t("adminDashboard.cc.noPayments")}</p>
+              ) : (
+                <ul className="divide-y divide-border">
+                  {dashboard.recent_payments.map((p) => (
+                    <li key={p.id}>
+                      <Link to="/admin/payments" className="flex items-center justify-between gap-3 py-2 hover:bg-muted/30 rounded-lg px-1 transition-colors">
+                        <span className="min-w-0">
+                          <span className="block text-sm font-medium text-foreground truncate">
+                            {p.first_name} {p.last_name}
+                          </span>
+                          <span className="block text-[11px] text-muted-foreground">{ago(p.paid_at ?? p.created_at)}</span>
+                        </span>
+                        <span className="text-sm font-bold tabular-nums text-accent">{money(Number(p.amount_cents))}</span>
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </Card>
+          )}
+
+          {/* Activity */}
+          <Card order="order-6" icon={Activity} title={t("adminDashboard.cc.activity")} testId="dashboard-activity">
+            {!dashboardLoaded ? (
+              <Skeleton rows={5} />
+            ) : dashboard.activity.length === 0 ? (
+              <p className="text-xs text-muted-foreground py-4">{t("adminDashboard.cc.noActivity")}</p>
+            ) : (
+              <ol className="relative space-y-0.5 before:absolute before:left-[1.05rem] before:top-2 before:bottom-2 before:w-px before:bg-border">
+                {dashboard.activity.map((a, i) => {
+                  const Icon = ACT_ICON[a.kind] ?? Activity;
+                  return (
+                    <li key={`${a.kind}-${a.at}-${i}`}>
+                      <Link to={`/admin/clients/${a.client_id}`} className="relative flex items-start gap-3 rounded-lg px-1 py-1.5 hover:bg-muted/40 transition-colors">
+                        <span className="relative z-10 grid place-items-center w-7 h-7 rounded-full bg-card border border-border shrink-0">
+                          <Icon className={`w-3.5 h-3.5 ${a.kind === "payment" ? "text-accent" : "text-primary"}`} />
+                        </span>
+                        <span className="min-w-0 pt-0.5">
+                          <span className="block text-xs text-foreground leading-snug">
+                            {t(`adminDashboard.cc.act.${a.kind}`, {
+                              name: a.name || "—",
+                              detail: a.kind === "payment" ? money(Number(a.detail ?? 0)) : (a.detail ?? ""),
+                            })}
+                          </span>
+                          <span className="block text-[11px] text-muted-foreground">{ago(a.at)}</span>
+                        </span>
+                      </Link>
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
+          </Card>
         </div>
       </div>
     </div>
   );
 }
 
-function Stat({
-  icon: Icon,
-  label,
-  value,
-  tint,
-}: {
-  icon: any;
-  label: string;
-  value: any;
-  tint: string;
-}) {
+function Card({ order, icon: Icon, title, testId, children }: { order: string; icon: LucideIcon; title: string; testId: string; children: ReactNode }) {
   return (
-    <div className="bg-card rounded-2xl border border-border p-5 overflow-hidden relative">
-      <div
-        className={`absolute inset-0 bg-gradient-to-br ${tint} to-transparent opacity-40 pointer-events-none`}
-      />
-      <div className="relative flex items-center justify-between">
-        <span className="text-sm text-muted-foreground">{label}</span>
-        <Icon className="w-5 h-5 text-primary" />
-      </div>
-      <div className="text-3xl font-bold mt-2 relative">{value}</div>
+    <section className={`${order} lg:order-none card-base p-4 sm:p-5 min-w-0`} data-testid={testId}>
+      <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-foreground">
+        <span className="grid place-items-center w-7 h-7 rounded-lg bg-primary/10">
+          <Icon className="w-4 h-4 text-primary" />
+        </span>
+        {title}
+      </h2>
+      {children}
+    </section>
+  );
+}
+
+function SubHead({ title, to, cta }: { title: string; to: string; cta: string }) {
+  return (
+    <div className="mb-1 flex items-center justify-between gap-2">
+      <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{title}</h3>
+      <Link to={to} className="text-[11px] font-semibold text-primary inline-flex items-center gap-1">
+        {cta} <ArrowRight className="w-3 h-3" />
+      </Link>
     </div>
   );
 }
 
-function ActionCard({
-  icon: Icon,
-  label,
-  value,
-  to,
-  urgent,
-}: {
-  icon: any;
-  label: string;
-  value: any;
-  to: string;
-  urgent: boolean;
-}) {
+function Kpi({ label, value, hint, spark, accent }: { label: string; value: number | string; hint: string; spark?: number[]; accent?: boolean }) {
   return (
-    <Link
-      to={to}
-      className={`flex items-center gap-4 p-4 rounded-2xl border transition-all hover:scale-[1.01] ${
-        urgent
-          ? "border-destructive/40 bg-destructive/5 hover:bg-destructive/10"
-          : "border-border bg-card hover:bg-white/5"
-      }`}
-    >
-      <div
-        className={`p-2 rounded-lg ${urgent ? "bg-destructive/10" : "bg-primary/10"}`}
-      >
-        {urgent ? (
-          <AlertCircle className="w-5 h-5 text-destructive" />
-        ) : (
-          <Icon className="w-5 h-5 text-primary" />
-        )}
+    <div className="rounded-xl border border-border p-3 min-w-0">
+      <p className="text-[11px] text-muted-foreground truncate">{label}</p>
+      <div className="flex items-end justify-between gap-2">
+        <p className="text-2xl font-bold tabular-nums text-foreground">{value}</p>
+        {spark && spark.length > 0 && <Sparkline values={spark} label={label} className={accent ? "text-accent" : "text-primary"} />}
       </div>
-      <div>
-        <div className="text-2xl font-bold tabular-nums">{value}</div>
-        <div className="text-xs text-muted-foreground">{label}</div>
-      </div>
-      <ArrowRight className="w-4 h-4 ml-auto text-muted-foreground" />
-    </Link>
+      <p className="text-[10px] text-muted-foreground truncate">{hint}</p>
+    </div>
+  );
+}
+
+function Skeleton({ rows }: { rows: number }) {
+  return (
+    <div className="space-y-2" aria-hidden>
+      {Array.from({ length: rows }, (_, i) => (
+        <div key={i} className="h-9 rounded-lg bg-muted animate-pulse" />
+      ))}
+    </div>
   );
 }

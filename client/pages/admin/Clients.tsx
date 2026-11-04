@@ -199,7 +199,7 @@ const STAGES: (PipelineStage | "all")[] = [
 ];
 
 /**
- * Extended OFG rounds (6–12) live on pipeline_stage `round_5`; the API
+ * Extended OFG rounds (6–24) live on pipeline_stage `round_5`; the API
  * resolves these filter values from published reports + case max_rounds.
  */
 const EXTENDED_ROUND_STAGE_FILTERS = [

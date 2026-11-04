@@ -142,8 +142,10 @@ describe("Credit Analysis acceptance (Fix Spec, Oct 15 2026)", () => {
     expect(n.kind).toBe("late");
     expect(n.status).toMatch(/Late 30/);
     expect(n.status).toMatch(/\$60 past due/);
-    expect(n.status).toMatch(/\$514 balance on \$500 limit/);
-    // Round 3 (cross-bureau inconsistencies); not reported to TransUnion.
+    // Spec v2.1 P1-4: over-limit is an accuracy flag, not status text.
+    expect(n.accuracyFlags!.join(" ")).toMatch(/balance \$514 exceeds \$500 limit/);
+    expect(n.accuracyFlags!.join(" ")).toMatch(/missing from TU/);
+    // Spec v2.1 §5: late-payment account → Round 3; not reported to TransUnion.
     expect(n.round).toBe(3);
     expect(n.legalBasis).toBe("FCRA §611, §623");
     expect(n.inconsistencies.join(" | ")).toMatch(/Closed date: reported by EQ, not by EX/);
@@ -151,11 +153,16 @@ describe("Credit Analysis acceptance (Fix Spec, Oct 15 2026)", () => {
     expect(n.inconsistencies.join(" | ")).toMatch(/Not reported to TU/);
   });
 
-  it("Round 1: the Dec 12-13 2024 cluster of 17 (EQ 3, EX 9, TU 5); BCI + Credco excluded", () => {
-    expect(a.inquiryClusters.map((c) => [c.count, c.perBureau, c.older12m])).toEqual([[17, { TU: 5, EX: 9, EQ: 3 }, true]]);
-    expect(a.inquiryClusters[0]).toMatchObject({ count: 17, perBureau: { EQ: 3, EX: 9, TU: 5 }, older12m: true });
+  it("Round 1: same-DATE clusters (12/12, 12/13); BCI excluded (opened BCION); Credco excluded (active loan)", () => {
+    // 17 auto-shopping pulls: 10 on 12/12, 7 on 12/13 (BCI is excluded, not clustered).
+    expect(a.inquiryClusters.map((c) => [c.from, c.count, c.older12m])).toEqual([
+      ["12/12/2024", 10, true],
+      ["12/13/2024", 7, true],
+    ]);
     const bci = a.inquiries.find((x) => x.creditor === "BCI FIN CORP")!;
+    // Cesar (Oct 22): an inquiry matching an account opened within ~90 days is excluded.
     expect(bci).toMatchObject({ action: "permissible", excludedReason: "matches_account" });
+    expect(bci.lowerOdds).toMatch(/BCION/);
     const credco = a.inquiries.filter((x) => x.creditor.startsWith("CREDCO"));
     expect(credco).toHaveLength(3);
     expect(credco.every((x) => x.excludedReason === "active_loan")).toBe(true);
@@ -165,19 +172,21 @@ describe("Credit Analysis acceptance (Fix Spec, Oct 15 2026)", () => {
     expect(a.negatives.filter((n) => n.round === 2)).toEqual([]);
   });
 
-  it("Round 3: Fortiva + Equifax identity + Westlake update (not a deletion)", () => {
-    expect(a.identityFlags.map((f) => `${f.bureau}:${f.field}`)).toEqual(["EQ:ssn", "EQ:name"]);
-    expect(a.accuracyUpdates.map((u) => u.creditor)).toEqual(["WESTLAKE SERVICE INC"]);
-    expect(a.accuracyUpdates[0].inconsistencies.join(" | ")).toMatch(/Status: .*EX Closed/);
-    // Westlake stays a positive account.
+  it("Spec v2.1 P0-7: identity variances go to Round 1; positive Westlake is never a dispute target", () => {
+    expect(a.identityFlags.map((f) => `${f.bureau}:${f.field}`).sort()).toEqual(["EQ:name", "EQ:ssn"]);
+    expect(a.accuracyUpdates).toEqual([]);
     expect(a.positives.some((p) => p.creditor === "WESTLAKE SERVICE INC")).toBe(true);
+    expect(a.negatives.some((n) => n.creditor === "WESTLAKE SERVICE INC")).toBe(false);
   });
 
   it("escrow: active (agent), loan pulls excluded, tradelines after closing", () => {
     expect(a.escrow.active).toBe(true);
     expect(a.escrow.loanInquiries).toHaveLength(3);
     expect(a.tradelines.map((t) => t.code)).toEqual(["IH-1", "IH-2", "primary"]);
-    expect(a.tradelines.every((t) => t.timing === "after_closing")).toBe(true);
+    // Spec §7: AU lines after closing; primary line held until after closing.
+    expect(a.tradelines.filter((t) => t.code !== "primary").every((t) => t.timing === "after_closing")).toBe(true);
+    expect(a.tradelines.find((t) => t.code === "primary")).toMatchObject({ timing: "hold", note: "Hold until after closing" });
+    expect(a.tradelines.find((t) => t.code === "IH-2")?.optional).toBe(true);
   });
 
   it("escrow is also auto-detected from the recent mortgage pull", () => {
@@ -185,10 +194,11 @@ describe("Credit Analysis acceptance (Fix Spec, Oct 15 2026)", () => {
     expect(buildCreditAnalysis(FILE, { escrow: false }).escrow.active).toBe(false);
   });
 
-  it("file strength: current 46 (8, 18, 0, 8, 12); projected 78", () => {
+  it("file strength: current 46 (8, 18, 0, 8, 12); conservative projection (no loan credit before closing)", () => {
     expect(a.fileStrength.factors.map((f) => f.current)).toEqual([8, 18, 0, 8, 12]);
     expect(a.fileStrength.current).toBe(46);
-    expect(a.fileStrength.postRepair).toBe(78);
+    expect(a.fileStrength.postRepair).toBeGreaterThan(46);
+    expect(a.fileStrength.factors.find((f) => f.key === "mortgage")!.postRepair).toBe(0);
   });
 
   it("program: Standard (no counted Complex trigger)", () => {
@@ -197,46 +207,50 @@ describe("Credit Analysis acceptance (Fix Spec, Oct 15 2026)", () => {
 
   it("projections move per bureau: only EQ/EX (where Fortiva reports) move in Round 3", () => {
     const by = Object.fromEntries(a.projections.map((p) => [p.key, p.scores]));
-    expect(Object.keys(by)).toEqual(["current", "round1", "round3", "round4"]);
+    // Spec §6: a step only for rounds that have items (no Round 4 here); v2.3 P1-7: never a utilization/AU row.
+    expect(Object.keys(by)).toEqual(["current", "round1", "round3"]);
     expect(by.round3.EQ!).toBeGreaterThan(by.round1.EQ!);
     expect(by.round3.EX!).toBeGreaterThan(by.round1.EX!);
     expect(by.round3.TU).toBe(by.round1.TU);
-    // Never flat: each later milestone >= the previous one.
     for (const b of ["TU", "EX", "EQ"] as const) {
-      expect(by.round4[b]!).toBeGreaterThan(by.current[b]!);
+      expect(by.round3[b]!).toBeGreaterThanOrEqual(by.current[b]!);
+      expect(by.round3[b]!).toBeLessThanOrEqual(Math.min(760, by.current[b]! + 100));
     }
   });
 });
 
 describe("Credit Analysis PDF (acceptance file)", () => {
-  it("renders the 5 sections with escrow banner, exclusions, IH codes and full CROA", async () => {
+  it("renders the Spec §8 5-page layout: active-loan banner, exclusions, IH codes, CROA", async () => {
     const { generateOfgCreditAnalysisPdf } = await import("./ofgCreditAnalysisPdf");
     const data = buildCreditAnalysis(FILE, { escrow: true, lender: { model: "FICO", score: 630, target: 660 } });
     const buf = await generateOfgCreditAnalysisPdf(data, {
       clientName: "Acceptance Client",
       lang: "en",
-      program: { standardPrice: "$1,497", complexPrice: "$2,497", enrollUrl: "optimum-financial-group.com/premium-plan-payment", phone: "(949) 736-5644", site: "optimum-financial-group.com" },
+      program: {
+        standardPrice: "$1,497",
+        complexPrice: "$2,497",
+        standardUrl: "optimum-financial-group.com/premium-plan-payment",
+        complexUrl: "optimum-financial-group.com/complex-repair-payment",
+        phone: "(949) 736-5644",
+        site: "optimum-financial-group.com",
+      },
     });
     if (process.env.ACCEPTANCE_PDF_OUT) (await import("fs")).writeFileSync(process.env.ACCEPTANCE_PDF_OUT, buf);
     await import("pdf-parse/worker").catch(() => undefined);
     const { PDFParse } = await import("pdf-parse");
     const text = (await new PDFParse({ data: buf }).getText()).text.replace(/\s+/g, " ");
     for (const must of [
-      "ACTIVE ESCROW - DISPUTE FILING ON HOLD UNTIL CLOSING",
-      "752 Very Good",
-      "644 Fair",
-      "666 Good",
+      "ACTIVE LOAN FILE",
+      "Coordinate dispute timing with the loan officer",
       "needs 660",
-      "17 inquiries",
-      "Excluded: BCI FIN CORP",
-      "Active mortgage application",
-      "None on file. No collection accounts",
-      "NOT a deletion target",
-      "Correct to match verified ID",
+      "10 same-day inquiries (12/12/2024)",
+      "EXCLUDED - permissible purpose (matches BCION",
+      "EXCLUDED - permissible purpose (active transaction)",
+      "Personal info",
       "IH-1 ($800)",
-      "After closing",
+      "After closing or before next application",
+      "Hold: until after closing",
       "46 / 100",
-      "78 / 100",
       "Standard Repair - $1,497",
       "This analysis is based on information provided and does not constitute legal advice.",
     ]) {

@@ -10,7 +10,8 @@ describe("roundOptionsForMax", () => {
   it("builds 1..max", () => {
     expect(roundOptionsForMax(5)).toEqual([1, 2, 3, 4, 5]);
     expect(roundOptionsForMax(8)).toHaveLength(8);
-    expect(roundOptionsForMax(99)).toHaveLength(12);
+    expect(roundOptionsForMax(99)).toHaveLength(24);
+    expect(roundOptionsForMax(24)[23]).toBe(24);
   });
 });
 

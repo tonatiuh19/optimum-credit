@@ -68,7 +68,14 @@
       "agent": "Agente",
       "affiliate": "Afiliado",
       "support": "Soporte"
-    }
+    },
+    "billing": "Facturación",
+    "menu": "Menú",
+    "closeMenu": "Cerrar menú",
+    "kicker": "Admin",
+    "quickNav": "Navegación rápida",
+    "more": "Más",
+    "productivity": "Calificación"
   },
   "adminAsk": {
     "title": "Preguntar",
@@ -210,6 +217,10 @@
         "label": "Alertas de reporte de progreso",
         "hint": "Desajuste de PII, cuentas cerradas que aún reportan, o consultas duras abiertas tras un reporte de ronda"
       },
+      "credit_analysis_review": {
+        "label": "Análisis de crédito por revisar",
+        "hint": "Un análisis de crédito no coincidió con los totales del reporte o la auditoría de Claude encontró un problema — revíselo antes de que lo reciba el cliente"
+      },
       "morning_digest": {
         "label": "Resumen matutino (días hábiles)",
         "hint": "Correo con Claude cada mañana laboral (tareas, conversaciones, prospectos y frase motivadora)"
@@ -271,7 +282,12 @@
     "ofgPhonesUnassigned": "Sin asignar",
     "ofgPhonesAssigned": "Asignado",
     "ofgPhonesOwner": "Dueño: {{name}}",
-    "ofgPhonesAssignError": "No se pudo actualizar la asignación"
+    "ofgPhonesAssignError": "No se pudo actualizar la asignación",
+    "gcrFreeTitle": "Reporte de crédito gratis en /get-credit-report",
+    "gcrFreeHint": "La página del QR de eventos (ofgllc.com/get-credit-report). Encendido: quien se registra recibe el enlace del reporte gratis de MyFreeScoreNow en pantalla, por correo y SMS. Apagado: solo registro — reciben una confirmación y un especialista da seguimiento.",
+    "gcrFreeToggleAria": "Ofrecer el reporte de crédito gratis en /get-credit-report",
+    "gcrFreeOn": "Encendido — se ofrece el enlace del reporte gratis al registrarse.",
+    "gcrFreeOff": "Apagado — solo formulario de registro; confirmación por correo y SMS sin enlace. Los enlaces ya enviados siguen funcionando."
   },
   "adminReminderFlows": {
     "alsoSmsLabel": "También SMS tras el email",
@@ -964,6 +980,12 @@
           "required": "Escribe un número",
           "invalid": "Escribe un número válido de EE. UU."
         }
+      },
+      "keypad": {
+        "open": "Teclado",
+        "hint": "Toque o escriba 0-9 * #",
+        "error": "No se pudo enviar la tecla, intente de nuevo",
+        "threeWay": "Llamada de 3: las teclas van a la persona agregada"
       }
     },
     "phoneActions": {
@@ -1103,7 +1125,11 @@
     "before": "Antes",
     "after": "Después",
     "itemRemovedFallback": "Ítem eliminado",
-    "targetFallback": "Ítem objetivo"
+    "targetFallback": "Ítem objetivo",
+    "finalRound": "Final",
+    "scoreUpdateTitle": "Actualización de puntaje.",
+    "scoreUpdateBody": "Esta ronda muestra tus puntajes. Tu revisión completa, cuenta por cuenta, estará en tu próximo informe.",
+    "noScore": "Sin puntaje"
   },
   "support": {
     "heading": "Soporte",
@@ -1422,6 +1448,66 @@
       "internal": "Notas internas (se guardan en el expediente al publicar, nunca en el PDF)",
       "approver": "Los informes con alertas los publica el responsable del idioma (inglés: Lecca, español: Angel) o un super admin.",
       "none": "Sin alertas: el informe se puede enviar."
+    },
+    "notifyClient": {
+      "label": "Enviar email y texto al cliente",
+      "hint": "Envía el informe de la ronda por email + SMS (y a socios vinculados si se marca abajo).",
+      "oldRound": "Ronda antigua: se publica sin avisar por defecto ({{reasons}}). El informe sigue visible en el portal del cliente. Marque para avisar de todos modos."
+    },
+    "finalRoundTitle": "La ronda {{n}} es la última de este cliente",
+    "finalRoundBody": "Al publicarla se completa el programa y el cliente pasa a Completado. Para continuar después de la ronda {{n}}, primero aumenta las Rondas máximas en la pestaña Reportes.",
+    "reads": {
+      "title": "Leyendo ambos reportes a nivel de cuenta",
+      "body": "Vista previa y Publicar se activan cuando ambas lecturas estén listas (normalmente 1-3 minutos; un reporte ya leído es instantáneo). Los logros y objetivos salen solo de estas lecturas, nunca de un resumen de texto.",
+      "before": "Antes",
+      "after": "Después",
+      "reused": "reutilizado de la ronda anterior",
+      "reportDate": "fecha del reporte {{date}}",
+      "ready": "Ambos reportes leídos a nivel de cuenta — listo para la vista previa.",
+      "blockedTitle": "Bloqueado: integridad de datos",
+      "blockedBody": "{{reason}}. Sube el reporte Después correcto para continuar.",
+      "status": {
+        "missing": "en espera",
+        "queued": "en cola",
+        "reading": "leyendo…",
+        "ready": "listo",
+        "failed": "falló — requiere revisión"
+      },
+      "incomplete": {
+        "title": "El PDF {{which}} está incompleto — SmartCredit seguía cargando",
+        "body": "Las cuentas no habían cargado cuando se guardó este PDF, así que un reporte con él saldría mal. No se publicó nada.",
+        "steps": {
+          "open": "Abre el reporte en SmartCredit.",
+          "wait": "Baja hasta el final y espera a que se vean todas las cuentas (sin íconos girando).",
+          "save": "Imprimir → Guardar como PDF.",
+          "upload": "Haz clic en Empezar de nuevo y sube el/los PDF nuevos."
+        },
+        "cta": "Empezar de nuevo y subir otra vez"
+      },
+      "background": "Puede cerrar esto y trabajar con otro cliente: las lecturas siguen corriendo y este reporte estará listo cuando regrese.",
+      "mode": {
+        "reused": "El mismo archivo ya se había leído: se reutilizó al instante.",
+        "batch": "Tomando la ruta de respaldo: puede tardar unos minutos más."
+      }
+    },
+    "scoreUpdate": {
+      "offerTitle": "¿Enviar una actualización de puntaje?",
+      "offerBody": "A este PDF le faltan cuentas, así que no se puede crear el informe completo. La actualización de puntaje envía los puntajes del cliente (y las consultas cuando el informe las muestra completas), sin resultados de cuentas, así que no hay victorias falsas. Igual pasa primero por aprobación. La próxima ronda con PDFs completos muestra todo el progreso de las cuentas.",
+      "offerCta": "Continuar como actualización de puntaje",
+      "readsCta": "Enviar una actualización de puntaje",
+      "modeTitle": "Actualización de puntaje",
+      "modeBody": "Este informe envía los puntajes y, cuando ambos informes las muestran completas, las consultas eliminadas. Sin resultados de cuentas. Pasa por aprobación antes de llegar al cliente.",
+      "modeFullAvailable": "Ambos informes ya están completos: vuelve al informe de progreso completo.",
+      "switchToFull": "Cambiar al informe completo",
+      "nextRoundNote": "Próxima ronda: sube PDFs completos. Un PDF incompleto de esta ronda nunca se reutiliza.",
+      "reuseBlocked": "El PDF guardado de la ronda anterior estaba incompleto (se envió como actualización de puntaje). Sube un informe Antes completo.",
+      "reviewNote": "Actualización de puntaje: solo se usan los puntajes de abajo (verifícalos con los PDF). No se incluyen victorias, objetivos ni otras secciones de cuentas.",
+      "previewIntro": "Revisa la actualización de puntaje de una página antes de publicarla. Pasa por aprobación antes de llegar al cliente."
+    },
+    "startingPoint": {
+      "label": "No hay informe de antes de empezar.",
+      "hint": "Usa un solo informe como punto de partida: súbelo como Después. Muestra los puntajes y los elementos a disputar, aún sin cambios.",
+      "readyExtract": "Listo para crear el punto de partida de la Ronda 1 con {{after}}"
     }
   },
   "infoRequests": {
@@ -1505,7 +1591,102 @@
     "viewCalendar": "Calendario",
     "today": "Hoy",
     "tomorrow": "1d",
-    "inDays": "{{n}}d"
+    "inDays": "{{n}}d",
+    "cc": {
+      "morning": "Buenos días, {{name}}",
+      "afternoon": "Buenas tardes, {{name}}",
+      "evening": "Buenas noches, {{name}}",
+      "loading": "Cargando tu día…",
+      "summary_one": "{{count}} pendiente requiere tu atención",
+      "summary_other": "{{count}} pendientes requieren tu atención",
+      "allClear": "Todo al día — nada esperando por ti.",
+      "allClearLong": "Todo al día. Nada requiere tu atención ahora.",
+      "scope": "Alcance",
+      "everyone": "Todos",
+      "mine": "Míos",
+      "refresh": "Actualizar",
+      "quickActions": "Accesos rápidos",
+      "qa": {
+        "clients": "Clientes",
+        "pipeline": "Pipeline",
+        "conversations": "Conversaciones",
+        "documents": "Revisión de docs",
+        "tasks": "Mis tareas",
+        "calendar": "Calendario",
+        "payments": "Pagos"
+      },
+      "needsYou": "Requiere tu atención",
+      "inbox": {
+        "reports_approval_one": "{{count}} informe de progreso por aprobar",
+        "reports_approval_other": "{{count}} informes de progreso por aprobar",
+        "tasks_overdue_one": "{{count}} tarea vencida",
+        "tasks_overdue_other": "{{count}} tareas vencidas",
+        "analyses_review_one": "{{count}} análisis de crédito por revisar",
+        "analyses_review_other": "{{count}} análisis de crédito por revisar",
+        "conversations_unread_one": "{{count}} conversación sin leer",
+        "conversations_unread_other": "{{count}} conversaciones sin leer",
+        "docs_review_one": "{{count}} documento por revisar",
+        "docs_review_other": "{{count}} documentos por revisar",
+        "rounds_due_one": "{{count}} ronda en los próximos 3 días",
+        "rounds_due_other": "{{count}} rondas en los próximos 3 días",
+        "tickets_open_one": "{{count}} ticket de soporte abierto",
+        "tickets_open_other": "{{count}} tickets de soporte abiertos",
+        "payments_pending_one": "{{count}} cliente con pago pendiente",
+        "payments_pending_other": "{{count}} clientes con pago pendiente"
+      },
+      "inboxHint": {
+        "reports_approval": "Publicados — no se envían hasta aprobarlos",
+        "tasks_overdue": "Pasaron su fecha límite",
+        "analyses_review": "Retenidos por el control de precisión antes de que el cliente los vea",
+        "conversations_unread": "Clientes esperando respuesta",
+        "docs_review": "Identificaciones, comprobantes de domicilio y contratos",
+        "rounds_due": "Fechas objetivo de rondas de disputa próximas",
+        "tickets_open": "Abiertos o en progreso",
+        "payments_pending": "Pago de inscripción sin completar"
+      },
+      "today": "Hoy",
+      "daysLate": "{{n}}d tarde",
+      "pulse": "Pulso",
+      "last8w": "Últimas 8 semanas",
+      "completedTotal": "{{count}} completados en total",
+      "kpi": {
+        "active": "Clientes activos",
+        "activeHint": "En el programa ahora",
+        "new": "Clientes nuevos",
+        "enrolled": "Inscritos",
+        "completed": "Completados"
+      },
+      "avgImprovement": "Mejora promedio del puntaje de crédito:",
+      "money": "Dinero",
+      "revenue30d": "Ingresos (30 días)",
+      "revenue8w": "{{amount}} en las últimas 8 semanas",
+      "recentPayments": "Pagos recientes",
+      "noPayments": "Aún no hay pagos",
+      "trends": "Tendencias",
+      "funnel": "Embudo del pipeline",
+      "openPipeline": "Abrir pipeline",
+      "stage": {
+        "prospect": "Prospecto",
+        "new_client": "Cliente nuevo",
+        "docs_ready": "Docs listos",
+        "round_1": "Ronda 1",
+        "round_2": "Ronda 2",
+        "round_3": "Ronda 3",
+        "round_4": "Ronda 4",
+        "round_5": "Ronda 5+",
+        "completed": "Completado"
+      },
+      "activity": "Actividad reciente",
+      "noActivity": "Sin actividad reciente.",
+      "act": {
+        "client": "Cliente nuevo: {{name}}",
+        "contract": "{{name}} firmó el contrato",
+        "document": "{{name}} subió un documento",
+        "report": "Reporte de progreso de la ronda {{detail}} para {{name}}",
+        "analysis": "Análisis de crédito listo para {{name}}",
+        "payment": "{{name}} pagó {{detail}}"
+      }
+    }
   },
   "languageSwitcher": {
     "label": "Idioma",
@@ -1656,6 +1837,56 @@
       "save": "Guardar",
       "saved": "Guardado — la próxima descarga del PDF lo usa",
       "saveError": "No se pudo guardar"
+    },
+    "enhanced": {
+      "loading": "Cargando el análisis cuenta por cuenta…",
+      "source": "Análisis cuenta por cuenta (igual que Descargar PDF)",
+      "checkingNegatives": "Lectura preliminar: la revisión cuenta por cuenta sigue en proceso.",
+      "escrowTitle": "Archivo de préstamo activo — coordine las disputas con el oficial de préstamos",
+      "escrowBody": "La consulta del prestamista se excluye, la línea primaria queda en espera y las líneas AU esperan al cierre.",
+      "model": "Puntajes: {{model}}",
+      "lender": "Prestamista {{model}}: {{score}} — necesita {{target}}",
+      "negatives": "Elementos negativos ({{count}})",
+      "noNegatives": "No se encontraron elementos negativos en ningún buró.",
+      "hold": "En espera",
+      "round1": "R1 consultas + datos personales: {{count}}",
+      "round2": "R2 cobranzas: {{count}}",
+      "round3": "R3 pagos atrasados: {{count}}",
+      "round4": "R4 cargos a pérdida: {{count}}",
+      "projected": "Puntaje medio proyectado (est.)",
+      "strength": "Fortaleza del archivo",
+      "program": "Programa",
+      "tier_standard": "Reparación Estándar",
+      "tier_complex": "Reparación Compleja",
+      "readingTitle": "Analizando el reporte cuenta por cuenta…",
+      "readingBody": "Leyendo cada cuenta en los 3 burós (aprox. 1 minuto). Los resultados y el PDF aparecen aquí automáticamente.",
+      "failedTitle": "No pudimos leer este reporte automáticamente",
+      "failedStaff": "La lectura cuenta por cuenta falló. Vuelva a subir el PDF (o una copia más clara) para intentarlo de nuevo.",
+      "failedPublic": "Nuestro equipo revisará su reporte y le contactará con su análisis.",
+      "middle": "Puntaje medio {{score}}",
+      "vantage": "VantageScore {{score}}",
+      "notItemized": "No detallado",
+      "informational": "Informativo (no son objetivos de disputa)",
+      "selfCheckTitle": "Requiere revisión — la lectura no coincide con los totales del reporte",
+      "selfCheckBody": "Revise esto antes de enviar algo al cliente:",
+      "selfCheckRow": "{{label}}: reporte {{expected}}, lectura {{actual}}"
+    },
+    "review": {
+      "checkingTitle": "Verificando contra el reporte…",
+      "checkingBody": "Se están conciliando los totales y Claude está auditando el análisis contra el PDF. El cliente lo recibe cuando pase.",
+      "needsTitle": "Requiere revisión — no se envió al cliente",
+      "needsBody": "Las verificaciones automáticas encontraron algo por confirmar. Corrija el contexto o vuelva a correrlas; apruebe para enviarlo al cliente.",
+      "approve": "Aprobar y enviar",
+      "rerun": "Volver a verificar",
+      "approved": "Aprobado por el equipo — enviado al cliente",
+      "passed": "Pasó las verificaciones automáticas — enviado al cliente",
+      "reconciled": "{{count}} cuenta(s) faltante(s) agregada(s) desde el reporte",
+      "auditorError": "El auditor de Claude no pudo terminar — revise manualmente o vuelva a verificar.",
+      "approvedToast": "Análisis aprobado y enviado",
+      "rerunToast": "Verificación reiniciada",
+      "error": "No se pudo actualizar la revisión",
+      "publicTitle": "Estamos revisando tu reporte",
+      "publicBody": "Nuestro equipo está verificando tu análisis de crédito para asegurar que cada detalle sea correcto. Te lo enviaremos en breve."
     }
   },
   "getCreditReport": {
@@ -1687,7 +1918,18 @@
     "openReportNow": "Abrir reporte gratis ahora",
     "submitAnother": "Enviar otra persona",
     "redirectingToReport": "Abriendo tu reporte de crédito gratis…",
-    "trustNote": "Al obtener tu reporte gratis, aceptas nuestra <privacy>Política de Privacidad</privacy> y los <terms>Términos de Servicio</terms>."
+    "trustNote": "Al obtener tu reporte gratis, aceptas nuestra <privacy>Política de Privacidad</privacy> y los <terms>Términos de Servicio</terms>.",
+    "registerMetaTitle": "Regístrate con Optimum Financial Group",
+    "registerMetaDescription": "Déjanos tus datos y un especialista de Optimum Financial Group te contactará sobre tu crédito.",
+    "registerHeading": "Regístrate con Optimum Financial Group",
+    "registerSubheading": "Déjanos tus datos y un especialista te contactará sobre tu crédito y tus opciones.",
+    "registerFormHint": "Los usamos para confirmar tu registro y contactarte.",
+    "registerSubmit": "Registrarme",
+    "registerThanksTitle": "¡Ya estás registrado!",
+    "registerThanksBody": "Gracias — recibimos tus datos. Un especialista de Optimum Financial Group te contactará pronto.",
+    "registerCheckEmail": "Revisa tu correo para la confirmación",
+    "registerCheckSms": "También te enviamos una confirmación por SMS",
+    "registerTrustNote": "Al registrarte, aceptas nuestra <privacy>Política de Privacidad</privacy> y los <terms>Términos de Servicio</terms>."
   },
   "prepaidOnboard": {
     "pipelineCta": "Invitación pagada",
@@ -2609,6 +2851,34 @@
       "bank_m4": "Banco mes 4",
       "bank_m5": "Banco mes 5",
       "bank_m6": "Banco mes 6"
+    },
+    "uw": {
+      "loading": "Cargando documentos…",
+      "identifiers": "SSN / EIN",
+      "reveal": "Mostrar",
+      "revealLogged": "Cada vez que se muestra o se abre un documento queda registrado.",
+      "view": "Ver",
+      "requestNew": "Pedir nuevo",
+      "replace": "Reemplazar",
+      "upload": "Subir",
+      "status_pending": "Por revisar",
+      "status_approved": "Aprobado",
+      "status_rejected": "Se pidió uno nuevo",
+      "requestedReason": "Solicitado: {{reason}}",
+      "reasonPlaceholder": "Qué falta / qué enviar (el cliente lo ve)",
+      "sendRequest": "Enviar solicitud",
+      "cancel": "Cancelar",
+      "requestHint": "Pedir nuevo: el cliente recibe email + texto con su enlace para subirlo, y la solicitud pasa a Esperando documentos.",
+      "requested": "Solicitud enviada al cliente",
+      "requestError": "No se pudo solicitar el documento",
+      "uploaded": "Documento subido",
+      "uploadError": "No se pudo subir",
+      "openError": "No se pudo abrir el documento",
+      "notes": "Notas de underwriting",
+      "noNotes": "Sin notas todavía.",
+      "notePlaceholder": "Agregar una nota para el equipo de OFG…",
+      "addNote": "Agregar nota",
+      "noteError": "No se pudo guardar la nota"
     }
   },
   "portalFunding": {
@@ -2765,6 +3035,781 @@
     "source": {
       "company": "QR de empresa",
       "session": "QR de sesión"
+    }
+  },
+  "adminPeople": {
+    "roleUnderwriter": "Underwriter (solo funding)",
+    "roleUnderwriterHint": "Solo el tablero de funding: documentos, etapas, notas y solicitudes de documentos. Sin clientes, CRM ni configuración."
+  },
+  "billing": {
+    "title": "Facturación",
+    "subtitle": "Tu plan de la plataforma OFG, la factura del mes y el uso.",
+    "managePayment": "Administrar pago",
+    "stripeMissing": "Stripe aún no está conectado — el uso se está registrando y las facturas se emitirán cuando se configure STRIPE_SECRET_KEY.",
+    "prevMonth": "Mes anterior",
+    "nextMonth": "Mes siguiente",
+    "estimateTitle": "Factura estimada de este mes",
+    "invoiceTitle": "Factura de este mes",
+    "startedOn": "Facturación iniciada el {{date}}",
+    "notStarted": "La facturación inicia con la primera ejecución en producción después del deploy",
+    "proratedHint": "{{days}} de {{total}} días × {{price}}/mes",
+    "qtyHint": "{{qty}} × {{price}}",
+    "mcpCalls": "Acciones del asistente de IA",
+    "claudeCost": "Costo de Claude (proveedor)",
+    "billedHint": "Se cobra por acción",
+    "dailyTitle": "Actividad diaria",
+    "claudeTitle": "Uso de Claude",
+    "aiRowHint": "{{calls}} llamadas · {{input}} tokens de entrada / {{output}} de salida",
+    "noUsage": "Aún no hay uso este mes.",
+    "byStaffTitle": "Uso por persona",
+    "staffRow": "{{mcp}} MCP · {{ai}} Claude ({{cost}})",
+    "mcpToolsTitle": "Acciones más usadas del asistente de IA",
+    "pricesTitle": "Lista de precios",
+    "pricesHint": "El costo medido es el costo real promedio del proveedor en los últimos 30 días; sugerido = costo × margen. Solo las filas facturables van en la factura.",
+    "calls30d_one": "{{count}} en los últimos 30 días",
+    "calls30d_other": "{{count}} en los últimos 30 días",
+    "measuredCost": "Costo medido",
+    "suggested": "Sugerido ({{markup}}×)",
+    "billable": "Facturable",
+    "priceAria": "Precio de {{action}}",
+    "save": "Guardar",
+    "priceSaved": "Precio guardado",
+    "saveError": "No se pudo guardar",
+    "invoicesTitle": "Facturas",
+    "noInvoices": "Aún no hay facturas — la primera se emite el día 1 del próximo mes.",
+    "view": "Ver",
+    "retry": "Reintentar",
+    "retryDone": "Factura emitida",
+    "retryError": "No se pudo emitir la factura",
+    "portalError": "No se pudo abrir el portal de pagos",
+    "emailTitle": "Correo de facturación",
+    "emailHint": "Stripe envía las facturas y recibos a este correo.",
+    "emailSaved": "Correo de facturación guardado",
+    "status": {
+      "in_progress": "En curso",
+      "pending": "Pendiente",
+      "open": "Abierta",
+      "paid": "Pagada",
+      "failed": "Falló",
+      "void": "Anulada",
+      "uncollectible": "Incobrable",
+      "issuing": "Emitiendo…"
+    },
+    "units": {
+      "month": "por mes",
+      "call": "por acción"
+    },
+    "actions": {
+      "mcp_tool_call": "Conector del Asistente de IA",
+      "ai_credit_report_read": "Lectura de reportes de crédito",
+      "ai_credit_review": "Revisión del análisis (auditor)",
+      "ai_progress_report": "IA de reportes de progreso",
+      "ai_inbound_reply": "Respuestas de IA entrantes",
+      "ai_reply_suggestions": "Sugerencias de respuesta",
+      "ai_admin_chat": "Chat de IA admin",
+      "ai_morning_digest": "Resumen matutino",
+      "suite_credit_intelligence": "Motor de Inteligencia Crediticia",
+      "suite_communications_hub": "Centro de Comunicaciones",
+      "suite_crm_automations": "CRM, Pipeline y Automatizaciones",
+      "suite_cloud_infrastructure": "Infraestructura en la Nube y Datos",
+      "suite_security_compliance": "Seguridad y Cumplimiento",
+      "suite_managed_support": "Soporte Administrado y Nuevas Versiones"
+    },
+    "pm": {
+      "title": "Método de pago",
+      "autoHint": "Las facturas se cobran automáticamente el día 1 de cada mes.",
+      "emailHint": "No hay método de pago guardado — las facturas se envían por correo con un enlace de pago (vencen en 15 días).",
+      "autopay": "Pago automático activo",
+      "billedTo": "Facturado a",
+      "bank": "Cuenta bancaria",
+      "none": "Sin agregar",
+      "secure": "Protegido por Stripe — los datos de la tarjeta nunca pasan por nuestros servidores.",
+      "methods": "Tarjeta de crédito o débito — guardada de forma segura para el cobro mensual automático.",
+      "add": "Agregar método de pago",
+      "update": "Actualizar método de pago",
+      "save": "Guardar método de pago",
+      "cancel": "Cancelar",
+      "saved": "Método de pago guardado — pago automático activo",
+      "error": "No se pudo guardar el método de pago",
+      "notConfigured": "Falta la clave pública de Stripe (STRIPE_PUBLISHABLE_KEY)."
+    },
+    "ownerOnlyHint": "Costo del proveedor · solo tú lo ves",
+    "staffRowMcp": "{{mcp}} acciones del asistente de IA",
+    "projectedInline": "Proyección a fin de mes: {{amount}}",
+    "table": {
+      "title": "Precios — {{month}}",
+      "hint": "Exactamente lo que se facturará este mes, línea por línea.",
+      "empty": "No hay conceptos facturables este mes.",
+      "item": "Concepto",
+      "unit": "Unidad",
+      "qty": "Cantidad",
+      "rate": "Tarifa",
+      "amount": "Importe",
+      "fullMonth": "Mes completo ({{days}} días)",
+      "days": "{{days}} de {{total}} días",
+      "totalSoFar": "Total hasta hoy",
+      "projected": "Proyección a fin de mes",
+      "projectedRow": "{{item}}: ~{{qty}} → {{amount}}",
+      "projectedHint": "La proyección extrapola el ritmo diario del mes; la factura usa el uso real.",
+      "desc": {
+        "mcp_tool_call": "Acciones que el asistente de IA de OFG ejecuta dentro de la plataforma (MCP), cobradas por acción.",
+        "suite_credit_intelligence": "Lectura con IA de cada reporte de 3 burós y todo el flujo de análisis de crédito.",
+        "suite_communications_hub": "Todas las conversaciones con clientes en un solo lugar, en cualquier canal.",
+        "suite_crm_automations": "Opera el negocio de principio a fin, de prospecto a cliente activo.",
+        "suite_cloud_infrastructure": "Nube rápida y siempre disponible que crece con OFG.",
+        "suite_security_compliance": "Datos de clientes protegidos en cada capa.",
+        "suite_managed_support": "Un equipo dedicado que mejora la plataforma continuamente."
+      },
+      "suiteGroup": "OFG Operating Suite — suscripción mensual",
+      "usageGroup": "Uso",
+      "suiteSubtotal": "Subtotal de la suite"
+    },
+    "platform": {
+      "title": "Plataforma",
+      "subtitle": "Lo que incluye la cuota de la plataforma — resumen técnico con números en vivo",
+      "liveSince": "en operación desde {{date}}",
+      "kpi": {
+        "clients": "Clientes",
+        "activeClients": "Clientes activos",
+        "staff": "Usuarios del equipo",
+        "affiliates": "Afiliados",
+        "apiRoutes": "Rutas de API",
+        "dbTables": "Tablas de base de datos",
+        "roles": "Roles de acceso",
+        "jobs": "Tareas programadas"
+      },
+      "activityTitle": "Actividad — {{month}}",
+      "activity": {
+        "credit_report_reads": "Lecturas de reportes",
+        "credit_analyses": "Análisis de crédito",
+        "progress_reports": "Reportes de progreso",
+        "ai_calls": "Llamadas al modelo de IA",
+        "mcp_calls": "Llamadas MCP",
+        "sms_sent": "SMS enviados",
+        "sms_received": "SMS recibidos",
+        "calls": "Llamadas",
+        "call_minutes": "Minutos de llamada",
+        "call_insights": "Transcripciones + análisis",
+        "whatsapp_messages": "Mensajes de WhatsApp",
+        "emails": "Correos",
+        "tasks_created": "Tareas creadas"
+      },
+      "archTitle": "Arquitectura técnica",
+      "arch": {
+        "frontend": {
+          "title": "Aplicación web",
+          "body": "SPA en React 18 + TypeScript, compilada con Vite; estado con Redux Toolkit y thunks asíncronos; sistema de diseño Tailwind con temas claro/oscuro; totalmente responsiva; i18n inglés/español; portales de admin y cliente instalables."
+        },
+        "api": {
+          "title": "Capa de API",
+          "body": "Node.js + Express 5 en TypeScript, desplegado como funciones serverless en una red edge global: {{routes}} rutas en un solo bundle, hasta {{seconds}} s por solicitud para lecturas largas de IA, límite de peticiones por ruta, contrato OpenAPI (Swagger)."
+        },
+        "data": {
+          "title": "Base de datos",
+          "body": "Base de datos SQL serverless distribuida, compatible con MySQL 8, con {{tables}} tablas, conexiones solo TLS, migraciones versionadas, escrituras transaccionales con reintento ante bloqueos y respaldos automáticos."
+        },
+        "realtime": {
+          "title": "Tiempo real",
+          "body": "Canales pub/sub por WebSocket envían mensajes, llamadas, transcripciones y notificaciones al instante a cada pantalla abierta, sin recargar."
+        },
+        "storage": {
+          "title": "Documentos y archivos",
+          "body": "Documentos y reportes de crédito cifrados en reposo con AES-256-GCM (IV y etiqueta por archivo) antes de subirse a almacenamiento privado; enlaces de descarga firmados de corta duración."
+        },
+        "security": {
+          "title": "Seguridad y acceso",
+          "body": "Tokens de sesión firmados con revocación en servidor, códigos de un solo uso por correo/SMS, {{roles}} niveles de rol con bloqueo por sección, lista de orígenes CORS, verificación de firma en webhooks y bitácora completa de acciones de IA y MCP."
+        },
+        "jobs": {
+          "title": "Procesos en segundo plano",
+          "body": "{{jobs}} tareas programadas: un worker cada 5 minutos (notificaciones, recordatorios, lecturas de reportes, análisis de llamadas, facturación) y un resumen matutino entre semana; reclamos idempotentes para que nada corra dos veces."
+        },
+        "ai": {
+          "title": "Pipeline de IA",
+          "body": "Reportes de crédito leídos por un modelo de lenguaje con salidas estructuradas estrictas, motor de reglas determinístico Spec v2.1, autoverificación contra los totales del reporte, doble auditoría independiente con consenso y revisión humana antes de liberar."
+        },
+        "voice": {
+          "title": "Voz y mensajería",
+          "body": "Softphone en el navegador (WebRTC) con grabación, desvío, buzón de voz, llamada de 3 vías y teclado; SMS/MMS y WhatsApp bidireccionales; transcripciones y análisis automáticos; normalización de teléfonos E.164."
+        },
+        "observability": {
+          "title": "Calidad y operación",
+          "body": "Más de 1,300 pruebas automatizadas (unitarias, integración, end-to-end), contratos tipados compartidos entre cliente y API, notas de versión generadas en cada deploy y logs estructurados."
+        }
+      },
+      "modulesTitle": "Módulos incluidos ({{count}})",
+      "modules": {
+        "crm": {
+          "title": "CRM y contactos",
+          "body": "Clientes, prospectos y libreta de direcciones con protección de duplicados, etiquetas, notas e historial completo."
+        },
+        "pipeline": {
+          "title": "Pipeline de ventas",
+          "body": "Tablero por etapas de prospecto a cliente activo, asignación y bloqueo por sección."
+        },
+        "conversations": {
+          "title": "Centro de conversaciones",
+          "body": "Bandeja unificada de SMS, MMS, WhatsApp, correo y llamadas por cliente y por número OFG."
+        },
+        "voice": {
+          "title": "Voz",
+          "body": "Softphone, grabaciones, buzón, desvío, transcripciones y análisis de llamadas con IA."
+        },
+        "creditAnalysis": {
+          "title": "Motor de análisis de crédito",
+          "body": "Lee cualquier formato de reporte de 3 burós y genera el PDF de 5 páginas con rondas, base legal, nivel y proyecciones, validado por un auditor de IA."
+        },
+        "progressReports": {
+          "title": "Reportes de progreso",
+          "body": "Lectura antes/después por ronda y PDFs de progreso con marca para los clientes."
+        },
+        "docReview": {
+          "title": "Revisión de documentos",
+          "body": "Recepción y aprobación de identificaciones, comprobantes de domicilio y contratos."
+        },
+        "funding": {
+          "title": "Financiamiento empresarial",
+          "body": "Tablero de solicitudes de financiamiento con panel de evaluación."
+        },
+        "tasks": {
+          "title": "Tareas",
+          "body": "Tareas del equipo y de clientes con fechas, alertas de vencimiento y asignación."
+        },
+        "payments": {
+          "title": "Pagos y suscripciones",
+          "body": "Pagos de clientes, pagos divididos y planes recurrentes."
+        },
+        "affiliates": {
+          "title": "Afiliados y referidos",
+          "body": "Socios referidores, pipeline de afiliados y atribución."
+        },
+        "eventMarketing": {
+          "title": "Marketing de eventos",
+          "body": "Páginas de eventos, registro por QR y captura de prospectos con alertas al equipo."
+        },
+        "education": {
+          "title": "Educación",
+          "body": "Contenido educativo y plantillas para clientes."
+        },
+        "reminders": {
+          "title": "Flujos de recordatorios",
+          "body": "Secuencias automáticas por SMS/correo para documentos, pagos y siguientes pasos."
+        },
+        "aiAssistant": {
+          "title": "Asistente de IA para admin",
+          "body": "Preguntas sobre clientes, tareas y reportes dentro de la app, con referencias."
+        },
+        "mcp": {
+          "title": "Conector MCP",
+          "body": "Conector OAuth seguro para que un asistente de IA busque, lea y actualice datos de la plataforma, con bitácora de auditoría completa."
+        },
+        "clientPortal": {
+          "title": "Portal del cliente",
+          "body": "Los clientes ven su progreso, suben documentos y firman contratos."
+        },
+        "notifications": {
+          "title": "Notificaciones del equipo",
+          "body": "Alertas por correo, en la app y SMS por persona, con preferencias."
+        },
+        "billing": {
+          "title": "Facturación",
+          "body": "Esta página: plan, facturas, pago automático y uso."
+        }
+      },
+      "integrationsTitle": "Integraciones y quién paga",
+      "owner": {
+        "included": "Incluido en el plan",
+        "ofg": "Cuenta de OFG"
+      },
+      "integrations": {
+        "hosting": {
+          "title": "Hosting y cómputo serverless",
+          "body": "Red edge global, funciones, compilaciones y despliegues."
+        },
+        "database": {
+          "title": "Base de datos administrada",
+          "body": "Almacenamiento, cómputo y respaldos."
+        },
+        "realtime": {
+          "title": "Mensajería en tiempo real",
+          "body": "Canales WebSocket para actualizaciones en vivo."
+        },
+        "storage": {
+          "title": "Almacenamiento cifrado / CDN",
+          "body": "Documentos, PDFs y multimedia."
+        },
+        "email": {
+          "title": "Correo transaccional",
+          "body": "Notificaciones, resúmenes y reportes."
+        },
+        "platformBilling": {
+          "title": "Facturación de la plataforma",
+          "body": "Procesamiento de tarjeta/ACH de esta factura."
+        },
+        "telephony": {
+          "title": "Telefonía y operador SMS",
+          "body": "Números, SMS/MMS, minutos, grabaciones y transcripción."
+        },
+        "ai": {
+          "title": "Proveedor del modelo de IA",
+          "body": "Lectura de reportes, auditor, análisis de llamadas y asistentes."
+        },
+        "whatsapp": {
+          "title": "Mensajería de WhatsApp Business",
+          "body": "Canal de WhatsApp."
+        },
+        "crm": {
+          "title": "Sincronización con CRM externo",
+          "body": "Sincronización de contactos y negocios."
+        },
+        "creditSoftware": {
+          "title": "Sincronización con software de reparación de crédito",
+          "body": "Sincronización de clientes y etapas."
+        },
+        "clientPayments": {
+          "title": "Pasarela de pagos de clientes",
+          "body": "Pagos cobrados a los clientes de OFG."
+        },
+        "creditMonitoring": {
+          "title": "Inscripción a monitoreo de crédito",
+          "body": "Enlaces de inscripción al reporte de crédito del cliente."
+        }
+      }
+    },
+    "suite": {
+      "eyebrow": "Tu suscripción",
+      "name": "OFG Operating Suite",
+      "tagline": "Seis servicios administrados que operan la reparación de crédito de OFG — una sola suscripción mensual.",
+      "services": {
+        "suite_credit_intelligence": {
+          "summary": "Lectura con IA de cada reporte de 3 burós y todo el flujo de análisis de crédito.",
+          "features": [
+            "Lectura con IA (todos los formatos principales)",
+            "PDFs de análisis de crédito de 5 páginas",
+            "Control de precisión con doble auditoría + revisión",
+            "Reportes de progreso por ronda y PDFs"
+          ]
+        },
+        "suite_communications_hub": {
+          "summary": "Todas las conversaciones con clientes en un solo lugar, en cualquier canal.",
+          "features": [
+            "Bandeja unificada: SMS, MMS, WhatsApp, correo",
+            "Softphone en el navegador, desvío, buzón",
+            "Grabaciones, transcripciones y análisis de llamadas",
+            "Enrutamiento inteligente por número OFG"
+          ]
+        },
+        "suite_crm_automations": {
+          "summary": "Opera el negocio de principio a fin, de prospecto a cliente activo.",
+          "features": [
+            "Clientes, contactos y tablero de pipeline",
+            "Tareas, recordatorios y alertas de vencimiento",
+            "Portales de clientes y afiliados",
+            "Páginas de eventos y registro por QR"
+          ]
+        },
+        "suite_cloud_infrastructure": {
+          "summary": "Nube rápida y siempre disponible que crece con OFG.",
+          "features": [
+            "Hosting serverless global",
+            "Base de datos SQL administrada + respaldos",
+            "Actualizaciones en tiempo real",
+            "Almacenamiento cifrado de documentos"
+          ]
+        },
+        "suite_security_compliance": {
+          "summary": "Datos de clientes protegidos en cada capa.",
+          "features": [
+            "Cifrado AES-256 en reposo, TLS en tránsito",
+            "Acceso por roles y bloqueo por sección",
+            "Bitácora completa de acciones de IA y del equipo",
+            "Webhooks firmados y monitoreo"
+          ]
+        },
+        "suite_managed_support": {
+          "summary": "Un equipo dedicado que mejora la plataforma continuamente.",
+          "features": [
+            "Mantenimiento y corrección de errores",
+            "Nuevas funciones en cada versión",
+            "Soporte prioritario",
+            "Notas de versión en cada despliegue"
+          ]
+        }
+      }
+    }
+  },
+  "reportDelivery": {
+    "generated": "Reporte generado",
+    "by": "por {{name}}",
+    "opened_one": "El cliente abrió el reporte",
+    "opened_other": "El cliente abrió el reporte {{count}}×",
+    "linkIssued": "enlace enviado {{date}}",
+    "partner": "Socio",
+    "channel": {
+      "email": "Correo → {{who}}",
+      "sms": "SMS → {{who}}",
+      "whatsapp": "WhatsApp → {{who}}"
+    },
+    "recipient": {
+      "client": "Cliente",
+      "partner": "Socio",
+      "admin": "Equipo",
+      "contact": "Contacto",
+      "other": "Destinatario"
+    },
+    "role": {
+      "realtor_broker": "Realtor",
+      "loan_officer": "Oficial de préstamos",
+      "one_off": "Referido",
+      "affiliate_partner": "Socio afiliado"
+    },
+    "status": {
+      "sent": "Enviado",
+      "failed": "Falló",
+      "delivered": "Entregado",
+      "undelivered": "No entregado",
+      "queued": "En cola",
+      "sending": "Enviando",
+      "accepted": "Aceptado",
+      "read": "Leído"
+    },
+    "resend": "Reenvío",
+    "sentTo_one": "Enviado a {{count}} destinatario",
+    "sentTo_other": "Enviado a {{count}} destinatarios",
+    "notSent": "Aún no enviado",
+    "smsDelivered_one": "{{count}} SMS entregado",
+    "smsDelivered_other": "{{count}} SMS entregados",
+    "failed_one": "{{count}} falló",
+    "failed_other": "{{count}} fallaron",
+    "openedChip_one": "Abierto 1×",
+    "openedChip_other": "Abierto {{count}}×",
+    "notOpened": "Aún no abierto",
+    "lastSent": "Último envío {{date}}"
+  },
+  "caseHygiene": {
+    "status_behind_stage": "El estatus del cliente va atrás de la etapa del caso",
+    "proof_of_address_pending": "Comprobante de domicilio pendiente hace {{days}} días",
+    "no_round_schedule": "Sin calendario de rondas",
+    "id_docs_pending": "Documentos de identidad pendientes de revisión ({{days}} días)"
+  },
+  "productivity": {
+    "noAccess": "El tablero está disponible para el personal calificado y los gerentes.",
+    "team": "Equipo hoy",
+    "ringLabel": "Calificación de hoy {{grade}}",
+    "liveHint": "en vivo · se cierra a las 4:40 PM",
+    "streak": "Racha",
+    "streakHint": "días en B o mejor",
+    "week": "Esta semana",
+    "trend": "Tendencia diaria",
+    "refresh": "Actualizar",
+    "levelNext": "{{days}}/{{needed}} días en B+ para desbloquear {{level}}",
+    "levelMax": "Todas las métricas desbloqueadas — ¡sigue así!",
+    "unlocksAt": "Se desbloquea en {{level}}",
+    "points_one": "{{count}} pt",
+    "points_other": "{{count}} pts",
+    "nothingPending": "Nada pendiente — no se califica",
+    "slackNotConnected": "Slack no conectado — no se califica",
+    "slackSetupHint": "Las métricas de Slack no se califican hasta conectar el OFG Bot.",
+    "details_one": "{{count}} elemento",
+    "details_other": "{{count}} elementos",
+    "progress": {
+      "ratio": "{{done}} de {{total}} hechos",
+      "count": "{{done}} de {{target}}",
+      "zero_one": "{{count}} corrección",
+      "zero_other": "{{count}} correcciones"
+    },
+    "levels": {
+      "bronze": "Bronce",
+      "silver": "Plata",
+      "gold": "Oro"
+    },
+    "profiles": {
+      "ops": "Operaciones",
+      "sales": "Ventas"
+    },
+    "status": {
+      "graded": "Calificado",
+      "day_off": "Día libre — no se califica",
+      "weekend": "Fin de semana — no se califica",
+      "no_work": "Aún no hay nada que calificar"
+    },
+    "cheer": {
+      "A": "¡Excelente — lo estás logrando! 🎉",
+      "B": "Gran día — ¡muy cerca de una A!",
+      "C": "Bien — quedan algunos pendientes.",
+      "D": "¡Vamos! Revisa los pendientes.",
+      "F": "Día difícil — empieza por la métrica más grande."
+    },
+    "widget": {
+      "title": "Mi tablero",
+      "team": "Tableros del equipo"
+    },
+    "daysOff": {
+      "title": "Días libres",
+      "hint": "Los días libres no se califican y no rompen la racha.",
+      "person": "Persona",
+      "day": "Día",
+      "reason": "Motivo (opcional)",
+      "add": "Agregar día libre",
+      "remove": "Quitar",
+      "saved": "Día libre guardado",
+      "required": "Requerido"
+    },
+    "badges": {
+      "title": "Insignias",
+      "hint": "{{earned}} de {{total}} ganadas",
+      "items": {
+        "first_a": {
+          "title": "Primera A",
+          "hint": "Saca 90+ en un día"
+        },
+        "streak_5": {
+          "title": "En racha",
+          "hint": "5 días seguidos en B o mejor"
+        },
+        "streak_10": {
+          "title": "Imparable",
+          "hint": "10 días seguidos en B o mejor"
+        },
+        "level_silver": {
+          "title": "Plata",
+          "hint": "Desbloquea el nivel Plata"
+        },
+        "level_gold": {
+          "title": "Oro",
+          "hint": "Desbloquea el nivel Oro"
+        },
+        "perfect_week": {
+          "title": "Semana perfecta",
+          "hint": "A en los 5 días laborales"
+        },
+        "inbox_zero": {
+          "title": "Bandeja en cero",
+          "hint": "Responde 5+ entrantes en menos de 2 h en un día"
+        },
+        "same_day_hero": {
+          "title": "Héroe del mismo día",
+          "hint": "3+ reportes con copia al socio en un día"
+        },
+        "closer": {
+          "title": "Cerrador",
+          "hint": "2 cierres en una semana"
+        },
+        "hot_hands": {
+          "title": "Manos calientes",
+          "hint": "10 llamadas conectadas en un día"
+        }
+      }
+    },
+    "metrics": {
+      "daily_list": {
+        "title": "Lista del día contactada",
+        "target": "Tareas + rondas de hoy, todas contactadas antes de las 4 PM"
+      },
+      "inbound_reply": {
+        "title": "Respuesta a entrantes < 2 h",
+        "target": "Cada mensaje entrante o llamada perdida respondida en 2 horas"
+      },
+      "rounds_on_time": {
+        "title": "Rondas a tiempo",
+        "target": "95% subidas dentro de 2 días de la fecha del calendario"
+      },
+      "report_partner": {
+        "title": "Reporte + socio el mismo día",
+        "target": "Reporte al cliente y copia al socio el mismo día"
+      },
+      "call_notes": {
+        "title": "Nota después de cada llamada",
+        "target": "Cuenta la transcripción o una nota en el hilo"
+      },
+      "corrections": {
+        "title": "Cero correcciones",
+        "target": "Ningún reporte publicado reiniciado esta semana"
+      },
+      "new_client_start": {
+        "title": "Cliente nuevo arrancado < 1 día",
+        "target": "Clientes nuevos pasan a su primera ronda en 24 h"
+      },
+      "slack_report": {
+        "title": "Reporte de Slack 4 PM",
+        "target": "Publicado en el DM grupal antes de las 4:15 PM"
+      },
+      "hot_warm": {
+        "title": "Leads calientes y tibios",
+        "target": "Calientes contactados hoy, tibios cada 48 h (3 intentos sin respuesta = hecho)"
+      },
+      "connected_calls": {
+        "title": "Llamadas conectadas",
+        "target": "5 llamadas contestadas de más de 2 minutos al día"
+      },
+      "closes": {
+        "title": "Cierres",
+        "target": "2 prospectos convertidos en clientes por semana (proporcional)"
+      },
+      "spanish_reply": {
+        "title": "Respuesta en español < 2 h",
+        "target": "Leads en español respondidos en 2 horas"
+      },
+      "collections": {
+        "title": "Cobros a tiempo",
+        "target": "90% de las cuotas pagadas en su fecha"
+      },
+      "next_step": {
+        "title": "Siguiente paso en cada lead",
+        "target": "Fecha agendada + nota en cada lead caliente/tibio"
+      },
+      "daily_posts": {
+        "title": "Publicaciones diarias",
+        "target": "Facebook, Instagram y TikTok compartidos en #ofg-marketing"
+      }
+    }
+  },
+  "reportApproval": {
+    "checks": {
+      "account_totals": "Cuentas vs el resumen del reporte",
+      "balances": "Saldos vs el resumen del reporte",
+      "limits": "Límites revolventes vs el resumen del reporte",
+      "inquiries": "Consultas vs el resumen del reporte",
+      "public_records": "Cobranzas / registros públicos",
+      "scores": "Puntajes",
+      "chronology": "Fechas (After más reciente que Before)",
+      "contradictions": "Un estado por elemento y buró",
+      "target_count": "Todos los objetivos en el PDF",
+      "positives_in_targets": "Ninguna cuenta negativa en Positivos",
+      "projection": "Topes de proyección (+100, 760)",
+      "pages_croa": "3 páginas + divulgación CROA",
+      "language": "Solo hechos en el texto"
+    },
+    "notApplicable": "no viene en este reporte",
+    "passedCount": "{{count}} de {{total}} revisiones aprobadas",
+    "error": "No se pudo aprobar",
+    "sent": "Aprobado — informe enviado al cliente",
+    "releasedSilent": "Aprobado — informe publicado en el portal (sin mensaje)",
+    "reasonMin": "Escribe al menos 10 caracteres explicando por qué es seguro enviarlo",
+    "doneSent": "Enviado al cliente · aprobado por {{who}}",
+    "doneSilent": "Publicado en el portal (sin mensaje) · aprobado por {{who}}",
+    "legacy": "Enviado al publicar (antes del paso de aprobación)",
+    "pendingTitle": "Esperando aprobación — aún no se envía",
+    "needsReviewTitle": "La revisión automática falló — retenido para el cliente",
+    "pendingBody": "El cliente y los socios no reciben nada (y el portal lo oculta) hasta que lo apruebe la responsable del idioma, Cesar o Alex.",
+    "pendingBodySilent": "Ronda antigua: al aprobar se publica en el portal sin correo ni SMS.",
+    "needsReviewBody": "Corrige los datos (normalmente: vuelve a guardar el PDF de SmartCredit cuando carguen todas las cuentas), reinicia la ronda y publica de nuevo.",
+    "approveSend": "Aprobar y enviar",
+    "approveRelease": "Aprobar y publicar",
+    "notApprover": "La responsable del idioma, Cesar o Alex pueden aprobar este informe.",
+    "reasonPlaceholder": "Por qué es seguro enviarlo aunque falló la revisión (queda registrado)",
+    "override": "Anular y enviar",
+    "fixAndRepublish": "Solo Cesar o Alex pueden anular una revisión fallida.",
+    "queueTitle_one": "{{count}} informe de progreso esperando aprobación",
+    "queueTitle_other": "{{count}} informes de progreso esperando aprobación",
+    "failedCount_one": "{{count}} revisión falló",
+    "failedCount_other": "{{count}} revisiones fallaron",
+    "readyToSend": "Revisión aprobada — listo para enviar",
+    "previewPass": "Revisión aprobada — después de publicar, Aprobar y enviar lo entrega.",
+    "previewFail": "La revisión falló — al publicar, el informe queda retenido para el cliente.",
+    "publishedTitle": "Publicado — esperando aprobación",
+    "publishedBody": "La ronda {{round}} quedó guardada y el pipeline avanzó. No se envió nada: el cliente lo verá cuando se apruebe."
+  },
+  "leadInsights": {
+    "title": "Datos de credito",
+    "subtitle": "Del ultimo reporte de credito leido",
+    "empty": "Aun no hay reporte leido — los datos aparecen tras el primer analisis.",
+    "heat": "Calor",
+    "heatTitle": "Calor {{score}}/100 — que tan urgente y que tan buen candidato es",
+    "readiness": {
+      "ready": "Listo para hipoteca",
+      "close": "Cerca",
+      "long": "Programa largo"
+    },
+    "middleToTarget": "{{middle}} → {{target}}",
+    "pointsNeeded": "{{count}} pts para {{target}}",
+    "atTarget": "En o sobre {{target}}",
+    "projected": "Proyectado tras la Ronda 4",
+    "reachesIn": "Llega a {{target}} en la Ronda {{round}} (est.)",
+    "notWithin": "No dentro de la Ronda 4 (est.)",
+    "activeLoan": "Archivo hipotecario",
+    "activeLoanBy": "Archivo hipotecario · {{name}}",
+    "estValue": "Valor est.",
+    "value": "~${{value}}",
+    "negatives": "Negativos",
+    "negDetail": "{{collections}} cobr · {{chargeOffs}} CO · {{lates}} atrasos",
+    "derogBalance": "Saldo derogatorio",
+    "utilization": "Utilizacion de tarjetas",
+    "noOpenCard": "Sin tarjeta abierta en buen estado",
+    "inquiries": "Consultas",
+    "inquiriesDetail": "{{d120}} en 120 dias · {{d12m}} en 12 meses",
+    "sameDay": "{{count}} el mismo dia",
+    "newAccount": "Cuenta nueva",
+    "fileStrength": "Fortaleza del archivo",
+    "program": "Programa",
+    "tier": {
+      "standard": "Estandar",
+      "complex": "Complejo"
+    },
+    "plusAu": "+ linea AU",
+    "quickWins": "Victorias rapidas",
+    "quickWin": {
+      "duplicate_inquiries": "Consultas duplicadas",
+      "inquiries_aging_off": "Consultas por vencer",
+      "paid_collections": "Cobranzas pagadas",
+      "accuracy_flags": "Alertas de exactitud",
+      "personal_info": "Datos personales distintos"
+    },
+    "nextAction": "Siguiente paso",
+    "action": {
+      "call_partner_before_underwriting": "Llamar al socio — presentar antes de suscripcion",
+      "call_today_active_loan": "Llamar hoy — prestamo en proceso",
+      "offer_au_after_closing": "Ofrecer linea AU despues del cierre",
+      "start_round1": "Inscribir e iniciar la Ronda 1",
+      "pull_full_report": "Sacar el reporte completo de 3 buros",
+      "offer_au": "Ofrecer una linea AU",
+      "ready_refer_lender": "Listo — referir de vuelta al prestamista"
+    },
+    "reasonsTitle": "Por que esta caliente",
+    "reason": {
+      "active_loan_file": "Archivo hipotecario activo",
+      "partner_referred": "Referido por socio",
+      "shopping_inquiries": "Buscando credito",
+      "new_account_90d": "Cuenta nueva (90 dias)",
+      "close_to_target": "Cerca de la meta",
+      "quick_wins": "Victorias rapidas",
+      "needs_repair": "Tiene cuentas por reparar",
+      "already_ready": "Ya en la meta"
+    },
+    "more": "Mas del reporte",
+    "scoreFactors": "Factores del puntaje",
+    "oldest": "Cuenta mas antigua",
+    "months": "{{count}} meses",
+    "thinFile": "Archivo delgado",
+    "student": "Prestamos estudiantiles",
+    "medical": "Cobranzas medicas",
+    "medicalDetail": "{{count}} · ${{balance}}",
+    "addresses": "Direcciones",
+    "addressesDetail": "{{count}} · {{states}}",
+    "lenderSim": "Simulacion del prestamista",
+    "history": "Historial de puntaje",
+    "historyEmpty": "Una lectura por ahora — el historial crece con cada reporte nuevo.",
+    "estimate": "Estimaciones, no garantias.",
+    "sortLabel": "Ordenar prospectos",
+    "sortNewest": "Mas recientes",
+    "sortHeat": "Mas calientes (datos de credito)",
+    "leaderboard": {
+      "title": "Ranking de socios referidores",
+      "subtitle": "Prospectos, conversiones y valor abierto por socio",
+      "days": "Ultimos {{count}} dias",
+      "partner": "Socio",
+      "leads": "Prospectos",
+      "hot": "Calientes",
+      "converted": "Convertidos",
+      "avgMiddle": "Medio prom.",
+      "pipeline": "Valor abierto",
+      "lastLead": "Ultimo prospecto",
+      "empty": "No hay prospectos referidos por socios en este periodo.",
+      "unlinked": "Requested By en reportes de prestamista — sin socio vinculado",
+      "unlinkedHint": "Vincule estos nombres a un socio para que sus prospectos y avisos les lleguen.",
+      "backfill": "Generar datos de reportes anteriores",
+      "backfilling": "Generando…",
+      "backfillDone": "Generados {{built}} de {{scanned}} reportes"
     }
   }
 }

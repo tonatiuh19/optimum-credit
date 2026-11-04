@@ -93,6 +93,9 @@ interface FundingState {
   adminDetailLoading: boolean;
   adminDetailError: string | null;
   adminActionLoading: boolean;
+  /** Underwriting view of the open application (docs, notes, masked SSN/EIN). */
+  underwriting: FundingUnderwriting | null;
+  underwritingBusy: boolean;
 
   // Portal
   portalApplication: FundingApplication | null;
@@ -120,6 +123,8 @@ const initialState: FundingState = {
   adminDetailLoading: false,
   adminDetailError: null,
   adminActionLoading: false,
+  underwriting: null,
+  underwritingBusy: false,
 
   portalApplication: null,
   portalLoading: false,
@@ -331,6 +336,125 @@ export const createAdminFundingApplication = createAsyncThunk<
     );
   }
 });
+
+export interface FundingUnderwritingDoc {
+  id: number;
+  doc_type: string;
+  file_name: string;
+  file_size: number | null;
+  mime_type: string | null;
+  review_status: "pending" | "approved" | "rejected";
+  rejection_reason: string | null;
+  uploaded_at: string;
+}
+
+export interface FundingUnderwriting {
+  applicationId: number;
+  documents: FundingUnderwritingDoc[];
+  notes: string;
+  ssnMasked: string | null;
+  einMasked: string | null;
+  revealed: { ssn?: string | null; ein?: string | null };
+}
+
+/** Docs + notes + masked SSN/EIN for the underwriting panel. */
+export const fetchFundingUnderwriting = createAsyncThunk<FundingUnderwriting, number, { rejectValue: string }>(
+  "funding/underwriting",
+  async (id, { rejectWithValue }) => {
+    try {
+      const [detail, sensitive] = await Promise.all([
+        api.get<{ documents: FundingUnderwritingDoc[]; notes: string }>(`/admin/funding/${id}`),
+        api.get<{ ssn_masked: string | null; ein_masked: string | null }>(`/admin/funding/${id}/sensitive`),
+      ]);
+      return {
+        applicationId: id,
+        documents: detail.data.documents || [],
+        notes: detail.data.notes || "",
+        ssnMasked: sensitive.data.ssn_masked,
+        einMasked: sensitive.data.ein_masked,
+        revealed: {},
+      };
+    } catch (err: unknown) {
+      return rejectWithValue(formatAxiosError(err, "Could not load documents."));
+    }
+  },
+);
+
+/** Full SSN / EIN (logged server-side). */
+export const revealFundingSecret = createAsyncThunk<
+  { field: "ssn" | "ein"; value: string | null },
+  { id: number; field: "ssn" | "ein" },
+  { rejectValue: string }
+>("funding/reveal", async ({ id, field }, { rejectWithValue }) => {
+  try {
+    const { data } = await api.post<{ field: "ssn" | "ein"; value: string | null }>(`/admin/funding/${id}/sensitive/reveal`, { field });
+    return data;
+  } catch (err: unknown) {
+    return rejectWithValue(formatAxiosError(err, "Could not reveal."));
+  }
+});
+
+/** Open a document (decrypted blob; view is logged server-side). */
+export const openFundingDocument = createAsyncThunk<
+  { blob: Blob; fileName: string },
+  { id: number; docId: number; fileName: string },
+  { rejectValue: string }
+>("funding/openDoc", async ({ id, docId, fileName }, { rejectWithValue }) => {
+  try {
+    const res = await api.get(`/admin/funding/${id}/documents/${docId}/file`, { responseType: "blob" });
+    return { blob: res.data as Blob, fileName };
+  } catch (err: unknown) {
+    return rejectWithValue(formatAxiosError(err, "Could not open document."));
+  }
+});
+
+/** Reject a document and send the client their upload link. */
+export const requestFundingDocument = createAsyncThunk<
+  number,
+  { id: number; docId: number; reason: string },
+  { rejectValue: string }
+>("funding/requestDoc", async ({ id, docId, reason }, { dispatch, rejectWithValue }) => {
+  try {
+    await api.post(`/admin/funding/${id}/documents/${docId}/request`, { reason });
+    void dispatch(fetchFundingUnderwriting(id));
+    void dispatch(fetchFundingApplication(id));
+    return id;
+  } catch (err: unknown) {
+    return rejectWithValue(formatAxiosError(err, "Could not request the document."));
+  }
+});
+
+/** Upload a document on the client's behalf. */
+export const uploadFundingDocumentAdmin = createAsyncThunk<
+  number,
+  { id: number; docType: string; file: File },
+  { rejectValue: string }
+>("funding/adminUpload", async ({ id, docType, file }, { dispatch, rejectWithValue }) => {
+  try {
+    const fd = new FormData();
+    fd.append("doc_type", docType);
+    fd.append("file", file);
+    await api.post(`/admin/funding/${id}/documents`, fd);
+    void dispatch(fetchFundingUnderwriting(id));
+    void dispatch(fetchFundingApplication(id));
+    return id;
+  } catch (err: unknown) {
+    return rejectWithValue(formatAxiosError(err, "Could not upload document."));
+  }
+});
+
+/** Append an underwriting note. */
+export const addFundingNote = createAsyncThunk<string, { id: number; text: string }, { rejectValue: string }>(
+  "funding/addNote",
+  async ({ id, text }, { rejectWithValue }) => {
+    try {
+      const { data } = await api.post<{ notes: string }>(`/admin/funding/${id}/notes`, { text });
+      return data.notes;
+    } catch (err: unknown) {
+      return rejectWithValue(formatAxiosError(err, "Could not save the note."));
+    }
+  },
+);
 
 export const fetchFundingApplication = createAsyncThunk<
   FundingApplication,
@@ -571,6 +695,34 @@ const slice = createSlice({
     });
 
     // Admin detail
+    b.addCase(fetchFundingUnderwriting.fulfilled, (s, a) => {
+      const keep = s.underwriting?.applicationId === a.payload.applicationId ? s.underwriting.revealed : {};
+      s.underwriting = { ...a.payload, revealed: keep };
+    });
+    b.addCase(revealFundingSecret.fulfilled, (s, a) => {
+      if (s.underwriting) s.underwriting.revealed[a.payload.field] = a.payload.value;
+    });
+    b.addCase(addFundingNote.pending, (s) => {
+      s.underwritingBusy = true;
+    });
+    b.addCase(addFundingNote.fulfilled, (s, a) => {
+      s.underwritingBusy = false;
+      if (s.underwriting) s.underwriting.notes = a.payload;
+    });
+    b.addCase(addFundingNote.rejected, (s) => {
+      s.underwritingBusy = false;
+    });
+    for (const t of [requestFundingDocument, uploadFundingDocumentAdmin] as const) {
+      b.addCase(t.pending, (s) => {
+        s.underwritingBusy = true;
+      });
+      b.addCase(t.fulfilled, (s) => {
+        s.underwritingBusy = false;
+      });
+      b.addCase(t.rejected, (s) => {
+        s.underwritingBusy = false;
+      });
+    }
     b.addCase(fetchFundingApplication.pending, (s) => {
       s.adminDetailLoading = true;
       s.adminDetailError = null;

@@ -18,6 +18,10 @@ import workTasks from "./slices/workTasksSlice";
 import adminNotifications from "./slices/adminNotificationsSlice";
 import adminAi from "./slices/adminAiSlice";
 import adminMcp from "./slices/adminMcpSlice";
+import billing from "./slices/billingSlice";
+import productivity from "./slices/productivitySlice";
+import reportApproval from "./slices/reportApprovalSlice";
+import leadInsights from "./slices/leadInsightsSlice";
 import conversations from "./slices/conversationsSlice";
 import voice from "./slices/voiceSlice";
 import funding from "./slices/fundingSlice";
@@ -46,6 +50,10 @@ export const store = configureStore({
     adminNotifications,
     adminAi,
     adminMcp,
+    billing,
+    productivity,
+    reportApproval,
+    leadInsights,
     conversations,
     voice,
     funding,

@@ -44,6 +44,7 @@ import { useVoiceDeviceOptional } from "@/contexts/VoiceDeviceContext";
 import { Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { ThreeWayCallControl } from "@/components/ThreeWayCallControl";
+import { CallKeypad } from "@/components/CallKeypad";
 import { resetThreeWay } from "@/store/slices/voiceSlice";
 
 export type CallState =
@@ -1064,6 +1065,9 @@ const VoiceCallPanel: React.FC<VoiceCallPanelProps> = ({
               <Mic className="h-4 w-4" />
             )}
           </Button>
+
+          {/* Keypad (DTMF: extensions, menus, voicemail) — only once connected */}
+          {callState === "in-call" && <CallKeypad call={callRef.current} />}
 
           {/* Add caller (three-way) — only once connected */}
           {callState === "in-call" && <ThreeWayCallControl callSid={callSid} />}

@@ -178,10 +178,11 @@ export function inboundAiHardEscalateReason(
   opts: { isUnknown: boolean; aiTurnCount: number; maxTurns?: number },
 ): string | null {
   if (opts.isUnknown) return "unknown_contact";
+  const body = String(text || "").trim();
+  // Photo-only / empty first: never text a hold back for these, even past max turns.
+  if (!body) return "empty_or_media_only";
   const max = opts.maxTurns ?? INBOUND_AI_MAX_SMS_TURNS;
   if (opts.aiTurnCount >= max) return "max_turns";
-  const body = String(text || "").trim();
-  if (!body) return "empty_or_media_only";
   // Compliance keywords are handled separately — never treat as FAQ.
   if (inboundAiComplianceKeyword(body)) return "compliance_keyword";
   for (const p of HARD_ESCALATE_PATTERNS) {
@@ -449,6 +450,71 @@ export function inboundAiLatestOutboundIsFailureHold(
     // A failed send should be retried on the next inbound.
     if (status === "failed" || status === "undelivered") return false;
     return true;
+  }
+  return false;
+}
+
+/**
+ * `messagesNewestFirst` is newest id first. True when an AI hold ("a teammate
+ * will follow up") already went out since the last staff / AI answer, for ANY
+ * escalation reason — so a burst of client texts gets one hold, not one each.
+ * A failed / undelivered hold does not count (retry on the next inbound).
+ */
+export function inboundAiHoldAlreadySent(
+  messagesNewestFirst: Array<{
+    direction?: unknown;
+    body?: unknown;
+    metadata_json?: unknown;
+    provider_status?: unknown;
+  }>,
+): boolean {
+  const holds = new Set([inboundAiEscalationHoldMessage("en"), inboundAiEscalationHoldMessage("es")]);
+  for (const m of messagesNewestFirst) {
+    if (String(m.direction || "") !== "outbound") continue;
+    const meta = parseMeta(m.metadata_json);
+    const isAi = meta?.inbound_ai === true || meta?.source === "inbound_ai";
+    // Staff wrote (or the AI answered) since — a new streak may get a hold.
+    if (!isAi) return false;
+    const isHold =
+      meta?.inbound_ai_hold === true ||
+      meta?.inbound_ai_failure === true ||
+      holds.has(String(m.body || "").trim());
+    if (!isHold) return false;
+    const status = String(m.provider_status || "").toLowerCase();
+    if (status === "failed" || status === "undelivered") continue;
+    return true;
+  }
+  return false;
+}
+
+/** Minutes after a staff text during which the AI stays out of the thread. */
+export const INBOUND_AI_STAFF_ACTIVE_MINUTES_DEFAULT = 120;
+
+export function inboundAiStaffActiveMinutes(raw: string | undefined | null): number {
+  const n = Number(String(raw ?? "").trim());
+  return raw != null && String(raw).trim() !== "" && Number.isFinite(n) && n >= 0
+    ? n
+    : INBOUND_AI_STAFF_ACTIVE_MINUTES_DEFAULT;
+}
+
+/**
+ * True when a person on staff texted this thread within `minutes` — the client
+ * is talking to a human, so the AI must not jump in ("Sending now" after
+ * staff asked for a payment is not an FAQ).
+ */
+export function inboundAiStaffRecentlyActive(
+  messagesNewestFirst: Array<{ direction?: unknown; metadata_json?: unknown; created_at?: unknown }>,
+  nowMs: number,
+  minutes: number,
+): boolean {
+  if (minutes <= 0) return false;
+  for (const m of messagesNewestFirst) {
+    if (String(m.direction || "") !== "outbound") continue;
+    const meta = parseMeta(m.metadata_json);
+    if (meta?.inbound_ai === true || meta?.source === "inbound_ai") continue;
+    const at = m.created_at instanceof Date ? m.created_at.getTime() : Date.parse(String(m.created_at || ""));
+    if (!Number.isFinite(at)) continue;
+    return nowMs - at <= minutes * 60_000;
   }
   return false;
 }

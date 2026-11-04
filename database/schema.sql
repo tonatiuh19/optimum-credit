@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS `admins` (
   `first_name` VARCHAR(100) NOT NULL,
   `last_name` VARCHAR(100) NOT NULL,
   `phone` VARCHAR(20) DEFAULT NULL,
-  `role` ENUM('super_admin','admin','agent','affiliate') NOT NULL DEFAULT 'admin',
+  `role` ENUM('super_admin','admin','agent','affiliate','underwriter') NOT NULL DEFAULT 'admin' COMMENT 'underwriter = funding board only (outside partner)',
   `status` ENUM('active','inactive','suspended') NOT NULL DEFAULT 'active',
   `preferred_language` ENUM('en','es') NOT NULL DEFAULT 'en' COMMENT 'Admin UI/comms language preference',
   `language_owner_for` ENUM('en','es') DEFAULT NULL COMMENT 'Language-owner role for client/task routing (en|es); NULL = not an owner',
@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS `admins` (
   `call_forwarding_enabled` TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'Also ring personal phone on inbound',
   `call_forwarding_phone` VARCHAR(20) DEFAULT NULL COMMENT 'E.164 cell for simultaneous ring',
   `voicemail_enabled` TINYINT(1) DEFAULT NULL COMMENT 'NULL = inherit org default from system_settings',
+  `productivity_profile` VARCHAR(20) DEFAULT NULL COMMENT 'GF-8 scorecard profile: ops | sales; NULL = not scored',
+  `slack_user_id` VARCHAR(20) DEFAULT NULL COMMENT 'Slack member id (U...) for scorecard DMs / Slack metrics',
   `voicemail_greeting_text` TEXT DEFAULT NULL,
   `voicemail_greeting_url` VARCHAR(500) DEFAULT NULL,
   `last_login_at` DATETIME DEFAULT NULL,
@@ -500,7 +502,7 @@ CREATE TABLE IF NOT EXISTS `credit_repair_cases` (
   `pipeline_stage`            ENUM('prospect','new_client','docs_ready','round_1','round_2','round_3','round_4','round_5','completed','cancelled')
                                             NOT NULL DEFAULT 'new_client',
   `max_rounds`                TINYINT UNSIGNED NOT NULL DEFAULT 5
-    COMMENT 'Max OFG progress rounds (5 default; staff may raise up to 12)',
+    COMMENT 'Max OFG progress rounds (5 default; staff may raise up to 24)',
   `next_dispute_target_date`  DATE DEFAULT NULL
     COMMENT 'Optional next dispute target for extended rounds (calendar)',
   `report_compare_mode` ENUM('baseline','chain') NOT NULL DEFAULT 'baseline'
@@ -546,6 +548,21 @@ CREATE TABLE IF NOT EXISTS `case_round_schedules` (
 -- ============================================================================
 -- FUNDING APPLICATIONS (business funding intake — separate from Credit Repair)
 -- ============================================================================
+-- Audit trail for sensitive funding data (underwriter + staff access).
+CREATE TABLE IF NOT EXISTS `funding_access_logs` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `admin_id` INT UNSIGNED NOT NULL,
+  `funding_application_id` INT UNSIGNED NOT NULL,
+  `action` ENUM('view_doc','upload_doc','request_doc','reveal_ssn','reveal_ein','status_change','note') NOT NULL,
+  `document_id` INT UNSIGNED DEFAULT NULL,
+  `detail` VARCHAR(255) DEFAULT NULL,
+  `ip_address` VARCHAR(64) DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_funding_access_app` (`funding_application_id`, `created_at`),
+  KEY `idx_funding_access_admin` (`admin_id`, `created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS `funding_applications` (
   `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
   `public_token` CHAR(36) NOT NULL,
@@ -723,7 +740,12 @@ CREATE TABLE IF NOT EXISTS `client_round_reports` (
   `score_before` SMALLINT UNSIGNED DEFAULT NULL,
   `score_after` SMALLINT UNSIGNED DEFAULT NULL,
   `items_removed` INT UNSIGNED NOT NULL DEFAULT 0,
-  `items_disputed` INT UNSIGNED NOT NULL DEFAULT 0,
+  `items_disputed` INT UNSIGNED DEFAULT NULL COMMENT 'From the dispute log; NULL = not recorded',
+  `before_report_date` VARCHAR(20) DEFAULT NULL COMMENT 'Report Date of the Before pull (never the filename)',
+  `after_report_date` VARCHAR(20) DEFAULT NULL COMMENT 'Report Date of the After pull',
+  `before_file_hash` CHAR(64) DEFAULT NULL,
+  `after_file_hash` CHAR(64) DEFAULT NULL,
+  `engine_json` JSON DEFAULT NULL COMMENT 'Engine write-back: per-bureau diff, attribution, flags, File Strength components',
   `summary_md` MEDIUMTEXT DEFAULT NULL,
   `bureau_scores_json` JSON DEFAULT NULL,
   `wins_json` JSON DEFAULT NULL COMMENT 'removed items table rows',
@@ -744,13 +766,20 @@ CREATE TABLE IF NOT EXISTS `client_round_reports` (
   `created_by_admin_id` INT UNSIGNED DEFAULT NULL,
   `delivered_via_sms` TINYINT(1) NOT NULL DEFAULT 0,
   `delivered_via_email` TINYINT(1) NOT NULL DEFAULT 0,
+  `delivery_status` VARCHAR(20) DEFAULT NULL COMMENT 'v1.1: pending_approval | needs_review | sending | sent | silent; NULL = legacy (sent at publish)',
+  `self_check_json` JSON DEFAULT NULL COMMENT 'v1.1 §9 checks: [{key, pass (null = n/a), detail}]',
+  `delivery_options_json` JSON DEFAULT NULL COMMENT 'Publish-time choices replayed on approval: notify_client, notify_partners',
+  `approved_by_admin_id` INT UNSIGNED DEFAULT NULL,
+  `approved_at` DATETIME DEFAULT NULL,
+  `delivery_result_json` JSON DEFAULT NULL COMMENT 'What approval sent: client_notify, partners_emailed, override reason',
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_client_round` (`client_id`,`round_number`),
   KEY `idx_round_reports_client` (`client_id`),
   CONSTRAINT `fk_round_reports_client` FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_round_reports_admin` FOREIGN KEY (`created_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL,
-  CONSTRAINT `fk_reports_case` FOREIGN KEY (`case_id`) REFERENCES `credit_repair_cases`(`id`) ON DELETE SET NULL
+  CONSTRAINT `fk_reports_case` FOREIGN KEY (`case_id`) REFERENCES `credit_repair_cases`(`id`) ON DELETE SET NULL,
+  KEY `idx_crr_delivery_status` (`delivery_status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================================
@@ -1654,6 +1683,7 @@ CREATE TABLE IF NOT EXISTS `reminder_flow_executions` (
   `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
   `flow_id` INT UNSIGNED NOT NULL,
   `client_id` INT UNSIGNED NOT NULL,
+  `round_number` TINYINT UNSIGNED DEFAULT NULL COMMENT 'Round this execution was for (progress-report flows); duplicate guard key',
   `triggered_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `status` ENUM('completed','partial','failed') NOT NULL DEFAULT 'completed',
   `steps_executed` INT NOT NULL DEFAULT 0,
@@ -1891,6 +1921,7 @@ CREATE TABLE IF NOT EXISTS `credit_file_extractions` (
   `purpose` ENUM('analysis','progress_before','progress_after','other') NOT NULL DEFAULT 'other',
   `file_name` VARCHAR(255) NOT NULL,
   `mime_type` VARCHAR(100) NOT NULL,
+  `file_sha256` CHAR(64) DEFAULT NULL COMMENT 'SHA-256 of the uploaded file (identical-pull guard)',
   `file_size` INT UNSIGNED NOT NULL,
   `storage_key` VARCHAR(1000) NOT NULL COMMENT 'Encrypted file on CDN',
   `enc_iv` CHAR(32) NOT NULL,
@@ -1910,15 +1941,29 @@ CREATE TABLE IF NOT EXISTS `credit_file_extractions` (
   `created_by_admin_id` INT UNSIGNED DEFAULT NULL,
   `submitted_at` DATETIME DEFAULT NULL,
   `completed_at` DATETIME DEFAULT NULL,
+  `review_status` ENUM('pending','running','passed','needs_review','approved') DEFAULT NULL COMMENT 'Analysis review gate; NULL = legacy (approved)',
+  `review_findings_json` JSON DEFAULT NULL COMMENT '{selfCheck, audit[], reconciledAdded, error}',
+  `extract_version` VARCHAR(24) DEFAULT NULL COMMENT 'Reader prompt/schema/model fingerprint; same file + same version = reusable read',
+  `read_mode` VARCHAR(16) DEFAULT NULL COMMENT 'direct | chunked | batch | reused | split_fallback',
+  `read_parts` TINYINT UNSIGNED DEFAULT NULL COMMENT 'Page ranges read in parallel (chunked)',
+  `read_ms` INT UNSIGNED DEFAULT NULL COMMENT 'Model time for the read (ms)',
+  `output_tokens` INT UNSIGNED DEFAULT NULL COMMENT 'Model output tokens (sum of parts)',
+  `reused_from_id` BIGINT UNSIGNED DEFAULT NULL COMMENT 'Ready read this row was copied from (same file)',
+  `review_attempts` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `review_started_at` DATETIME DEFAULT NULL,
+  `reviewed_by_admin_id` INT UNSIGNED DEFAULT NULL,
+  `reviewed_at` DATETIME DEFAULT NULL,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_cfe_status` (`status`, `created_at`),
+  KEY `idx_cfe_review` (`review_status`, `completed_at`),
   KEY `idx_cfe_client` (`client_id`),
   KEY `idx_cfe_case` (`case_id`),
   KEY `idx_cfe_credit_analysis` (`credit_analysis_id`),
   KEY `idx_cfe_wizard_session` (`report_wizard_session_id`),
   KEY `idx_cfe_batch` (`batch_id`),
+  KEY `idx_cfe_reuse` (`file_sha256`, `extract_version`, `status`),
   CONSTRAINT `fk_cfe_client` FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_cfe_case` FOREIGN KEY (`case_id`) REFERENCES `credit_repair_cases`(`id`) ON DELETE SET NULL,
   CONSTRAINT `fk_cfe_admin` FOREIGN KEY (`created_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL
@@ -1953,13 +1998,51 @@ CREATE TABLE IF NOT EXISTS `credit_analyses` (
   `lender_score_model` VARCHAR(40) DEFAULT NULL COMMENT 'Lender score model, e.g. FICO 2/4/5 (mortgage)',
   `lender_score` SMALLINT UNSIGNED DEFAULT NULL COMMENT 'Lender middle score (agent-entered)',
   `lender_target_score` SMALLINT UNSIGNED DEFAULT NULL COMMENT 'Score the lender needs',
+  `public_token` CHAR(32) DEFAULT NULL COMMENT 'Random hex handle for public/portal new-engine result access',
   `generated_at` DATETIME DEFAULT NULL,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_credit_analyses_client` (`client_id`),
   KEY `idx_credit_analyses_generated` (`generated_at`),
+  UNIQUE KEY `uq_credit_analyses_public_token` (`public_token`),
   CONSTRAINT `fk_credit_analyses_client` FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================================
+-- LEAD CREDIT INSIGHTS (one snapshot per credit report read)
+-- Applied by: 20261026_180000_lead_credit_insights.sql
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `lead_credit_insights` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `client_id` INT UNSIGNED NOT NULL,
+  `credit_file_extraction_id` INT UNSIGNED NOT NULL,
+  `credit_analysis_id` INT UNSIGNED DEFAULT NULL,
+  `purpose` VARCHAR(20) NOT NULL DEFAULT 'analysis' COMMENT 'analysis | progress_before | progress_after | other',
+  `report_date` DATE DEFAULT NULL,
+  `middle_score` SMALLINT UNSIGNED DEFAULT NULL,
+  `target_score` SMALLINT UNSIGNED DEFAULT NULL,
+  `points_to_target` SMALLINT UNSIGNED DEFAULT NULL,
+  `projected_middle` SMALLINT UNSIGNED DEFAULT NULL,
+  `readiness` ENUM('ready','close','long') DEFAULT NULL,
+  `negatives_total` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `utilization_pct` SMALLINT UNSIGNED DEFAULT NULL,
+  `inquiries_120d` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `active_loan_file` TINYINT(1) NOT NULL DEFAULT 0,
+  `requested_by` VARCHAR(150) DEFAULT NULL COMMENT 'Lender tri-merge "Requested By" (referral partner name)',
+  `est_value_usd` INT UNSIGNED NOT NULL DEFAULT 0,
+  `heat_score` TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '0-100',
+  `next_action` VARCHAR(40) DEFAULT NULL,
+  `insights_json` JSON NOT NULL,
+  `version` SMALLINT UNSIGNED NOT NULL DEFAULT 1,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_lead_insights_extraction` (`credit_file_extraction_id`),
+  KEY `idx_lead_insights_client` (`client_id`, `id`),
+  KEY `idx_lead_insights_heat` (`heat_score`),
+  KEY `idx_lead_insights_requested_by` (`requested_by`),
+  CONSTRAINT `fk_lead_insights_client` FOREIGN KEY (`client_id`) REFERENCES `clients`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Seed system labels (source + analysis layers)
@@ -2176,4 +2259,122 @@ CREATE TABLE IF NOT EXISTS `event_registrations` (
   CONSTRAINT `fk_event_reg_company` FOREIGN KEY (`company_id`) REFERENCES `event_companies`(`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_event_reg_series` FOREIGN KEY (`series_id`) REFERENCES `event_series`(`id`) ON DELETE SET NULL,
   CONSTRAINT `fk_event_reg_session` FOREIGN KEY (`session_id`) REFERENCES `event_sessions`(`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================================
+-- PLATFORM BILLING (OFG -> platform owner). Applied by: 20261022_190000_platform_billing.sql
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `billing_usage_events` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `occurred_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `service` VARCHAR(30) NOT NULL COMMENT 'anthropic | mcp | platform',
+  `action` VARCHAR(60) NOT NULL COMMENT 'billing_prices.action',
+  `quantity` DECIMAL(14,4) NOT NULL DEFAULT 1,
+  `unit` VARCHAR(20) NOT NULL DEFAULT 'call',
+  `model` VARCHAR(80) DEFAULT NULL,
+  `input_tokens` INT UNSIGNED DEFAULT NULL,
+  `output_tokens` INT UNSIGNED DEFAULT NULL,
+  `cache_read_tokens` INT UNSIGNED DEFAULT NULL,
+  `cache_write_tokens` INT UNSIGNED DEFAULT NULL,
+  `provider_cost_usd` DECIMAL(12,6) DEFAULT NULL COMMENT 'Real provider cost (informational)',
+  `admin_id` INT UNSIGNED DEFAULT NULL,
+  `client_id` INT UNSIGNED DEFAULT NULL,
+  `ref_type` VARCHAR(40) DEFAULT NULL,
+  `ref_id` VARCHAR(64) DEFAULT NULL,
+  `metadata_json` JSON DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_billing_usage_occurred` (`occurred_at`),
+  KEY `idx_billing_usage_action_occurred` (`action`, `occurred_at`),
+  KEY `idx_billing_usage_admin_occurred` (`admin_id`, `occurred_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `billing_prices` (
+  `action` VARCHAR(60) NOT NULL,
+  `service` VARCHAR(30) NOT NULL,
+  `unit` VARCHAR(20) NOT NULL DEFAULT 'call',
+  `unit_price_usd` DECIMAL(12,6) NOT NULL DEFAULT 0,
+  `markup` DECIMAL(6,3) NOT NULL DEFAULT 2.000 COMMENT 'Suggested price = measured cost x markup',
+  `billable` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1 = on the invoice; 0 = usage shown only',
+  `sort_order` INT NOT NULL DEFAULT 100,
+  `updated_by_admin_id` INT UNSIGNED DEFAULT NULL,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`action`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT IGNORE INTO `billing_prices` (`action`, `service`, `unit`, `unit_price_usd`, `billable`, `sort_order`) VALUES
+  -- OFG Operating Suite ($582/month): 20261023_010000 split + 20261023_020000 reduced to $580, 20261023_030000 → $582, 20261023_040000 cents
+  ('suite_credit_intelligence', 'suite', 'month', 152.35, 1, 1),
+  ('suite_communications_hub', 'suite', 'month', 109.80, 1, 2),
+  ('suite_crm_automations', 'suite', 'month', 94.65, 1, 3),
+  ('suite_cloud_infrastructure', 'suite', 'month', 95.40, 1, 4),
+  ('suite_security_compliance', 'suite', 'month', 54.95, 1, 5),
+  ('suite_managed_support', 'suite', 'month', 74.85, 1, 6),
+  ('mcp_tool_call', 'mcp', 'call', 0.01, 1, 7),
+  ('ai_credit_report_read', 'anthropic', 'call', 0, 0, 10),
+  ('ai_credit_review', 'anthropic', 'call', 0, 0, 11),
+  ('ai_progress_report', 'anthropic', 'call', 0, 0, 12),
+  ('ai_inbound_reply', 'anthropic', 'call', 0, 0, 13),
+  ('ai_reply_suggestions', 'anthropic', 'call', 0, 0, 14),
+  ('ai_admin_chat', 'anthropic', 'call', 0, 0, 15),
+  ('ai_morning_digest', 'anthropic', 'call', 0, 0, 16);
+
+CREATE TABLE IF NOT EXISTS `billing_invoices` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `period_month` CHAR(7) NOT NULL COMMENT 'YYYY-MM',
+  `period_start` DATETIME NOT NULL,
+  `period_end` DATETIME NOT NULL,
+  `lines_json` JSON NOT NULL,
+  `total_usd` DECIMAL(12,2) NOT NULL,
+  `status` VARCHAR(20) NOT NULL DEFAULT 'pending' COMMENT 'pending | open | paid | void | uncollectible | failed',
+  `stripe_invoice_id` VARCHAR(64) DEFAULT NULL,
+  `hosted_invoice_url` VARCHAR(500) DEFAULT NULL,
+  `invoice_pdf_url` VARCHAR(500) DEFAULT NULL,
+  `error_message` VARCHAR(500) DEFAULT NULL,
+  `paid_at` DATETIME DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_billing_invoice_period` (`period_month`),
+  KEY `idx_billing_invoice_stripe` (`stripe_invoice_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- GF-8 Productivity scorecard
+CREATE TABLE IF NOT EXISTS `productivity_days_off` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `admin_id` INT UNSIGNED NOT NULL,
+  `day` DATE NOT NULL COMMENT 'America/Los_Angeles calendar day',
+  `reason` VARCHAR(120) DEFAULT NULL,
+  `created_by_admin_id` INT UNSIGNED DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_prod_dayoff` (`admin_id`, `day`),
+  CONSTRAINT `fk_prod_dayoff_admin` FOREIGN KEY (`admin_id`) REFERENCES `admins`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `productivity_scores` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `admin_id` INT UNSIGNED NOT NULL,
+  `score_date` DATE NOT NULL COMMENT 'America/Los_Angeles day',
+  `profile` VARCHAR(20) NOT NULL,
+  `total` DECIMAL(5,1) DEFAULT NULL COMMENT 'NULL = not graded (day off / nothing pending)',
+  `grade` CHAR(1) DEFAULT NULL,
+  `level` VARCHAR(10) NOT NULL DEFAULT 'bronze',
+  `metrics_json` JSON NOT NULL COMMENT 'Per metric: score, raw, target, weight, locked, graded, evidence ids',
+  `final` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1 = locked at 4:40 PM',
+  `slack_sent_at` DATETIME DEFAULT NULL,
+  `computed_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_prod_score_day` (`admin_id`, `score_date`),
+  KEY `idx_prod_score_date` (`score_date`),
+  CONSTRAINT `fk_prod_score_admin` FOREIGN KEY (`admin_id`) REFERENCES `admins`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `productivity_badges` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `admin_id` INT UNSIGNED NOT NULL,
+  `badge_key` VARCHAR(40) NOT NULL,
+  `earned_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_prod_badge` (`admin_id`, `badge_key`),
+  CONSTRAINT `fk_prod_badge_admin` FOREIGN KEY (`admin_id`) REFERENCES `admins`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

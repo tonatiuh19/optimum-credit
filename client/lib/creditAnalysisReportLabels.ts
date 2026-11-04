@@ -142,11 +142,6 @@ export function creditAnalysisReportLabels(
 
 export function resolveCreditAnalysisReportLang(result: {
   text_language?: "en" | "es";
-  analyst?: Record<string, string | number | null> | null;
 }): CreditAnalysisReportLang {
-  if (result.text_language === "es" || result.text_language === "en") {
-    return result.text_language;
-  }
-  if (result.analyst?.text_language === "Spanish") return "es";
-  return "en";
+  return result.text_language === "es" ? "es" : "en";
 }

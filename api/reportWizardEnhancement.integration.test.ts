@@ -100,11 +100,18 @@ describe("progress report enhancement (preview)", () => {
     await pool.end();
   });
 
-  it("v2: 3 pages + parse-failure flag while enhanced reads are missing / pending", async () => {
-    const first = await previewFull();
-    expect(first.pages).toBe(3);
-    expect(first.text).toContain("Your Score Progress");
-    expect(first.flags.map((f) => f.code)).toContain("parse_failure");
+  // Engine Spec v1 PR-P0-1: no text fallback — Preview waits for both reads.
+  const previewRaw = () =>
+    request(app)
+      .post(`/api/admin/report-wizard/sessions/${sessionId}/preview`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({});
+
+  it("v2: Preview is gated until both account-level reads are ready (no text fallback)", async () => {
+    // No reads and no stored source PDF → needs review (reads_failed), never a text-built report.
+    const none = await previewRaw();
+    expect(none.status).toBe(422);
+    expect(none.body.code).toBe("reads_failed");
     await pool.query(
       `INSERT INTO credit_file_extractions
          (client_id, case_id, report_wizard_session_id, purpose, file_name, mime_type, file_size,
@@ -113,10 +120,22 @@ describe("progress report enhancement (preview)", () => {
                REPEAT('0',32), REPEAT('0',32), 'ready', ?)`,
       [clientId, caseId, sessionId, JSON.stringify(FILE)],
     );
-    // Only Before ready → still the review-data layout (flagged).
-    const half = await previewFull();
-    expect(half.pages).toBe(3);
-    expect(half.flags.map((f) => f.code)).toContain("parse_failure");
+    // Before ready, After still reading → 409 reads_pending with per-pull status.
+    await pool.query(
+      `INSERT INTO credit_file_extractions
+         (client_id, case_id, report_wizard_session_id, purpose, file_name, mime_type, file_size,
+          storage_key, enc_iv, enc_tag, status)
+       VALUES (?, ?, ?, 'progress_after', 'a.pdf', 'application/pdf', 1, 'vitest://none',
+               REPEAT('0',32), REPEAT('0',32), 'submitted')`,
+      [clientId, caseId, sessionId],
+    );
+    const half = await previewRaw();
+    expect(half.status).toBe(409);
+    expect(half.body.code).toBe("reads_pending");
+    expect(half.body.reads).toMatchObject({ before: { status: "ready" }, after: { status: "reading" } });
+    const status = await request(app).get(`/api/admin/report-wizard/sessions/${sessionId}/reads`).set("Authorization", `Bearer ${adminToken}`);
+    expect(status.body).toMatchObject({ ready: false, reads: { before: { status: "ready" }, after: { status: "reading" } } });
+    await pool.query(`DELETE FROM credit_file_extractions WHERE report_wizard_session_id = ? AND purpose = 'progress_after'`, [sessionId]);
   }, 60_000);
 
   it("v2: account-level wins/targets once Before and After are both ready", async () => {
@@ -141,11 +160,15 @@ describe("progress report enhancement (preview)", () => {
     expect(full.flags.map((f) => f.code)).not.toContain("parse_failure");
     // LEAFY removed → win; KLARNA new late → target + internal note.
     expect(full.text).toMatch(/What Came Off Your Report.*LEAFY FINANCIAL/);
-    expect(full.text).toMatch(/Targets\).*KLARNA/);
-    expect(full.flags.some((f) => f.code === "internal_note" && /New negative: KLARNA/.test(f.message))).toBe(true);
+    expect(full.text).toMatch(/What Is Still On Your Report.*KLARNA/);
+    const ready = await request(app).get(`/api/admin/report-wizard/sessions/${sessionId}/reads`).set("Authorization", `Bearer ${adminToken}`);
+    expect(ready.body.ready).toBe(true);
+    // Undated → not "new" (only items dated after the baseline are new); staff get a note to check the Before.
+    expect(full.flags.some((f) => f.code === "internal_note" && /Not on the Before read \(no open date.*KLARNA/.test(f.message))).toBe(true);
+    expect(full.text).not.toMatch(/What Moved Your Score/);
   }, 60_000);
 
-  it("v2: flagged report cannot be published by a non-owner (needs review)", async () => {
+  it("v2: identical pulls are BLOCKED_DATA_INTEGRITY for everyone (PR-P0-5)", async () => {
     const [ag] = await pool.query<ResultSetHeader>(
       `INSERT INTO admins (email, first_name, last_name, role, status, preferred_language)
        VALUES (?, 'Agent', 'NonOwner', 'agent', 'active', 'en')`,
@@ -161,15 +184,48 @@ describe("progress report enhancement (preview)", () => {
       const res = await request(app)
         .post(`/api/admin/report-wizard/sessions/${sessionId}/finalize`)
         .set("Authorization", `Bearer ${agentToken}`)
-        .send({ compliance_acknowledged: true });
-      expect(res.status).toBe(409);
-      expect(res.body.code).toBe("needs_review");
-      expect(res.body.issues.join(" ")).toMatch(/same report date/);
+        .send({ compliance_acknowledged: true, acknowledge_score_anomalies: true });
+      expect(res.status).toBe(422);
+      expect(res.body.code).toBe("blocked_data_integrity");
+      expect(res.body.error).toMatch(/same report date/);
       const [st] = await pool.query<RowDataPacket[]>(`SELECT status FROM report_wizard_sessions WHERE id = ?`, [sessionId]);
       expect(st[0].status).toBe("review");
     } finally {
       await pool.query(`DELETE FROM admin_sessions WHERE admin_id = ?`, [ag.insertId]).catch(() => undefined);
       await pool.query(`DELETE FROM admins WHERE id = ?`, [ag.insertId]);
+    }
+  }, 60_000);
+
+  it("GF-84: old rounds default to a silent publish (notify-default)", async () => {
+    const get = () =>
+      request(app)
+        .get(`/api/admin/report-wizard/sessions/${sessionId}/notify-default`)
+        .set("Authorization", `Bearer ${adminToken}`);
+    // Recent After date, nothing newer → notify.
+    let res = await get();
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ notify_client: true, reasons: [] });
+
+    // After report 45+ days old → silent, with the reason.
+    const old = { ...DATA, reportDate: { before: "2025-01-01", after: "2025-02-01" } };
+    await pool.query(`UPDATE report_wizard_sessions SET reviewed_json = ? WHERE id = ?`, [JSON.stringify(old), sessionId]);
+    res = await get();
+    expect(res.body.notify_client).toBe(false);
+    expect(res.body.reasons.join(" ")).toMatch(/days old/);
+
+    // A newer round already published → silent.
+    await pool.query(`UPDATE report_wizard_sessions SET reviewed_json = NULL WHERE id = ?`, [sessionId]);
+    const [rr] = await pool.query<ResultSetHeader>(
+      `INSERT INTO client_round_reports (client_id, case_id, round_number, score_before, score_after, items_removed, items_disputed)
+       VALUES (?, ?, 3, 600, 620, 0, 0)`,
+      [clientId, caseId],
+    );
+    try {
+      res = await get();
+      expect(res.body.notify_client).toBe(false);
+      expect(res.body.reasons.join(" ")).toMatch(/Round 3 is already published/);
+    } finally {
+      await pool.query(`DELETE FROM client_round_reports WHERE id = ?`, [rr.insertId]);
     }
   }, 60_000);
 });

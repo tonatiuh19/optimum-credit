@@ -628,4 +628,28 @@ describe("conversations voice", () => {
     }
     expect(status).toBe("no-answer");
   });
+
+  it("outbound-dial-end writes Twilio's final status + duration over the browser label", async () => {
+    const [numRows] = await pool.query<RowDataPacket[]>(`SELECT e164 FROM admin_phone_numbers WHERE id = ?`, [phoneNumberId]);
+    const to = String(numRows[0].e164);
+    const from = `+1765${String(Date.now()).slice(-7)}`;
+    const sid = `CAend${Date.now()}`;
+    await request(app).post("/api/voice/incoming").type("form").send({ From: from, To: to, Called: to, CallSid: sid, Direction: "inbound" });
+    let rowId = 0;
+    for (let i = 0; i < 20 && !rowId; i++) {
+      await new Promise((r) => setTimeout(r, 200));
+      const [rows] = await pool.query<RowDataPacket[]>(`SELECT id FROM conversation_messages WHERE provider_message_id = ? AND channel = 'call'`, [sid]);
+      rowId = Number(rows[0]?.id || 0);
+    }
+    expect(rowId).toBeGreaterThan(0);
+    await pool.query(`UPDATE conversation_messages SET provider_status = 'failed', call_duration_sec = 3 WHERE id = ?`, [rowId]);
+    const r = await request(app).post("/api/voice/outbound-dial-end").type("form").send({ CallSid: sid, DialCallStatus: "completed", DialCallDuration: "66" });
+    expect(r.status).toBe(200);
+    const [[row]] = await pool.query<RowDataPacket[]>(`SELECT provider_status, call_duration_sec FROM conversation_messages WHERE id = ?`, [rowId]);
+    expect(row).toMatchObject({ provider_status: "completed", call_duration_sec: 66 });
+    // Non-terminal statuses never overwrite.
+    await request(app).post("/api/voice/outbound-dial-end").type("form").send({ CallSid: sid, DialCallStatus: "in-progress" });
+    const [[again]] = await pool.query<RowDataPacket[]>(`SELECT provider_status FROM conversation_messages WHERE id = ?`, [rowId]);
+    expect(again.provider_status).toBe("completed");
+  });
 });

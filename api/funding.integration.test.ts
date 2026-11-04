@@ -147,6 +147,19 @@ describe("business funding", () => {
       expect(up.status).toBe(201);
     }
 
+    // Encrypted bytes go to the CDN as ".enc" (CDN rejects encrypted data
+    // under the original ".pdf"/".jpeg" name); original name/MIME stay in DB.
+    const [docRows] = await pool.query<RowDataPacket[]>(
+      `SELECT storage_key, file_name, mime_type FROM client_documents WHERE funding_application_id = ?`,
+      [applicationId],
+    );
+    expect(docRows.length).toBe(slots.length);
+    for (const d of docRows) {
+      expect(String(d.storage_key)).toMatch(/\.enc$/);
+      expect(String(d.file_name)).toMatch(/\.pdf$/);
+      expect(String(d.mime_type)).toBe("application/pdf");
+    }
+
     const submit = await request(app).post(
       `/api/public/funding/${publicToken}/submit`,
     );
@@ -376,4 +389,126 @@ describe("business funding", () => {
       portal.body.applications.some((a: any) => Number(a.id) === appId),
     ).toBe(true);
   }, 60_000);
+
+  it("underwriter role: funding board only — docs, stages, notes, requests; everything else 403", async () => {
+    const uwEmail = `funding-uw-${RUN_ID}@example.test`;
+    const [uwIns] = await pool.query<ResultSetHeader>(
+      `INSERT INTO admins (email, first_name, last_name, role, status, preferred_language)
+       VALUES (?, 'Under', 'Writer', 'underwriter', 'active', 'en')`,
+      [uwEmail],
+    );
+    const uwId = Number(uwIns.insertId);
+    try {
+      const uw = await createSession("admin", uwId, uwEmail, "127.0.0.1", `vitest-funding-uw-${RUN_ID}`);
+      const auth = (r: request.Test) => r.set("Authorization", `Bearer ${uw}`);
+
+      // Applicant starts, adds SSN/EIN, uploads the license.
+      const start = await request(app).post("/api/public/funding").send({
+        first_name: "Under", last_name: RUN_ID, email: `funding-uwapp-${RUN_ID}@example.test`,
+        phone: "5551234567", funding_type: "bank_statements", preferred_language: "en",
+      });
+      expect(start.status).toBe(201);
+      const token = String(start.body.application.public_token);
+      const appId = Number(start.body.application.id);
+      applicationIds.push(appId);
+      clientIds.push(Number(start.body.application.client_id));
+      await request(app).patch(`/api/public/funding/${token}`).send({ ssn: "123456789", ein: "987654321", llc_name: "UW LLC" });
+      const up = await request(app)
+        .post(`/api/public/funding/${token}/documents`)
+        .field("doc_type", "funding_drivers_license")
+        .attach("file", Buffer.from("%PDF-1.4 license"), { filename: "license.pdf", contentType: "application/pdf" });
+      expect(up.status).toBe(201);
+      const docId = Number(up.body.document_id);
+
+      // Allowed: board, detail, docs, masked SSN/EIN.
+      expect((await auth(request(app).get("/api/admin/funding"))).status).toBe(200);
+      const detail = await auth(request(app).get(`/api/admin/funding/${appId}`));
+      expect(detail.status).toBe(200);
+      expect(detail.body.documents.map((d: { id: number }) => d.id)).toContain(docId);
+      const masked = await auth(request(app).get(`/api/admin/funding/${appId}/sensitive`));
+      expect(masked.body).toEqual({ ssn_masked: "***-**-6789", ein_masked: "**-***4321" });
+      const reveal = await auth(request(app).post(`/api/admin/funding/${appId}/sensitive/reveal`).send({ field: "ssn" }));
+      expect(reveal.body).toEqual({ field: "ssn", value: "123456789" });
+      const file = await auth(request(app).get(`/api/admin/funding/${appId}/documents/${docId}/file`));
+      expect(file.status).toBe(200);
+
+      // Stage moves, notes, doc request, upload on behalf.
+      expect((await auth(request(app).post(`/api/admin/funding/${appId}/status`).send({ status: "under_review" }))).status).toBe(200);
+      const note = await auth(request(app).post(`/api/admin/funding/${appId}/notes`).send({ text: "Bank statements look consistent" }));
+      expect(note.body.notes).toMatch(/\(underwriter\)\] Bank statements look consistent/);
+      const reqDoc = await auth(request(app).post(`/api/admin/funding/${appId}/documents/${docId}/request`).send({ reason: "License is expired" }));
+      expect(reqDoc.status).toBe(200);
+      const [st] = await pool.query<RowDataPacket[]>(
+        `SELECT f.status, d.review_status, d.rejection_reason FROM funding_applications f
+         JOIN client_documents d ON d.funding_application_id = f.id WHERE f.id = ? AND d.id = ?`,
+        [appId, docId],
+      );
+      expect(st[0]).toMatchObject({ status: "awaiting_docs", review_status: "rejected", rejection_reason: "License is expired" });
+      const behalf = await auth(
+        request(app)
+          .post(`/api/admin/funding/${appId}/documents`)
+          .field("doc_type", "funding_bank_m1")
+          .attach("file", Buffer.from("%PDF-1.4 m1"), { filename: "m1.pdf", contentType: "application/pdf" }),
+      );
+      expect(behalf.status).toBe(201);
+
+      // Audit trail.
+      const [logs] = await pool.query<RowDataPacket[]>(
+        `SELECT action FROM funding_access_logs WHERE funding_application_id = ? AND admin_id = ? ORDER BY id`,
+        [appId, uwId],
+      );
+      expect(logs.map((l) => l.action)).toEqual(["reveal_ssn", "view_doc", "status_change", "note", "request_doc", "upload_doc"]);
+
+      // Client re-uploads the requested license → underwriter is told.
+      __testClearEmailDryRuns();
+      const reup = await request(app)
+        .post(`/api/public/funding/${token}/documents`)
+        .field("doc_type", "funding_drivers_license")
+        .attach("file", Buffer.from("%PDF-1.4 new license"), { filename: "license2.pdf", contentType: "application/pdf" });
+      expect(reup.status).toBe(201);
+      expect(
+        __testGetEmailDryRuns().some((e) => String(e.to).toLowerCase() === uwEmail.toLowerCase() && /Requested document received/.test(String(e.subject))),
+      ).toBe(true);
+
+      // The LAST upload auto-submits the application — that alone must
+      // email the underwriter; an explicit Submit afterwards must not re-alert.
+      __testClearEmailDryRuns();
+      for (const slot of ["funding_corp_statement", "funding_bank_m2", "funding_bank_m3", "funding_bank_m4", "funding_bank_m5", "funding_bank_m6", "funding_drivers_license"]) {
+        const u = await request(app)
+          .post(`/api/public/funding/${token}/documents`)
+          .field("doc_type", slot)
+          .attach("file", Buffer.from("%PDF-1.4 x"), { filename: `${slot}.pdf`, contentType: "application/pdf" });
+        expect(u.status, slot).toBe(201);
+      }
+      const toUw = () => __testGetEmailDryRuns().filter((e) => String(e.to).toLowerCase() === uwEmail.toLowerCase());
+      expect(toUw().map((e) => e.subject)).toEqual([expect.stringMatching(/Funding application submitted/)]);
+      const submit = await request(app).post(`/api/public/funding/${token}/submit`);
+      expect(submit.status).toBe(200);
+      expect(toUw()).toHaveLength(1);
+
+      // Conversation media / recordings: never for underwriters.
+      const media = await request(app).get("/api/conversations/media").query({ token: uw, url: "https://api.twilio.com/2010-04-01/x.mp3" });
+      expect(media.status).toBe(403);
+
+      // Contained: CRM, clients, conversations, team, convert, create → 403.
+      for (const [method, path] of [
+        ["get", "/api/admin/clients"],
+        ["get", "/api/admin/conversations"],
+        ["get", "/api/admin/admins"],
+        ["get", `/api/admin/clients/${start.body.application.client_id}`],
+      ] as const) {
+        const r = await auth(request(app)[method](path));
+        expect(r.status, path).toBe(403);
+      }
+      expect((await auth(request(app).post(`/api/admin/funding/${appId}/convert`))).status).toBe(403);
+      expect((await auth(request(app).post("/api/admin/funding").send({}))).status).toBe(403);
+      // Notes never reach the public funding payload.
+      const pub = await request(app).get(`/api/public/funding/${token}`);
+      expect(JSON.stringify(pub.body)).not.toMatch(/consistent/);
+    } finally {
+      await pool.query(`DELETE FROM funding_access_logs WHERE admin_id = ?`, [uwId]).catch(() => {});
+      await pool.query(`DELETE FROM admin_sessions WHERE admin_id = ?`, [uwId]).catch(() => {});
+      await pool.query(`DELETE FROM admins WHERE id = ?`, [uwId]).catch(() => {});
+    }
+  }, 90_000);
 });

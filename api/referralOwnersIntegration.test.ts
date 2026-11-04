@@ -150,7 +150,7 @@ describe("referral owners + prospect create — HTTP smoke", () => {
       (p: { id: number }) => Number(p.id) === clientId,
     );
     expect(found).toBeTruthy();
-  }, 30_000);
+  }, 90_000); // remote DB: pipeline is ~8 s alone, slower under parallel suites
 
   it("rejects creating a case for a prospect (must convert)", async () => {
     const res = await request(app)
@@ -158,7 +158,7 @@ describe("referral owners + prospect create — HTTP smoke", () => {
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ client_id: clientId, pipeline_stage: "new_client" });
     expect(res.status).toBe(409);
-  }, 30_000);
+  }, 90_000); // remote DB: pipeline is ~8 s alone, slower under parallel suites
 
   it("converts prospect and notifies path stays healthy", async () => {
     const res = await request(app)

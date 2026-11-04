@@ -55,9 +55,14 @@ CSS variables live in `client/global.css`. Tailwind maps them via `tailwind.conf
 
 - Credit Analysis PDF (`api/ofgCreditAnalysisPdf.ts`) uses the Progress Report brand: navy header + 3px gold rule, white OFG logo, light footer with phone/site + confidentiality line, navy table headers with zebra rows, gold-underlined section titles, red-tint callouts for flags and gold-tint callouts for recommendations. Flowing layout (`PageFlow`) breaks pages automatically. The Progress Report's appended account-detail pages (`generateProgressEnhancementPdf`) use the same kit with gold-topped summary tiles and an "Account detail N" page label so they never clash with the base report's "n / 3" numbering. All copy in en + es inside the module; keep `§` (WinAnsi-safe) for legal bases.
 - Credit Analysis v2 (Cesar spec, Oct 2026): red-tint "ACTIVE ESCROW" banner under the scores, gold-tint "LENDER SCORE" callout, Round 1-4 tables (excluded inquiries listed with the reason, "None on file" for empty rounds), tradeline table with IH-1/IH-2 codes + price + timing, file strength shown as `x / 20` per category, and the full CROA text in a gold callout.
+- Credit Analysis Spec v2.1 (Oct 20 2026) — fixed **5-page** contract (`generateOfgCreditAnalysisPdfWithMeta` returns the page count; it re-renders in compact mode if content overflows): p1 scores table (FICO + rating + VantageScore + middle score) + score bars, red "ACTIVE LOAN FILE" banner, file-overview table, facts-only observations; p2 Round 1–4 tables (Creditor | Type | Bureaus | Status/issue | Legal basis; R1 = inquiries + personal info; excluded lender inquiry listed with the reason) + "Informational - not dispute targets"; p3 negatives oldest-first by derogatory date (N/I footnote), active positives + one-line closed summary, utilization; p4 projection table (per bureau "NNN+ (low-high)" + middle) with middle-score bars, tradelines (IH-2 optional, primary line "Hold"); p5 action plan (max 6, rounds merged when needed), file strength, program-specific enrollment link + MyFreeScoreNow link, CROA. Bureaus the source doesn't label print **"Not itemized"** — never guessed. Name = formatted Borrower name ("Alma Y. Rice"); placeholders ("TBD") block the PDF. File name `[LastName]_OFG_Credit_Analysis_[MonYYYY].pdf`.
+- Staff on-screen summary shows a warning-tint "Needs review" card listing self-check mismatches (report total vs read) — staff view only.
+- Credit Analysis review gate (`CreditAnalysisReviewCard`, staff only): spinner card "Double-checking against the report…" while the self-check + Claude audit run; warning-tint card "Needs review — not sent to the client" listing mismatches (report vs read), confirmed blocking findings (destructive text) and notes (muted), with **Re-run checks** (outline) and **Approve and release** (primary) buttons — stacked on mobile, right-aligned on desktop; small accent line with a shield icon once passed / approved. Public / portal view shows a centered shield card "We're reviewing your report" instead of any data while held.
 - Progress Report v2 (`api/progressReportV2.ts`, replaces the old 3-page generator): exactly 3 letter pages, navy header with gold "OPTIMUM FINANCIAL GROUP" eyebrow, score table + ASCII score bars (Courier, `[====    ]`), REMOVED / PARTIAL WIN statuses, gold "Your progress too" callout for client actions, per-account utilization with HIGH/FAIR/GOOD bands and "Pay to $X", Courier roadmap rows, file-strength ASCII bar, CROA box. ASCII only in the bars; en + es labels inside the module; never statute citations other than CROA, never "FICO".
 
 ## Softphone — three-way calls
+
+- `CallKeypad` (`client/components/CallKeypad.tsx`): round outline `Grid3x3` button between Mute and Add caller (connected calls only). Popover: mono digits display + 3×4 keypad (`h-12`, `active:scale-95`), local DTMF tone (`client/lib/dtmfTone.ts`), physical keyboard 0-9 * # while open. Sends via the call (`sendDigits`); during a three-way it routes to the third party through the server. Copy under `conversations.voice.keypad.*`.
 
 - `ThreeWayCallControl` (`client/components/ThreeWayCallControl.tsx`): round outline icon button next to Mute (only while connected). Popover: quick-dial secondary buttons, US number field (Formik + Yup), then a 3×4 keypad (`active:scale-95`) for the third party's phone menu and a destructive-outline "Remove" button. Active state tints the trigger `bg-primary/10 border-primary/40`. Copy under `conversations.voice.threeWay.*` (en + es).
 
@@ -66,12 +71,13 @@ CSS variables live in `client/global.css`. Tailwind maps them via `tailwind.conf
 - New theme token **`warning`** (amber, light + dark in `global.css`, `tailwind.config.ts`) for in-between states. Traffic light = `accent` (green) **Hot**, `warning` (amber) **Warm**, `destructive` (red) **Cold** — never arbitrary colors.
 - `LeadTemperatureBadge` (`client/components/admin/LeadTemperatureBadge.tsx`): pill with a dot (pulses when Hot) — on prospect Kanban cards next to `LangBadge`; `LEAD_TEMPERATURE_TONE` holds the classes.
 - `LeadTemperatureCard`: prospect panel Overview — tinted by color, action line + reasons, "Analysis reviewed" toggle and a `datetime-local` "Schedule call" (Formik + Yup). Copy under `adminPipeline.leadTemp.*` (en + es).
+- **Lead credit insights** (`client/components/admin/lead-insights/`): one snapshot per credit report read (`lead_credit_insights`; rules `api/leadCreditInsights.ts`). `LeadInsightChips` on prospect Kanban cards (above labels): heat (flame + 0-100), readiness pill, `middle → target`, Mortgage file, `~$value` — hidden until a report is read. `LeadCreditInsightsCard` in the client panel (all clients): SVG heat ring, readiness + Mortgage-file pills, heat reasons, middle → target bar (primary fill, accent projected segment, target tick), 6 metric tiles, Quick wins (accent) + Next action (primary), collapsible "More from the report", score-history sparkline. `PartnerLeaderboardCard` on Reports: range toggle, ranked table with lead bars, unlinked "Requested By" chips, backfill button. Colors: semantic tokens only via `READINESS_CLASS` / `heatClass` (`leadInsightsUi.ts`) — ready = accent, close = primary, long = muted; heat 70+ destructive, 40+ primary. Pipeline filter **Sort prospects → Hottest first** (`prospect_sort=heat`). Copy under `leadInsights.*` (en + es).
 
 ## Credit reports — staff review UI
 
 - `CreditAnalysisLenderContextCard` (`client/components/credit/`): `card-base` under the analysis status line (staff only). Segmented control Auto / In escrow / Not in escrow (`role="radiogroup"`; "In escrow" uses `bg-warning/15 text-warning`) + three inputs for the lender score model / score / target (Formik + Yup, 300-900). Copy under `creditAnalysis.context.*`.
 - `ReportReviewFlags` (`client/components/admin/`): above the wizard preview. Blocking flags in a `border-warning/40 bg-warning/10` card with `AlertTriangle`; internal notes in a muted card with `NotebookPen`; clean state is a small `text-accent` check line. Copy under `reportWizard.reviewFlags.*`.
-- `ClientStageBadge` (`client/components/admin/`): pipeline stage pill; extended rounds (6-12, stored on `round_5`) show the real round in `accent` with a small "Extended" tag.
+- `ClientStageBadge` (`client/components/admin/`): pipeline stage pill; extended rounds (6-24, stored on `round_5`) show the real round in `accent` with a small "Extended" tag.
 
 ## Mobile responsiveness
 
@@ -190,7 +196,7 @@ Surfaces: New Case schedule, Client panel Payment Schedule, Admin Payments split
 - **Case link:** Optional `case_id` on create/edit via case search picker (case number / client name). Cards deep-link to `/admin/pipeline?client={id}`.
 - **Calendar:** Open tasks with a due date appear alongside rounds and payments (`adminCalendar.legendTasks`). Done tasks are omitted. Default filter **My tasks only** (toggle) to avoid HubSpot team-task clutter. Clicking a day scrolls the day panel into view; clicking a round/task/payment row opens the case (or My Tasks with `?task=` for unlinked tasks). Extended-case `next_dispute_target_date` events use accent chips (`kind: extended`, Special legend) vs primary schedule R1–5 chips.
 - **Pipeline Web leads:** Public Get Started / credit-analysis / get-credit-report leads are tagged `web_lead_review` and shown in a **Web leads** column (not main Prospect). Staff promote with “To Prospect” (removes the label). **Affiliate `ref` attribution skips `web_lead_review`** — those leads land on main Prospect for the affiliate (and staff). Placeholder phones and hard spam are rejected at create; phone/email matches return the existing client (no twins).
-- **Extended rounds:** Cases default to `max_rounds=5`. Staff can raise to 6–12 on Reports. Pipeline stays on **Round 5** while publishing 6+; cards show a **Special · Rn/max** legend. Cases on **Chain** compare mode show a **Chain** badge (Baseline is default and not badged). Optional `next_dispute_target_date`. Final max round → Completed. Raising max after Completed reopens the card to Round 5 (no graduating email). Reset cascades through max_rounds.
+- **Extended rounds:** Cases default to `max_rounds=5`. Staff can raise to 6–24 on Reports. Pipeline stays on **Round 5** while publishing 6+; cards show a **Special · Rn/max** legend. Cases on **Chain** compare mode show a **Chain** badge (Baseline is default and not badged). Optional `next_dispute_target_date`. Final max round → Completed. Raising max after Completed reopens the card to Round 5 (no graduating email). Reset cascades through max_rounds.
 - **Dashboard:** “My open tasks” widget lists up to 8 tasks assigned to the current admin (overdue first).
 - **DnD:** Native HTML5 drag (same pattern as Pipeline) — no extra DnD library.
 - **HubSpot:** Optional extract. On HubSpot developer platform **2026.03**, Tasks API access uses **`crm.objects.contacts.read/write`** (not `crm.objects.tasks.*`). Prefer **`HUBSPOT_SERVICE_KEY`** with those contacts scopes, or Projects OAuth with the same scopes. Permitted admins sync via Sync now (Service Key) or Connect + Sync (OAuth). Until configured, header shows locked “HubSpot sync · Soon”.
@@ -201,6 +207,9 @@ Surfaces: New Case schedule, Client panel Payment Schedule, Admin Payments split
 - **Staff invite links:** On **Affiliates**, managers create shareable signup URLs (`/affiliate/join/:tokenOrSlug`) — evergreen or one-time. **Standard plan only** for now. URL path: random token, auto slug from admin name, or custom slug. Join auto-comps. Public join page uses a brand header (no nav), labeled form, and required Terms + SMS/Privacy consent (`LegalConsent`; API rejects without `agreed_terms` / `agreed_sms`). Rows support enable/disable (separate from Used up / Expired badges), **edit** (label + path; Auto remint warned), and **delete**. Public resolve does **not** expose the opaque token. Rate-limited to 5 joins/hour/IP. Requires `AFFILIATES_ENABLED=1`.
 
 ## Business Funding
+
+- **Underwriter role** (`underwriter`, outside funding partner): admin shell shows only Funding; any other admin route redirects to `/admin/funding` (API allow-list enforces the same → 403 `underwriter_scope`). No "New application" or "Convert" buttons.
+- `FundingUnderwritingPanel` (`client/components/admin/`): inside the funding detail sheet — SSN/EIN masked (mono) with a ghost "Reveal" (logged), one bordered row per document slot with a status pill (`secondary` to review / `accent` approved / `destructive` new one requested), View / Request new (inline reason form) / Upload-Replace, then underwriting notes (`pre` block + textarea). Copy under `adminFunding.uw.*`.
 
 - **Public wizard** `/funding`: Same standalone shell as **Register** — gradient background, sticky header, `card-base` step card, **`PublicWizardFooter`** (trust badges, theme toggle, legal links), semantic tokens for light + dark.
 - **Data:** `funding_applications` + `clients.status=funding` (excluded from CR Prospect). Docs on `client_documents` with funding doc_types; SSN/EIN via `secrets_ciphertext` (AES-GCM). Both funding types require the full 8-slot checklist.
@@ -218,3 +227,61 @@ Surfaces: New Case schedule, Client panel Payment Schedule, Admin Payments split
 - **API:** public `GET/POST /api/public/event-marketing…`; admin CRUD under `/api/admin/event-marketing/…`. Prospects get `event_marketing` + company `label_slug` + `web_lead_review`. Staff notify `event_registration`; Reminder Flows trigger `event_registered` (gate with `ofy` / `allegiance` labels). Welcome SMS From = César OFG line (same as `/get-credit-report`).
 - **i18n:** `eventMarketing.*`, `adminNav.eventMarketing`, `adminProfile.events.event_registration`.
 - **Seed:** OFY Family Fun Nights (Oct) + Mastering Your Money placeholder + Allegiance Oct 7; staff add further Allegiance dates in CRM.
+
+## Admin Billing (platform invoice)
+
+- Route `/admin/billing` (`client/pages/admin/Billing.tsx`), sidebar entry visible only when `billing.canView` (server `BILLING_ADMIN_IDS`; Alex + Cesar).
+- Layout: payment method card (card visual + Stripe Payment Element, card only — no Link / wallets) → month picker → gradient estimate card (`from-primary/10 via-card to-accent/10`) (total, projection, status) → stat tiles (MCP calls; Claude provider cost owner-only) → daily bar chart (recharts, `--primary` / `--accent`) → usage (Claude owner-only, by staff, top MCP tools with progress bars) → price list editor (owner only) → invoices with status chips → invoice email.
+- Pricing table (`components/billing/BillingPricingTable.tsx`): invoice-style table on desktop (item · unit · qty · rate · amount), stacked cards on mobile, "Total so far" + primary-tinted projection box.
+- Platform sheet (`components/billing/PlatformDetails.tsx`): KPI grid (gap-px border grid), collapsible sections (activity, architecture, modules, integrations) with grid-rows height animation; integration chips: included = accent, OFG account = muted. Never name providers in this section.
+- OFG Operating Suite card (`components/billing/OperatingSuiteCard.tsx`): gradient header (`from-primary via-primary/90 to-accent`) with plan name and tagline; service grid (gap-px border grid, 1/2/3 columns) — icon tile, amount, summary, ✓ sub-items each with its rate-card price (`SUITE_SUBITEM_WEIGHTS` + `splitWeighted`: exact at current prices, rescaled to the cent if a service total changes; page only — the invoice keeps the 6 service lines). Suite lines are `billing_prices.service = 'suite'` (action prefix `suite_`); the pricing table groups them under "OFG Operating Suite — monthly subscription" with a subtotal, then "Usage".
+- Twilio is OFG's own account and is never shown on Billing.
+- Status chips: paid = accent, failed/uncollectible = destructive, void = muted, others = primary.
+
+## Admin Dashboard (command center)
+
+- `client/pages/admin/Dashboard.tsx`. Hero: `bg-gradient-to-br from-primary via-primary/95 to-primary/80` + accent radial glow; date (accent, uppercase), greeting, summary; Everyone / Mine segmented control (active = `bg-accent`), refresh button (spins while loading); quick-action tiles (`bg-primary-foreground/10`, accent icons, 2 columns on mobile, auto-fill ≥ 9.5rem on desktop).
+- Layout: two columns on `lg` (`minmax(0,1.35fr) / minmax(0,1fr)`) — left: Needs you, Pulse, Trends; right: Today, Money (super admins), Recent activity. On mobile one column in priority order (Needs you → Today → Pulse → Money → Trends → Activity) via `contents` wrappers + `order-*`.
+- Needs you rows: tone chips (alert = destructive, warn = warning, info = primary), count pill, arrow. Pulse KPIs with `Sparkline` (`components/admin/dashboard/Sparkline.tsx`); funnel uses `HBars` (`components/admin/dashboard/HBars.tsx`). Activity is a timeline (left rule + round icon badges).
+- Manual refresh only (no polling).
+
+
+## Admin shell — phone layout (Groundwork-style)
+
+- `client/components/layouts/AdminLayout.tsx`, below `md` only (tablet/desktop sidebar unchanged).
+- Top bar (`#0b0f1a`, safe-area top): white wordmark + "Admin" kicker, notification bell, theme toggle.
+- Bottom tab bar (`fixed bottom-0`, 5 columns, `bg-[#0b0f1a]/95 backdrop-blur`, safe-area bottom): up to 4 sections the role can open (preferred: Dashboard, Pipeline, Conversations, My tasks — locked/hidden ones are skipped) + **More**. Active tab = white with a primary top indicator; badges: conversations (accent), my tasks (primary).
+- **More** opens the full menu as a bottom sheet (85dvh, rounded top, grip + "Menu" + close) over a blurred overlay; closes on overlay tap, Esc, or route change; body scroll locked while open.
+- Page content gets `pb-[calc(5.5rem+env(safe-area-inset-bottom))]` on phones; floating call panels sit above the tab bar on phones.
+
+## Case panel — report delivery timeline
+
+- `client/components/admin/RoundDeliveryTimeline.tsx`, rendered under each round's PDFs in the case panel Reports tab.
+- Collapsed: status strip of chips — Sent to N (primary), N SMS delivered (accent), N failed (destructive), Opened N× (accent) / Not opened yet (muted) — plus "Last sent" on ≥ sm; chevron rotates on expand.
+- Expanded (grid-rows height animation): vertical timeline (left rule, round icon badges toned ok/info/bad): Report generated (by) · Email/SMS → Client or partner name · role (address, by, live status label, Resend tag, error) · Client opened the report N×.
+
+## Progress Report engine v1 (wizard + PDF)
+
+- Wizard review step: `ProgressReadsCard` (`client/components/admin/ProgressReadsCard.tsx`) above Preview — per-pull read status (spinner / ✓ accent / ⚠ destructive), "reused from the prior round", report dates; destructive-tinted "Blocked: data integrity" card for identical pulls. Preview and Publish stay disabled until both reads are ready (polls every 10 s).
+- Round 1 starting point (Nov 2, 2026): a `border-border bg-muted/30` checkbox row (`starting-point-option`) in the upload step, Round 1 only; when ticked the Before upload is hidden.
+- Score update (Oct 28, 2026): when a read is flagged incomplete (SmartCredit saved before the accounts loaded), the destructive incomplete card adds a primary "Send a Score update instead" button (`score-update-enable`) next to Start over; the upload step shows the same offer as a `primary/5` card (`score-update-offer`, `Gauge` icon). In Score update mode the reads card becomes a `border-primary/30 bg-primary/5` card (`progress-reads-score-update`) explaining scores + verified inquiries only, with an outline "Switch to full report" button. The approval queue marks these rows with a small `bg-primary/10 text-primary` pill. Step 1 shows an info note when the earlier round's PDF can't be reused (`before-reuse-blocked`).
+- PDF page 1: score table → "Since you started" line (bold navy) → "What Moved Your Score" bullets (gold dots) → wins → targets table with a Round column (R1–R4). Page 2 ends with "Verified by the Bureau (Informational)" when present. Footer: phone · site · office address. No statute citations in client copy.
+- Case panel: hygiene alerts as warning chips under the header (`case-hygiene-alerts`).
+
+
+## Productivity scorecard (GF-8)
+
+- Page `/admin/productivity` (nav "Scorecard"): scored staff (`admins.productivity_profile`) see their own card; managers (BILLING_ADMIN_IDS) get a team strip and days-off panel.
+- Hero reuses the dashboard gradient; `GradeRing` (animated SVG ring, letter grade) — tones from `gradeTone()` in `client/lib/productivity.ts`: A `accent`, B `primary`, C muted, D/F `destructive`.
+- Levels: Bronze = muted, Silver = `primary`, Gold = `accent` (`LEVEL_META`). Locked metric cards are dashed + slightly blurred with a lock chip ("Unlocks at Silver").
+- `MetricCard`: score bar (`scoreTone`), progress line, "nothing pending / Slack not connected" (not graded) states, expandable evidence list.
+- Playful bits: CSS `Confetti` burst on an A, flickering streak flame (`animate-scorecard-flicker`), badge gallery with gradient tiles; all disabled under `prefers-reduced-motion`.
+- Dashboard tile: `ScorecardWidget` (own ring or team grade chips).
+
+## Progress report approval gate (Engine Spec v1.1)
+
+- Publish never sends. `ReportApprovalCard` (`client/components/admin/report-approval/`) shows the state: pending = `primary` tint + clock ("Waiting for approval — not sent yet"); self-check failed = `destructive` tint + shield-alert; sent / released = one `accent` line with who approved.
+- `SelfCheckList`: failed checks first (red X, check name + detail), passed checks collapsed behind "N of M checks passed"; n/a rows muted.
+- Approve & send = primary button; the release-manager override is a destructive button behind a required reason textarea (Formik + Yup, ≥ 10 chars).
+- Used in the wizard's last step, the case panel round card (above the delivery timeline) and the dashboard `ReportApprovalQueue` (hidden when empty, anchor `#report-approvals`, inbox item "reports_approval").
+- Wizard preview shows the same self-check above the PDF (accent when it passes, destructive when publishing would hold the report).

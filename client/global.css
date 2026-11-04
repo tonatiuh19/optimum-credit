@@ -283,3 +283,38 @@
     background-position: -100% 0;
   }
 }
+
+/* GF-8 scorecard: confetti burst on an A, flame flicker on streaks */
+@keyframes scorecard-confetti {
+  0% {
+    transform: translate(0, 0) rotate(0deg);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(var(--dx), var(--dy)) rotate(540deg);
+    opacity: 0;
+  }
+}
+
+@keyframes scorecard-flicker {
+  0%,
+  100% {
+    transform: scale(1) rotate(0deg);
+  }
+  50% {
+    transform: scale(1.12) rotate(-4deg);
+  }
+}
+
+@layer utilities {
+  .animate-scorecard-flicker {
+    animation: scorecard-flicker 1.6s ease-in-out infinite;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-scorecard-flicker,
+  .scorecard-confetti > span {
+    animation: none !important;
+  }
+}

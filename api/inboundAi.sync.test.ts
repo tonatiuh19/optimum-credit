@@ -69,6 +69,14 @@ describe("inboundAi ↔ api/index.ts sync", () => {
     expect(indexSrc).toMatch(/CANCELAR\|BAJA/);
   });
 
+  it("keeps the one-hold-per-streak + staff-active gates inlined", () => {
+    expect(indexSrc).toContain("function inboundAiHoldAlreadySent");
+    expect(indexSrc).toContain("function inboundAiStaffRecentlyActive");
+    expect(indexSrc).toContain("INBOUND_AI_STAFF_ACTIVE_MINUTES");
+    expect(indexSrc).toMatch(/const INBOUND_AI_STAFF_ACTIVE_MINUTES_DEFAULT\s*=\s*120\b/);
+    expect(indexSrc).toContain("inbound_ai_hold: true");
+  });
+
   it("keeps INBOUND_AI_ADMIN_IDS allowlist gate inlined", () => {
     expect(indexSrc).toContain("INBOUND_AI_ADMIN_IDS");
     expect(indexSrc).toContain("parseInboundAiAdminAllowlist");

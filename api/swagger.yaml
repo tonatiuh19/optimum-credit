@@ -235,6 +235,8 @@ paths:
           description: Created or reactivated
         "400":
           description: Invalid email
+        "409":
+          description: Email belongs to an active staff member (code notify_email_is_staff)
 
   /admin/notify-extra-emails/{id}:
     patch:
@@ -388,22 +390,21 @@ paths:
       tags: [Credit Analysis]
       summary: Generate a free credit-analysis (public, no auth)
       description: |
-        Multipart upload of a credit report (PDF preferred). Runs the Optimum
-        credit-analysis algorithm (FICO bands, goal-based lending conversion,
-        prioritized negatives, utilization, 30/60/90 timeline, dispute rounds,
-        file strength, 6-step action plan, client SMS copy) using SmartCredit
-        heuristic extractors + branded HTML (navy/gold). Creates or reuses a
+        Multipart upload of a credit report (PDF or image). Queues the new
+        engine's account-by-account read (direct ~1 min, batch fallback) —
+        the single Credit Analysis engine for screen, PDF, email and AI. Creates or reuses a
         `clients` row:
         - New email → inserted as `status=prospect`, `pipeline_stage=prospect`.
         - Existing prospect → stays a prospect, analysis attached.
         - Existing non-prospect client → analysis attached, status untouched.
         Attaches a source label (`web_analysis` or `agent_submission` per
-        `mode`) plus inferred analysis labels (e.g. `collections`, `auto`).
-        Optionally emails the analysis when `email_opt_in=true`. The response
-        includes `extraction_status` — when it is not `ok` (report wasn't a
-        parseable text-based PDF), the returned `analysis_html`/`analysis_text`
-        honestly say we couldn't reliably read the report instead of implying
-        no negative items were found.
+        `mode`); item labels (e.g. `collections`, `auto`) attach from the
+        new-engine read when it is ready.
+        Optionally emails the new-engine PDF when `email_opt_in=true` (once the
+        read is ready; never while in escrow). New engine only: PDF or image
+        (JPG, PNG, WebP) required — other types return 400; 503 when the
+        reader is unavailable. The response returns `enhanced_pending=true`
+        and a `public_token`; there is no text-only analysis.
 
         **Affiliate attribution (first-touch, 30 days):** accepts
         `affiliate_code` / `affiliateCode` / `ref` / `slug` (any one) as a
@@ -468,10 +469,13 @@ paths:
       description: >-
         Accepts a PDF or an image (JPG, PNG, WebP, GIF) from any provider
         (SmartCredit, IdentityIQ, MyFreeScoreNow, bureau reports, scans/photos).
-        Stores it encrypted and queues a Claude extraction (ANTHROPIC_MODEL)
-        that runs from the queue cron via the Message Batches API (usually
-        1–3 minutes). Recognized text PDFs also get a text cross-check.
-        Returns 202; poll GET /admin/credit-files/{id}. Staff only.
+        Stores it encrypted and queues a Claude extraction (ANTHROPIC_MODEL),
+        read right away in its own invocation (large per-bureau reports are split
+        into page ranges read in parallel and verified against the report's own
+        totals); the queue cron's Message Batches path is the fallback. An identical
+        file already read by the current reader (same purpose group) is reused
+        instantly (status ready, reused true). Recognized text PDFs also get a text
+        cross-check. Returns 202; poll GET /admin/credit-files/{id}. Staff only.
       security:
         - BearerAuth: []
       requestBody:
@@ -489,7 +493,7 @@ paths:
                 client_id: { type: integer }
                 case_id: { type: integer }
       responses:
-        "202": { description: Queued (id, status, provider, image_pages, total_pages) }
+        "202": { description: "Accepted (id, status queued | ready, reused, provider, image_pages, total_pages). ready + reused = an identical file's read was reused." }
         "400": { description: Missing file / unsupported type }
         "404": { description: Client not found }
         "413": { description: File over the platform upload limit }
@@ -576,7 +580,252 @@ paths:
           description: >-
             { status: queued | submitted | ready | failed | null, context:
             { escrow: boolean | null, lender_score_model, lender_score,
-            lender_target_score } }
+            lender_target_score }, review: null | { status: pending |
+            running | passed | needs_review | approved, findings: {
+            selfCheck: { ok, items[] }, audit: [{ check, severity:
+            blocking|note, detail }], reconciledAdded, error }, reviewedAt } }.
+            review is set once the read is ready (Spec v2.1 §11 review gate).
+  /admin/credit-analyses/{id}/review:
+    post:
+      tags: [Admin, Credit Analysis]
+      summary: Approve a flagged Credit Analysis (release to the client) or re-run the checks
+      description: >-
+        Review gate. After a read, the self-check (report's own Account
+        Summary totals) + Claude "find missing accounts" + a double Claude
+        audit run; passed → released (scores, labels, client email, public
+        result). Otherwise needs_review until an admin approves. Admin /
+        super_admin only. rerun resets the checks to pending.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: { type: string, enum: [approve, rerun] }
+      responses:
+        "200": { description: "{ review_status: approved | pending }" }
+        "400": { description: Invalid action }
+        "403": { description: Not an admin / super_admin }
+        "409": { description: The report has not been read yet }
+  /internal/credit-file-review/{id}:
+    post:
+      tags: [Internal]
+      summary: Run the review gate for one read in a fresh 300 s invocation
+      description: Kicked right after a Credit Analysis read is ready; the 5-min cron is the fallback. x-cron-secret required.
+      security: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+        - in: header
+          name: x-cron-secret
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: "{ status: passed | needs_review | pending | skipped, reconciledAdded, findings }" }
+        "401": { description: Missing / wrong secret }
+  /internal/credit-file-read/{id}:
+    post:
+      tags: [Internal]
+      summary: Read one queued credit report in its own invocation (up to 800 s)
+      description: >-
+        Kicked right after an upload (never inside the upload request). Large per-bureau
+        reports are split into 2-4 page ranges read in parallel; a failed read goes to a
+        Message Batch immediately. Idempotent: only a queued job is claimed. The 5-min cron
+        kicks any job left queued. x-cron-secret required.
+      security: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+        - in: header
+          name: x-cron-secret
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: "{ ok: true } read ready; { ok: false } not claimed or handed to a batch" }
+        "401": { description: Missing / wrong secret }
+        "500": { description: Read failed (the job is retried by the cron) }
+  /public/credit-analyses/{token}/status:
+    get:
+      tags: [Public, Credit Analysis]
+      summary: New-engine read status for a public / portal analysis (by token)
+      description: >-
+        token = public_token returned by POST /public/credit-analysis,
+        /portal/credit-analysis (and staff uploads). 32 hex chars; never the
+        numeric id. queued | submitted = still reading or being
+        double-checked (direct read up to ~4 min, then the automatic review);
+        review = held for staff review (show "we're reviewing it").
+      parameters:
+        - in: path
+          name: token
+          required: true
+          schema: { type: string, pattern: "^[a-f0-9]{32}$" }
+      responses:
+        "200": { description: "{ status: queued | submitted | ready | failed | review | null }" }
+        "404": { description: Unknown token }
+  /public/credit-analyses/{token}/analysis:
+    get:
+      tags: [Public, Credit Analysis]
+      summary: New-engine (account-by-account) analysis by token
+      description: Same data as the PDF; agent-only lender score omitted. 404 until the read is ready AND released by the review gate (passed / approved).
+      parameters:
+        - in: path
+          name: token
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: "{ analysis }" }
+        "404": { description: Not ready / unknown token }
+  /public/credit-analyses/{token}/pdf:
+    get:
+      tags: [Public, Credit Analysis]
+      summary: New-engine Credit Analysis PDF by token
+      parameters:
+        - in: path
+          name: token
+          required: true
+          schema: { type: string }
+        - in: query
+          name: lang
+          schema: { type: string, enum: [en, es] }
+      responses:
+        "200": { description: PDF, content: { application/pdf: {} } }
+        "404": { description: Not ready / unknown token }
+  /admin/funding/{id}/documents/{docId}/file:
+    get:
+      tags: [Admin, Funding]
+      summary: View / download a funding document (decrypted, logged)
+      description: >-
+        Roles super_admin, admin, underwriter. ?download=1 for attachment. Logged in funding_access_logs (view_doc).
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+        - in: path
+          name: docId
+          required: true
+          schema: { type: integer }
+      responses:
+        "200": { description: OK }
+        "403": { description: Not super_admin / admin / underwriter }
+  /admin/funding/{id}/documents:
+    post:
+      tags: [Admin, Funding]
+      summary: Upload a funding document on the client's behalf
+      description: >-
+        multipart: doc_type (funding slot) + file. Encrypted, stored as .enc. Logged (upload_doc). 409 if the client has not started the application uploads yet.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200": { description: OK }
+        "403": { description: Not super_admin / admin / underwriter }
+  /admin/funding/{id}/documents/{docId}/request:
+    post:
+      tags: [Admin, Funding]
+      summary: Request a new document (reject + notify client)
+      description: >-
+        Body { reason }. Marks the document rejected, moves the application to awaiting_docs and emails/texts the client their upload link. Logged (request_doc).
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+        - in: path
+          name: docId
+          required: true
+          schema: { type: integer }
+      responses:
+        "200": { description: OK }
+        "403": { description: Not super_admin / admin / underwriter }
+  /admin/funding/{id}/sensitive:
+    get:
+      tags: [Admin, Funding]
+      summary: Masked SSN / EIN
+      description: >-
+        { ssn_masked: ***-**-1234, ein_masked: **-***1234 }
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200": { description: OK }
+        "403": { description: Not super_admin / admin / underwriter }
+  /admin/funding/{id}/sensitive/reveal:
+    post:
+      tags: [Admin, Funding]
+      summary: Reveal full SSN or EIN (logged)
+      description: >-
+        Body { field: ssn | ein }. Logged (reveal_ssn / reveal_ein).
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200": { description: OK }
+        "403": { description: Not super_admin / admin / underwriter }
+  /admin/funding/{id}/notes:
+    post:
+      tags: [Admin, Funding]
+      summary: Append an underwriting note
+      description: >-
+        Body { text }. Appended with author + time ((underwriter) tag). Staff/underwriter detail only — never in public/portal payloads.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200": { description: OK }
+        "403": { description: Not super_admin / admin / underwriter }
+  /admin/credit-analyses/{id}/enhanced-analysis:
+    get:
+      tags: [Admin, Credit Analysis]
+      summary: New-engine analysis (JSON) for the on-screen panel
+      description: >-
+        Same data as the enhanced PDF (per-bureau scores + printed ratings,
+        negatives by round, inquiry clusters, escrow, lender score,
+        projections, file strength, program tier). 404 until the
+        account-level read is ready.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200": { description: "{ analysis }" }
+        "404": { description: Enhanced read not ready }
   /admin/credit-analyses/{id}/context:
     patch:
       tags: [Admin, Credit Analysis]
@@ -608,6 +857,24 @@ paths:
         "200": { description: "{ context }" }
         "400": { description: Invalid value / nothing to update }
         "404": { description: Not found }
+  /admin/report-wizard/sessions/{id}/notify-default:
+    get:
+      tags: [Admin, Report Wizard]
+      summary: Suggested "Notify client" for publishing this round (GF-84)
+      description: >-
+        A round is "old" (publish silently — no client/partner email or SMS)
+        when a newer round is already published, a newer round is being
+        prepared for the case, or the After report is 45+ days old. Publish
+        (finalize) accepts notify_client true/false to override.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200": { description: "{ notify_client: boolean, reasons: string[] }" }
   /admin/credit-analyses/{id}/enhanced-pdf:
     get:
       tags: [Admin, Credit Analysis]
@@ -752,6 +1019,71 @@ paths:
         "400": { description: Invalid body / missing reason }
         "404": { description: Client not found }
         "422": { description: Already in that hold / cancelled, or not on hold when resuming }
+  /admin/clients/{id}/credit-insights:
+    get:
+      tags: [Admin]
+      summary: Lead credit insights (latest read + history)
+      description: |
+        One snapshot per credit report read (analysis or progress): middle score vs
+        target, points needed, projected middle after Round 4 and the round that
+        reaches the target, readiness (ready / close / long), negatives by type,
+        derogatory balance, utilization (+ lender figure, no open card in good
+        standing), inquiries (120 days / 12 months / same-day max), new account in
+        90 days, lender-report source (vendor, report ID, Requested By), active
+        mortgage file, File Strength, program + estimated value, heat score 0-100
+        with reasons, quick wins, next action, score factors, thin file, student /
+        medical amounts, address history and lender simulation. A new read is
+        compared with the previous one and the assigned staffer gets a bell for
+        stage changes (score crossed a cutoff, target reached, items removed,
+        new collection / charge-off, utilization under 30%).
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: "{ latest: LeadCreditInsightsRow | null, history: LeadCreditInsightsRow[] } (newest first, max 24)"
+        "404":
+          description: Client not found / out of scope
+  /admin/referral-partners/leaderboard:
+    get:
+      tags: [Admin]
+      summary: Referral partner leaderboard
+      description: |
+        Per partner (leads created in the window): leads, hot, converted (succeeded
+        payment), conversion %, average middle score, open pipeline value (estimated
+        program value of unconverted leads), last lead. Also lists lender-report
+        "Requested By" names on leads with no partner linked yet.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: days
+          schema: { type: integer, minimum: 7, maximum: 365, default: 90 }
+      responses:
+        "200":
+          description: "{ days, partners: ReferralPartnerLeaderboardRow[], unlinked_requesters: [{ name, leads, last_at }] }"
+  /admin/credit-insights/backfill:
+    post:
+      tags: [Admin]
+      summary: Build lead credit insights for existing reads (super admin)
+      security:
+        - BearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                limit: { type: integer, minimum: 1, maximum: 500, default: 200 }
+      responses:
+        "200":
+          description: "{ scanned, built, failed }"
+        "403":
+          description: Not a super admin
   /admin/clients/{id}/credit-analysis:
     get:
       tags: [Admin, Credit Analysis]
@@ -927,6 +1259,10 @@ paths:
         (email / in-app / SMS per admin prefs; SMS From = each admin’s assigned
         OFG staff number). Unassigned (`assigned_admin_id` null). Prospect SMS
         From = César OFG (`+19496740714`) or `GET_CREDIT_REPORT_SMS_FROM_E164`.
+        When system setting `get_credit_report_free_report_enabled` = `0`
+        (Settings → admin switch) the free report is off: the email/SMS are a
+        registration confirmation with no link, `free_report` is false and
+        `mfsn_url` / `short_url` are null. `/go/free-score` keeps working.
       requestBody:
         required: true
         content:
@@ -952,8 +1288,9 @@ paths:
                 properties:
                   ok: { type: boolean }
                   client_id: { type: integer }
-                  mfsn_url: { type: string }
-                  short_url: { type: string }
+                  free_report: { type: boolean }
+                  mfsn_url: { type: string, nullable: true }
+                  short_url: { type: string, nullable: true }
                   event_kind:
                     type: string
                     nullable: true
@@ -967,6 +1304,187 @@ paths:
           description: Missing/invalid fields
         "429":
           description: Rate limited
+
+  /admin/productivity/access:
+    get:
+      tags: [Productivity]
+      security: [{ bearerAuth: [] }]
+      summary: "GF-8 scorecard access: { can_view, is_manager (BILLING_ADMIN_IDS), scored (admins.productivity_profile set) }"
+      responses:
+        "200":
+          description: Access flags
+  /admin/productivity/me:
+    get:
+      tags: [Productivity]
+      security: [{ bearerAuth: [] }]
+      summary: "Live scorecard for a Pacific day (own; managers may pass admin_id): today metrics, level, streak, week average, badges"
+      parameters:
+        - { name: admin_id, in: query, required: false, schema: { type: integer } }
+        - { name: date, in: query, required: false, schema: { type: string, format: date } }
+      responses:
+        "200":
+          description: Scorecard
+        "403":
+          description: Not your scorecard
+        "404":
+          description: User is not scored
+  /admin/productivity/team:
+    get:
+      tags: [Productivity]
+      security: [{ bearerAuth: [] }]
+      summary: Today's scorecard for every scored staff member (managers only)
+      responses:
+        "200":
+          description: "{ date, members[] }"
+        "403":
+          description: Managers only
+  /admin/productivity/days-off:
+    get:
+      tags: [Productivity]
+      security: [{ bearerAuth: [] }]
+      summary: Days off from the last 30 days on (own; managers see all)
+      responses:
+        "200":
+          description: "{ days_off[] }"
+    post:
+      tags: [Productivity]
+      security: [{ bearerAuth: [] }]
+      summary: "Mark a day off (managers): { admin_id, day: YYYY-MM-DD, reason? } — the day is not graded"
+      responses:
+        "201":
+          description: Saved
+  /admin/productivity/days-off/{id}:
+    delete:
+      tags: [Productivity]
+      security: [{ bearerAuth: [] }]
+      summary: Remove a day off (managers)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: Removed
+  /admin/billing/access:
+    get:
+      tags: [Billing]
+      summary: "Billing access: { can_view_billing (BILLING_ADMIN_IDS: Alex 30001 + Cesar 90001), is_owner (BILLING_OWNER_IDS: Alex) }"
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: "{ can_view_billing: boolean }"
+  /admin/billing/summary:
+    get:
+      tags: [Billing]
+      summary: Month invoice estimate + usage (billing admins only)
+      description: |
+        Lines = base fee prorated from `billing_start_at` (first production run
+        after deploy) + billable actions (MCP tool calls) from
+        `billing_usage_events`. MCP calls are synced from `admin_ai_audit_logs`
+        (cursor `billing_mcp_audit_cursor`) on every summary + cron tick.
+        `projection` = month-end estimate from the daily pace (current month).
+        `plan` = billable prices (shown before billing starts). Usage: by staff, top MCP tools, daily. Claude provider cost
+        (`usage.ai`, `ai_cost_usd`) is returned to the platform owner only.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { in: query, name: month, schema: { type: string, example: "2026-10" } }
+      responses:
+        "200": { description: Summary }
+        "403": { description: Not a billing admin }
+  /admin/billing/platform:
+    get:
+      tags: [Billing]
+      summary: Platform technical sheet with live counts (routes, tables, roles, accounts, month activity) — billing admins
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { in: query, name: month, schema: { type: string, example: "2026-10" } }
+      responses:
+        "200": { description: "{ month, live_since, system, accounts, activity }" }
+        "403": { description: Not a billing admin }
+  /admin/billing/prices:
+    get:
+      tags: [Billing]
+      summary: Price list with measured 30-day average cost and suggested price (cost × markup) — platform owner only
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { description: "{ prices: [...] }" }
+  /admin/billing/prices/{action}:
+    put:
+      tags: [Billing]
+      summary: Edit unit price / markup / billable for one action — platform owner only
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { in: path, name: action, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                unit_price_usd: { type: number, minimum: 0 }
+                markup: { type: number, minimum: 0 }
+                billable: { type: boolean }
+      responses:
+        "200": { description: Saved }
+        "400": { description: Invalid value }
+        "404": { description: Unknown action }
+  /admin/billing/settings:
+    put:
+      tags: [Billing]
+      summary: Set the invoice email (synced to the Stripe customer)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { customer_email: { type: string, format: email } } }
+      responses:
+        "200": { description: Saved }
+  /admin/billing/invoices:
+    get:
+      tags: [Billing]
+      summary: Issued platform invoices (one per month)
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { description: "{ invoices: [...] }" }
+  /admin/billing/invoices/{month}/retry:
+    post:
+      tags: [Billing]
+      summary: Issue (or retry) the Stripe invoice for a closed month
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { in: path, name: month, required: true, schema: { type: string, example: "2026-10" } }
+      responses:
+        "200": { description: Issued / already issued / nothing to bill }
+        "502": { description: Stripe error (recorded on the invoice) }
+        "503": { description: Stripe not configured }
+  /admin/billing/portal:
+    post:
+      tags: [Billing]
+      summary: Stripe Customer Portal session URL (payment method, receipts)
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { description: "{ url }" }
+  /webhooks/stripe:
+    post:
+      tags: [Billing]
+      summary: Stripe events (invoice.finalized / paid / payment_failed / voided / marked_uncollectible)
+      description: Verified with `STRIPE_WEBHOOK_SECRET` (Stripe-Signature, 5 min tolerance).
+      responses:
+        "200": { description: Received }
+        "400": { description: Bad signature }
+
+  /public/get-credit-report-config:
+    get:
+      tags: [Credit Analysis]
+      summary: Whether /get-credit-report offers the free report (public)
+      description: Reads system setting `get_credit_report_free_report_enabled` (missing = on). Returns false on error.
+      responses:
+        "200":
+          description: Config
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  free_report_enabled: { type: boolean }
 
   /public/event-marketing:
     get:
@@ -2568,7 +3086,14 @@ paths:
     post:
       tags: [Conversations]
       summary: Persist call to conversation_messages (channel=call)
-      description: Idempotent on provider_message_id (Twilio CallSid).
+      description: |
+        Idempotent on provider_message_id (Twilio CallSid). When `call_sid` is
+        given, Twilio's own outcome (client leg status, duration, error code)
+        overrides the browser's `call_status` / `duration`; the browser values
+        are kept in `metadata_json` (`browser_call_status`, `browser_duration_sec`,
+        `twilio_error_code`) and the error lands in `error_message`.
+        All JSON bodies on /api (except webhooks, /api/voice/*, crons) store
+        `*phone` fields as +1XXXXXXXXXX when they are US numbers.
       security: [{ bearerAuth: [] }]
       responses:
         "200":
@@ -3012,11 +3537,36 @@ paths:
         "401":
           description: Unauthorized
 
+  /admin/clients/{id}/round-report-deliveries:
+    get:
+      tags: [Admin]
+      summary: Progress-report delivery timeline per round (case panel)
+      description: |
+        Per round: `events` newest first — `generated` (PDF uploaded, by),
+        `send` (email/SMS to client or partner with name + role, to, status —
+        SMS is the live carrier status — error, by, `resend` when the same
+        address was already sent in that round), `opened` (download-link opens,
+        `open_count`, link issued `first_at`) — and a `summary` (sends, failed,
+        delivered SMS, unique recipients, opens, last sent / opened).
+        Source: outbound_message_log (kind round_report), conversation_messages,
+        round_report_pdfs, round_report_download_tokens. Not for affiliates.
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: integer } }
+      responses:
+        "200": { description: "{ client_id, rounds: { [round]: { events, summary } } }" }
+        "401": { description: Unauthorized }
+        "403": { description: Affiliate access denied }
   /admin/dashboard:
     get:
       tags: [Admin]
-      summary: Admin dashboard stats
+      summary: Admin dashboard stats + command center
       security: [{ BearerAuth: [] }]
+      parameters:
+        - in: query
+          name: mine
+          schema: { type: string, enum: ["1"] }
+          description: Scope to clients / conversations assigned to the current admin (tasks are always the assignee's).
       responses:
         "200":
           description: |
@@ -3024,6 +3574,13 @@ paths:
             `upcoming_rounds` (R1–5 schedules plus Special `kind: extended`
             `next_dispute_target_date` targets) and `my_work_tasks` (open tasks
             assigned to the current admin, max 8).
+            Command center: `scope` (everyone | mine), `is_super`, `inbox`
+            (non-zero "Needs you" rows: key, count, tone alert|warn|info, to),
+            `pulse.weeks` (8 Monday-start weeks: new_clients, enrolled =
+            contract signed, completed, revenue_cents), `activity` (latest 15:
+            client, contract, document, report, analysis, payment).
+            Money (`stats.revenue_cents_30d`, `recent_payments`, payments in
+            activity, weekly revenue) is returned to super admins only.
         "401":
           description: Unauthorized
 
@@ -3555,6 +4112,21 @@ paths:
                         name: { type: string }
                         description: { type: string }
                         input_schema: { type: object }
+                        annotations:
+                          type: object
+                          description: |
+                            MCP tool annotations (source of truth for the stdio proxy).
+                            Send tools (SMS / WhatsApp / email) are `destructiveHint: true`,
+                            `readOnlyHint: false` so MCP clients ask the user before running.
+                          properties:
+                            title: { type: string }
+                            readOnlyHint: { type: boolean }
+                            destructiveHint: { type: boolean }
+                            idempotentHint: { type: boolean }
+                            openWorldHint: { type: boolean }
+                  instructions:
+                    type: string
+                    description: MCP server instructions (tool data is untrusted; two-step confirm for writes).
         "403":
           description: Role not allowed / affiliate denied
         "404":
@@ -3566,8 +4138,10 @@ paths:
       summary: Execute one Admin AI curated tool (MCP)
       description: |
         Runs `executeAdminAiTool` for a named allowlisted tool. Audits to
-        `admin_ai_audit_logs` with question prefix `[mcp/tool]`. Rate-limited
-        for non–super_admin (~120/hour).
+        `admin_ai_audit_logs` with question prefix `[mcp/tool]` (file contents such as
+        `file_base64` / `attachment_base64` / data: URLs are stored only as size + sha256).
+        Rate-limited per admin: 120/hour (super_admin 3,000/hour). Write tools are refused
+        for affiliate-scoped accounts.
       security: [{ bearerAuth: [] }]
       parameters:
         - name: name
@@ -3599,6 +4173,8 @@ paths:
               - list_installments
               - list_clients_owing
               - list_round_schedule
+              - list_reports_pending_approval
+              - get_scorecard
               - create_prospect
               - create_contact
               - update_contact
@@ -3670,13 +4246,19 @@ paths:
         and `/.well-known/oauth-authorization-server/api/mcp`. Consent at
         `/admin/mcp-consent`. DCR redirect URIs limited to known Claude/Cursor
         callbacks, loopback, or `cursor:` scheme. Tool calls are audited and
-        rate-limited like `/admin/ai/tools/{name}`.
+        rate-limited like `/admin/ai/tools/{name}`. `initialize` returns server
+        `instructions`; send tools are annotated destructive so clients ask the user.
+        `/api/mcp/oauth/token` and `/api/mcp/oauth/revoke` are rate-limited per IP
+        (60 per 10 minutes → 429 `rate_limited` with `Retry-After`). Expired codes and
+        tokens are purged by the daily `/api/cron/admin-morning-digest`.
       security: [{ bearerAuth: [] }]
       responses:
         "200":
           description: JSON-RPC MCP response
         "401":
-          description: Missing/invalid MCP OAuth token
+          description: |
+            Missing/invalid MCP OAuth token. Header
+            `WWW-Authenticate: Bearer resource_metadata="<app>/.well-known/oauth-protected-resource", scope="admin_ai.read"` (RFC 9728).
         "403":
           description: Role not allowed
         "404":
@@ -5242,6 +5824,10 @@ paths:
           name: language
           schema: { type: string, enum: [en, es] }
         - in: query
+          name: prospect_sort
+          schema: { type: string, enum: [heat] }
+          description: "heat = prospects ordered by the lead credit insights heat score (hottest first). Prospect rows carry insight_* fields (heat score, readiness, middle / target / points to target, projected middle, estimated value, active mortgage file, next action, Requested By)."
+        - in: query
           name: billing
           schema:
             type: string
@@ -6386,6 +6972,11 @@ paths:
     get:
       tags: [Admin]
       summary: Get full detail for a single credit repair case
+      description: |
+        `case_info.hygiene_alerts` (Engine Spec v1 PR-P2-3, shown on the case,
+        never in reports): `status_behind_stage`, `proof_of_address_pending`
+        (`days` > 14), `no_round_schedule`. `reports[].items_disputed` is null
+        when no dispute log exists ("not recorded").
       security:
         - BearerAuth: []
       parameters:
@@ -6423,7 +7014,7 @@ paths:
                         type: integer
                         minimum: 5
                         maximum: 12
-                        description: Max OFG progress rounds (5 default; up to 12 for special clients)
+                        description: Max OFG progress rounds (5 default; up to 24 for special clients)
                       next_dispute_target_date:
                         type: string
                         format: date
@@ -6469,7 +7060,7 @@ paths:
       tags: [Admin]
       summary: Update extended OFG rounds settings for a case
       description: |
-        Any staff admin may raise `max_rounds` (5–12) for special clients, set
+        Any staff admin may raise `max_rounds` (5–24) for special clients, set
         an optional `next_dispute_target_date` (calendar), and/or choose
         `report_compare_mode` (`baseline` = vs enrollment Before — default;
         `chain` = vs prior After). Pipeline stage ENUM stays on `round_5` while
@@ -7930,6 +8521,8 @@ paths:
       description: >
         For Round 1 returns enrollment guidance. For Round N>1, returns the published
         Round N−1 after PDF metadata when available so the wizard can reuse it as Before.
+        A PDF that was incomplete in a published Score update is never offered:
+        can_reuse=false with reuse_blocked=incomplete_source (staff upload a complete Before).
       security:
         - BearerAuth: []
       parameters:
@@ -7945,7 +8538,7 @@ paths:
             type: integer
             minimum: 1
             maximum: 12
-          description: Round 1..case.max_rounds (default program 1–5; extended up to 12)
+          description: Round 1..case.max_rounds (default program 1–5; extended up to 24)
       responses:
         "200":
           description: Before-context for the requested round
@@ -8038,6 +8631,19 @@ paths:
                 enhance_with_claude:
                   type: string
                   description: Claude narrative polish during extract (default on; "false" to skip)
+                score_update:
+                  type: string
+                  description: >-
+                    "true" = continue an incomplete SmartCredit print as a Score update
+                    (scores + verified inquiries only, no account results). Accepted only when
+                    the upload check reports incomplete_print; never for same_file.
+                starting_point:
+                  type: string
+                  description: >-
+                    "true" = Round 1 only, the client has no earlier report: upload one PDF as
+                    after_pdf (no Before source). Scores and items to dispute, nothing compared.
+                    Refused codes: starting_point_round_1_only, starting_point_one_file,
+                    starting_point_score_update.
       responses:
         "201":
           description: Session created and extraction complete
@@ -8048,7 +8654,14 @@ paths:
         "413":
           description: Upload exceeds platform body limit
         "422":
-          description: Round validation or reuse constraints failed
+          description: >-
+            Round validation or reuse constraints failed; or an instant upload check:
+            code same_file (Before and After are the same file) or code incomplete_print
+            (a SmartCredit PDF saved before its accounts loaded; side = before | after).
+            Both carry score_update_available (true only for incomplete_print — re-send with
+            score_update=true). code score_update_not_needed = score_update requested but both
+            PDFs are complete. code reuse_incomplete_source = the reused prior PDF was
+            incomplete (published as a Score update) — upload a complete Before.
 
   /admin/cases/{caseId}/report-wizard/stage-pdf:
     post:
@@ -8193,11 +8806,45 @@ paths:
         "502":
           description: Claude enhance failed
 
+  /admin/report-wizard/sessions/{id}/score-update:
+    post:
+      tags: [Report Wizard]
+      summary: Switch a draft between the full progress report and a Score update
+      description: |
+        Score update (Oct 28, 2026): when a SmartCredit PDF was saved before its account
+        pages loaded, the report can be sent as a one-page Score update — staff-verified
+        scores, the hard-inquiry totals each report prints, and removed inquiries only when
+        both reads match those printed totals on every bureau. No account results. Same
+        approval gate as every report; counts as the round. `enabled: true` only while a
+        read is flagged incomplete_print; `enabled: false` is always allowed. Audited
+        (`report_wizard.score_update`).
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: integer } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: { type: boolean }
+      responses:
+        "200":
+          description: "{ session, score_update }"
+        "404":
+          description: Session not found
+        "409":
+          description: Already published (code session_published)
+        "422":
+          description: No read is flagged incomplete (code score_update_not_needed)
   /admin/report-wizard/sessions/{id}/preview:
     post:
       tags: [Admin]
       summary: Generate a non-persisted PDF preview from reviewed data
       description: >-
+        Score update sessions return the one-page Score update PDF with header
+        X-Report-Kind=score_update (gate codes: reads_pending 409, reads_failed,
+        score_update_not_needed, blocked_data_integrity 422).
         Same 3-page progress PDF as before. Enhancement: when the background
         account-level reads of this session's Before and After PDFs are both
         ready (queued at session create), account-detail pages are appended
@@ -8227,8 +8874,17 @@ paths:
               schema:
                 type: string
                 format: binary
+        "409":
+          description: |
+            Engine Spec v1 PR-P0-1 — `code: reads_pending`: the account-level
+            Before / After reads are not both ready (`reads` has per-pull status).
+            No text-summary fallback.
         "422":
-          description: Compliance validation failed
+          description: |
+            Compliance validation failed, or `code: reads_failed` (a read failed
+            twice — needs review) / `code: blocked_data_integrity` (identical
+            pulls: same report date, same file hash, or identical scores +
+            balances — PR-P0-5).
 
   /admin/report-wizard/sessions/{id}/review:
     patch:
@@ -8256,10 +8912,71 @@ paths:
         "200":
           description: Review saved
 
+  /admin/round-reports/pending-approval:
+    get:
+      tags: [Report Wizard]
+      security: [{ bearerAuth: [] }]
+      summary: "Spec v1.1 P0-1: progress reports published but not sent (pending_approval | needs_review), with failed self-checks and whether the caller can approve / override"
+      responses:
+        "200":
+          description: "{ items[] } — each item has report_kind: progress_report | score_update"
+  /admin/round-reports/{id}/approval:
+    get:
+      tags: [Report Wizard]
+      security: [{ bearerAuth: [] }]
+      summary: "Approval status of one round report: delivery_status, §9 self-check rows, publish options, approver"
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: Approval status
+        "404":
+          description: Not found
+  /admin/round-reports/{id}/approve:
+    post:
+      tags: [Report Wizard]
+      security: [{ bearerAuth: [] }]
+      summary: "Approve & send (language owner EN/ES or REPORT_RELEASE_MANAGER_IDS). needs_review needs a release manager + override_reason (≥ 10 chars, audited). Sends the client flow + partner PDF, or releases to the portal silently for old rounds. A sent round that makes two in a row with no items removed and no score gain alerts ROUND_NO_CHANGE_ALERT_ADMIN_IDS by SMS + in-app."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                override_reason: { type: string }
+      responses:
+        "200":
+          description: "{ ok, delivery_status: sent | silent, client_notify, partners_emailed }"
+        "403":
+          description: Not an approver for this report language
+        "409":
+          description: Already approved / being approved
+        "422":
+          description: Self-check failed (code self_check_failed) — fix and republish, or release-manager override
+  /admin/report-wizard/sessions/{id}/reads:
+    get:
+      tags: [Report Wizard]
+      summary: Account-level read status for the Progress Report engine (also re-queues missing reads)
+      description: |
+        `ready` = both reads ready and no data-integrity block. Before reused
+        from the prior round (`before_source: prior_round`) = that round's After
+        read. A missing read is queued from the stored source PDF; a failed read
+        is retried once, then reported as failed (needs review).
+        Spec v1.1: a SmartCredit PDF saved before the accounts loaded fails with
+        code incomplete_print (empty account pages, or fewer accounts than the
+        pull's own summary lists, e.g. "TU 11 of 32").
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: "{ ready, reads: { before, after: { status: missing|queued|reading|ready|failed, error, reused, code? } }, blocked_data_integrity, report_dates, score_update, score_update_available, incomplete_sides } — in a Score update session ready = both reads settled and one is incomplete. Also starting_point, scores_from_reads, read_scores { before, after }: once both reads settle the review scores are filled from the reads (any report format); a later typed score that differs from the PDF fails the scores self-check (needs_review, release-manager override)"
   /admin/report-wizard/sessions/{id}/finalize:
     post:
       tags: [Admin]
-      summary: Publish OFG report (generate PDF, advance pipeline, notify client)
+      summary: "Publish OFG report (generate PDF, advance pipeline; Score update sessions publish the one-page Score update with engine_json.engine=score_update and no account results). Spec v1.1 P0-1: never sends — the report waits for POST /admin/round-reports/{id}/approve (delivery_status pending_approval, or needs_review when the §9 self-check fails) and stays hidden from the client until then."
       description: |
         Round 6+ (ROUND_AUDIT_MIN_ROUND): also sends an SMS + in-app audit
         alert to ROUND_AUDIT_ALERT_ADMIN_IDS (default Lecca), once per case + round.
@@ -8302,6 +9019,11 @@ paths:
                   type: boolean
                 acknowledge_score_anomalies:
                   type: boolean
+                notify_client:
+                  type: boolean
+                  description: >-
+                    GF-84 override. Omit to use the default (old / backfilled rounds
+                    publish silently; see notify-default). false also skips partners.
                 notify_partners:
                   type: boolean
                   description: >
@@ -9462,7 +10184,7 @@ components:
           type: integer
           minimum: 5
           maximum: 12
-          description: Max OFG progress rounds (5 default; up to 12 for special clients)
+          description: Max OFG progress rounds (5 default; up to 24 for special clients)
         next_dispute_target_date:
           type: string
           format: date
@@ -9820,46 +10542,25 @@ components:
         suggested_labels:
           type: array
           items: { type: string }
-        analysis_html: { type: string }
-        analysis_text: { type: string, nullable: true }
         email_sent: { type: boolean }
         generated_at: { type: string, format: date-time }
         text_language:
           type: string
           enum: [en, es]
-          description: Language used for narrative, action plan, and PDF HTML
-        claude_enhanced:
-          type: boolean
-          description: |
-            True when Anthropic Claude successfully enriched Round 1–4 narrative,
-            dispute basis copy, and SMS on top of the rules-engine extraction.
-            Scores, utilization numbers, and account identities stay locked to extraction.
+          description: Report language (screen, PDF, email)
         email_skipped_no_address:
           type: boolean
           description: email_opt_in was true but no valid email on file
-        extraction_status:
+        enhanced_pending:
+          type: boolean
+          description: |
+            True while the new-engine (account-by-account) read is running. The
+            result screen polls status and then renders the analysis; scores,
+            negatives (with dispute_round) and suggested_labels are written from
+            that read when it is ready (empty until then).
+        public_token:
           type: string
-          enum: [ok, empty, parse_failed, unsupported_type]
-          description: |
-            How well we were able to read text out of the uploaded report.
-            Anything other than `ok` means scores/negatives may be incomplete
-            or absent — `analysis_html`/`analysis_text` will say so honestly
-            instead of implying no negative items were found.
-        chars_extracted:
-          type: integer
-          nullable: true
-          description: Trimmed character count of extracted text (0 for unsupported/failed files)
-        analyst:
-          type: object
-          nullable: true
-          additionalProperties: true
-          description: |
-            Flat Optimum analyst JSON (no nested objects/arrays). Includes
-            bureau labels, lending conversion (`fha_status`, `goal_score`,
-            `mortgage_*`), neg_1..5, util_1..3, timeline, dispute rounds,
-            file-strength labels, action_1..6, HTML table fragments, and
-            `client_text_message`. HTML fragments use brand navy `#121829`
-            and gold `#C0A06A`.
+          description: Secure handle for /api/public/credit-analyses/{token}/{status,analysis,pdf}
 
     BulkImportPreviewRow:
       type: object

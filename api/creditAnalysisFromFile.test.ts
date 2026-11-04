@@ -10,26 +10,29 @@ describe("buildCreditAnalysis (Ledesma-style file)", () => {
     expect(a.warnings.join(" ")).toMatch(/EQ returned no score/);
   });
 
-  it("assigns rounds: collections R2, inconsistent charge-off R3, clean charge-off R4", () => {
+  it("assigns rounds by item type (Spec v2.1 §5): collections R2, charge-offs R4 (inconsistent or not)", () => {
     const by = Object.fromEntries(a.negatives.map((n) => [n.creditor, n]));
     expect(by["LEAFY FINANCIAL"].round).toBe(2);
     expect(by["LEAFY FINANCIAL"].legalBasis).toMatch(/FDCPA §809/);
-    expect(by["OPPLOANS/FINWISE"].round).toBe(3);
+    expect(by["OPPLOANS/FINWISE"].round).toBe(4);
     expect(by["OPPLOANS/FINWISE"].inconsistencies.join(" ")).toMatch(/Last activity/);
     expect(by["OPPLOANS/FINWISE"].inconsistencies.join(" ")).toMatch(/Late counts/);
     expect(by["EAGLE COMMUNITY CU"].round).toBe(4);
   });
 
-  it("puts dispute-remark items on HOLD", () => {
+  it("verified / resolved dispute remark → informational, not a new target (Spec v2.1 P1-5)", () => {
     const j = a.negatives.find((n) => n.creditor === "JEFFERSON CAPITAL")!;
     expect(j.hold).toBe(true);
+    expect(j.holdReason).toMatch(/needs new evidence/);
+    expect(a.informational!.some((i) => i.creditor === "JEFFERSON CAPITAL")).toBe(true);
     expect(a.negatives.find((n) => n.creditor === "LEAFY FINANCIAL")!.hold).toBe(false);
   });
 
   it("classifies inquiries: ages off soon / permissible / dispute", () => {
     const by = Object.fromEntries(a.inquiries.map((q) => [q.creditor, q]));
     expect(by["AUTO LENDER"]).toMatchObject({ action: "ages_off", agesOff: "10/15/2026" });
-    expect(by["CAPITAL ONE"].action).toBe("permissible");
+    // Matched to an account opened within ~90 days → excluded (permissible purpose).
+    expect(by["CAPITAL ONE"]).toMatchObject({ action: "permissible", excludedReason: "matches_account" });
     expect(by["UNKNOWN LENDER"].action).toBe("dispute");
   });
 

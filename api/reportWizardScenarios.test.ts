@@ -98,11 +98,20 @@ describe("buildConfidence", () => {
   });
 });
 
-describe("computeFileStrengthScore", () => {
-  it("rewards wins and penalizes targets", () => {
-    const high = computeFileStrengthScore(500, 3, 1);
-    const low = computeFileStrengthScore(500, 0, 8);
-    expect(high).toBeGreaterThan(low);
+describe("computeFileStrengthScore (Engine Spec v1 component model, review-step estimate)", () => {
+  const cards = (pct: number) => [{ limit: 10000, balance: pct * 100 }, { limit: 5000, balance: pct * 50 }, { limit: 2000, balance: pct * 20 }];
+  it("clean file with low utilization scores high (age / mix unknown at review → 92)", () => {
+    // payment 35 + utilization 30 + negatives 20 + age/mix 7 (age unknown, revolving only, 3+ cards).
+    expect(computeFileStrengthScore({ targets: [], utilization: cards(5) })).toBe(92);
+  });
+  it("late payments cost payment history; any derogatory lowers the score", () => {
+    const late = computeFileStrengthScore({ targets: [{ item: "CB/RH - Late payments", detail: "TU 1x30" }], utilization: cards(5) });
+    expect(late).toBe(74); // 35 - 15 lates, - 3 negative item
+  });
+  it("active 120+ delinquency caps payment history; utilization over 75% caps that component", () => {
+    expect(computeFileStrengthScore({ targets: [{ item: "KASHABLE - Late payments", detail: "Over 120 Days Past Due" }], utilization: cards(5) })).toBeLessThanOrEqual(64);
+    expect(computeFileStrengthScore({ targets: [], utilization: cards(85) })).toBe(67); // utilization 5
+    expect(computeFileStrengthScore({ targets: [{ item: "TOYOTA - Charge-off" }], utilization: cards(5) })).toBe(86); // negatives 14
   });
 });
 

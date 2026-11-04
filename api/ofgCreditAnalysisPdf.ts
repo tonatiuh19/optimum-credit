@@ -18,7 +18,9 @@ import {
 import { BUREAUS, type Bureau } from "./creditFile";
 import type { ProgressEnhancement } from "./creditFileProgress";
 import {
+  inGoodStanding,
   parseReportDate,
+  PROJECTION_KEYS_MAX,
   type AnalysisNegative,
   type AnalysisRound,
   type CreditAnalysisData,
@@ -45,8 +47,16 @@ export interface CreditAnalysisPdfOptions {
   clientName: string;
   lang: "en" | "es";
   logoPng?: Uint8Array | null;
-  /** Program prices / links shown in the recommendation box. */
-  program: { standardPrice: string; complexPrice: string; enrollUrl: string; phone: string; site: string };
+  /** Program prices / links (P0-11: program-specific enrollment link + MFSN sign-up). */
+  program: {
+    standardPrice: string;
+    complexPrice: string;
+    standardUrl: string;
+    complexUrl: string;
+    mfsnUrl?: string | null;
+    phone: string;
+    site: string;
+  };
 }
 
 type Labels = ReturnType<typeof analysisLabels>;
@@ -58,100 +68,187 @@ function analysisLabels(lang: "en" | "es") {
     originalCreditor: es ? "acreedor orig." : "orig.",
     title: es ? "Analisis de Credito" : "Credit Analysis Report",
     reportDate: es ? "Fecha del reporte" : "Report date",
-    s1: es ? "1. Puntajes actuales y resumen del archivo" : "1. Current Scores + File Overview",
-    s2: es ? "2. Cuentas negativas - orden de disputa" : "2. Negative Accounts - Dispute Priority",
-    s3: es ? "3. Desglose completo de cuentas" : "3. Complete Account Breakdown",
-    s4: es ? "4. Proyeccion de puntaje y lineas comerciales" : "4. Projected Score Progression + Tradelines",
-    s5: es ? "5. Plan de accion y fortaleza del archivo" : "5. Personalized Action Plan + File Strength",
-    scoreSnapshot: es ? "PUNTAJES" : "SCORE SNAPSHOT",
-    fileOverview: es ? "RESUMEN DEL ARCHIVO" : "FILE OVERVIEW",
+    source: es ? "Fuente" : "Source",
+    s1: es ? "1. Puntajes y resumen del archivo" : "1. Scores + File Overview",
+    s2: es ? "2. Prioridad de disputas" : "2. Dispute Priority",
+    s3: es ? "3. Cuentas" : "3. Accounts",
+    s4: es ? "4. Proyeccion de puntaje y lineas comerciales" : "4. Projected Scores + Tradelines",
+    s5: es ? "5. Plan de accion, fortaleza y programa" : "5. Action Plan, File Strength + Program",
+    scoreTable: es ? "PUNTAJES" : "SCORES",
     bureau: es ? "Buro" : "Bureau",
     score: es ? "Puntaje" : "Score",
     rating: es ? "Calificacion" : "Rating",
+    vantage: "VantageScore",
+    middle: es ? "Puntaje medio (el que usa el prestamista)" : "Middle score (what a lender uses)",
     notReported: es ? "Sin datos" : "Not reported",
+    fileOverview: es ? "RESUMEN DEL ARCHIVO" : "FILE OVERVIEW",
     metric: es ? "Metrica" : "Metric",
-    totalAccounts: es ? "Cuentas totales" : "Total accounts",
-    positive: es ? "Positivas / al corriente" : "Positive / in good standing",
-    negative: es ? "Negativas" : "Negative",
-    inquiries: es ? "Consultas (2 anos)" : "Hard inquiries (2 years)",
+    value: es ? "Valor" : "Value",
+    accounts: es ? "Cuentas" : "Accounts",
+    posNeg: es ? "Positivas / negativas" : "Positive / negative",
+    inquiries: es ? "Consultas" : "Hard inquiries",
+    notItemized: es ? "No detallado" : "Not itemized",
     utilization: es ? "Utilizacion revolvente" : "Revolving utilization",
-    avgAge: es ? "Antiguedad promedio" : "Average account age",
-    oldest: es ? "Cuenta mas antigua" : "Oldest account",
-    revLimit: es ? "Limite revolvente total" : "Total open revolving limit",
-    balances: es ? "Saldos reportados" : "Total balances reported",
-    flagged: es ? "ALERTA" : "FLAGGED",
+    avgAge: es ? "Antiguedad promedio / mas antigua" : "Avg age / oldest",
+    avgAgeOnly: es ? "Antiguedad promedio" : "Average account age",
+    oldestOnly: es ? "Cuenta mas antigua" : "Oldest account",
+    fileTotals: (t: number, wb: number, nt: number, na: number, pd: string) =>
+      es
+        ? `Archivo completo: ${t} cuentas (${wb} con saldo), ${nt} negativas${na !== nt ? ` (${na} cuentas unicas)` : ""}, ${pd} vencido.`
+        : `Whole file: ${t} tradelines (${wb} with balances), ${nt} negative${na !== nt ? ` (${na} unique accounts)` : ""}, ${pd} past due.`,
+    collCo: es ? "Cobranzas / cargos a perdida" : "Collections / charge-offs",
+    pastDue: es ? "Vencido" : "Past due",
+    publicRecords: es ? "Registros publicos" : "Public records",
+    revLimit: es ? "Limite revolvente abierto" : "Open revolving limit",
+    keyObs: es ? "OBSERVACIONES (SOLO HECHOS)" : "KEY OBSERVATIONS (FACTS ONLY)",
+    activeTitle: es ? "ARCHIVO DE PRESTAMO ACTIVO" : "ACTIVE LOAN FILE",
+    activeBody: (lender: string | null, date: string | null) =>
+      es
+        ? `${lender ? `${lender} consulto este reporte${date ? ` el ${date}` : ""}. ` : ""}Coordine el momento de las disputas con el oficial de prestamos. Sin cuentas nuevas hasta despues del cierre.`
+        : `${lender ? `${lender} pulled this report${date ? ` on ${date}` : ""}. ` : ""}Coordinate dispute timing with the loan officer. No new credit until after closing.`,
+    mortgageBody: (by: string | null, via: string | null, date: string | null) =>
+      es
+        ? `Archivo hipotecario: consultado${by ? ` por ${by}` : ""}${via ? ` via ${via}` : ""}${date ? ` el ${date}` : ""}. Coordine el momento de las disputas con el oficial de prestamos antes de presentarlas.`
+        : `Mortgage file: pulled${by ? ` by ${by}` : ""}${via ? ` via ${via}` : ""}${date ? ` on ${date}` : ""}. Coordinate dispute timing with the loan officer before filing.`,
+    lenderTitle: es ? "PUNTAJE DEL PRESTAMISTA" : "LENDER SCORE",
+    lenderBody: (model: string, score: string, target: string) =>
+      es
+        ? `El prestamista usa ${model}: puntaje medio ${score}${target ? `; necesita ${target}` : ""}.`
+        : `The lender uses ${model}: middle score ${score}${target ? `; needs ${target}` : ""}.`,
     missingBureau: (b: string) =>
       es
-        ? `${b} no devolvio datos: no hay puntaje, cuentas ni consultas. Normalmente es un congelamiento o el buro no se consulto. Levante el congelamiento y saque un reporte de 3 buros antes de disputar.`
-        : `${b} returned no data: no score, tradelines or inquiries. This usually means a security freeze or the bureau was not pulled. Lift any freeze and pull a fresh 3-bureau report before filing disputes.`,
-    keyObs: es ? "OBSERVACIONES CLAVE" : "KEY OBSERVATIONS",
-    roundIntro: es
-      ? "Ordenado de mas facil a mas dificil. Rondas de 30 dias; solo se disputa informacion inexacta o no verificable."
-      : "Ordered easiest to hardest to remove. Rounds run on 30-day cycles; only inaccurate or unverifiable reporting is disputed.",
+        ? `${b} no devolvio datos (posible congelamiento o no se consulto). Levante el congelamiento y saque un reporte de 3 buros.`
+        : `${b} returned no data (likely a freeze or not pulled). Lift any freeze and pull a fresh 3-bureau report.`,
+    flagged: es ? "ALERTA" : "FLAGGED",
     roundTitle: (r: AnalysisRound) =>
       ({
-        1: es ? "RONDA 1 - CONSULTAS" : "ROUND 1 - INQUIRIES",
+        1: es ? "RONDA 1 - CONSULTAS + DATOS PERSONALES" : "ROUND 1 - INQUIRIES + PERSONAL INFO",
         2: es ? "RONDA 2 - COBRANZAS DE TERCEROS" : "ROUND 2 - THIRD-PARTY COLLECTIONS",
-        3: es ? "RONDA 3 - INCONSISTENCIAS ENTRE BUROS" : "ROUND 3 - BUREAU INCONSISTENCIES",
-        4: es ? "RONDA 4 - CARGOS A PERDIDA / ATRASOS" : "ROUND 4 - CHARGE-OFFS + LATE PAYMENTS",
+        3: es ? "RONDA 3 - PAGOS ATRASADOS / EXACTITUD" : "ROUND 3 - LATE PAYMENTS / ACCURACY",
+        4: es ? "RONDA 4 - CARGOS A PERDIDA / DEROGATORIOS DEL ACREEDOR" : "ROUND 4 - CHARGE-OFFS / ORIGINAL-CREDITOR DEROGATORY",
       })[r],
-    hold: es ? "EN ESPERA - NOTA DE DISPUTA DEL CONSUMIDOR" : "ON HOLD - CONSUMER-DISPUTE REMARK ON FILE",
-    holdNote: es
-      ? "Estas cuentas muestran 'no disputada' pero las observaciones aun tienen una nota de disputa. Confirme que no hay disputa abierta, pida retirar la nota y luego dispute en la ronda indicada."
-      : "These accounts show 'not disputed' while the remarks still carry a dispute notation. Confirm no dispute is open, request removal of the stale notation, then file in the round shown.",
     creditor: es ? "Acreedor" : "Creditor",
     type: es ? "Tipo" : "Type",
     bureaus: es ? "Buros" : "Bureaus",
-    detail: es ? "Detalle" : "Detail",
-    date: es ? "Fecha" : "Date",
-    milestoneHeader: es ? "Etapa" : "Milestone",
-    impact: es ? "Impacto estimado" : "Expected impact",
+    issue: es ? "Estado / problema" : "Status / issue",
     legal: es ? "Base legal" : "Legal basis",
-    noTargets: es ? "Sin objetivos en esta ronda." : "No targets in this round.",
-    inquiryAgesOff: (d: string) => (es ? `Se elimina sola el ${d}. No se disputa.` : `Ages off on its own ${d}. No dispute needed.`),
-    inquiryPermissible: es ? "Vinculada a una cuenta abierta (proposito permitido). No es objetivo." : "Tied to an opened account (permissible purpose). Not a target.",
-    inquiryDispute: es ? "Sin cuenta relacionada - disputar." : "No matching account - dispute.",
-    negativesTable: es ? "SECCION A - CUENTAS NEGATIVAS" : "SECTION A - NEGATIVE / DEROGATORY ACCOUNTS",
-    positivesTable: es ? "SECCION B - CUENTAS POSITIVAS" : "SECTION B - POSITIVE ACCOUNTS",
-    utilTable: es ? "SECCION C - UTILIZACION" : "SECTION C - UTILIZATION BREAKDOWN",
+    noneOnFile: es ? "Nada en el archivo." : "None on file.",
+    inquiry: es ? "Consulta" : "Inquiry",
+    moreInquiries: (n: number) => (es ? `${n} consultas mas (lista completa en el sistema)` : `${n} more inquiries (full list on file)`),
+    inquiryDispute: es ? "Sin proposito permitido verificado" : "No verified permissible purpose",
+    inquiryAgesOff: (d: string) => (es ? `Se elimina sola el ${d}` : `Ages off on its own ${d}`),
+    cluster: (d: string, n: number) => (es ? `${n} consultas el mismo dia (${d})` : `${n} same-day inquiries (${d})`),
+    duplicateInq: es ? "duplicada (mismo acreedor, buro y fecha)" : "duplicate (same creditor, bureau and date)",
+    repeatInq: (auto: boolean) =>
+      es
+        ? `consulta repetida, ventana de compra ${auto ? "de auto" : "de tasa"}`
+        : `repeat pull, ${auto ? "auto" : "rate"}-shopping window`,
+    lenderWindow: es
+      ? "El archivo del prestamista solo lista los ultimos 120 dias; saque MFSN para 12 meses."
+      : "Lender file lists last 120 days only; pull MFSN for 12 months.",
+    noBureauItems: (b: string) => (es ? `sin partidas en ${b}` : `no ${b} items`),
+    // v2.4 #8: Round 1 personal-info items never move a score; the cell is about inquiries.
+    noBureauInquiries: (b: string) => (es ? `sin consultas en ${b}` : `no ${b} inquiries`),
+    noLimit: es ? "sin limite" : "no limit",
+    excludedLoan: es ? "EXCLUIDA - proposito permitido (transaccion activa)" : "EXCLUDED - permissible purpose (active transaction)",
+    excludedMatch: (why: string) =>
+      es
+        ? `EXCLUIDA - proposito permitido (${why.replace(/^matches/, "coincide con").replace(/ opened /, " abierta ")})`
+        : `EXCLUDED - permissible purpose (${why})`,
+    personalInfo: es ? "Datos personales" : "Personal info",
+    unitMismatch: es ? "numero de unidad distinto" : "unit mismatch",
+    fieldName: (f: string) =>
+      ({
+        name: es ? "variante de nombre" : "name variant",
+        address: es ? "direccion" : "address",
+        ssn: es ? "SSN distinto" : "SSN variance",
+        dob: es ? "fecha de nacimiento" : "date of birth",
+      })[f] ?? f,
+    informational: es ? "INFORMATIVO - NO SON OBJETIVOS" : "INFORMATIONAL - NOT DISPUTE TARGETS",
+    note: es ? "Nota" : "Note",
+    joint: es ? "(conjunta)" : "(joint)",
+    duplicate: es ? "misma cuenta con 2 nombres de acreedor" : "same account under 2 furnisher names",
+    negTable: es ? "SECCION 1 - CUENTAS NEGATIVAS (MAS ANTIGUA PRIMERO)" : "SECTION 1 - NEGATIVE ACCOUNTS (OLDEST FIRST)",
+    posTable: es ? "SECCION 2 - CUENTAS POSITIVAS" : "SECTION 2 - POSITIVE ACCOUNTS",
+    balLimit: es ? "Saldo / limite" : "Balance / limit",
+    origAmt: es ? "monto orig." : "orig. amt",
+    perMonth: es ? "/mes" : "/mo",
+    utilStatus: (st: string | undefined) =>
+      ({
+        open: es ? "Abierta" : "Open",
+        inactive: es ? "Inactiva" : "Open-reporting, inactive",
+        closed: es ? "Cerrada" : "Closed",
+        charged_off: es ? "Cargo a perdida - objetivo de disputa" : "Charged off - dispute target",
+        terminated: es ? "Terminada (ECOA T) - no cuenta" : "Terminated (ECOA T) - not counted",
+      })[st ?? "open"] ?? st ?? "",
+    na: "N/A",
+    paidOn: es ? "Pagada" : "Paid",
+    lenderUtil: (u: number | null | undefined, used: number | null | undefined) =>
+      es
+        ? `Cifras del prestamista: utilizacion revolvente ${u ?? "--"}%${used != null ? `, credito revolvente usado ${used}%` : ""}.`
+        : `Lender summary: revolving utilization ${u ?? "--"}%${used != null ? `, revolving/credit line used ${used}%` : ""}.`,
+    noOpenCard: es
+      ? "No hay ninguna tarjeta abierta en buen estado reportando actualmente."
+      : "No open credit card in good standing is currently reporting.",
+    utilNotApplicable: es
+      ? "Ninguna tarjeta abierta en buen estado: la utilizacion no aplica."
+      : "No open card in good standing - utilization not applicable.",
+    notCounted: es ? "No cuenta" : "Not counted",
+    allDerogUtil: (names: string, plural: boolean) =>
+      es
+        ? `Toda la utilizacion de tarjetas de este archivo viene ${plural ? "de los saldos en cargo a perdida de" : "del saldo en cargo a perdida de"} ${names}, por lo que se atiende con la disputa de exactitud de la Ronda 4.`
+        : `All card utilization on this file comes from the charged-off ${names} ${plural ? "balances" : "balance"}, so it is addressed through the Round 4 accuracy dispute.`,
+    confirmPrior: es ? "confirmar con el cliente antes de disputar" : "confirm with client before disputing",
+    tlPerIssuer: es ? "Segun el emisor" : "Per card issuer",
+    utilTable: es ? "SECCION 3 - UTILIZACION" : "SECTION 3 - UTILIZATION BREAKDOWN",
+    derogDate: es ? "Fecha derog." : "Derog. date",
+    niFootnote: es
+      ? "* Fecha del primer derogatorio no detallada: se usa la mas antigua entre la ultima actividad y la apertura (nunca una fecha de pago, cierre o reporte)."
+      : "* First derogatory date not itemized: the earlier of date of last activity and date opened is used (never a paid, closed or reported date).",
+    closedPositives: (n: number) =>
+      es ? `${n} cuentas cerradas pagadas segun lo acordado (no se listan).` : `${n} closed accounts paid as agreed (not listed).`,
+    round: es ? "Ronda" : "Round",
     opened: es ? "Apertura" : "Opened",
-    balance: es ? "Saldo" : "Balance",
-    status: es ? "Estado" : "Status",
-    priority: es ? "Ronda" : "Round",
     limit: es ? "Limite" : "Limit",
-    used: es ? "% usado" : "% Used",
-    to30: es ? "Saldo para 30%" : "Balance for 30%",
-    to10: es ? "Saldo para 10%" : "Balance for 10%",
-    orLess: es ? "o menos" : "or less",
+    balance: es ? "Saldo" : "Balance",
+    used: es ? "% usado" : "% used",
+    to30: es ? "Saldo para 30%" : "Balance at 30%",
+    to10: es ? "Saldo para 10%" : "Balance at 10%",
     alreadyOk: es ? "Ya esta bien" : "Already OK",
-    totalDerog: (v: string) => (es ? `Saldo total negativo: ${v}.` : `Total derogatory balances: ${v}.`),
-    utilNote: es
-      ? "Utilizacion = saldo / limite x 100. Mas de 30% resta puntos; menos de 10% da el maximo beneficio. Cada tarjeta cuenta por separado ademas del total."
-      : "Utilization = Balance / Credit Limit x 100. Over 30% costs points; under 10% earns the maximum benefit. Scoring models weigh each card individually as well as the total.",
-    projTitle: es ? "PROGRESION ESTIMADA POR RONDA" : "ESTIMATED SCORE PROGRESSION BY ROUND",
+    orLess: es ? "o menos" : "or less",
+    totalOpen: es ? "Total (abiertas en buen estado)" : "Total (open cards in good standing)",
+    moreCards: (n: number) => (es ? `${n} tarjetas mas incluidas en el total.` : `${n} more cards included in the total.`),
+    status: es ? "Estado" : "Status",
+    projTitle: es ? "PUNTAJE PROYECTADO POR RONDA (ESTIMADO)" : "PROJECTED SCORE BY ROUND (ESTIMATED)",
     projNote: es
-      ? "Las proyecciones son estimaciones basadas en las cuentas de este reporte. Los resultados reales varian."
-      : "Projections are estimates based on the items in this report. Actual results vary by bureau response and how the file is maintained.",
-    milestone: (k: ProjectionMilestone["key"], escrow: boolean) =>
+      ? "Estimaciones: cada eliminacion solo mueve los buros que la reportan; tope +100 por buro y nunca mas de 760. No es una garantia."
+      : "Estimates: each removal only moves the bureaus that report it; capped at +100 per bureau and never past 760. Not a guarantee.",
+    step: es ? "Etapa" : "Step",
+    middleCol: es ? "Medio" : "Middle",
+    milestone: (k: ProjectionMilestone["key"]) =>
       ({
         current: es ? "Actual" : "Current",
-        round1: escrow
-          ? es ? "Despues del cierre + Ronda 1 (consultas)" : "After closing + Round 1 (inquiries)"
-          : es ? "Ronda 1 - Consultas" : "Round 1 - Inquiries",
-        round2: es ? "Ronda 2 - Cobranzas" : "Round 2 - Collections",
-        round3: es ? "Ronda 3 - Exactitud entre buros" : "Round 3 - Bureau accuracy",
-        round4: es ? "Ronda 4 + linea AU" : "Round 4 + AU tradeline",
+        round1: es ? "Ronda 1 - consultas + datos personales" : "Round 1 - inquiries + personal info",
+        round2: es ? "Ronda 2 - cobranzas" : "Round 2 - collections",
+        round3: es ? "Ronda 3 - pagos atrasados" : "Round 3 - late payments",
+        round4: es ? "Ronda 4 - cargos a perdida" : "Round 4 - charge-offs",
+        utilization: es ? "Utilizacion menor a 10% / linea AU" : "Utilization under 10% / AU line",
       })[k],
-    tradelineTitle: es ? "RECOMENDACION DE LINEAS COMERCIALES" : "TRADELINE RECOMMENDATION",
-    tlPrimary: es ? "Linea revolvente primaria (banco)" : "Primary revolving line (major bank)",
-    tlAu: es ? "Linea AU (usuario autorizado) antigua y de alto limite" : "Aged, high-limit AU tradeline",
-    tlPrimaryImpact: es ? "+15-25 pts con historial puntual" : "+15-25 pts as on-time history builds",
-    tlAuImpact: es ? "+20-40 pts (estimado)" : "+20-40 pts (estimated)",
+    tradelineTitle: es ? "LINEAS COMERCIALES" : "TRADELINES",
+    tlLevel: es ? "Nivel" : "Level",
+    impact: es ? "Impacto estimado" : "Expected impact",
+    tlTiming: es ? "Cuando" : "Timing",
+    tlNow: es ? "Ahora" : "Now",
+    tlAfterClosing: es ? "Despues del cierre o antes de la siguiente solicitud" : "After closing or before next application",
+    tlHold: es ? "En espera" : "Hold",
+    tlType: (code: string) =>
+      code === "primary" ? (es ? "Linea primaria (Chase / Navy Federal)" : "Primary line (Chase / Navy Federal)") : es ? "Linea AU" : "AU tradeline",
+    tlWhyTitle: es ? "POR QUE FUNCIONA PARA ESTE ARCHIVO" : "WHY IT WORKS FOR THIS FILE",
     actionTitle: es ? "PLAN DE ACCION" : "ACTION PLAN",
-    strengthTitle: es ? "FORTALEZA DEL ARCHIVO" : "FILE STRENGTH SCORE",
+    strengthTitle: es ? "FORTALEZA DEL ARCHIVO (0-100)" : "FILE STRENGTH (0-100)",
     factor: es ? "Factor (20 pts c/u)" : "Factor (20 pts each)",
     current: es ? "Actual" : "Current",
-    post: es ? "Despues" : "Post-repair",
+    projected: es ? "Proyectado" : "Projected",
     factorName: (k: string) =>
       ({
         revolving: es ? "Cuentas revolventes abiertas" : "Open revolving accounts",
@@ -160,64 +257,31 @@ function analysisLabels(lang: "en" | "es") {
         age: es ? "Antiguedad" : "Account age",
         derogatory: es ? "Cuentas negativas" : "Derogatory items",
       })[k] ?? k,
-    total: es ? "TOTAL" : "TOTAL",
+    total: "TOTAL",
     programTitle: es ? "PROGRAMA RECOMENDADO" : "RECOMMENDED PROGRAM",
     programName: (t: string, price: string) =>
       t === "complex" ? (es ? `Reparacion Compleja - ${price}` : `Complex Repair - ${price}`) : es ? `Reparacion Estandar - ${price}` : `Standard Repair - ${price}`,
     enroll: es ? "Inscribase" : "Enroll",
+    mfsn: es ? "Reporte de 3 buros con historial de 12 meses (MyFreeScoreNow)" : "3-bureau report with 12-month history (MyFreeScoreNow)",
     croaTitle: es ? "DIVULGACION CROA" : "CROA DISCLOSURE",
     croa: es
-      ? "Optimum Financial Group presta servicios de reparacion de credito conforme a la Ley de Organizaciones de Reparacion de Credito (CROA), 15 U.S.C. \u00a71679 y ss. No garantizamos mejoras especificas de puntaje. Los resultados varian segun la persona. Este analisis se basa en la informacion proporcionada y no constituye asesoria legal."
-      : "Optimum Financial Group provides credit repair services in compliance with the Credit Repair Organizations Act (CROA), 15 U.S.C. \u00a71679 et seq. We do not guarantee specific score improvements. Results vary by individual. This analysis is based on information provided and does not constitute legal advice.",
-    escrowTitle: es ? "ESCROW ACTIVO - DISPUTAS EN ESPERA HASTA EL CIERRE" : "ACTIVE ESCROW - DISPUTE FILING ON HOLD UNTIL CLOSING",
-    escrowBody: (pulls: string) =>
-      es
-        ? `El cliente esta en escrow de una hipoteca.${pulls ? ` Las consultas ${pulls} son la solicitud activa del prestamo y NO son objetivos de disputa.` : ""} No se presentan disputas, cuentas nuevas ni lineas comerciales hasta despues del cierre: las notas de disputa pueden provocar revision del suscriptor. Los prestamistas usan modelos FICO hipotecarios, por lo que sus puntajes seran distintos a los VantageScore de este reporte.`
-        : `Client is currently in escrow on a mortgage.${pulls ? ` The ${pulls} inquiries are the active loan pull and are NOT dispute targets.` : ""} No disputes, new accounts or tradelines until after closing - dispute remarks on tradelines can trigger underwriting review. Lenders use FICO mortgage models, so the lender's scores will differ from the VantageScore figures above.`,
-    lenderTitle: es ? "PUNTAJE DEL PRESTAMISTA" : "LENDER SCORE",
-    lenderBody: (model: string, score: string, target: string) =>
-      es
-        ? `El prestamista usa ${model}: puntaje medio actual ${score}${target ? `; necesita ${target}` : ""}. Los puntajes de este reporte son de otro modelo y no se comparan uno a uno.`
-        : `The lender uses ${model}: current middle score ${score}${target ? `; needs ${target}` : ""}. The scores in this report come from a different model and do not compare one-to-one.`,
-    posNeg: es ? "Positivas / negativas" : "Positive / Negative",
-    utilOpen: es ? "Utilizacion (tarjetas abiertas)" : "Revolving utilization (open cards)",
-    utilInclClosed: es ? "Utilizacion incl. tarjetas cerradas con saldo" : "Utilization incl. closed cards with balances",
-    pubColl: es ? "Registros publicos / cobranzas" : "Public records / Collections",
-    cluster: (from: string, to: string, n: number) =>
-      es ? `Grupo de consultas ${from}${to !== from ? ` - ${to}` : ""} (${n} consultas)` : `${from}${to !== from ? ` - ${to}` : ""} inquiry cluster (${n} inquiries)`,
-    clusterNote: (older: boolean) =>
-      es
-        ? `Mismo dia / dias seguidos con varios prestamistas.${older ? " Mas de 12 meses (peso minimo)." : ""} Disputar las que sigan sin proposito permitido.`
-        : `Same-day / back-to-back pulls across lenders.${older ? " Over 12 months old (minimal score weight)." : ""} Dispute any still reporting with no permissible purpose.`,
-    excluded: es ? "Excluida" : "Excluded",
-    excludedMatch: es ? "Coincide con una cuenta abierta - proposito permitido. No es objetivo." : "Matches an opened account - permissible purpose. Not a target.",
-    excludedLoan: es ? "Solicitud de hipoteca activa - proposito permitido. No es objetivo." : "Active mortgage application - permissible purpose. Not a target.",
-    noneOnFile: es ? "Nada en el archivo." : "None on file.",
-    noCollections: es ? "Ningun buro reporta cuentas en cobranza." : "No collection accounts reported by any bureau.",
-    identityItem: es ? "Datos personales" : "Personal info",
-    identityAction: es ? "Corregir para que coincida con la identificacion verificada." : "Correct to match verified ID.",
-    updateItem: (type: string) => (es ? `${type} (positiva)` : `${type} (positive)`),
-    updateNote: es ? "Solo actualizacion de exactitud - NO es objetivo de eliminacion." : "Accuracy update only - NOT a deletion target.",
-    fallbackNote: es
-      ? "Si la Ronda 3 vuelve 'verificada', escalar con disputa directa al proveedor sobre la exactitud del historial de pagos y el saldo."
-      : "If Round 3 returns 'verified', escalate with a direct furnisher dispute challenging payment-history accuracy and balance reporting.",
-    fileAfterClosing: es ? "La presentacion empieza despues del cierre." : "Filing begins after closing.",
-    closedRound: (r: number) => (es ? `Cuenta cerrada - Ronda ${r}` : `Closed account - Round ${r}`),
-    totalOpen: es ? "Total (tarjetas abiertas)" : "Total (open cards)",
-    totalInclClosed: es ? "Total incl. cerradas" : "Total incl. closed",
-    tlLevel: es ? "Nivel" : "Level",
-    tlPrice: es ? "Precio" : "Price",
-    tlTiming: es ? "Cuando" : "Timing",
-    tlNow: es ? "Ahora" : "Now",
-    tlAfterClosing: es ? "Despues del cierre" : "After closing",
-    tlType: (code: string) =>
-      code === "primary" ? (es ? "Linea primaria (Chase / Navy Federal)" : "Primary line (Chase / Navy Federal)") : es ? "Linea AU" : "AU tradeline",
-    tlWhyTitle: es ? "POR QUE FUNCIONA PARA ESTE ARCHIVO" : "WHY THIS WORKS FOR THIS FILE",
+      ? "Optimum Financial Group presta servicios de reparacion de credito conforme a la Ley de Organizaciones de Reparacion de Credito (CROA), 15 U.S.C. §1679 y ss. No garantizamos mejoras especificas de puntaje. Los resultados varian segun la persona. Este analisis se basa en la informacion proporcionada y no constituye asesoria legal."
+      : "Optimum Financial Group provides credit repair services in compliance with the Credit Repair Organizations Act (CROA), 15 U.S.C. §1679 et seq. We do not guarantee specific score improvements. Results vary by individual. This analysis is based on information provided and does not constitute legal advice.",
     confidential: es
       ? "Confidencial - preparado para el cliente nombrado. Las proyecciones son estimaciones."
       : "Confidential - prepared for the named client. Projections are estimates, not guarantees.",
-    page: (n: number) => (es ? `Pagina ${n}` : `Page ${n}`),
-    years: (m: number) => (es ? `${Math.floor(m / 12)} a ${m % 12} m` : `${Math.floor(m / 12)} yrs ${m % 12} mo`),
+    page: (n: number) => (es ? `Pagina ${n} de 5` : `Page ${n} of 5`),
+    years: (m: number) => (es ? `${Math.floor(m / 12)} a ${m % 12} m` : `${Math.floor(m / 12)} yrs ${m % 12} mos`),
+    acctType: (k: string) =>
+      ({
+        auto: "Auto",
+        revolving: es ? "Revolvente" : "Revolving",
+        installment: es ? "Prestamo" : "Installment",
+        mortgage: es ? "Hipoteca" : "Mortgage",
+        collection: es ? "Cobranza" : "Collection",
+        student_loan: es ? "Prestamo estudiantil" : "Student loan",
+        open: es ? "Abierta" : "Open",
+      })[k] ?? k,
     kind: (k: string) =>
       ({
         collection: es ? "Cobranza" : "Collection",
@@ -225,35 +289,9 @@ function analysisLabels(lang: "en" | "es") {
         late: es ? "Pagos atrasados" : "Late payments",
         repossession: es ? "Reposesion" : "Repossession",
         public_record: es ? "Registro publico" : "Public record",
-        derogatory: es ? "Negativa" : "Derogatory",
+        derogatory: es ? "Derogatorio" : "Derogatory",
       })[k] ?? k,
   };
-}
-
-const BUREAU_NAME: Record<Bureau, string> = { TU: "TransUnion", EX: "Experian", EQ: "Equifax" };
-
-/** WinAnsi-safe text (Helvetica standard font). */
-export function pdfSafe(input: string): string {
-  return String(input ?? "")
-    .replace(/[–—―]/g, "-")
-    .replace(/[‘’]/g, "'")
-    .replace(/[“”]/g, '"')
-    .replace(/…/g, "...")
-    .replace(/[\t\r\n]+/g, " ")
-    .replace(/[^\x20-\x7E\xA0-\xFF]/g, "")
-    .replace(/ {2,}/g, " ")
-    .trim();
-}
-
-function pdfMoney(n: number | null | undefined): string {
-  return n === null || n === undefined ? "--" : `$${Math.round(n).toLocaleString("en-US")}`;
-}
-
-function scoreRating(s: number, es: boolean): string {
-  if (s >= 740) return es ? "Excelente" : "Excellent";
-  if (s >= 670) return es ? "Bueno" : "Good";
-  if (s >= 580) return es ? "Regular" : "Fair";
-  return es ? "Bajo" : "Poor";
 }
 
 /** Flowing page writer: header/footer per page, auto page breaks. */
@@ -266,7 +304,6 @@ class PageFlow {
   readonly M = 40;
   readonly contentW = 612 - 80;
   readonly bottom = 64;
-
   constructor(
     private pdf: PDFDocument,
     readonly font: PDFFont,
@@ -294,8 +331,13 @@ class PageFlow {
       p.drawImage(this.logo, { x: this.M, y: this.H - 72 + 17, width: w, height: h });
       tx = this.M + w + 16;
     }
-    this.text(this.headerTitle, tx, this.H - 34, 12, { font: this.bold, color: OFG_PDF.white });
-    this.text(this.headerSub, tx, this.H - 50, 8.5, { color: rgb(0.85, 0.87, 0.92) });
+    const subW = this.W - this.M - tx;
+    const subLines = this.wrap(this.headerSub, 8, subW);
+    const two = subLines.length > 1;
+    this.text(this.headerTitle, tx, this.H - (two ? 30 : 34), 12, { font: this.bold, color: OFG_PDF.white });
+    subLines.slice(0, 2).forEach((ln, i) =>
+      this.text(ln, tx, this.H - (two ? 45 : 50) - i * 10, 8, { color: rgb(0.85, 0.87, 0.92), maxWidth: subW }),
+    );
     p.drawRectangle({ x: 0, y: 0, width: this.W, height: 40, color: OFG_PDF.light });
     this.text(this.footerLine, this.M, 24, 7.5, { color: OFG_PDF.muted });
     this.text(this.L.confidential, this.M, 13, 7, { color: OFG_PDF.muted });
@@ -345,7 +387,8 @@ class PageFlow {
   }
 
   subhead(title: string) {
-    this.ensure(30);
+    // Heading + a table header + one row: never leave a heading alone at the page bottom.
+    this.ensure(60);
     this.text(title, this.M, this.y, 8.5, { font: this.bold, color: OFG_PDF.muted });
     this.y -= 13;
   }
@@ -370,7 +413,8 @@ class PageFlow {
     this.y -= 2;
   }
 
-  callout(title: string, body: string, tone: "warn" | "info" = "info") {
+  /** warn = red (data problems); gold = SOP banner (gold border / accent, navy text, v2.4 #13). */
+  callout(title: string, body: string, tone: "warn" | "info" | "gold" = "info") {
     const lines = this.wrap(body, 8.5, this.contentW - 20);
     const h = 22 + lines.length * 12;
     this.ensure(h + 6);
@@ -382,8 +426,9 @@ class PageFlow {
       height: h,
       color: tone === "warn" ? OFG_PDF.redTint : OFG_PDF.goldTint,
       borderColor: tone === "warn" ? OFG_PDF.red : OFG_PDF.gold,
-      borderWidth: 0.8,
+      borderWidth: tone === "gold" ? 1.4 : 0.8,
     });
+    if (tone === "gold") this.page.drawRectangle({ x: this.M, y: top - h, width: 4, height: h, color: OFG_PDF.gold });
     this.text(title, this.M + 10, top - 14, 8.5, { font: this.bold, color: tone === "warn" ? OFG_PDF.red : OFG_PDF.navy });
     let yy = top - 27;
     for (const line of lines) {
@@ -397,8 +442,12 @@ class PageFlow {
   table(headers: string[], rows: string[][], widths: number[], o: { size?: number } = {}) {
     const size = o.size ?? 7.8;
     const colW = widths.map((w) => w * this.contentW);
+    const firstRowH = rows.length
+      ? Math.max(...rows[0].map((c, i) => this.wrap(c, size, colW[i] - 8).length)) * (size + 3) + 6
+      : 0;
     const drawHeader = () => {
-      this.ensure(18);
+      // Header + first row together (no orphan table header).
+      this.ensure(18 + firstRowH);
       this.page.drawRectangle({ x: this.M, y: this.y - 5, width: this.contentW, height: 16, color: OFG_PDF.navy });
       let x = this.M + 4;
       headers.forEach((h, i) => {
@@ -432,11 +481,12 @@ class PageFlow {
     this.y -= 8;
   }
 
+  /** Graphic bar (Cesar, Oct 27: keep the graphic over the v2 spec's ASCII bars). */
   scoreBar(label: string, score: number | null, extra: string) {
     this.ensure(18);
-    this.text(label, this.M, this.y, 8.5, { font: this.bold });
-    const bx = this.M + 140;
-    const bw = 220;
+    this.text(label, this.M, this.y, 8.5, { font: this.bold, maxWidth: 168 });
+    const bx = this.M + 174;
+    const bw = 200;
     this.page.drawRectangle({ x: bx, y: this.y - 1, width: bw, height: 8, color: OFG_PDF.border });
     if (score !== null) {
       const pct = Math.min(1, Math.max(0, (score - 300) / 550));
@@ -448,38 +498,163 @@ class PageFlow {
   }
 }
 
-/** Spanish labels for the rule-generated inconsistency prefixes. */
-const INCONSISTENCY_ES: Array<[RegExp, string]> = [
-  [/^Date opened:/, "Fecha de apertura:"],
-  [/^Balance:/, "Saldo:"],
-  [/^Last activity:/, "Ultima actividad:"],
-  [/^Payment status:/, "Estado de pago:"],
-  [/^Late counts \(30\/60\/90\):/, "Atrasos (30/60/90):"],
-];
+const BUREAU_NAME: Record<Bureau, string> = { TU: "TransUnion", EX: "Experian", EQ: "Equifax" };
+const LEGAL_ROUND1 = "FCRA §604, §611";
+/**
+ * OFG contact on every client report (analysis + progress PDFs, emails).
+ * Change it HERE only.
+ */
+export const OFG_REPORT_CONTACT = {
+  phone: "(949) 674-0714",
+  site: "ofgllc.com",
+  address: "2717 W Coast Hwy, Ste C, Newport Beach, CA 92663",
+  // Spec v2.3 P2-1: full URLs from program config, never built from the website domain.
+  // Reports print OFG redirect links (served by api/index.ts /go/*): a page that moves only changes
+  // OFG_ENROLL_TARGETS, and every PDF already sent keeps working.
+  standardUrl: "https://www.ofgllc.com/go/enroll-standard",
+  complexUrl: "https://www.ofgllc.com/go/enroll-complex",
+  freeScoreUrl: "https://www.ofgllc.com/go/free-score",
+} as const;
 
-function negativeDetail(n: AnalysisNegative, L: Labels): string {
+/**
+ * Where the /go/enroll-* redirects land (Cesar, Oct 26 R-5: program pages on optimum-financial-group.com).
+ * Standard = /standard-repair-payment — /premium-plan-payment does not exist there (it redirects to /home).
+ */
+export const OFG_ENROLL_TARGETS = {
+  standard: "https://www.optimum-financial-group.com/standard-repair-payment",
+  complex: "https://www.optimum-financial-group.com/complex-repair-payment",
+} as const;
+
+/** Spec §8: the client analysis is exactly 5 pages. */
+export const CREDIT_ANALYSIS_PDF_PAGES = 5;
+
+/** WinAnsi-safe text (Helvetica standard font). */
+export function pdfSafe(input: string): string {
+  return String(input ?? "")
+    .replace(/[–—―]/g, "-")
+    .replace(/[‘’]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/…/g, "...")
+    .replace(/[\t\r\n]+/g, " ")
+    .replace(/[^\x20-\x7E\xA0-\xFF]/g, "")
+    .replace(/ {2,}/g, " ")
+    .trim();
+}
+
+/**
+ * Spec v2.3 P1-6: never print a cut-off value. Partial dates ("REPORTED 10/24/",
+ * "06/- 10/") and masked fragments become "not itemized".
+ */
+export function completeValuesOnly(text: string, es = false): string {
+  return String(text ?? "")
+    .replace(/\b\d{1,2}\/(?:\d{1,2}\/)?(?![\d/])(?:\s*-\s*\d{1,2}\/(?:\d{1,2}\/)?(?![\d/]))?/g, es ? "(fecha no detallada)" : "(date not itemized)")
+    .replace(/\s*•+\s*/g, " ")
+    .replace(/ {2,}/g, " ")
+    .trim();
+}
+
+/**
+ * R-1: one whole-percent value per figure, from the raw balance / limit (never re-rounding a
+ * value already rounded to one decimal: 42.47% → 42.5 → 43).
+ */
+export function wholePct(balance: number, limit: number): number | null {
+  return limit > 0 ? Math.round((balance / limit) * 100) : null;
+}
+
+/** File-level card utilization as printed: the same rows the utilization table totals. */
+export function printedUtilization(data: CreditAnalysisData): number | null {
+  // v2.4 #3: open cards in good standing only, on every format.
+  const rows = data.utilization.filter(inGoodStanding);
+  if (!rows.length) return null;
+  const own = rows.filter((u) => !u.authorizedUser);
+  const use = own.length ? own : rows;
+  return wholePct(use.reduce((s, u) => s + u.balance, 0), use.reduce((s, u) => s + u.limit, 0));
+}
+
+function pdfMoney(n: number | null | undefined): string {
+  return n === null || n === undefined ? "--" : `$${Math.round(n).toLocaleString("en-US")}`;
+}
+
+function scoreRating(s: number, es: boolean): string {
+  if (s >= 740) return es ? "Excelente" : "Excellent";
+  if (s >= 670) return es ? "Bueno" : "Good";
+  if (s >= 580) return es ? "Regular" : "Fair";
+  return es ? "Bajo" : "Poor";
+}
+
+/** One date style everywhere in the client PDF: MM/DD/YYYY (or MM/YYYY when month-only). */
+export function displayDate(raw: string | null | undefined, monthOnly = false): string {
+  const d = parseReportDate(raw);
+  if (!d) return raw ? String(raw) : "--";
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  if (monthOnly) return `${mm}/${d.getUTCFullYear()}`;
+  return `${mm}/${String(d.getUTCDate()).padStart(2, "0")}/${d.getUTCFullYear()}`;
+}
+
+/** "ALMA YVETTE RICE" → "Alma Y. Rice" (P0-1). */
+export function displayBorrowerName(raw: string | null | undefined): string | null {
+  const parts = String(raw ?? "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((p) => (p.length === 1 ? p.toUpperCase() : p[0].toUpperCase() + p.slice(1).toLowerCase()));
+  if (!parts.length) return null;
+  // Spec v2.3 P2-2: the full borrower name as printed — never abbreviated.
+  return parts.join(" ");
+}
+
+/** Never print a placeholder name ("TBD", "(last name TBD)", "Client"). */
+export function isPlaceholderName(name: string | null | undefined): boolean {
+  const t = String(name ?? "").trim();
+  return !t || /\btbd\b|\bunknown\b|^client$|\(.*\)/i.test(t);
+}
+
+function bureauLabel(bureaus: Bureau[], notItemized: boolean | undefined, L: Labels): string {
+  return notItemized ? L.notItemized : bureaus.join(", ");
+}
+
+function issueText(n: AnalysisNegative, L: Labels): string {
   const parts = [n.status];
   if (n.originalCreditor) parts.push(`${L.originalCreditor} ${n.originalCreditor}`);
-  if (n.inconsistencies.length) {
-    parts.push(
-      n.inconsistencies
-        .map((i) =>
-          L.lang === "es"
-            ? INCONSISTENCY_ES.reduce((acc, [re, es]) => acc.replace(re, es), i).replace(/ vs /g, " vs ")
-            : i,
-        )
-        .join("; "),
-    );
-  }
-  return `${parts.join(" - ")}${n.balance !== null ? ` (${pdfMoney(n.balance)})` : ""}`;
+  // Spec v2.3 P1-3: a paid collection is still a target — say when it was paid.
+  if (n.paidOn !== undefined && n.paidOn !== null) parts.push(n.paidOn ? `${L.paidOn} ${n.paidOn}` : L.paidOn);
+  if (n.joint) parts.push(L.joint);
+  if (n.duplicateGroup != null) parts.push(L.duplicate);
+  const flags = (n.accuracyFlags ?? []).filter((f) => !/^missing from/.test(f) || !n.bureausNotItemized);
+  if (flags.length) parts.push(`[${flags.join("; ")}]`);
+  // Only real cross-bureau differences (P1-2).
+  const real = n.inconsistencies.filter((i) => !/^Not reported to/.test(i));
+  if (real.length) parts.push(real.join("; "));
+  const body = parts.join(" - ");
+  // v2.4 #15: no trailing balance when the status already prints that amount.
+  return `${body}${n.balance && !body.includes(pdfMoney(n.balance)) ? ` (${pdfMoney(n.balance)})` : ""}`;
 }
 
 export async function generateOfgCreditAnalysisPdf(
   data: CreditAnalysisData,
   opts: CreditAnalysisPdfOptions,
 ): Promise<Buffer> {
+  return (await generateOfgCreditAnalysisPdfWithMeta(data, opts)).buffer;
+}
+
+/** Renders the 5-page contract; retries once in compact mode if the content overflows. */
+export async function generateOfgCreditAnalysisPdfWithMeta(
+  data: CreditAnalysisData,
+  opts: CreditAnalysisPdfOptions,
+): Promise<{ buffer: Buffer; pages: number }> {
+  let out = await renderAnalysisPdf(data, opts, false);
+  if (out.pages > CREDIT_ANALYSIS_PDF_PAGES) out = await renderAnalysisPdf(data, opts, true);
+  return out;
+}
+
+async function renderAnalysisPdf(
+  data: CreditAnalysisData,
+  opts: CreditAnalysisPdfOptions,
+  compact: boolean,
+): Promise<{ buffer: Buffer; pages: number }> {
   const L = analysisLabels(opts.lang);
   const es = opts.lang === "es";
+  const T = compact ? 6.9 : 7.6; // table font
   const pdf = await PDFDocument.create();
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
@@ -491,438 +666,557 @@ export async function generateOfgCreditAnalysisPdf(
       logo = null;
     }
   }
-  const sub = `${opts.clientName}  |  ${L.reportDate}: ${data.reportDate ?? "--"}${data.scoreModel ? `  |  ${data.scoreModel}` : ""}`;
-  const f = new PageFlow(pdf, font, bold, logo, `${L.title}`, sub, L, `Optimum Financial Group  |  ${opts.program.phone}  |  ${opts.program.site}`);
+  const name = displayBorrowerName(data.borrowerName) ?? opts.clientName;
+  const src = data.source;
+  const ordered = src?.ordered ? displayDate(src.ordered) : null;
+  const rd = parseReportDate(data.reportDate);
+  const reportDateText = rd
+    ? `${String(rd.getUTCMonth() + 1).padStart(2, "0")}/${String(rd.getUTCDate()).padStart(2, "0")}/${rd.getUTCFullYear()}`
+    : data.reportDate ?? "--";
+  // Spec v2.3 P2-2: 'Xactus tri-merge #94944806 (STATEWIDE)'; v2.4 #16: "ordered <date>" only when it
+  // differs from the report date, so the header stays one line.
+  const source =
+    data.reportFormat === "merged"
+      ? `${src?.vendor ? `${src.vendor} tri-merge` : es ? "Tri-merge de prestamista" : "Lender tri-merge"}${src?.reportId ? ` #${src.reportId}` : ""}${
+          src?.company ?? data.escrow?.lenderName ? ` (${src?.company ?? data.escrow?.lenderName})` : ""
+        }${ordered && ordered !== reportDateText ? `${es ? ", ordenado" : ", ordered"} ${ordered}` : ""}`
+      : data.scoreModel || "";
+  const sub = `${name}  |  ${L.reportDate}: ${reportDateText}${source ? `  |  ${L.source}: ${source}` : ""}`;
+  const f = new PageFlow(pdf, font, bold, logo, `${L.title}`, sub, L, `Optimum Financial Group  |  ${opts.program.phone}  |  ${opts.program.site}  |  ${OFG_REPORT_CONTACT.address}`);
   const active = BUREAUS.filter((b) => !data.missingBureaus.includes(b));
+  const totals = data.totals;
+  // Section n starts on page n; an overflow from the previous section is absorbed, not added.
+  const startSectionPage = (n: number) => {
+    if (f.pageNo < n) f.newPage();
+  };
+  const clip = (t: string, max: number) => (compact && t.length > max ? `${t.slice(0, max - 3)}...` : t);
 
-  // ── 1. Scores + overview ────────────────────────────────────────────────
+  // ── Page 1: scores + overview + banner + facts ──────────────────────────
   f.section(L.s1);
-  f.subhead(L.scoreSnapshot);
-  for (const b of BUREAUS) {
+  // v2.4 #11: VantageScore column on every report; "Not itemized" when the source has none.
+  f.table(
+    [L.bureau, data.scoreModel && /fico/i.test(data.scoreModel) ? "FICO" : L.score, L.rating, L.vantage],
+    BUREAUS.map((b) => {
+      const s = data.scores[b];
+      return [
+        BUREAU_NAME[b],
+        s === null ? L.notReported : String(s),
+        s === null ? "--" : data.scoreRatings?.[b] || scoreRating(s, es),
+        data.vantageScores?.[b] ? String(data.vantageScores[b]) : L.notItemized,
+      ];
+    }).concat([[L.middle, data.middleScore != null ? String(data.middleScore) : "--", "", ""]]),
+    [0.4, 0.18, 0.18, 0.24],
+    { size: T },
+  );
+  for (const b of active) {
     const s = data.scores[b];
-    // The rating PRINTED on the report wins; computed band only as a fallback.
-    const rating = data.scoreRatings?.[b] || (s === null ? "" : scoreRating(s, es));
-    f.scoreBar(BUREAU_NAME[b], s, s === null ? L.notReported : `${s}  ${rating}`);
+    if (s !== null) f.scoreBar(BUREAU_NAME[b], s, String(s));
   }
-  f.y -= 4;
   if (data.escrow?.active) {
-    const pulls = [...new Set((data.escrow.loanInquiries ?? []).map((q) => `${q.date} ${q.creditor}`))].join(", ");
-    f.callout(L.escrowTitle, L.escrowBody(pulls), "warn");
+    const lenderQ = data.escrow.loanInquiries?.[0];
+    // Spec v2.3 P1-1: the vendor pulled it for the requester — not a separate loan.
+    if (data.reportFormat === "merged" && src && (src.requestedBy || src.vendor || src.company)) {
+      const via = [src.company, src.vendor].filter(Boolean).join(" / ") || null;
+      f.callout(L.activeTitle, L.mortgageBody(src.requestedBy, via, ordered ?? displayDate(data.reportDate)), "gold");
+    } else {
+      f.callout(L.activeTitle, L.activeBody(data.escrow.lenderName ?? lenderQ?.creditor ?? null, displayDate(lenderQ?.date ?? data.reportDate)), "gold");
+    }
   }
   if (data.lender && data.lender.score) {
-    f.callout(
-      L.lenderTitle,
-      L.lenderBody(data.lender.model || "FICO", String(data.lender.score), data.lender.target ? String(data.lender.target) : ""),
+    f.callout(L.lenderTitle, L.lenderBody(data.lender.model || "FICO", String(data.lender.score), data.lender.target ? String(data.lender.target) : ""));
+  }
+  for (const b of data.missingBureaus) f.callout(`${L.flagged} - ${BUREAU_NAME[b].toUpperCase()}`, L.missingBureau(BUREAU_NAME[b]), "warn");
+  f.subhead(L.fileOverview);
+  // Per bureau (EQ / EX / TU) — Cesar, Oct 22: counts by bureau, never one combined column.
+  const OV: Bureau[] = ["EQ", "EX", "TU"];
+  const inqItemized = data.inquiries.some((q) => q.bureau);
+  const ov = (fn: (b: Bureau) => string) => OV.map((b) => (data.overview[b].reported ? fn(b) : "--"));
+  const perBureauInq = (b: Bureau) => {
+    if (!inqItemized) return L.notItemized;
+    const groups = new Set(data.inquiries.filter((q) => q.bureau === b).map((q) => `${q.creditor.toLowerCase()}|${q.date}`));
+    return String(groups.size);
+  };
+  const overviewRows: string[][] = [
+    [L.accounts, ...ov((b) => String(data.overview[b].totalAccounts))],
+    [L.posNeg, ...ov((b) => `${data.overview[b].positive} / ${data.overview[b].negative}`)],
+    [L.inquiries, ...ov(perBureauInq)],
+    [L.utilization, ...ov((b) => {
+      const o = data.overview[b];
+      return o.utilizationPct === null ? L.na : `${wholePct(o.revolvingBalance, o.revolvingLimit)}% (${pdfMoney(o.revolvingBalance)} / ${pdfMoney(o.revolvingLimit)})`;
+    })],
+    [L.avgAgeOnly, ...ov((b) => (data.overview[b].avgAgeMonths === null ? "--" : L.years(data.overview[b].avgAgeMonths!)))],
+    [L.oldestOnly, ...ov((b) => displayDate(data.overview[b].oldest?.opened, true))],
+    [L.collCo, ...ov((b) => `${data.negatives.filter((n) => n.kind === "collection" && n.bureaus.includes(b)).length} / ${data.negatives.filter((n) => n.kind === "charge_off" && n.bureaus.includes(b)).length}`)],
+    [L.publicRecords, ...ov((b) => String(data.negatives.filter((n) => n.kind === "public_record" && n.bureaus.includes(b)).length))],
+  ];
+  f.table([L.metric, ...OV.map((b) => BUREAU_NAME[b])], overviewRows, [0.31, 0.23, 0.23, 0.23], { size: T });
+  if (totals) {
+    f.paragraph(
+      L.fileTotals(totals.tradelines, totals.withBalance, totals.negativeTradelines, totals.negativeAccounts, pdfMoney(totals.pastDue)),
+      7.4,
+      OFG_PDF.muted,
     );
   }
-  f.subhead(L.fileOverview);
-  const ov = (fn: (b: Bureau) => string) => BUREAUS.map((b) => (data.overview[b].reported ? fn(b) : "--"));
-  const collections = (b: Bureau) => data.negatives.filter((n) => n.kind === "collection" && n.bureaus.includes(b)).length;
-  const publicRecords = (b: Bureau) => data.negatives.filter((n) => n.kind === "public_record" && n.bureaus.includes(b)).length;
-  const closedWithBalance = data.utilization.filter((u) => u.closed);
-  f.table(
-    [L.metric, ...BUREAUS.map((b) => BUREAU_NAME[b])],
-    [
-      [L.totalAccounts, ...ov((b) => String(data.overview[b].totalAccounts))],
-      [L.posNeg, ...ov((b) => `${data.overview[b].positive} / ${data.overview[b].negative}`)],
-      [L.inquiries, ...ov((b) => String(data.overview[b].hardInquiries))],
-      [
-        L.utilOpen,
-        ...ov((b) => {
-          const o = data.overview[b];
-          return o.utilizationPct === null ? "--" : `${o.utilizationPct}%`;
-        }),
-      ],
-      ...(closedWithBalance.length
-        ? [
-            [
-              L.utilInclClosed,
-              ...ov((b) => {
-                const o = data.overview[b];
-                // Closed cards still carrying a balance on THIS bureau.
-                const extra = data.negatives
-                  .filter((n) => n.bureaus.includes(b))
-                  .map((n) => closedWithBalance.find((u) => u.account === n.creditor))
-                  .filter((u): u is NonNullable<typeof u> => !!u);
-                if (!extra.length) return "N/A";
-                const lim = o.revolvingLimit + extra.reduce((s, u) => s + u.limit, 0);
-                const bal = o.revolvingBalance + extra.reduce((s, u) => s + u.balance, 0);
-                return lim > 0 ? `${Math.round((bal / lim) * 100)}%` : "--";
-              }),
-            ],
-          ]
-        : []),
-      [L.avgAge, ...ov((b) => (data.overview[b].avgAgeMonths === null ? "--" : L.years(data.overview[b].avgAgeMonths!)))],
-      [L.oldest, ...ov((b) => (data.overview[b].oldest ? data.overview[b].oldest!.opened : "--"))],
-      [L.pubColl, ...ov((b) => `${publicRecords(b)} / ${collections(b)}`)],
-      [L.revLimit, ...ov((b) => pdfMoney(data.overview[b].revolvingLimit))],
-    ],
-    [0.31, 0.23, 0.23, 0.23],
-  );
-  for (const b of data.missingBureaus) {
-    f.callout(`${L.flagged} - ${BUREAU_NAME[b].toUpperCase()}`, L.missingBureau(BUREAU_NAME[b]), "warn");
-  }
   f.subhead(L.keyObs);
-  for (const obs of keyObservations(data, es)) f.bullet(obs);
+  for (const obs of keyObservations(data, es).slice(0, compact ? 4 : 5)) f.bullet(obs);
 
-  // ── 2. Dispute plan (Round 1 → 4, easiest first) ────────────────────────
-  f.ensure(180);
+  // ── Page 2: dispute priority ────────────────────────────────────────────
+  startSectionPage(2);
   f.section(L.s2);
-  f.paragraph(`${L.roundIntro}${data.escrow?.active ? ` ${L.fileAfterClosing}` : ""}`, 8.5, OFG_PDF.muted);
-
-  // Round 1: clusters, standalone targets, then exclusions with the reason.
+  const head = [L.creditor, L.type, L.bureaus, L.issue, L.legal];
+  const widths = [0.22, 0.12, 0.11, 0.38, 0.17];
   f.subhead(L.roundTitle(1));
-  const r1Rows: string[][] = [];
+  const r1: string[][] = [];
   for (const c of data.inquiryClusters ?? []) {
-    r1Rows.push([
-      L.cluster(c.from, c.to, c.count),
-      BUREAUS.filter((b) => c.perBureau[b]).map((b) => `${b} ${c.perBureau[b]}`).join(" / "),
-      L.clusterNote(c.older12m),
+    // R-2: the cluster row names its creditors (bureau after each) and carries the lower-odds note.
+    const members = data.inquiries.filter((q) => q.clusterId === c.id);
+    const byBureau = new Map<string, string[]>();
+    for (const q of members) {
+      const k = q.bureau ?? L.notItemized;
+      byBureau.set(k, [...(byBureau.get(k) ?? []), q.creditor]);
+    }
+    // Compact (overflow) pass: first names per bureau + "+N" so a busy file keeps its 5 pages.
+    const nameCap = compact ? 2 : 6;
+    const names = [...byBureau.entries()]
+      .map(([b, cs]) => {
+        const u = [...new Set(cs)];
+        return `${u.slice(0, nameCap).join(", ")}${u.length > nameCap ? ` +${u.length - nameCap}` : ""} (${b})`;
+      })
+      .join("; ");
+    const odds = members.map((q) => q.nearAccount || q.lowerOdds).find(Boolean);
+    r1.push([
+      L.cluster(displayDate(c.from), c.count),
+      L.inquiry,
+      inqItemized ? BUREAUS.filter((b) => c.perBureau[b]).join(", ") : L.notItemized,
+      `${names} - ${L.inquiryDispute}${odds ? ` (${odds})` : ""}`,
       LEGAL_ROUND1,
     ]);
   }
-  for (const q of data.inquiries.filter((x) => !x.clusterId && x.action !== "permissible")) {
-    r1Rows.push([
-      `${q.creditor} (${q.date})`,
-      q.bureau,
-      q.action === "ages_off" ? L.inquiryAgesOff(q.agesOff ?? "--") : L.inquiryDispute,
+  // One row per creditor + date (bureau copies combined); compact mode caps the list.
+  const inqGroups = new Map<string, { q: (typeof data.inquiries)[number]; bureaus: string[] }>();
+  for (const q of data.inquiries.filter((x) => !x.clusterId && x.action !== "permissible" && x.duplicateOf == null)) {
+    const k = `${q.creditor.toLowerCase()}|${q.date}|${q.action}`;
+    const g = inqGroups.get(k) ?? { q, bureaus: [] };
+    if (q.bureau && !g.bureaus.includes(q.bureau)) g.bureaus.push(q.bureau);
+    inqGroups.set(k, g);
+  }
+  const inqRows = [...inqGroups.values()];
+  const inqCap = compact ? 10 : 16;
+  for (const { q, bureaus } of inqRows.slice(0, inqCap)) {
+    const dup = q.duplicates && q.duplicates > 1;
+    // R-2: one row for the duplicate pulls with every date ("09/18 + 09/21/2026").
+    const dupDates = dup
+      ? [q, ...data.inquiries.filter((x) => x.duplicateOf != null && data.inquiries[x.duplicateOf] === q)]
+          .map((x) => parseReportDate(x.date))
+          .filter((d): d is Date => !!d)
+          .sort((a, b) => a.getTime() - b.getTime())
+      : [];
+    const md = (d: Date) => `${String(d.getUTCMonth() + 1).padStart(2, "0")}/${String(d.getUTCDate()).padStart(2, "0")}`;
+    const when = dupDates.length > 1 ? `${dupDates.slice(0, -1).map(md).join(" + ")} + ${md(dupDates[dupDates.length - 1])}/${dupDates[dupDates.length - 1].getUTCFullYear()}` : displayDate(q.date);
+    r1.push([
+      dup ? `${q.creditor} (x${q.duplicates}), ${when}` : `${q.creditor} ${displayDate(q.date)}`,
+      L.inquiry,
+      bureaus.length ? bureaus.join(", ") : L.notItemized,
+      `${dup ? `${q.duplicateKind === "repeat" ? L.repeatInq(!!q.autoPull) : L.duplicateInq} - ` : ""}${q.action === "ages_off" ? L.inquiryAgesOff(q.agesOff ?? "--") : L.inquiryDispute}${q.lowerOdds ? ` (${q.lowerOdds})` : ""}${q.nearAccount ? ` (${q.nearAccount})` : ""}`,
       q.action === "ages_off" ? "--" : LEGAL_ROUND1,
     ]);
   }
-  const excludedSeen = new Set<string>();
+  if (inqRows.length > inqCap) r1.push([L.moreInquiries(inqRows.length - inqCap), L.inquiry, "", "", LEGAL_ROUND1]);
+  // One row per field (name / address / SSN / DOB), bureaus combined.
+  const idGroups = new Map<string, { field: string; kind: string; bureaus: string[]; details: string[]; unlabeled: boolean }>();
+  for (const fl of data.identityFlags ?? []) {
+    const key = `${fl.field}|${fl.kind ?? ""}`;
+    const g = idGroups.get(key) ?? { field: fl.field, kind: fl.kind ?? "", bureaus: [], details: [], unlabeled: false };
+    if (fl.bureau) {
+      if (!g.bureaus.includes(fl.bureau)) g.bureaus.push(fl.bureau);
+    } else g.unlabeled = true;
+    if (fl.detail && !g.details.includes(fl.detail)) g.details.push(fl.detail);
+    idGroups.set(key, g);
+  }
+  // Spec v2.3 P1-6: one row per variance type per bureau; complete values only.
+  for (const { field, kind, ...g } of idGroups.values()) {
+    // v2.4 #4: a unit mismatch on one street is ONE Round 1 row naming every bureau's unit.
+    if (kind === "unit_mismatch") {
+      for (const d of g.details) r1.push([L.personalInfo, L.unitMismatch, g.bureaus.join(", "), clip(d, 110), "FCRA §611"]);
+      continue;
+    }
+    const tail = field === "address" ? ` - ${L.confirmPrior}` : "";
+    if (g.bureaus.length > 1) {
+      for (const b of g.bureaus) {
+        const mine = (data.identityFlags ?? []).filter((x) => x.field === field && (x.kind ?? "") === kind && x.bureau === b).map((x) => completeValuesOnly(x.detail, es));
+        r1.push([L.personalInfo, L.fieldName(field), b, `${clip([...new Set(mine)].join("; "), 110)}${tail}`, "FCRA §611"]);
+      }
+      continue;
+    }
+    const where = [...g.bureaus, ...(g.unlabeled ? [L.notItemized] : [])].join(", ");
+    r1.push([L.personalInfo, L.fieldName(field), where, `${clip(g.details.map((d) => completeValuesOnly(d, es)).join("; "), 110)}${tail}`, "FCRA §611"]);
+  }
+  const exGroups = new Map<string, { q: (typeof data.inquiries)[number]; bureaus: string[] }>();
   for (const q of data.inquiries.filter((x) => x.action === "permissible")) {
-    const k = `${q.creditor}|${q.date}`;
-    if (excludedSeen.has(k)) continue;
-    excludedSeen.add(k);
-    const bureaus = data.inquiries.filter((x) => x.creditor === q.creditor && x.date === q.date).map((x) => x.bureau);
-    r1Rows.push([
-      `${L.excluded}: ${q.creditor} (${q.date})`,
-      bureaus.join(" / "),
-      q.excludedReason === "active_loan" ? L.excludedLoan : L.excludedMatch,
-      "--",
-    ]);
+    const key = `${q.creditor.toLowerCase()}|${q.date}`;
+    const g = exGroups.get(key) ?? { q, bureaus: [] };
+    if (q.bureau && !g.bureaus.includes(q.bureau)) g.bureaus.push(q.bureau);
+    exGroups.set(key, g);
   }
-  if (r1Rows.length) f.table([L.creditor, L.bureaus, L.detail, L.legal], r1Rows, [0.3, 0.14, 0.4, 0.16]);
-  else f.paragraph(L.noneOnFile, 8.5, OFG_PDF.muted);
-
-  // Round 2: third-party collections only.
-  f.subhead(L.roundTitle(2));
-  const r2 = data.negatives.filter((n) => n.round === 2 && !n.hold);
-  if (r2.length) {
+  for (const { q, bureaus } of exGroups.values()) {
+    const why = q.excludedReason === "active_loan" ? L.excludedLoan : L.excludedMatch(q.lowerOdds ?? "");
+    r1.push([`${q.creditor} ${displayDate(q.date)}`, L.inquiry, bureaus.length ? bureaus.join(", ") : L.notItemized, why, "--"]);
+  }
+  if (r1.length) f.table(head, r1, widths, { size: T });
+  else f.paragraph(L.noneOnFile, 8, OFG_PDF.muted);
+  if (data.reportFormat === "merged") f.paragraph(L.lenderWindow, 7.2, OFG_PDF.muted);
+  for (const r of [2, 3, 4] as const) {
+    f.subhead(L.roundTitle(r));
+    const rows = data.negatives
+      .filter((n) => n.round === r && !n.hold)
+      // v2.4 #5: Type = the account type from the source; the issue stays in Status / issue.
+      .map((n) => [`${n.creditor}${n.mask ? ` ...${n.mask}` : ""}`, n.accountType ? L.acctType(n.accountType) : L.kind(n.kind), bureauLabel(n.bureaus, n.bureausNotItemized, L), clip(issueText(n, L), 120), n.legalBasis]);
+    if (rows.length) f.table(head, rows, widths, { size: T });
+    else f.paragraph(L.noneOnFile, 8, OFG_PDF.muted);
+  }
+  if ((data.informational ?? []).length) {
+    f.subhead(L.informational);
     f.table(
-      [L.creditor, L.type, L.bureaus, L.detail, L.legal],
-      r2.map((n) => [n.creditor, L.kind(n.kind), n.bureaus.join(", "), negativeDetail(n, L), n.legalBasis]),
-      [0.22, 0.13, 0.1, 0.38, 0.17],
+      [L.creditor, L.bureaus, L.note],
+      data.informational!.slice(0, compact ? 4 : 8).map((i) => [`${i.creditor}${i.mask ? ` ...${i.mask}` : ""}`, i.bureaus.join(", "), clip(i.note, 100)]),
+      [0.3, 0.15, 0.55],
+      { size: T },
     );
-  } else f.paragraph(`${L.noneOnFile} ${L.noCollections}`, 8.5, OFG_PDF.muted);
-
-  // Round 3: inconsistencies + personal info + positive-account accuracy updates.
-  f.subhead(L.roundTitle(3));
-  const r3: string[][] = data.negatives
-    .filter((n) => n.round === 3 && !n.hold)
-    .map((n) => [n.creditor, L.kind(n.kind), n.bureaus.join(", "), negativeDetail(n, L), n.legalBasis]);
-  const idByBureau = new Map<Bureau, string[]>();
-  for (const flag of data.identityFlags ?? []) {
-    idByBureau.set(flag.bureau, [...(idByBureau.get(flag.bureau) ?? []), flag.detail]);
-  }
-  for (const [b, details] of idByBureau) {
-    r3.push([`${BUREAU_NAME[b]} ${L.identityItem.toLowerCase()}`, L.identityItem, b, `${details.join("; ")}. ${L.identityAction}`, "FCRA §611"]);
-  }
-  for (const u of data.accuracyUpdates ?? []) {
-    r3.push([u.creditor, L.updateItem(u.type ?? L.type), u.bureaus.join(", "), `${u.inconsistencies.join("; ")}. ${L.updateNote}`, "FCRA §611, §623"]);
-  }
-  if (r3.length) f.table([L.creditor, L.type, L.bureaus, L.detail, L.legal], r3, [0.22, 0.13, 0.1, 0.38, 0.17]);
-  else f.paragraph(L.noneOnFile, 8.5, OFG_PDF.muted);
-
-  // Round 4: charge-offs / original-creditor derogatories + fallback for Round 3.
-  f.subhead(L.roundTitle(4));
-  const r4 = data.negatives.filter((n) => n.round === 4 && !n.hold);
-  const fallback = data.negatives.filter((n) => n.round === 3 && !n.hold);
-  const r4Rows = [
-    ...r4.map((n) => [n.creditor, L.kind(n.kind), n.bureaus.join(", "), negativeDetail(n, L), n.legalBasis]),
-    ...fallback.map((n) => [n.creditor, L.kind(n.kind), n.bureaus.join(", "), L.fallbackNote, "FCRA §611, §623"]),
-  ];
-  if (r4Rows.length) f.table([L.creditor, L.type, L.bureaus, L.detail, L.legal], r4Rows, [0.22, 0.13, 0.1, 0.38, 0.17]);
-  else f.paragraph(L.noneOnFile, 8.5, OFG_PDF.muted);
-
-  const held = data.negatives.filter((n) => n.hold);
-  if (held.length) {
-    f.subhead(L.hold);
-    f.table(
-      [L.creditor, L.type, L.bureaus, L.detail, L.priority],
-      held.map((n) => [n.creditor, L.kind(n.kind), n.bureaus.join(", "), negativeDetail(n, L), `R${n.round}`]),
-      [0.24, 0.13, 0.1, 0.43, 0.1],
-    );
-    f.paragraph(L.holdNote, 7.8, OFG_PDF.muted);
   }
 
-  // ── 3. Account tables ───────────────────────────────────────────────────
-  f.ensure(180);
+  // ── Page 3: negatives (oldest first), active positives, utilization ──────
+  startSectionPage(3);
   f.section(L.s3);
-  f.subhead(L.negativesTable);
-  const openedTime = (d: string | null) => parseReportDate(d)?.getTime() ?? Number.MAX_SAFE_INTEGER;
-  const oldestFirst = [...data.negatives].sort((a, b) => openedTime(a.opened) - openedTime(b.opened));
-  const negRows = oldestFirst.map((n) => [
-    n.opened ?? "--",
-    n.creditor,
-    L.kind(n.kind),
-    n.bureaus.join(", "),
-    negativeDetail(n, L),
-    n.hold ? `HOLD > R${n.round}` : n.round === 3 ? "R3 / R4" : `R${n.round}`,
-  ]);
-  if (negRows.length) f.table([L.opened, L.creditor, L.type, L.bureaus, L.status, L.priority], negRows, [0.1, 0.2, 0.13, 0.1, 0.35, 0.12]);
-  else f.paragraph(L.noneOnFile, 8.5, OFG_PDF.muted);
-  f.subhead(L.positivesTable);
-  f.table(
-    [L.creditor, L.type, L.bureaus, L.opened, L.limit, L.balance, L.status],
-    data.positives.map((p) => [p.creditor, p.type ?? "--", p.bureaus.join(", "), p.opened ?? "--", pdfMoney(p.limit), pdfMoney(p.balance), p.status ?? "--"]),
-    [0.25, 0.14, 0.11, 0.11, 0.12, 0.12, 0.15],
-  );
+  f.subhead(L.negTable);
+  const dTime = (n: AnalysisNegative) => parseReportDate(n.derogDate ?? n.opened)?.getTime() ?? Number.MAX_SAFE_INTEGER;
+  const negs = [...data.negatives].sort((a, b) => dTime(a) - dTime(b));
+  const anyProxy = negs.some((n) => n.derogDateIsProxy);
+  if (negs.length) {
+    f.table(
+      [L.derogDate, L.creditor, L.type, L.bureaus, L.balance, L.round],
+      negs.map((n) => [
+        `${displayDate(n.derogDate, true)}${n.derogDateIsProxy ? "*" : ""}`,
+        `${n.creditor}${n.mask ? ` ...${n.mask}` : ""}${n.joint ? ` ${L.joint}` : ""}`,
+        n.accountType ? L.acctType(n.accountType) : L.kind(n.kind),
+        bureauLabel(n.bureaus, n.bureausNotItemized, L),
+        pdfMoney(n.balance),
+        n.hold ? "--" : `R${n.round}`,
+      ]),
+      [0.14, 0.3, 0.15, 0.15, 0.13, 0.13],
+      { size: T },
+    );
+    if (anyProxy) f.paragraph(L.niFootnote, 7, OFG_PDF.muted);
+  } else f.paragraph(L.noneOnFile, 8, OFG_PDF.muted);
+  f.subhead(L.posTable);
+  // Spec v2.3 P1-8: real status per row; installments show the original amount, not a "limit".
+  const isOpen = (p: (typeof data.positives)[number]) => p.open ?? !/closed|paid|refinanc|transferred/i.test(p.status ?? "");
+  const posRows = [...data.positives].sort((a, b) => Number(isOpen(b)) - Number(isOpen(a)));
+  const posCap = compact ? 8 : 12;
+  if (posRows.length) {
+    f.table(
+      [L.creditor, L.type, L.opened, L.status, L.balLimit, L.bureaus],
+      posRows.slice(0, posCap).map((p) => {
+        const openType = /^open\b|utility/i.test(`${p.type ?? ""}`);
+        const amount = openType
+          ? `${pdfMoney(p.balance)} (${L.noLimit})`
+          : p.amountKind === "original"
+            ? `${pdfMoney(p.balance)}${p.limit ? ` (${L.origAmt} ${pdfMoney(p.limit)})` : ""}${p.monthlyPayment ? `, ${pdfMoney(p.monthlyPayment)}${L.perMonth}` : ""}`
+            : `${pdfMoney(p.balance)}${p.limit ? ` / ${pdfMoney(p.limit)}` : ""}`;
+        return [`${p.creditor}${p.mask ? ` ...${p.mask}` : ""}`, p.type ?? "--", displayDate(p.opened, true), p.statusLabel ?? (isOpen(p) ? "Open" : p.status ?? "--"), amount, p.bureaus.join(", ")];
+      }),
+      [0.24, 0.1, 0.11, 0.25, 0.18, 0.12],
+      { size: T },
+    );
+  }
+  if (posRows.length > posCap) f.paragraph(L.closedPositives(posRows.length - posCap), 7.6, OFG_PDF.muted);
   f.subhead(L.utilTable);
-  const target = (u: (typeof data.utilization)[number], cap: number) =>
-    u.derogatory ? L.closedRound(data.negatives.find((n) => n.creditor === u.account)?.round ?? 3) : u.balance <= cap ? L.alreadyOk : `${pdfMoney(cap)} ${L.orLess}`;
-  const uRows = data.utilization.map((u) => [
-    `${u.account}${u.authorizedUser ? " (AU)" : ""}${u.closed ? (es ? " (cerrada)" : " (closed)") : ""}`,
-    pdfMoney(u.limit),
-    pdfMoney(u.balance),
-    `${u.pctUsed}%`,
-    target(u, u.payTo30),
-    target(u, u.payTo10),
-  ]);
-  const totals = (rows: typeof data.utilization) => {
-    const lim = rows.reduce((s, u) => s + u.limit, 0);
-    const bal = rows.reduce((s, u) => s + u.balance, 0);
-    return [pdfMoney(lim), pdfMoney(bal), lim > 0 ? `${Math.round((bal / lim) * 1000) / 10}%` : "--", `${pdfMoney(Math.floor(lim * 0.3))} ${L.orLess}`, `${pdfMoney(Math.floor(lim * 0.1))} ${L.orLess}`];
-  };
-  const openU = data.utilization.filter((u) => !u.closed);
-  if (openU.length) uRows.push([L.totalOpen, ...totals(openU)]);
-  if (openU.length !== data.utilization.length) uRows.push([L.totalInclClosed, ...totals(data.utilization)]);
-  if (uRows.length) f.table([L.creditor, L.limit, L.balance, L.used, L.to30, L.to10], uRows, [0.3, 0.12, 0.12, 0.1, 0.18, 0.18]);
-  f.paragraph(L.utilNote, 7.8, OFG_PDF.muted);
+  // Spec v2.3 P0-3 / P0-7: reference figures only (never payoff advice); charge-offs show N/A.
+  // Lender tri-merges list every card; v2.4 #3: the total counts open cards in good standing only.
+  const utilAll = data.reportFormat === "merged" ? data.utilization : data.utilization.filter((u) => !u.closed);
+  const goodCards = utilAll.filter(inGoodStanding);
+  // Totals always cover every card; the rows shown are capped so the 5-page contract holds.
+  const rank = (u: (typeof utilAll)[number]) =>
+    u.status === "charged_off" ? 0 : u.status === "open" ? 1 : u.status === "inactive" ? 2 : u.status === "terminated" ? 3 : 4;
+  const utilCap = compact ? 6 : 10;
+  const utilRows = [...utilAll].sort((x, y) => rank(x) - rank(y) || y.balance - x.balance || y.limit - x.limit).slice(0, utilCap);
+  if (utilRows.length) {
+    const lim = goodCards.reduce((s, u) => s + u.limit, 0);
+    const bal = goodCards.reduce((s, u) => s + u.balance, 0);
+    const ref = (u: (typeof data.utilization)[number], pct: number) =>
+      inGoodStanding(u)
+        ? pdfMoney(Math.floor(u.limit * pct))
+        : u.status === "closed"
+          ? L.utilStatus("closed")
+          : u.status === "terminated" || u.status === "inactive"
+            ? L.notCounted
+            : L.na;
+    f.table(
+      [L.creditor, L.status, L.limit, L.balance, L.used, L.to30, L.to10],
+      [
+        ...utilRows.map((u) => [
+          `${u.account}${u.mask ? ` ...${u.mask}` : ""}${u.authorizedUser ? " (AU)" : ""}`,
+          L.utilStatus(u.status ?? (u.closed ? "closed" : "open")),
+          pdfMoney(u.limit),
+          pdfMoney(u.balance),
+          `${wholePct(u.balance, u.limit)}%`,
+          ref(u, 0.3),
+          ref(u, 0.1),
+        ]),
+        lim
+          ? [L.totalOpen, "", pdfMoney(lim), pdfMoney(bal), `${wholePct(bal, lim)}%`, pdfMoney(Math.floor(lim * 0.3)), pdfMoney(Math.floor(lim * 0.1))]
+          : [L.totalOpen, "", "$0", "$0", L.na, L.na, L.na],
+      ],
+      [0.24, 0.18, 0.1, 0.1, 0.08, 0.15, 0.15],
+      { size: T },
+    );
+  } else f.paragraph(L.noneOnFile, 8, OFG_PDF.muted);
+  if (utilAll.length > utilRows.length) f.paragraph(L.moreCards(utilAll.length - utilRows.length), 7.2, OFG_PDF.muted);
+  const uo = data.utilizationOverall;
+  if (uo.lenderUtilizationPct != null || uo.lenderUsedPct != null) f.paragraph(L.lenderUtil(uo.lenderUtilizationPct, uo.lenderUsedPct), 7.4, OFG_PDF.muted);
+  if (uo.allFromDerogatory) {
+    // R-6: name the real source.
+    const src = [...new Set(data.utilization.filter((u) => u.balance > 0).map((u) => u.account))];
+    f.paragraph(L.allDerogUtil(src.join(es ? " y " : " and "), src.length > 1), 7.4, OFG_PDF.muted);
+  }
+  if (uo.noOpenCardInGoodStanding && data.utilization.length) f.paragraph(L.utilNotApplicable, 7.4, OFG_PDF.muted);
 
-  // ── 4. Projections + tradelines ─────────────────────────────────────────
-  f.ensure(180);
+  // ── Page 4: projections + tradelines ────────────────────────────────────
+  startSectionPage(4);
   f.section(L.s4);
   f.subhead(L.projTitle);
-  f.paragraph(L.projNote, 7.8, OFG_PDF.muted);
+  f.paragraph(L.projNote, 7.4, OFG_PDF.muted);
   f.table(
-    [L.milestoneHeader, ...active.map((b) => BUREAU_NAME[b])],
-    data.projections.map((p) => [
-      L.milestone(p.key, !!data.escrow?.active),
+    [L.step, ...active.map((b) => BUREAU_NAME[b]), L.middleCol],
+    data.projections.filter((p) => PROJECTION_KEYS_MAX.includes(p.key)).map((p, k, rows) => [
+      L.milestone(p.key),
       ...active.map((b) => {
         const v = p.scores[b];
-        return v === null ? "--" : p.key === "current" ? String(v) : `${v}+`;
+        if (v === null) return "--";
+        if (p.key === "current") return String(v);
+        const r = p.ranges?.[b];
+        // R-8: nothing on this bureau in this round → same score, no "+" and no range.
+        const prev = rows[k - 1];
+        const prevRange = prev?.ranges?.[b] ?? (prev ? [prev.scores[b], prev.scores[b]] : null);
+        if (prev && r && prevRange && r[0] === prevRange[0] && r[1] === prevRange[1]) return `${v} (${p.key === "round1" ? L.noBureauInquiries(b) : L.noBureauItems(b)})`;
+        // A range collapsed by the +100 / 760 cap prints as one number, never "689-689".
+        return r && r[0] !== r[1] ? `${v}+ (${r[0]}-${r[1]})` : `${v}+`;
       }),
+      p.middle == null ? "--" : p.key === "current" ? String(p.middle) : `${p.middle}+`,
     ]),
-    [0.4, ...active.map(() => 0.6 / Math.max(1, active.length))],
+    [0.34, ...active.map(() => 0.5 / Math.max(1, active.length)), 0.16],
+    { size: T },
   );
+  // Middle-score bars.
+  // Compact (overflow) pass: the middle-score bars repeat the table above — dropped to keep 5 pages.
+  if (!compact) for (const p of data.projections.filter((x) => PROJECTION_KEYS_MAX.includes(x.key))) if (p.middle != null) f.scoreBar(L.milestone(p.key), p.middle, p.key === "current" ? String(p.middle) : `${p.middle}+`);
   if (data.tradelines?.length) {
     f.subhead(L.tradelineTitle);
     f.table(
       [L.type, L.tlLevel, L.impact, L.bureaus, L.tlTiming],
       data.tradelines.map((t) => [
         L.tlType(t.code),
-        t.code === "primary" ? "--" : `${t.code}${t.price ? ` (${pdfMoney(t.price)})` : ""}`,
-        t.impact,
-        t.bureaus.join(", "),
-        t.timing === "after_closing" ? L.tlAfterClosing : L.tlNow,
+        t.code === "primary" ? "--" : `${t.code}${t.price ? ` (${pdfMoney(t.price)})` : ""}${t.optional ? (es ? " opcional" : " optional") : ""}`,
+        t.note && t.code !== "primary" ? `${t.impact}. ${t.note}` : t.impact,
+        t.bureaus.length ? t.bureaus.join(", ") : L.tlPerIssuer,
+        t.timing === "hold" ? `${L.tlHold}${t.note ? `: ${t.note.replace(/^Hold:?\s*/i, "")}` : ""}` : t.timing === "after_closing" ? L.tlAfterClosing : L.tlNow,
       ]),
-      [0.26, 0.15, 0.3, 0.13, 0.16],
+      [0.22, 0.15, 0.3, 0.11, 0.22],
+      { size: T },
     );
     f.subhead(L.tlWhyTitle);
-    f.paragraph(tradelineWhy(data, es));
+    f.paragraph(tradelineWhy(data, es), 8);
   }
 
-  // ── 5. Action plan + file strength + program ────────────────────────────
-  f.ensure(180);
+  // ── Page 5: action plan, strength, program, CROA ────────────────────────
+  startSectionPage(5);
   f.section(L.s5);
   f.subhead(L.actionTitle);
   actionPlan(data, es).forEach((step, i) => f.bullet(`${i + 1}. ${step}`));
   f.subhead(L.strengthTitle);
   f.table(
-    [L.factor, L.current, L.post],
+    [L.factor, L.current, L.projected],
     [
       ...data.fileStrength.factors.map((x) => [L.factorName(x.key), `${x.current} / 20`, `${x.postRepair} / 20`]),
       [L.total, `${data.fileStrength.current} / 100`, `${data.fileStrength.postRepair} / 100`],
     ],
     [0.5, 0.25, 0.25],
+    { size: T },
   );
+  const complex = data.programTier === "complex";
   f.callout(
     L.programTitle,
-    `${L.programName(data.programTier, data.programTier === "complex" ? opts.program.complexPrice : opts.program.standardPrice)}. ${L.enroll}: ${opts.program.enrollUrl}  |  ${opts.program.phone}`,
+    `${L.programName(data.programTier, complex ? opts.program.complexPrice : opts.program.standardPrice)}. ${L.enroll}: ${complex ? opts.program.complexUrl : opts.program.standardUrl}  |  ${opts.program.phone}${opts.program.mfsnUrl ? `.  ${L.mfsn}: ${opts.program.mfsnUrl}` : ""}`,
   );
   f.callout(L.croaTitle, L.croa);
 
-  return Buffer.from(await pdf.save());
+  return { buffer: Buffer.from(await pdf.save()), pages: pdf.getPageCount() };
 }
 
-const LEGAL_ROUND1 = "FCRA §604, §611";
-
-/** "Why this works" paragraph tied to this file's numbers. */
+/** "Why it works" tied to this file's numbers. */
 export function tradelineWhy(data: CreditAnalysisData, es: boolean): string {
-  const openCards = data.utilization.filter((u) => !u.closed).length;
-  const late = data.negatives.find((n) => n.kind === "late");
+  const open = data.utilization.filter((u) => !u.closed);
+  const util = printedUtilization(data);
+  const limit = open.reduce((s, u) => s + u.limit, 0);
   const parts: string[] = [];
+  if (data.utilizationOverall.noOpenCardInGoodStanding) {
+    parts.push(
+      es
+        ? "No hay ninguna tarjeta abierta en buen estado reportando hoy; una linea AU antigua agrega una cuenta revolvente al dia con limite alto y saldo bajo, lo que le falta a este archivo."
+        : "There is no open credit card in good standing reporting today. An aged AU line adds an on-time revolving account with a high limit and low balance - the piece this file is missing.",
+    );
+    const primary = data.tradelines?.find((t) => t.code === "primary");
+    if (primary?.timing === "hold" && primary.note) {
+      const why = primary.note.replace(/^Hold:?\s*/i, "");
+      parts.push(es ? `Linea primaria en espera (${why}).` : `Primary line on hold (${why}).`);
+    }
+    return parts.join(" ");
+  }
   parts.push(
     es
-      ? `El archivo tiene ${openCards} ${openCards === 1 ? "tarjeta abierta" : "tarjetas abiertas"}${data.utilizationOverall.all !== null ? ` al ${data.utilizationOverall.all}% de utilizacion` : ""}.`
-      : `This file has ${openCards} open ${openCards === 1 ? "card" : "cards"}${data.utilizationOverall.all !== null ? ` at ${data.utilizationOverall.all}% utilization` : ""}.`,
+      ? `${open.length} ${open.length === 1 ? "tarjeta abierta" : "tarjetas abiertas"} con ${pdfMoney(limit)} de limite total${util !== null ? ` al ${util}% de utilizacion` : ""}.`
+      : `${open.length} open ${open.length === 1 ? "card" : "cards"} with ${pdfMoney(limit)} in total limits${util !== null ? ` at ${util}% utilization` : ""}.`,
   );
-  if (late) {
-    parts.push(
-      es
-        ? `Con un perfil revolvente delgado, el atraso de ${late.creditor} pesa mucho; una linea AU antigua y de alto limite agrega historial limpio y diluye ese atraso.`
-        : `With a thin revolving profile, the ${late.creditor} late carries outsized weight; a seasoned, high-limit AU line adds clean revolving history and dilutes it.`,
-    );
-  } else {
-    parts.push(
-      es
-        ? "Una linea AU antigua y de alto limite multiplica el credito disponible y estabiliza la utilizacion."
-        : "A seasoned, high-limit AU line multiplies available credit and stabilizes utilization.",
-    );
-  }
-  if (data.escrow?.active) {
-    parts.push(
-      es
-        ? "No se agregan cuentas ni lineas durante el escrow: cualquier cambio puede afectar la suscripcion."
-        : "No new accounts or tradelines during escrow - any change to the file can disrupt underwriting.",
-    );
+  parts.push(
+    es
+      ? "Una linea AU antigua y de alto limite agrega limite disponible e historial limpio, lo que baja la utilizacion total."
+      : "A seasoned, high-limit AU line adds available credit and clean history, which lowers total utilization.",
+  );
+  const primary = data.tradelines?.find((t) => t.code === "primary");
+  if (primary?.timing === "hold" && primary.note) {
+    const why = primary.note.replace(/^Hold:?\s*/i, "");
+    parts.push(es ? `Linea primaria en espera (${why}).` : `Primary line on hold (${why}).`);
   }
   return parts.join(" ");
 }
 
-/** Data-driven observations (no free text from the model). */
+/** Facts only (P1-7): what reports where — never single-item score-driver claims. */
 export function keyObservations(data: CreditAnalysisData, es: boolean): string[] {
   const out: string[] = [];
-  const active = BUREAUS.filter((b) => !data.missingBureaus.includes(b));
-  if (data.negatives.length) {
-    for (const n of data.negatives.slice(0, 3)) {
-      const missing = active.filter((b) => !n.bureaus.includes(b));
-      out.push(
-        es
-          ? `${n.creditor}: ${n.status} en ${n.bureaus.join(", ")}${missing.length ? ` (no reportado a ${missing.join(", ")})` : ""}.`
-          : `${n.creditor}: ${n.status} on ${n.bureaus.join(", ")}${missing.length ? ` (not reported to ${missing.join(", ")})` : ""}.`,
-      );
-    }
-    if (data.negatives.length > 3) {
-      out.push(es ? `${data.negatives.length - 3} cuentas negativas mas en la Seccion 3.` : `${data.negatives.length - 3} more derogatory accounts in Section 3.`);
-    }
+  if (data.escrow?.active) {
+    const by = data.source?.requestedBy;
+    const via = data.source?.company ?? data.escrow.lenderName ?? null;
+    out.push(
+      data.reportFormat === "merged" && (by || via)
+        ? es
+          ? `Archivo hipotecario consultado${by ? ` por ${by}` : ""}${via ? ` via ${via}` : ""}: esa consulta tiene proposito permitido y no es objetivo de disputa.`
+          : `Mortgage file pulled${by ? ` by ${by}` : ""}${via ? ` via ${via}` : ""}: that pull is a permissible-purpose inquiry, not a dispute target.`
+        : es
+          ? `Prestamo activo: ${data.escrow.lenderName ?? "el prestamista"} consulto el reporte; su consulta no es objetivo de disputa.`
+          : `Active loan: ${data.escrow.lenderName ?? "the lender"} pulled this report; its inquiry is not a dispute target.`,
+    );
+  }
+  const coll = data.negatives.filter((n) => n.kind === "collection");
+  // Spec v2.3 P1-3: paid collections stay negative — say so.
+  const paidColl = coll.filter((n) => n.paidOn !== undefined && n.paidOn !== null);
+  if (paidColl.length) {
+    out.push(
+      es
+        ? `${paidColl.map((n) => n.creditor).join(" y ")}: cobranza pagada${paidColl[0].paidOn ? ` (${paidColl[0].paidOn})` : ""} pero sigue reportada; los modelos FICO 2/4/5 hipotecarios cuentan cobranzas pagadas.`
+        : `${paidColl.map((n) => n.creditor).join(" and ")}: paid${paidColl[0].paidOn ? ` ${paidColl[0].paidOn}` : ""} but still reported; FICO 2/4/5 mortgage models still count paid collections.`,
+    );
+  }
+  for (const n of coll.filter((x) => !paidColl.includes(x)).slice(0, 2)) {
+    out.push(
+      es
+        ? `${n.creditor} (${pdfMoney(n.balance)}) se reporta en ${n.bureausNotItemized ? "buros no detallados" : n.bureaus.join(" y ")}.`
+        : `${n.creditor} (${pdfMoney(n.balance)}) reports on ${n.bureausNotItemized ? "bureaus not itemized" : n.bureaus.join(" and ")}.`,
+    );
+  }
+  const co = data.negatives.filter((n) => n.kind === "charge_off");
+  if (co.length) {
+    out.push(
+      es
+        ? `${co.length} ${co.length === 1 ? "cargo a perdida" : "cargos a perdida"}: ${co.map((n) => `${n.creditor} ${pdfMoney(n.balance)}`).join(", ")}.`
+        : `${co.length} charge-off${co.length === 1 ? "" : "s"}: ${co.map((n) => `${n.creditor} ${pdfMoney(n.balance)}`).join(", ")}.`,
+    );
+  }
+  const lates = data.negatives.filter((n) => n.kind === "late");
+  if (lates.length) {
+    out.push(
+      es
+        ? `${lates.length} ${lates.length === 1 ? "cuenta con pagos atrasados" : "cuentas con pagos atrasados"} (${lates.map((n) => n.creditor).join(", ")}).`
+        : `${lates.length} account${lates.length === 1 ? "" : "s"} with late payments (${lates.map((n) => n.creditor).join(", ")}).`,
+    );
+  }
+  const util = printedUtilization(data);
+  // v2.4 #9: when the revolving balance sits on charged-off / closed cards, say so in the same line.
+  const badBal = data.utilization.filter((u) => u.balance > 0 && !inGoodStanding(u));
+  const noGood = !!data.utilizationOverall.noOpenCardInGoodStanding && data.utilization.length > 0;
+  if (badBal.length && (noGood || data.utilizationOverall.allFromDerogatory)) {
+    const total = pdfMoney(badBal.reduce((s, u) => s + u.balance, 0));
+    const what = badBal
+      .map((u) => `${es ? (u.status === "charged_off" ? "la tarjeta en cargo a perdida" : "la tarjeta cerrada") : `the ${u.status === "charged_off" ? "charged-off" : "closed"}`} ${u.account}${es || /\bcard$/i.test(u.account) ? "" : " card"}`)
+      .join(es ? " y " : " and ");
+    out.push(
+      es
+        ? `Todo el saldo revolvente (${total}) esta en ${what}${noGood ? "; ninguna tarjeta abierta en buen estado." : "."}`
+        : `All revolving balance (${total}) is ${what}${noGood ? "; no open card in good standing." : "."}`,
+    );
   } else {
-    out.push(es ? "No se encontraron cuentas negativas." : "No derogatory tradelines found.");
+    if (util !== null && util > 30) out.push(es ? `Utilizacion revolvente al ${util}%.` : `Revolving utilization is ${util}%.`);
+    if (noGood) out.push(es ? "No hay ninguna tarjeta abierta en buen estado reportando." : "No open credit card in good standing is currently reporting.");
   }
-  // Score gap between bureaus explained by where an item reports.
-  const scored = active.filter((b) => data.scores[b] !== null);
-  if (scored.length >= 2 && data.negatives.length) {
-    const hi = scored.reduce((a, b) => (data.scores[a]! >= data.scores[b]! ? a : b));
-    const lo = scored.filter((b) => b !== hi && data.scores[hi]! - data.scores[b]! >= 40);
-    const cause = data.negatives.find((n) => !n.bureaus.includes(hi) && lo.every((b) => n.bureaus.includes(b)));
-    if (lo.length && cause) {
-      out.push(
-        es
-          ? `${cause.creditor} explica que ${lo.join("/")} esten por debajo de ${hi}, que no lo reporta.`
-          : `${cause.creditor} is the item holding ${lo.join("/")} below ${hi}, which does not report it.`,
-      );
-    }
-  }
-  for (const c of data.inquiryClusters ?? []) {
-    out.push(
-      es
-        ? `Grupo de ${c.count} consultas de compra (${c.from}).`
-        : `${c.count}-inquiry shopping cluster (${c.from}${c.to !== c.from ? ` - ${c.to}` : ""}).`,
-    );
-  }
-  if ((data.identityFlags ?? []).length) {
-    const bs = [...new Set(data.identityFlags.map((x) => x.bureau))];
-    out.push(es ? `Variacion de datos personales en ${bs.join(", ")}.` : `Personal-information variation on ${bs.join(", ")}.`);
-  }
-  for (const u of data.accuracyUpdates ?? []) {
-    out.push(es ? `${u.creditor} se reporta distinto entre buros (actualizar, no eliminar).` : `${u.creditor} reports inconsistently across bureaus (update, not a deletion).`);
-  }
-  const own = data.utilizationOverall.ownCardsOnly;
-  if (own !== null && own > 30) {
-    out.push(es ? `Sus tarjetas propias estan al ${own}% de utilizacion.` : `Own cards are at ${own}% utilization.`);
-  }
-  const held = data.negatives.filter((n) => n.hold).length;
-  if (held) {
-    out.push(
-      es
-        ? `${held} ${held === 1 ? "cuenta tiene" : "cuentas tienen"} nota de disputa del consumidor; ${held === 1 ? "queda" : "quedan"} EN ESPERA hasta confirmar y retirar la nota.`
-        : `${held} ${held === 1 ? "negative carries a consumer-dispute remark and is" : "negatives carry consumer-dispute remarks and are"} placed on HOLD until the notation is cleared.`,
-    );
-  }
+  for (const c of data.inquiryClusters ?? []) out.push(es ? `${c.count} consultas el ${c.from}.` : `${c.count} inquiries on ${c.from}.`);
+  if (!data.negatives.length) out.push(es ? "No se encontraron cuentas negativas." : "No derogatory tradelines found.");
   return out.slice(0, 6);
 }
 
-/** Ordered, data-driven action plan: max 6 steps naming the real items. */
+/** Max 6 steps, real items only, no positives, no new credit during an active loan (P0-7 / P0-9). */
 export function actionPlan(data: CreditAnalysisData, es: boolean): string[] {
   const steps: string[] = [];
   const names = (rows: Array<{ creditor: string }>) => [...new Set(rows.map((r) => r.creditor))].join(", ");
   if (data.escrow?.active) {
+    steps.push(es ? "Confirmar con el oficial de prestamos el momento de las disputas." : "Confirm dispute timing with the loan officer.");
+  }
+  if (data.reportFormat === "merged") {
     steps.push(
       es
-        ? "Proteger el cierre: sin disputas, cuentas nuevas ni lineas durante el escrow. Coordinar con el oficial de prestamos cualquier rescore."
-        : "Protect the closing. No disputes, new accounts, or tradelines while in escrow. Coordinate with the loan officer on any lender-side rescore.",
-    );
-    steps.push(
-      es
-        ? "Reporte nuevo de 3 buros despues del cierre para confirmar estados y ver la nueva hipoteca."
-        : "Fresh 3-bureau pull after closing to confirm current statuses and see the new mortgage reporting.",
+        ? "Sacar el reporte completo de MyFreeScoreNow (historial de 12 meses por buro) para fechar los atrasos."
+        : "Pull the full MyFreeScoreNow report (12-month history by bureau) to date the lates.",
     );
   }
   if (data.missingBureaus.length) {
     steps.push(
       es
-        ? `Complete el reporte de 3 buros: levante cualquier congelamiento en ${data.missingBureaus.join(", ")} y saque un reporte nuevo.`
-        : `Complete the 3-bureau pull: lift any freeze on ${data.missingBureaus.join(", ")} and pull a fresh report.`,
+        ? `Levantar cualquier congelamiento en ${data.missingBureaus.join(", ")} y sacar un reporte de 3 buros.`
+        : `Lift any freeze on ${data.missingBureaus.join(", ")} and pull a fresh 3-bureau report.`,
     );
   }
-  const held = data.negatives.filter((n) => n.hold);
-  if (held.length) {
-    steps.push(es ? `Retire las notas de disputa en ${names(held)}.` : `Clear the hold items: confirm no open disputes and remove the notations on ${names(held)}.`);
+  // Rounds (real items only), merged when they would exceed the 6-step limit.
+  const rounds: Array<{ label: number[]; what: string[] }> = [];
+  const r1 = data.inquiries.filter((q) => q.action === "dispute");
+  if (r1.length || (data.identityFlags ?? []).length) {
+    rounds.push({
+      label: [1],
+      what: [
+        ...(r1.length ? [es ? `consultas (${names(r1)})` : `inquiries (${names(r1)})`] : []),
+        ...((data.identityFlags ?? []).length ? [es ? "datos personales" : "personal-info variances"] : []),
+      ],
+    });
   }
-  const r1 = (data.inquiryClusters ?? []).length + data.inquiries.filter((q) => !q.clusterId && q.action === "dispute").length;
-  if (r1) {
-    const c = data.inquiryClusters?.[0];
-    steps.push(
-      es
-        ? `Ronda 1 - Consultas: disputar ${c ? `el grupo de ${c.from}` : "las consultas"} que siga sin proposito permitido.`
-        : `Round 1 - Inquiries: dispute ${c ? `the ${c.from} cluster inquiries` : "the inquiries"} still reporting without permissible purpose.`,
-    );
+  for (const r of [2, 3, 4] as const) {
+    const items = data.negatives.filter((n) => n.round === r && !n.hold);
+    if (items.length) rounds.push({ label: [r], what: [names(items)] });
   }
-  const r2 = data.negatives.filter((n) => n.round === 2 && !n.hold);
-  if (r2.length) steps.push(es ? `Ronda 2 - Cobranzas: ${names(r2)}.` : `Round 2 - Collections: ${names(r2)}.`);
-  const r3 = data.negatives.filter((n) => n.round === 3 && !n.hold);
-  const r3Extra = [
-    ...((data.identityFlags ?? []).length ? [es ? "datos personales" : "personal-info variations"] : []),
-    ...(data.accuracyUpdates ?? []).map((u) => (es ? `actualizar ${u.creditor}` : `update ${u.creditor}`)),
-  ];
-  if (r3.length || r3Extra.length) {
-    const what = [...(r3.length ? [es ? `inconsistencias de ${names(r3)}` : `${names(r3)} cross-bureau inconsistencies`] : []), ...r3Extra].join("; ");
-    steps.push(es ? `Ronda 3 - Exactitud: ${what}.` : `Round 3 - Accuracy: dispute ${what}.`);
-  }
-  const r4 = data.negatives.filter((n) => n.round === 4 && !n.hold);
-  if (r4.length || r3.length) {
-    steps.push(
-      es
-        ? `Ronda 4 - Escalar: ${names([...r4, ...r3])} con el proveedor si vuelven verificadas.`
-        : `Round 4 - Escalation: ${names([...r4, ...r3])} directly with the furnisher if verified.`,
-    );
-  }
-  const cards = data.utilization.filter((u) => !u.closed && !u.derogatory && !u.authorizedUser);
+  // Spec v2.3 P0-7: no step tells the client to pay, pay down or pay off a balance — the last step is the AU line.
   const tl = data.tradelines?.find((t) => t.code === "IH-1");
-  if (tl || cards.length) {
-    const top = cards.sort((a, b) => b.pctUsed - a.pctUsed)[0];
-    steps.push(
-      es
-        ? `Dar profundidad: ${tl ? "linea AU IH-1 y una linea primaria" : "mantener balances bajos"}${top ? `; mantener ${top.account} en ${pdfMoney(top.payTo10)} o menos` : ""}.`
-        : `Build depth: ${tl ? "place the IH-1 AU tradeline and add a primary revolving line" : "keep balances low"}${top ? `; keep ${top.account} at or below ${pdfMoney(top.payTo10)}` : ""}.`,
-    );
+  const utilStep = !!tl;
+  const slots = Math.max(1, 6 - steps.length - (utilStep ? 1 : 0));
+  while (rounds.length > slots) {
+    const b = rounds.pop()!;
+    const a = rounds.pop()!;
+    rounds.push({ label: [...a.label, ...b.label], what: [...a.what, ...b.what] });
   }
-  if (steps.length < 6) {
+  for (const r of rounds) {
+    const lbl = r.label.length > 1 ? `${es ? "Rondas" : "Rounds"} ${r.label[0]}-${r.label[r.label.length - 1]}` : `${es ? "Ronda" : "Round"} ${r.label[0]}`;
+    steps.push(`${lbl}: ${r.what.join(es ? " y " : "; ")}.`);
+  }
+  if (utilStep) {
+    const after = tl?.timing === "after_closing";
     steps.push(
       es
-        ? "Mantenga todos los pagos a tiempo y evite nuevas solicitudes de credito durante el programa."
-        : "Keep every account paid on time and avoid new credit applications during the program.",
+        ? `Linea AU (IH-1)${after ? ": agregar despues del cierre o antes de la siguiente solicitud; sin linea primaria nueva mientras el prestamo este activo" : ""}.`
+        : `AU tradeline (IH-1)${after ? ": add after closing or before the next application; no new primary line while the loan file is active" : ""}.`,
     );
   }
   return steps.slice(0, 6);
@@ -1022,7 +1316,7 @@ export async function generateProgressEnhancementPdf(
     }
   }
   const sub = `${opts.clientName}  |  ${enh.beforeDate ?? "--"} -> ${enh.afterDate ?? "--"}${enh.scoreModel ? `  |  ${enh.scoreModel}` : ""}`;
-  const f = new PageFlow(pdf, font, bold, logo, P.title, sub, L, `Optimum Financial Group  |  ${opts.phone}  |  ${opts.site}`, P.detailPage);
+  const f = new PageFlow(pdf, font, bold, logo, P.title, sub, L, `Optimum Financial Group  |  ${opts.phone}  |  ${opts.site}  |  ${OFG_REPORT_CONTACT.address}`, P.detailPage);
 
   f.section(P.section);
   // Summary tiles.

@@ -59,6 +59,13 @@ describe("validatePublishRoundNumber / cascade / legend", () => {
     expect(validatePublishRoundNumber(6, 5)).toMatch(/1–5/);
     expect(validatePublishRoundNumber(6, 8)).toBeNull();
     expect(validatePublishRoundNumber(12, 12)).toBeNull();
+    // Oct 23 2026: programs go up to 24 rounds (Lecca — clients reaching R12).
+    expect(validatePublishRoundNumber(13, 24)).toBeNull();
+    expect(validatePublishRoundNumber(24, 24)).toBeNull();
+    expect(validatePublishRoundNumber(25, 24)).toMatch(/1–24/);
+    expect(ABSOLUTE_MAX_ROUNDS).toBe(24);
+    expect(clampMaxRounds(24)).toBe(24);
+    expect(clampMaxRounds(30)).toBe(24);
   });
 
   it("cascades through max", () => {

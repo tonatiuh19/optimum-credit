@@ -2,7 +2,7 @@ import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
 
 /**
- * Pipeline stage pill. Extended OFG rounds (6–12) are stored on `round_5`, so
+ * Pipeline stage pill. Extended OFG rounds (6–24) are stored on `round_5`, so
  * pass `effectiveRound` to show the real round with an "Extended" tag.
  */
 export function ClientStageBadge({

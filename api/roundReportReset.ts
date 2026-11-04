@@ -4,7 +4,7 @@
  */
 
 const DEFAULT_MAX_ROUNDS = 5;
-const ABSOLUTE_MAX_ROUNDS = 12;
+const ABSOLUTE_MAX_ROUNDS = 24;
 
 function clampMaxRounds(raw: unknown): number {
   const n = Number(raw);

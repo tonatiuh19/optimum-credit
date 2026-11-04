@@ -28,7 +28,7 @@ export interface AdminUser {
   first_name: string;
   last_name: string;
   phone?: string | null;
-  role: "super_admin" | "admin" | "support" | "agent" | "affiliate";
+  role: "super_admin" | "admin" | "support" | "agent" | "affiliate" | "underwriter";
   status: "active" | "suspended" | "invited" | "inactive";
   /** Admin UI/comms language preference (not client ownership) */
   preferred_language?: "en" | "es" | null;
@@ -113,6 +113,7 @@ export type AdminNotifyEventKey =
   | "event_registration"
   | "prospect_temperature"
   | "progress_report_alerts"
+  | "credit_analysis_review"
   | "morning_digest";
 
 export type AdminNotifyChannel = "email" | "in_app" | "sms";
@@ -590,7 +591,7 @@ export interface AdminClientListItem {
   pipeline_stage: PipelineStage;
   pipeline_stage_changed_at?: string | null;
   /**
-   * Real round for `round_5` clients: 5, or 6–12 in an extended program
+   * Real round for `round_5` clients: 5, or 6–24 in an extended program
    * (from published reports + case max_rounds). Null for other stages.
    */
   effective_round?: number | null;
@@ -744,7 +745,7 @@ export interface CreditRepairCase {
   preferred_language?: "en" | "es" | null;
   pipeline_stage: PipelineStage;
   pipeline_stage_changed_at?: string | null;
-  /** Max OFG progress rounds (5 default; up to 12 for special clients). */
+  /** Max OFG progress rounds (5 default; up to 24 for special clients). */
   max_rounds?: number;
   /** Optional next dispute target date (extended rounds calendar). */
   next_dispute_target_date?: string | null;
@@ -821,6 +822,73 @@ export interface AdminDashboardStats {
   new_clients_30d: number;
   completed_clients: number;
   avg_score_improvement: number;
+}
+
+/** Case panel: one event in a round's progress-report delivery timeline. */
+export interface ReportDeliveryEvent {
+  type: "generated" | "send" | "opened";
+  at: string;
+  channel?: "email" | "sms" | "whatsapp";
+  recipient_type?: string;
+  recipient_name?: string | null;
+  /** referrers.category for partner recipients */
+  recipient_role?: string | null;
+  to?: string;
+  /** sent | failed | delivered | undelivered | queued … (SMS = live carrier status) */
+  status?: string;
+  error?: string | null;
+  by?: string | null;
+  resend?: boolean;
+  open_count?: number;
+  /** when the download link was issued */
+  first_at?: string | null;
+}
+
+export interface ReportDeliveryRound {
+  events: ReportDeliveryEvent[];
+  summary: {
+    sends: number;
+    failed: number;
+    delivered: number;
+    recipients: number;
+    opened: number;
+    last_opened_at: string | null;
+    last_sent_at: string | null;
+  };
+}
+
+/** Dashboard "Needs you" row (only non-zero counts are returned). */
+export interface AdminDashboardInboxItem {
+  key:
+    | "reports_approval"
+    | "tasks_overdue"
+    | "analyses_review"
+    | "conversations_unread"
+    | "docs_review"
+    | "rounds_due"
+    | "tickets_open"
+    | "payments_pending";
+  count: number;
+  tone: "alert" | "warn" | "info";
+  to: string;
+}
+
+/** One Monday-start week of the dashboard pulse (revenue is 0 for non super admins). */
+export interface AdminDashboardPulseWeek {
+  week: string;
+  new_clients: number;
+  enrolled: number;
+  completed: number;
+  revenue_cents: number;
+}
+
+export interface AdminDashboardActivity {
+  kind: "client" | "contract" | "document" | "report" | "analysis" | "payment";
+  at: string;
+  client_id: number;
+  name: string;
+  /** client status, doc type, round number or amount in cents (by kind) */
+  detail: string | null;
 }
 
 export interface AdminDashboardTicket {
@@ -952,7 +1020,7 @@ export interface AdminUserListItem {
   first_name: string;
   last_name: string;
   phone?: string | null;
-  role: "super_admin" | "admin" | "agent" | "affiliate";
+  role: "super_admin" | "admin" | "agent" | "affiliate" | "underwriter";
   status: "active" | "inactive" | "suspended";
   /** Admin UI/comms language preference */
   preferred_language?: "en" | "es" | null;
@@ -1952,6 +2020,16 @@ export interface OfGReportWizardOptions {
   spanish?: boolean;
   /** Claude narrative polish during extract (default true when omitted). */
   enhance_with_claude?: boolean;
+  /**
+   * Score update (Oct 28, 2026): a SmartCredit PDF was saved before its account pages
+   * loaded — publish a short scores + verified-inquiries update instead of the full report.
+   */
+  score_update?: boolean;
+  /**
+   * Round 1 only: the client has no report from before we started, so the one report is
+   * both Before and After. Scores and items to dispute, no comparison.
+   */
+  starting_point?: boolean;
 }
 
 export interface OfGWinRow {
@@ -2062,6 +2140,8 @@ export interface ReportWizardBeforeContext {
   compare_mode?: ReportCompareMode;
   /** Which PDF role to load from prior_session_id when reusing. */
   reuse_pdf_role?: "before" | "after";
+  /** Why reuse is off: that PDF was incomplete (published as a Score update). */
+  reuse_blocked?: "incomplete_source";
 }
 
 // ============================================================
@@ -2289,6 +2369,119 @@ export interface Prospect {
   lead_temperature_at?: string | null;
   analysis_reviewed_at?: string | null;
   call_scheduled_at?: string | null;
+  /** Latest lead credit insights (null until a credit report is read). */
+  insight_heat_score?: number | null;
+  insight_readiness?: LeadReadiness | null;
+  insight_middle_score?: number | null;
+  insight_target_score?: number | null;
+  insight_points_to_target?: number | null;
+  insight_projected_middle?: number | null;
+  insight_est_value_usd?: number | null;
+  insight_active_loan_file?: number | boolean | null;
+  insight_next_action?: LeadNextAction | null;
+  insight_requested_by?: string | null;
+}
+
+// ── Lead credit insights (one snapshot per credit report read) ─────────────
+export type LeadReadiness = "ready" | "close" | "long";
+export type LeadNextAction =
+  | "call_partner_before_underwriting"
+  | "call_today_active_loan"
+  | "offer_au_after_closing"
+  | "start_round1"
+  | "pull_full_report"
+  | "offer_au"
+  | "ready_refer_lender";
+export type LeadHeatReason =
+  | "active_loan_file"
+  | "partner_referred"
+  | "shopping_inquiries"
+  | "new_account_90d"
+  | "close_to_target"
+  | "quick_wins"
+  | "needs_repair"
+  | "already_ready";
+export type LeadQuickWin = "duplicate_inquiries" | "inquiries_aging_off" | "paid_collections" | "accuracy_flags" | "personal_info";
+type InsightBureau = "TU" | "EX" | "EQ";
+
+/** Mirrors api/leadCreditInsights.ts LeadCreditInsights (typecheck guards drift). */
+export interface LeadCreditInsightsData {
+  version: number;
+  reportDate: string | null;
+  reportFormat: "per_bureau" | "merged";
+  scoreModel: string | null;
+  scores: Record<InsightBureau, number | null>;
+  middleScore: number | null;
+  targetScore: number;
+  pointsToTarget: number;
+  projectedMiddle: number | null;
+  roundToTarget: 1 | 2 | 3 | 4 | null;
+  readiness: LeadReadiness;
+  negatives: { total: number; collections: number; chargeOffs: number; lates: number; publicRecords: number; repossessions: number };
+  derogBalance: number;
+  pastDue: number;
+  utilizationPct: number | null;
+  lenderUtilizationPct: number | null;
+  noOpenCard: boolean;
+  inquiries: { last120d: number; last12m: number; sameDayMax: number };
+  newAccount90d: { creditor: string; opened: string } | null;
+  source: { vendor: string | null; reportId: string | null; company: string | null; requestedBy: string | null; ordered: string | null } | null;
+  activeLoanFile: boolean;
+  fileStrength: { now: number; projected: number };
+  programTier: "standard" | "complex";
+  tradelineRecommended: boolean;
+  estValueUsd: number;
+  heatScore: number;
+  heatReasons: LeadHeatReason[];
+  quickWins: Array<{ key: LeadQuickWin; count: number }>;
+  quickWinsTotal: number;
+  nextAction: LeadNextAction;
+  scoreFactors: string[];
+  oldestAccountMonths: number | null;
+  thinFile: boolean;
+  studentLoanBalance: number;
+  medicalCollections: { count: number; balance: number };
+  addressCount: number;
+  statesSeen: string[];
+  lenderSimulation: string | null;
+}
+
+export interface LeadCreditInsightsRow {
+  id: number;
+  client_id: number;
+  credit_file_extraction_id: number;
+  /** analysis | progress_before | progress_after | other */
+  purpose: string;
+  report_date: string | null;
+  created_at: string;
+  insights: LeadCreditInsightsData;
+}
+
+/** GET /api/admin/clients/:id/credit-insights */
+export interface LeadCreditInsightsResponse {
+  latest: LeadCreditInsightsRow | null;
+  history: LeadCreditInsightsRow[];
+}
+
+/** GET /api/admin/referral-partners/leaderboard */
+export interface ReferralPartnerLeaderboardRow {
+  referrer_id: number;
+  name: string;
+  company: string | null;
+  category: string;
+  leads: number;
+  hot: number;
+  converted: number;
+  conversion_pct: number;
+  avg_middle: number | null;
+  open_pipeline_usd: number;
+  last_lead_at: string | null;
+}
+export interface ReferralPartnerLeaderboardResponse {
+  days: number;
+  partners: ReferralPartnerLeaderboardRow[];
+  /** Lender-report "Requested By" names with no partner linked yet. */
+  unlinked_requesters: Array<{ name: string; leads: number; last_at: string }>;
 }
 
 export type LeadTemperatureColor = "hot" | "warm" | "cold";
@@ -2341,6 +2534,8 @@ export interface AdminPipelineQuery {
   column?: string;
   /** Load-more offset within that column. */
   offset?: number;
+  /** Prospect column order: "heat" = credit insights heat score (default newest). */
+  prospect_sort?: "heat";
 }
 
 export interface PipelineColumnPage<T = CreditRepairCase | Prospect> {
@@ -2426,23 +2621,18 @@ export interface CreditAnalysisResult {
   mode: CreditAnalysisMode;
   scores: CreditAnalysisScoreSet | null;
   negatives: CreditAnalysisNegativeItem[];
+  /** Item labels from the new-engine read (empty until it is ready). */
   suggested_labels: string[];
-  analysis_html: string;
-  analysis_text?: string | null;
   email_sent: boolean;
   generated_at: string;
-  /** How well we were able to read the uploaded report — see CreditAnalysisExtractionStatus. */
-  extraction_status: CreditAnalysisExtractionStatus;
-  /** Trimmed character count of extracted text (0 for unsupported/failed files). */
-  chars_extracted?: number;
-  /** Full flat analyst JSON (scores, lending conversion, plan, SMS copy, HTML tables). */
-  analyst?: CreditAnalysisAnalystFlat | null;
-  /** Language used when generating narrative (en|es). */
+  /** Report language (en|es). */
   text_language?: "en" | "es";
-  /** True when Claude narrative enhancement ran successfully on top of the rules engine. */
-  claude_enhanced?: boolean;
   /** True when email_opt_in was set but no valid client email was on file. */
   email_skipped_no_address?: boolean;
+  /** New-engine (account-by-account) read is running; email waits for it. */
+  enhanced_pending?: boolean;
+  /** Secure handle for public / portal new-engine status, analysis and PDF. */
+  public_token?: string;
 }
 
 // ============================================================
@@ -2642,9 +2832,26 @@ export interface CreditFileExtractionResponse {
 /** GET /api/admin/credit-analyses/:id/enhanced-status */
 export interface CreditAnalysisEnhancedStatusResponse {
   /** null = no enhanced read for this analysis (keep today's PDF). */
-  status: "queued" | "submitted" | "ready" | "failed" | null;
+  /** "review" = public view only: the analysis is held for staff review. */
+  status: "queued" | "submitted" | "ready" | "failed" | "review" | null;
   /** Agent context for the analysis PDF (escrow + lender score). */
   context?: CreditAnalysisLenderContext;
+  /** Review gate (Spec §11 + Claude audit) once the read is ready. */
+  review?: CreditAnalysisReview | null;
+}
+
+/** pending/running = automatic check in progress; needs_review = staff must approve; passed/approved = released. */
+export type CreditAnalysisReviewStatus = "pending" | "running" | "passed" | "needs_review" | "approved";
+
+export interface CreditAnalysisReview {
+  status: CreditAnalysisReviewStatus;
+  findings: {
+    selfCheck: { ok: boolean; items: Array<{ key: string; label: string; expected: string | null; actual: string; ok: boolean }> } | null;
+    audit: Array<{ check: string; severity: "blocking" | "note"; detail: string }>;
+    reconciledAdded: number;
+    error: string | null;
+  } | null;
+  reviewedAt: string | null;
 }
 
 /**
@@ -2656,6 +2863,52 @@ export interface CreditAnalysisLenderContext {
   lender_score_model: string | null;
   lender_score: number | null;
   lender_target_score: number | null;
+}
+
+/**
+ * GET /api/admin/credit-analyses/:id/enhanced-analysis — the new engine's
+ * analysis (subset used by the on-screen summary; same data as the PDF).
+ */
+export interface EnhancedCreditAnalysis {
+  reportDate: string | null;
+  scoreModel: string | null;
+  scores: Record<"TU" | "EX" | "EQ", number | null>;
+  scoreRatings: Record<"TU" | "EX" | "EQ", string | null>;
+  missingBureaus: Array<"TU" | "EX" | "EQ">;
+  negatives: Array<{
+    creditor: string;
+    kind: string;
+    bureaus: Array<"TU" | "EX" | "EQ">;
+    status: string;
+    round: 1 | 2 | 3 | 4;
+    hold: boolean;
+    legalBasis: string;
+    /** Spec v2.1: bureaus not labelled on the source ("Not itemized"). */
+    bureausNotItemized?: boolean;
+    mask?: string | null;
+  }>;
+  /** Spec v2.1: inquiries with bureau null = not itemized; action dispute | ages_off | permissible. */
+  inquiries?: Array<{ creditor: string; bureau: "TU" | "EX" | "EQ" | null; date: string; action: string; lowerOdds?: string | null }>;
+  inquiryClusters: Array<{ count: number; from: string; to: string }>;
+  /** Always empty since Spec v2.1 (positives are never dispute targets). */
+  accuracyUpdates: Array<{ creditor: string }>;
+  identityFlags: Array<{ bureau: "TU" | "EX" | "EQ" | null; field: string }>;
+  projections: Array<{ key: string; scores: Record<"TU" | "EX" | "EQ", number | null>; middle?: number | null }>;
+  fileStrength: { current: number; postRepair: number };
+  programTier: "standard" | "complex";
+  escrow: {
+    active: boolean;
+    source: "agent" | "mortgage_pull" | "mortgage_report" | "lender_report" | "loan_inquiry" | null;
+    lenderName?: string | null;
+  };
+  borrowerName?: string | null;
+  middleScore?: number | null;
+  vantageScores?: Record<"TU" | "EX" | "EQ", number | null>;
+  informational?: Array<{ creditor: string; note: string }>;
+  /** Spec §11 self-check against the report's own totals. */
+  selfCheck?: { ok: boolean; items: Array<{ key: string; label: string; expected: string | null; actual: string; ok: boolean }> };
+  lender: { model: string | null; score: number | null; target: number | null } | null;
+  utilizationOverall: { all: number | null; inclClosed?: number | null };
 }
 
 /** PATCH /api/admin/credit-analyses/:id/context */

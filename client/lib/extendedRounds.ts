@@ -3,7 +3,7 @@
  */
 
 export const DEFAULT_MAX_ROUNDS = 5;
-export const ABSOLUTE_MAX_ROUNDS = 12;
+export const ABSOLUTE_MAX_ROUNDS = 24;
 
 export function clampMaxRounds(raw: unknown): number {
   const n = Number(raw);

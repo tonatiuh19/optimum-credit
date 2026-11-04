@@ -311,6 +311,25 @@ export default function PipelineFilterBar({
 
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-muted-foreground">
+                {t("leadInsights.sortLabel")}
+              </label>
+              <div className="relative">
+                <select
+                  aria-label={t("leadInsights.sortLabel")}
+                  value={filters.prospect_sort}
+                  onChange={(e) => setFilter("prospect_sort", e.target.value)}
+                  className={filterSelectClass}
+                  data-testid="filter-prospect-sort"
+                >
+                  <option value="all">{t("leadInsights.sortNewest")}</option>
+                  <option value="heat">{t("leadInsights.sortHeat")}</option>
+                </select>
+                <ChevronDown className="w-3.5 h-3.5 absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-muted-foreground">
                 {t("adminPipeline.leadTemp.filter")}
               </label>
               <div className="relative">

@@ -185,9 +185,9 @@ describe("session state guards", () => {
 });
 
 describe("calcMiddleScore", () => {
-  it("returns median of non-zero scores", () => {
+  it("returns the median only with all three scores (otherwise it stays --)", () => {
     expect(calcMiddleScore(600, 650, 700)).toBe(650);
-    expect(calcMiddleScore(0, 640, 720)).toBe(720);
+    expect(calcMiddleScore(0, 640, 720)).toBe(0);
     expect(calcMiddleScore(0, 0, 0)).toBe(0);
   });
 });

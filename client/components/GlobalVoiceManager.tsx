@@ -355,7 +355,7 @@ const GlobalVoiceManager: React.FC = () => {
   return (
     <VoiceDeviceProvider deviceRef={deviceRef}>
       {ringingCall && (
-        <div className="fixed bottom-6 left-6 z-50 animate-in slide-in-from-bottom-4 duration-300">
+        <div className="fixed bottom-[calc(5rem+env(safe-area-inset-bottom))] md:bottom-6 left-4 md:left-6 z-50 animate-in slide-in-from-bottom-4 duration-300">
           <div className="bg-card border border-accent/30 shadow-2xl rounded-2xl p-4 w-80 space-y-3">
             <div className="flex items-center gap-3">
               <div className="relative flex-shrink-0">
@@ -406,7 +406,7 @@ const GlobalVoiceManager: React.FC = () => {
       )}
 
       {activeIncomingCall && (
-        <div className="fixed bottom-6 left-6 z-50 w-80 animate-in slide-in-from-bottom-4 duration-300">
+        <div className="fixed bottom-[calc(5rem+env(safe-area-inset-bottom))] md:bottom-6 left-4 md:left-6 z-50 w-80 animate-in slide-in-from-bottom-4 duration-300">
           <VoiceCallPanel
             phone={ringingPhone || t("conversations.voice.unknownNumber")}
             clientName={
@@ -422,7 +422,7 @@ const GlobalVoiceManager: React.FC = () => {
       )}
 
       {outboundCall && (
-        <div className="fixed bottom-6 right-6 z-50 w-80 shadow-2xl rounded-xl overflow-hidden animate-in slide-in-from-bottom-4 duration-300">
+        <div className="fixed bottom-[calc(5rem+env(safe-area-inset-bottom))] md:bottom-6 right-4 md:right-6 z-50 w-80 max-w-[calc(100vw-2rem)] shadow-2xl rounded-xl overflow-hidden animate-in slide-in-from-bottom-4 duration-300">
           <VoiceCallPanel
             phone={outboundCall.phone}
             clientName={outboundCall.clientName}

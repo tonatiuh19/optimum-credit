@@ -4,6 +4,8 @@ import api, { formatAxiosError } from "@/lib/api";
 import type {
   CreditAnalysisEnhancedStatusResponse,
   CreditAnalysisLenderContext,
+  CreditAnalysisReview,
+  EnhancedCreditAnalysis,
   CreditAnalysisLenderContextUpdate,
   CreditAnalysisMode,
   CreditAnalysisResult,
@@ -43,9 +45,12 @@ interface CreditAnalysisState {
   leadSubmitted: boolean;
   gcrSubmitting: boolean;
   gcrError: string | null;
+  /** /get-credit-report: free report offered? null = not loaded (treated as off). */
+  gcrFreeReportEnabled: boolean | null;
   gcrResult: {
     ok: boolean;
-    mfsn_url: string;
+    free_report?: boolean;
+    mfsn_url: string | null;
     short_url?: string;
     event_kind?: "golf" | "vegas" | "ofy" | null;
   } | null;
@@ -61,7 +66,12 @@ interface CreditAnalysisState {
   enhancedStatusById: Record<number, CreditAnalysisEnhancedStatusResponse["status"]>;
   /** Escrow flag + lender score per analysis (enhanced PDF context). */
   contextById: Record<number, CreditAnalysisLenderContext>;
+  /** Review gate (staff): status + findings per analysis. */
+  reviewById: Record<number, CreditAnalysisReview | null>;
+  reviewActingId: number | null;
   contextSavingId: number | null;
+  /** New-engine analysis per credit analysis id (on-screen summary). */
+  enhancedById: Record<number, EnhancedCreditAnalysis>;
   enhancedDownloadingId: number | null;
 }
 
@@ -75,6 +85,7 @@ const initialState: CreditAnalysisState = {
   gcrSubmitting: false,
   gcrError: null,
   gcrResult: null,
+  gcrFreeReportEnabled: null,
   adminLoading: false,
   adminSubmitting: false,
   adminError: null,
@@ -85,7 +96,10 @@ const initialState: CreditAnalysisState = {
   portalResult: null,
   enhancedStatusById: {},
   contextById: {},
+  reviewById: {},
+  reviewActingId: null,
   contextSavingId: null,
+  enhancedById: {},
   enhancedDownloadingId: null,
 };
 
@@ -178,6 +192,7 @@ export const fetchCreditAnalysisEnhancedStatus = createAsyncThunk<
     analysisId: number;
     status: CreditAnalysisEnhancedStatusResponse["status"];
     context?: CreditAnalysisLenderContext;
+    review?: CreditAnalysisReview | null;
   },
   number,
   { rejectValue: string }
@@ -186,9 +201,92 @@ export const fetchCreditAnalysisEnhancedStatus = createAsyncThunk<
     const { data } = await api.get<CreditAnalysisEnhancedStatusResponse>(
       `/admin/credit-analyses/${analysisId}/enhanced-status`,
     );
-    return { analysisId, status: data.status, context: data.context };
+    return { analysisId, status: data.status, context: data.context, review: data.review ?? null };
   } catch (err: unknown) {
     return rejectWithValue(formatAxiosError(err, "Could not check report status"));
+  }
+});
+
+/** Review gate: approve a flagged analysis (released to the client) or re-run the checks. */
+export const reviewCreditAnalysis = createAsyncThunk<
+  { analysisId: number; reviewStatus: CreditAnalysisReview["status"] },
+  { analysisId: number; action: "approve" | "rerun" },
+  { rejectValue: string }
+>("creditAnalysis/review", async ({ analysisId, action }, { rejectWithValue, dispatch }) => {
+  try {
+    const { data } = await api.post<{ review_status: CreditAnalysisReview["status"] }>(
+      `/admin/credit-analyses/${analysisId}/review`,
+      { action },
+    );
+    void dispatch(fetchCreditAnalysisEnhancedStatus(analysisId));
+    return { analysisId, reviewStatus: data.review_status };
+  } catch (err: unknown) {
+    return rejectWithValue(formatAxiosError(err, "Could not update the review"));
+  }
+});
+
+/**
+ * Public / portal (by secure token): status of the account-by-account read.
+ * Stored under the analysis id so the panel reads one map for every mode.
+ */
+export const fetchPublicEnhancedStatus = createAsyncThunk<
+  { analysisId: number; status: CreditAnalysisEnhancedStatusResponse["status"] },
+  { analysisId: number; token: string },
+  { rejectValue: string }
+>("creditAnalysis/publicEnhancedStatus", async ({ analysisId, token }, { rejectWithValue }) => {
+  try {
+    const { data } = await api.get<{ status: CreditAnalysisEnhancedStatusResponse["status"] }>(
+      `/public/credit-analyses/${token}/status`,
+    );
+    return { analysisId, status: data.status };
+  } catch (err: unknown) {
+    return rejectWithValue(formatAxiosError(err, "Could not check report status"));
+  }
+});
+
+export const fetchPublicEnhancedAnalysis = createAsyncThunk<
+  { analysisId: number; analysis: EnhancedCreditAnalysis },
+  { analysisId: number; token: string },
+  { rejectValue: string }
+>("creditAnalysis/publicEnhancedAnalysis", async ({ analysisId, token }, { rejectWithValue }) => {
+  try {
+    const { data } = await api.get<{ analysis: EnhancedCreditAnalysis }>(`/public/credit-analyses/${token}/analysis`);
+    return { analysisId, analysis: data.analysis };
+  } catch (err: unknown) {
+    return rejectWithValue(formatAxiosError(err, "Could not load the analysis"));
+  }
+});
+
+export const downloadPublicEnhancedPdf = createAsyncThunk<
+  { analysisId: number; blob: Blob; fileName: string },
+  { analysisId: number; token: string; lang?: "en" | "es" },
+  { rejectValue: string }
+>("creditAnalysis/publicEnhancedPdf", async ({ analysisId, token, lang }, { rejectWithValue }) => {
+  try {
+    const res = await api.get(`/public/credit-analyses/${token}/pdf`, {
+      params: lang ? { lang } : undefined,
+      responseType: "blob",
+    });
+    const disposition = String(res.headers["content-disposition"] || "");
+    return { analysisId, blob: res.data as Blob, fileName: disposition.match(/filename="([^"]+)"/)?.[1] || "OFG_Credit_Analysis.pdf" };
+  } catch (err: unknown) {
+    return rejectWithValue(formatAxiosError(err, "Could not download the report"));
+  }
+});
+
+/** New-engine analysis for the on-screen summary (ready reads only). */
+export const fetchEnhancedCreditAnalysis = createAsyncThunk<
+  { analysisId: number; analysis: EnhancedCreditAnalysis },
+  number,
+  { rejectValue: string }
+>("creditAnalysis/enhancedAnalysis", async (analysisId, { rejectWithValue }) => {
+  try {
+    const { data } = await api.get<{ analysis: EnhancedCreditAnalysis }>(
+      `/admin/credit-analyses/${analysisId}/enhanced-analysis`,
+    );
+    return { analysisId, analysis: data.analysis };
+  } catch (err: unknown) {
+    return rejectWithValue(formatAxiosError(err, "Could not load the enhanced analysis"));
   }
 });
 
@@ -312,10 +410,24 @@ export type GetCreditReportLeadPayload = {
   notes?: string;
 };
 
+/** Whether /get-credit-report currently offers the free MyFreeScoreNow report (Settings switch). */
+export const fetchGetCreditReportConfig = createAsyncThunk<boolean, void>(
+  "creditAnalysis/fetchGetCreditReportConfig",
+  async () => {
+    try {
+      const { data } = await publicApi.get<{ free_report_enabled: boolean }>("/public/get-credit-report-config");
+      return !!data.free_report_enabled;
+    } catch {
+      return false;
+    }
+  },
+);
+
 export const submitGetCreditReportLead = createAsyncThunk<
   {
     ok: boolean;
-    mfsn_url: string;
+    free_report?: boolean;
+    mfsn_url: string | null;
     short_url?: string;
     event_kind?: "golf" | "vegas" | "ofy" | null;
   },
@@ -329,7 +441,8 @@ export const submitGetCreditReportLead = createAsyncThunk<
     );
     return data as {
       ok: boolean;
-      mfsn_url: string;
+      free_report?: boolean;
+      mfsn_url: string | null;
       short_url?: string;
       event_kind?: "golf" | "vegas" | "ofy" | null;
     };
@@ -392,6 +505,9 @@ const slice = createSlice({
       s.leadSubmitted = true;
     });
 
+    b.addCase(fetchGetCreditReportConfig.fulfilled, (s, a) => {
+      s.gcrFreeReportEnabled = a.payload;
+    });
     b.addCase(submitGetCreditReportLead.pending, (s) => {
       s.gcrSubmitting = true;
       s.gcrError = null;
@@ -457,6 +573,36 @@ const slice = createSlice({
     b.addCase(fetchCreditAnalysisEnhancedStatus.fulfilled, (s, a) => {
       s.enhancedStatusById[a.payload.analysisId] = a.payload.status;
       if (a.payload.context) s.contextById[a.payload.analysisId] = a.payload.context;
+      s.reviewById[a.payload.analysisId] = a.payload.review ?? null;
+    });
+    b.addCase(fetchEnhancedCreditAnalysis.fulfilled, (s, a) => {
+      s.enhancedById[a.payload.analysisId] = a.payload.analysis;
+    });
+    b.addCase(reviewCreditAnalysis.pending, (s, a) => {
+      s.reviewActingId = a.meta.arg.analysisId;
+    });
+    b.addCase(reviewCreditAnalysis.fulfilled, (s, a) => {
+      s.reviewActingId = null;
+      const cur = s.reviewById[a.payload.analysisId];
+      if (cur) s.reviewById[a.payload.analysisId] = { ...cur, status: a.payload.reviewStatus };
+    });
+    b.addCase(reviewCreditAnalysis.rejected, (s) => {
+      s.reviewActingId = null;
+    });
+    b.addCase(fetchPublicEnhancedStatus.fulfilled, (s, a) => {
+      s.enhancedStatusById[a.payload.analysisId] = a.payload.status;
+    });
+    b.addCase(fetchPublicEnhancedAnalysis.fulfilled, (s, a) => {
+      s.enhancedById[a.payload.analysisId] = a.payload.analysis;
+    });
+    b.addCase(downloadPublicEnhancedPdf.pending, (s, a) => {
+      s.enhancedDownloadingId = a.meta.arg.analysisId;
+    });
+    b.addCase(downloadPublicEnhancedPdf.fulfilled, (s) => {
+      s.enhancedDownloadingId = null;
+    });
+    b.addCase(downloadPublicEnhancedPdf.rejected, (s) => {
+      s.enhancedDownloadingId = null;
     });
     b.addCase(updateCreditAnalysisContext.pending, (s, a) => {
       s.contextSavingId = a.meta.arg.analysisId;

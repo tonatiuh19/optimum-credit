@@ -107,10 +107,12 @@ describe("credit analysis integration", () => {
 
     expect(post.status).toBe(200);
     expect(post.body.id).toBeGreaterThan(0);
-    expect(post.body.extraction_status).toBeDefined();
     expect(post.body.client_id).toBe(prospectId);
-    // Vitest skips Anthropic; flag must still be present and false.
-    expect(post.body.claude_enhanced).toBe(false);
+    // New engine only: no quick text analysis, the read is pending.
+    expect(post.body.enhanced_pending).toBe(true);
+    expect(post.body.public_token).toMatch(/^[a-f0-9]{32}$/);
+    expect(post.body.analyst).toBeUndefined();
+    expect(post.body.negatives).toEqual([]);
 
     const get = await request(app)
       .get(`/api/admin/clients/${prospectId}/credit-analysis`)
@@ -118,8 +120,8 @@ describe("credit analysis integration", () => {
 
     expect(get.status).toBe(200);
     expect(get.body.analysis?.id).toBe(post.body.id);
-    expect(get.body.analysis?.claude_enhanced).toBe(false);
-    expect(get.body.analysis?.analyst?._claude_enhanced).toBeUndefined();
+    expect(get.body.analysis?.public_token).toBe(post.body.public_token);
+    expect(get.body.analysis?.analysis_html).toBeUndefined();
 
     // Enhancement: the same upload is queued (background) for the enhanced
     // account-level read, linked to this analysis. Response above unchanged.
@@ -160,7 +162,25 @@ describe("credit analysis integration", () => {
 
     expect(get.status).toBe(200);
     expect(get.body.analysis?.client_id).toBe(prospectId);
+    // Portal gets the secure token → renders the new engine (never a text summary).
+    expect(get.body.analysis?.public_token).toBe(post.body.public_token);
+    expect(typeof get.body.analysis?.enhanced_pending).toBe("boolean");
+
+    // The report is never stored as a plain (unencrypted) copy.
+    const [ca] = await pool.query<any[]>(`SELECT report_storage_key FROM credit_analyses WHERE id = ?`, [post.body.id]);
+    expect(ca[0].report_storage_key).toBeNull();
   }, 60_000);
+
+  it("rejects a file type the new engine cannot read", async () => {
+    const res = await request(app)
+      .post(`/api/admin/clients/${prospectId}/credit-analysis`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .attach("report_file", Buffer.from("plain text report"), {
+        filename: `report-${RUN_ID}.txt`,
+        contentType: "text/plain",
+      });
+    expect(res.status).toBe(400);
+  }, 30_000);
 
   it("rejects POST after convert but GET retains analysis", async () => {
     await pool.query(

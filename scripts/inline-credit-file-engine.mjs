@@ -1,7 +1,7 @@
 /**
  * Regenerates the inlined Credit File engine block in api/index.ts from
  * api/creditFile.ts, creditFileExtract.ts, creditAnalysisFromFile.ts, creditFileProgress.ts,
- * ofgCreditAnalysisPdf.ts, progressReportV2.ts and leadTemperature.ts (Vercel: no sibling runtime
+ * ofgCreditAnalysisPdf.ts, progressReportV2.ts, leadTemperature.ts and leadCreditInsights.ts (Vercel: no sibling runtime
  * imports). Run after editing either module:  node scripts/inline-credit-file-engine.mjs
  * api/creditFileEngine.sync.test.ts fails when the block is stale.
  */
@@ -26,7 +26,8 @@ export function buildInlineBlock() {
   const e = strip(fs.readFileSync(path.join(root, "api/creditFileProgress.ts"), "utf8"));
   const f = strip(fs.readFileSync(path.join(root, "api/leadTemperature.ts"), "utf8"));
   const g = strip(fs.readFileSync(path.join(root, "api/progressReportV2.ts"), "utf8"));
-  return `${BEGIN}\n${a.trim()}\n\n${b.trim()}\n\n${c.trim()}\n\n${e.trim()}\n\n${d.trim()}\n\n${f.trim()}\n\n${g.trim()}\n${END}`;
+  const h = strip(fs.readFileSync(path.join(root, "api/leadCreditInsights.ts"), "utf8"));
+  return `${BEGIN}\n${a.trim()}\n\n${b.trim()}\n\n${c.trim()}\n\n${e.trim()}\n\n${d.trim()}\n\n${f.trim()}\n\n${g.trim()}\n\n${h.trim()}\n${END}`;
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {

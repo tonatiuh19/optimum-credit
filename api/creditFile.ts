@@ -50,6 +50,34 @@ export interface BureauTradeline {
    * Optional: only Claude extraction fills it.
    */
   gridMarks?: string[];
+  /** "Date Last Delinquent" column (tri-merges) — the adverse date, never re-dated by later activity. */
+  dateLastDelinquent?: string | null;
+}
+
+/** How the report lays accounts out (Spec v2.1). */
+export type CreditReportFormat =
+  /** One column per bureau (SmartCredit, IdentityIQ, MFSN, myFICO 3B). */
+  | "per_bureau"
+  /** Lender tri-merge (Factual Data, Xactus, Advantage, CBC): one blended value per field + Repository bureaus. */
+  | "merged";
+
+/** The report's own totals (Account Summary) — the self-check gate reconciles against them. */
+export interface CreditReportSummary {
+  totalAccounts: number | null;
+  revolvingAccounts: number | null;
+  installmentAccounts: number | null;
+  otherAccounts: number | null;
+  totalBalance: number | null;
+  revolvingBalance: number | null;
+  pastDue: number | null;
+  late30: number | null;
+  late60: number | null;
+  late90: number | null;
+  /** Lender tri-merge Credit Summary extras (reconcile only, Spec v2.3 §7). */
+  revolvingUtilizationPct?: number | null;
+  revolvingUsedPct?: number | null;
+  collectionsChargeOffs?: number | null;
+  inquiries?: number | null;
 }
 
 export type AccountSection =
@@ -71,21 +99,43 @@ export interface CreditAccount {
   bureaus: Partial<Record<Bureau, BureauTradeline>>;
   /** False when field/value alignment checks failed — staff should verify. */
   confident: boolean;
+  /**
+   * Merged (tri-merge) row: ONE blended value per field, copied to each
+   * Repository bureau — cross-bureau comparisons are meaningless.
+   */
+  merged?: boolean;
+  /** Merged row with no Repository/bureau label: bureaus are "Not itemized". */
+  bureausNotItemized?: boolean;
+  /** ECOA joint contractual liability (e.g. B-2) — show "(joint)" only. */
+  joint?: boolean;
+  /** ECOA code as printed (tri-merges: I/A/C/J/M/P/S/T/U/X; "T" = terminated). */
+  ecoa?: string | null;
+  /** Tri-merge "High Credit" when printed separately from the credit limit. */
+  highCredit?: number | null;
+  /** Scheduled monthly payment when printed. */
+  monthlyPayment?: number | null;
 }
 
 export interface CreditInquiry {
   date: string;
   creditor: string;
-  bureau: Bureau;
+  /** null = the report does not say which bureau ("Not itemized"). Never guessed. */
+  bureau: Bureau | null;
   /** SmartCredit groups inquiries by whether a matching account exists. */
   matchedAccount: boolean | null;
 }
 
 /** Personal-info difference between bureaus (never carries SSN digits). */
 export interface IdentityFlag {
-  bureau: Bureau;
+  /** null = not itemized by bureau on the report. */
+  bureau: Bureau | null;
   field: "name" | "ssn" | "dob" | "address";
   detail: string;
+  /**
+   * v2.4 #4/#7 (set by the analysis, never by the read): unit_mismatch = same street, different unit
+   * across bureaus (Round 1); confirm = a prior address to confirm with the client before disputing.
+   */
+  kind?: "unit_mismatch" | "confirm";
 }
 
 export interface CreditFile {
@@ -104,6 +154,35 @@ export interface CreditFile {
   /** 0–1: share of pages with readable text (text-skeleton coverage). */
   confidence: number;
   warnings: string[];
+  /** Spec v2.1 fields (Claude reader); absent on older reads. */
+  reportFormat?: CreditReportFormat;
+  /** Full legal name from the Borrower / consumer block. */
+  borrowerName?: string | null;
+  /** Current address from the Borrower / consumer block (v2.4 #4: never a dispute target). */
+  borrowerAddress?: string | null;
+  /** Lender that requested a tri-merge (Requested by / Lender header). */
+  lender?: {
+    name: string | null;
+    requestedDate: string | null;
+    /** Person / company that ordered the report ("Requested By"). */
+    requestedBy?: string | null;
+    /** Credit vendor (Xactus, Factual Data …) and its report number. */
+    vendor?: string | null;
+    reportId?: string | null;
+  } | null;
+  /** VantageScore per bureau when the report prints it next to FICO. */
+  vantageScores?: Record<Bureau, number | null>;
+  /** Score reason codes as printed (e.g. "TOO MANY INQUIRIES"). */
+  scoreReasonCodes?: string[];
+  summary?: CreditReportSummary | null;
+  /** Lender simulation (CreditXpert / rapid-rescore) as printed — never our projection. */
+  lenderSimulation?: string | null;
+  /**
+   * Account entries the reader returned before same-account copies were merged
+   * (MyFreeScoreNow prints a collection once per bureau section). Compared with
+   * the report's own table of contents / account blocks.
+   */
+  readEntries?: number;
 }
 
 // ── shared helpers ──────────────────────────────────────────────────────────
@@ -273,7 +352,8 @@ export function parseSmartCredit(text: string): CreditFile {
     const cells = line.split(/\t|\s{2,}|\s(?=\d{3}\b|——)/).map((c) => c.trim()).filter(Boolean);
     if (
       cells.length === 3 &&
-      cells.every((c) => /^\d{3}$/.test(c) || /^—+$/.test(c)) &&
+      // A lone 0 is how some reports print "no score" (→ null below, column kept).
+      cells.every((c) => /^\d{3}$/.test(c) || /^—+$/.test(c) || c === "0") &&
       cells.some((c) => /^\d{3}$/.test(c))
     ) {
       BUREAUS.forEach((b, i) => {

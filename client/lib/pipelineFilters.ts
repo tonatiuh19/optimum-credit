@@ -15,6 +15,8 @@ export const EMPTY_PIPELINE_FILTERS = {
   info_requests: "all",
   has_notes: "all",
   labels: [] as string[],
+  /** "all" = newest first; "heat" = lead credit insights heat score (sort, not a filter). */
+  prospect_sort: "all",
 };
 
 export type PipelineFilterState = typeof EMPTY_PIPELINE_FILTERS;
@@ -53,6 +55,7 @@ export function buildAdminPipelineQuery(
   if (filters.info_requests !== "all") q.info_requests = filters.info_requests;
   if (filters.has_notes !== "all") q.has_notes = filters.has_notes;
   if (filters.labels.length > 0) q.labels = filters.labels;
+  if (filters.prospect_sort === "heat") q.prospect_sort = "heat";
   q.limit = 20;
   return q;
 }
@@ -129,6 +132,7 @@ export function pipelineFilterChipLabel(
       completed: "Completed",
     },
     language: { en: "EN", es: "ES" },
+    prospect_sort: { heat: t("leadInsights.sortHeat") },
     lead_temperature: {
       hot: t("adminPipeline.leadTemp.color.hot"),
       warm: t("adminPipeline.leadTemp.color.warm"),
