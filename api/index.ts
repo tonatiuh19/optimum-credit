@@ -25845,6 +25845,8 @@ async function executeAdminAiTool(
         conn.release();
       }
 
+      await notifyOnboardingNewClient(clientId, "admin_ai_convert");
+
       await autoAssignTasksForCase(clientId, caseId).catch((e: any) =>
         console.error(
           "[admin-ai] convert_prospect autoAssignTasks",
@@ -43074,6 +43076,136 @@ async function slackDm(slackUserId: string, text: string): Promise<boolean> {
   return r.ok;
 }
 
+// ── #ofg-onboarding: one post per new client (Nov 6, 2026) ───────────────────
+// Event-driven, no cron. Called after every path that turns someone into a client
+// (payment, convert, created as a client, prepaid link, prospect moved on the board).
+// clients.onboarding_alerted_at is claimed atomically, so a client is posted once even
+// when two paths fire. No payment info, email, phone or SSN in Slack.
+const ONBOARDING_REQUIRED_DOCS = ["id_front", "id_back", "ssn_card", "proof_of_address"] as const;
+const ONBOARDING_DOC_LABEL: Record<string, string> = { id_front: "ID front", id_back: "ID back", ssn_card: "SSN card", proof_of_address: "Proof of address" };
+
+export function onboardingSlackChannel(env: NodeJS.ProcessEnv = process.env): string {
+  return String(env.ONBOARDING_SLACK_CHANNEL || "C0CFFHR4LKW").trim().replace(/^#/, "");
+}
+
+/** Slack text for a new client. Pure, for tests. */
+export function onboardingClientMessage(c: {
+  clientId: number;
+  name: string;
+  caseNumber: string | null;
+  packageName: string | null;
+  language: string | null;
+  docs: Array<{ doc_type: string; review_status: string }>;
+  contractSignedAt: unknown;
+  smartCreditConnectedAt: unknown;
+  smartCreditEmail: string | null;
+  myFreeScoreNowEmail: string | null;
+  staffName: string | null;
+  appUrl: string;
+}): string {
+  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const best = (t: string) => {
+    const st = c.docs.filter((d) => d.doc_type === t).map((d) => d.review_status);
+    return st.includes("approved") ? "approved" : st.includes("pending") ? "pending" : st.includes("rejected") ? "rejected" : "missing";
+  };
+  const by = { approved: [] as string[], pending: [] as string[], rejected: [] as string[], missing: [] as string[] };
+  for (const t of ONBOARDING_REQUIRED_DOCS) by[best(t) as keyof typeof by].push(ONBOARDING_DOC_LABEL[t]);
+  const docs =
+    by.approved.length === ONBOARDING_REQUIRED_DOCS.length
+      ? "all 4 approved"
+      : [
+          `${by.approved.length}/4 approved`,
+          by.pending.length ? `pending: ${by.pending.join(", ")}` : "",
+          by.rejected.length ? `rejected: ${by.rejected.join(", ")}` : "",
+          by.missing.length ? `missing: ${by.missing.join(", ")}` : "",
+        ].filter(Boolean).join(" · ");
+  const monitoring = c.smartCreditConnectedAt
+    ? "SmartCredit connected"
+    : c.myFreeScoreNowEmail
+      ? "MyFreeScoreNow on file"
+      : c.smartCreditEmail
+        ? "SmartCredit email on file, not connected yet"
+        : "not set up yet";
+  const lang = String(c.language || "").toLowerCase().startsWith("es") ? "Spanish" : "English";
+  return [
+    `:new: *New client: ${esc(c.name)}*${c.caseNumber ? ` (${esc(c.caseNumber)})` : ""}`,
+    `• Package: ${esc(c.packageName || "not set")}`,
+    `• Language: ${lang}`,
+    `• Documents: ${docs}`,
+    `• Agreement: ${c.contractSignedAt ? "signed" : "not signed yet"}`,
+    `• Monitoring: ${monitoring}`,
+    `• Staff: ${esc(c.staffName || "unassigned")}`,
+    `<${c.appUrl.replace(/\/$/, "")}/admin/clients/${c.clientId}|Open in OFG>`,
+  ].join("\n");
+}
+
+/** Posts the client to #ofg-onboarding once. Never throws (a Slack problem must not fail the conversion). */
+export async function notifyOnboardingNewClient(clientId: number, source: string): Promise<"posted" | "skipped" | "dry-run" | "failed"> {
+  try {
+    if (!clientId) return "skipped";
+    const [[c]] = await pool.query<RowDataPacket[]>(
+      `SELECT c.id, c.first_name, c.last_name, c.status, c.pipeline_stage, c.preferred_language,
+              c.contract_signed_at, c.smart_credit_connected_at, c.smart_credit_email, c.myfreescorenow_email,
+              p.name AS package_name, CONCAT_WS(' ', a.first_name, a.last_name) AS staff_name
+         FROM clients c
+         LEFT JOIN packages p ON p.id = c.package_id
+         LEFT JOIN admins a ON a.id = c.assigned_admin_id
+        WHERE c.id = ? AND c.onboarding_alerted_at IS NULL LIMIT 1`,
+      [clientId],
+    );
+    // Prospects, leads, funding-only and unpaid sign-ups are not clients yet.
+    if (!c || ["prospect", "funding", "pending_payment", "cancelled"].includes(String(c.status)) || ["prospect", "cancelled"].includes(String(c.pipeline_stage))) {
+      return "skipped";
+    }
+    const [claim] = await pool.query<ResultSetHeader>(
+      `UPDATE clients SET onboarding_alerted_at = NOW() WHERE id = ? AND onboarding_alerted_at IS NULL`,
+      [clientId],
+    );
+    if (claim.affectedRows !== 1) return "skipped";
+    const release = () => pool.query(`UPDATE clients SET onboarding_alerted_at = NULL WHERE id = ?`, [clientId]).catch(() => undefined);
+
+    const [[cs]] = await pool.query<RowDataPacket[]>(
+      `SELECT case_number FROM credit_repair_cases WHERE client_id = ? AND status = 'active' ORDER BY id DESC LIMIT 1`,
+      [clientId],
+    );
+    const [docs] = await pool.query<RowDataPacket[]>(
+      `SELECT doc_type, review_status FROM client_documents WHERE client_id = ? AND funding_application_id IS NULL`,
+      [clientId],
+    );
+    const text = onboardingClientMessage({
+      clientId,
+      name: `${c.first_name ?? ""} ${c.last_name ?? ""}`.trim() || `Client #${clientId}`,
+      caseNumber: cs?.case_number ?? null,
+      packageName: c.package_name ?? null,
+      language: c.preferred_language ?? null,
+      docs: docs as Array<{ doc_type: string; review_status: string }>,
+      contractSignedAt: c.contract_signed_at,
+      smartCreditConnectedAt: c.smart_credit_connected_at,
+      smartCreditEmail: c.smart_credit_email ?? null,
+      myFreeScoreNowEmail: c.myfreescorenow_email ?? null,
+      staffName: String(c.staff_name || "").trim() || null,
+      appUrl: resolvePublicAppUrl(),
+    });
+    // Tests and local servers never post to the real channel (they share the production DB).
+    const blocked = realMessagingBlocked();
+    if (blocked) {
+      if (blocked === "local") await release(); // production still posts it when the event happens there
+      console.log(`[onboarding-slack:dry-run] client ${clientId} (${source})`);
+      return "dry-run";
+    }
+    const r = await slackApi("chat.postMessage", { channel: onboardingSlackChannel(), text, unfurl_links: false, unfurl_media: false }, true);
+    if (!r.ok) {
+      await release(); // the next conversion path (or a retry) can post it
+      console.warn("[onboarding-slack]", clientId, source, r.error);
+      return "failed";
+    }
+    return "posted";
+  } catch (e: any) {
+    console.warn("[onboarding-slack]", clientId, source, e?.message ?? e);
+    return "failed";
+  }
+}
+
 // ── Collectors (one Pacific day for one person) ─────────────────────────────
 type ProdCtx = { adminId: number; ymd: string; dayStart: Date; dayEnd: Date; cutoff: Date; now: Date; off: Set<string> };
 
@@ -47950,6 +48082,8 @@ async function markPaymentSucceeded(clientId: number, transactionId: string) {
   }).catch((e: any) =>
     console.error("[notify:activation-payment]", e?.message ?? e),
   );
+
+  await notifyOnboardingNewClient(clientId, "payment_succeeded");
 
   // Push new client to Credit Repair Cloud (async — don't block payment confirmation)
   crcSyncClient(clientId).catch((e) =>
@@ -58239,6 +58373,8 @@ function buildApp() {
         conn.release();
       }
 
+      await notifyOnboardingNewClient(clientId, "prospect_convert");
+
       autoAssignTasksForCase(clientId, caseId).catch((e) =>
         console.error(
           "[prospects:convert] autoAssignTasks failed:",
@@ -59352,6 +59488,7 @@ function buildApp() {
 
       await conn.commit();
       committed = true;
+      await notifyOnboardingNewClient(clientId, "prepaid_onboard");
 
       // Post-commit side effects (best effort). Enrollment is persisted —
       // session/email failures must not leave the invite unusable.
@@ -61229,6 +61366,9 @@ function buildApp() {
             );
           }
         }
+
+        // Not a prospect → a new client to onboard (the notifier skips prospects itself).
+        await notifyOnboardingNewClient(clientId, "admin_create_client");
 
         res.status(201).json({
           client: rows[0],

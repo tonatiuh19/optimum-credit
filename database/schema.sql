@@ -346,6 +346,8 @@ CREATE TABLE IF NOT EXISTS `clients` (
   `pipeline_stage_changed_at` DATETIME DEFAULT NULL,
   `activation_notified_at` DATETIME DEFAULT NULL
     COMMENT 'When signup activation SMS/email fan-out last ran (convert/payment)',
+  `onboarding_alerted_at` DATETIME DEFAULT NULL
+    COMMENT 'Posted to the #ofg-onboarding Slack channel (once per client)',
   -- Affiliate / referral routing
   `affiliate_id` INT UNSIGNED DEFAULT NULL,
   `referral_category` ENUM('realtor_broker','one_off','affiliate_partner') DEFAULT NULL
