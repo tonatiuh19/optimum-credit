@@ -6862,6 +6862,95 @@ function parseSmartCredit(text: string): CreditFile {
   };
 }
 
+/** One account's Credit Limit row as the SmartCredit print shows it (bureaus printing "——" are left out). */
+interface ScPrintedLimit {
+  creditor: string;
+  mask: string;
+  limits: Partial<Record<Bureau, number>>;
+}
+
+const SC_GROUP_HEADER = /^TransUnion®?\s*\tExperian®?\s*\tEquifax®?$/;
+const SC_GRID_CELL = /^(30|60|90|120|150|180|CO|C|R|F|B|OK)$/;
+const SC_DASH = /^[—–-]+$/;
+
+/**
+ * Credit limits read straight from the text of a SmartCredit 3B print (Nov 6, 2026 — Emiliano:
+ * the account read took the High Balance row as the limit, so revolving limits never matched
+ * the report's own Credit Utilization total and every round was held).
+ *
+ * Each account prints its labels, then a value block that starts with the
+ * "TransUnion® Experian® Equifax®" row and the account-number row. A page break can move the
+ * rest of a block below the next account's labels, but blocks keep account order, so every
+ * value row up to the next block belongs to the current one. Credit Limit is the last label
+ * (Utilization follows it on open revolving accounts). Blocks are matched to account headers
+ * by their mask; an account whose header or values are not in the text is left out.
+ */
+function parseSmartCreditPrintedLimits(text: string): ScPrintedLimit[] {
+  const lines = text.split(/\r?\n/);
+  const start = lines.findIndex((l) => SC_SECTION[l.trim()] !== undefined);
+  if (start < 0) return [];
+  let end = lines.findIndex((l, i) => i > start && l.trim() === "Public Records" && /overview of your public records/i.test(lines[i + 1] || ""));
+  if (end < 0) end = lines.length;
+  const region = lines.slice(start, end).map((l) => l.trim()).filter((t) => !isScNoise(t));
+
+  const heads: Array<{ creditor: string; mask: string | null; utilization: boolean }> = [];
+  const blocks: Array<{ masks: string[]; rows: string[][] }> = [];
+  let block: { masks: string[]; rows: string[][] } | null = null;
+  for (let i = 0; i < region.length; i++) {
+    const t = region[i];
+    const anIdx = region.slice(i + 1, i + 6).findIndex((l) => l === "Account Number");
+    if (anIdx >= 1 && !t.includes("\t") && !SC_LABELS[t] && !SC_SECTION[t] && region.slice(i + 1, i + 1 + anIdx).every((l) => SC_STATUS_LINE.test(l))) {
+      const token = t.split(/\s+/).pop() || "";
+      heads.push({ creditor: splitScHeader(t).creditor, mask: token.includes("*") ? token : null, utilization: false });
+      i += anIdx + 1;
+      continue;
+    }
+    if (t === "Account Number") heads.push({ creditor: "", mask: null, utilization: false }); // header on an image page
+    if (t === "Utilization" && heads.length) heads[heads.length - 1].utilization = true;
+    if (SC_GROUP_HEADER.test(t)) {
+      const masks = splitScValueRow(region[i + 1] || "");
+      block = null;
+      if (masks && masks.some((m) => m.includes("*")) && masks.every((m) => m.includes("*") || SC_DASH.test(m))) {
+        block = { masks, rows: [] };
+        blocks.push(block);
+        i++;
+      }
+      continue;
+    }
+    const cells = splitScValueRow(t);
+    // Payment-grid rows ("30 30 30") can print between the two halves of a split block.
+    if (cells && block && !cells.every((c) => SC_GRID_CELL.test(c))) block.rows.push(cells);
+  }
+
+  const out: ScPrintedLimit[] = [];
+  let next = 0;
+  for (const h of heads) {
+    if (!h.mask || !h.creditor) continue;
+    // Next block (within a short window) printing this header's mask; skipped blocks belong to unreadable headers.
+    let k = -1;
+    for (let j = next; j < Math.min(next + 3, blocks.length); j++) {
+      if (blocks[j].masks.includes(h.mask)) {
+        k = j;
+        break;
+      }
+    }
+    if (k < 0) continue;
+    next = k + 1;
+    const rows = blocks[k].rows;
+    const last = rows[rows.length - 1];
+    if (!last) continue;
+    const utilRow = last.some((c) => /%$/.test(c)) || (h.utilization && last.every((c) => SC_DASH.test(c)));
+    const row = utilRow ? rows[rows.length - 2] : last;
+    if (!row || !row.every((c) => /^\$[\d,]+(\.\d{2})?$/.test(c) || SC_DASH.test(c))) continue;
+    const limits: Partial<Record<Bureau, number>> = {};
+    BUREAUS.forEach((b, bi) => {
+      if (/^\$/.test(row[bi])) limits[b] = Number(row[bi].replace(/[$,]/g, ""));
+    });
+    if (Object.keys(limits).length) out.push({ creditor: h.creditor, mask: h.mask, limits });
+  }
+  return out;
+}
+
 /**
  * OFG Credit File engine — Claude extraction (lean fields) + cross-check.
  *
@@ -13494,7 +13583,7 @@ function pv2BuildPdfData(opts: {
 type Pv2ReportFormat = "smartcredit" | "identityiq" | "mfsn" | "myfico" | "trimerge";
 
 /** Bump when a summary parser changes: cached summaries from an older parser are re-parsed. */
-const PV2_SUMMARY_PARSER_VERSION = 2;
+const PV2_SUMMARY_PARSER_VERSION = 3;
 
 interface Pv2PullSummary {
   /** Parser that produced this summary (cached copies older than PV2_SUMMARY_PARSER_VERSION are re-parsed). */
@@ -13522,6 +13611,8 @@ interface Pv2PullSummary {
   merged?: { totalAccounts: number | null; openAccounts: number | null; publicRecords: number | null; collections: number | null } | null;
   /** Account blocks / table-of-contents entries the PDF itself prints (layout count, not a bureau total). */
   accountsPrinted?: number | null;
+  /** SmartCredit: each account's Credit Limit row read from the PDF text (parser v3+). */
+  printedLimits?: ScPrintedLimit[];
 }
 
 const PV2_MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
@@ -13695,6 +13786,51 @@ function pv2ParsePullSummary(text: string): Pv2PullSummary | null {
   return s ? { ...s, parserVersion: PV2_SUMMARY_PARSER_VERSION } : null;
 }
 
+/**
+ * Repairs open revolving credit limits from the PDF's own Credit Limit rows (Nov 6, 2026 —
+ * Emiliano: the read took Bank of America's High Balance $1,279 as its $500 limit, so the
+ * limits never matched the report's Credit Utilization total and every round was held).
+ * Guarded so a correct read is never touched: a bureau is repaired only when its read total
+ * misses the printed total and the printed limits make it match. A printed value is used
+ * only when every entry for the same creditor and a compatible mask agrees on it.
+ * Returns the same object when nothing changes.
+ */
+function pv2ApplyPrintedLimits<F extends CreditFile>(file: F, summary: Pv2PullSummary | null | undefined): F {
+  const printed = summary?.printedLimits;
+  if (!printed?.length) return file;
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const digits = (m: string | null | undefined) => String(m ?? "").replace(/[^0-9a-z]/gi, "").toLowerCase();
+  const openRevolving = (a: CreditAccount, b: Bureau) => a.section === "revolving" && !!a.bureaus[b] && !isClosedTradeline(a.bureaus[b]!, a);
+  const printedFor = (a: CreditAccount, b: Bureau): number | null => {
+    const name = norm(a.creditor);
+    const own = digits(a.mask);
+    const values = new Set<number>();
+    for (const p of printed) {
+      if (norm(p.creditor) !== name) continue;
+      const d = digits(p.mask);
+      if (own && d && !d.includes(own) && !own.includes(d)) continue;
+      if (typeof p.limits[b] === "number") values.add(p.limits[b]!);
+    }
+    return values.size === 1 ? [...values][0] : null;
+  };
+  let accounts = file.accounts;
+  for (const b of BUREAUS) {
+    const want = summary?.revolving?.[b]?.limit;
+    if (want == null) continue;
+    const tol = Math.max(50, want * 0.02);
+    const total = (list: CreditAccount[]) => list.reduce((n, a) => n + (openRevolving(a, b) ? a.bureaus[b]!.creditLimit ?? 0 : 0), 0);
+    if (Math.abs(total(accounts) - want) <= tol) continue;
+    const repaired = accounts.map((a) => {
+      if (!openRevolving(a, b)) return a;
+      const v = printedFor(a, b);
+      const t = a.bureaus[b]!;
+      return v == null || v === t.creditLimit ? a : { ...a, bureaus: { ...a.bureaus, [b]: { ...t, creditLimit: v } } };
+    });
+    if (Math.abs(total(repaired) - want) <= tol) accounts = repaired;
+  }
+  return accounts === file.accounts ? file : { ...file, accounts };
+}
+
 function pv2ParsePullSummaryLayout(text: string): Pv2PullSummary | null {
   const format = pv2DetectReportFormat(text);
   if (format === "mfsn") return pv2ParseMfsnSummary(text);
@@ -13703,7 +13839,9 @@ function pv2ParsePullSummaryLayout(text: string): Pv2PullSummary | null {
   if (format === "smartcredit" || format === "identityiq") {
     const s = pv2ParseSmartCreditSummary(text);
     const date = pv2Ymd(text.split(/\r?\n/).map((l) => /^(\d{2}\/\d{2}\/\d{4})\s*\t\s*\d{2}\/\d{2}\/\d{4}/.exec(l.trim())?.[1]).find(Boolean));
-    return s ? { ...s, format, reportDate: date } : date ? { format, reportDate: date, perBureau: pv2EmptyBureaus() as Pv2PullSummary["perBureau"], revolving: pv2EmptyBureaus() as Pv2PullSummary["revolving"] } : null;
+    const printedLimits = format === "smartcredit" ? parseSmartCreditPrintedLimits(text) : [];
+    const extra = printedLimits.length ? { printedLimits } : {};
+    return s ? { ...s, format, reportDate: date, ...extra } : date ? { format, reportDate: date, perBureau: pv2EmptyBureaus() as Pv2PullSummary["perBureau"], revolving: pv2EmptyBureaus() as Pv2PullSummary["revolving"], ...extra } : null;
   }
   return null;
 }
@@ -16266,7 +16404,7 @@ async function ensureProgressReads(sessionId: number): Promise<{
     };
     if (st === "ready" && latest.extracted_json) {
       const summary = await progressPullSummary(latest);
-      const file = withPrintedReportDate(parse(latest.extracted_json, latest.text_skeleton_json), summary);
+      const file = pv2ApplyPrintedLimits(withPrintedReportDate(parse(latest.extracted_json, latest.text_skeleton_json), summary), summary);
       const shortfall = pv2SummaryShortfall(file, summary);
       const incomplete =
         incompleteSmartCreditPrint(file, latest.text_skeleton_json ? parseJson(latest.text_skeleton_json) : null) ??
@@ -16352,7 +16490,7 @@ async function loadProgressRoundContext(
     if (!r?.extracted_json) return null;
     const skel = r.text_skeleton_json ? (typeof r.text_skeleton_json === "string" ? JSON.parse(r.text_skeleton_json) : r.text_skeleton_json) : null;
     const summary = await progressPullSummary(r);
-    const file = withPrintedReportDate(normalizeStoredRead(preferSkeletonReportDate(typeof r.extracted_json === "string" ? JSON.parse(r.extracted_json) : r.extracted_json, skel) as CreditFile), summary);
+    const file = pv2ApplyPrintedLimits(withPrintedReportDate(normalizeStoredRead(preferSkeletonReportDate(typeof r.extracted_json === "string" ? JSON.parse(r.extracted_json) : r.extracted_json, skel) as CreditFile), summary), summary);
     // A half-loaded pull is never a comparison base.
     if (incompleteSmartCreditPrint(file, skel) || pv2SummaryShortfall(file, summary)) return null;
     return file;

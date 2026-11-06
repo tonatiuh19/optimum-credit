@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="38%" r="75%">
+      <stop offset="0" stop-color="#1f2a47"/>
+      <stop offset="0.6" stop-color="#121829"/>
+      <stop offset="1" stop-color="#0a0e19"/>
+    </radialGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e6c98f"/>
+      <stop offset="0.5" stop-color="#c4a26a"/>
+      <stop offset="1" stop-color="#9a7a45"/>
+    </linearGradient>
+    <linearGradient id="face" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#26324f"/>
+      <stop offset="1" stop-color="#161e33"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="14" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+  <!-- rising score arcs -->
+  <g fill="none" stroke="url(#gold)" stroke-linecap="round" opacity="0.22">
+    <path d="M152 760 A380 380 0 0 1 872 760" stroke-width="10"/>
+    <path d="M212 760 A320 320 0 0 1 812 760" stroke-width="6" stroke-dasharray="2 26"/>
+  </g>
+  <!-- antenna -->
+  <line x1="512" y1="248" x2="512" y2="318" stroke="#c4a26a" stroke-width="22" stroke-linecap="round"/>
+  <circle cx="512" cy="226" r="34" fill="#e6c98f" filter="url(#glow)"/>
+  <!-- ears -->
+  <rect x="214" y="430" width="56" height="150" rx="28" fill="url(#gold)"/>
+  <rect x="754" y="430" width="56" height="150" rx="28" fill="url(#gold)"/>
+  <!-- head -->
+  <rect x="262" y="318" width="500" height="380" rx="120" fill="url(#gold)"/>
+  <rect x="290" y="346" width="444" height="324" rx="96" fill="url(#face)"/>
+  <!-- eyes -->
+  <g filter="url(#glow)" fill="#7ee0b8">
+    <rect x="384" y="440" width="76" height="96" rx="38"/>
+    <rect x="564" y="440" width="76" height="96" rx="38"/>
+  </g>
+  <!-- smile = upward trend -->
+  <polyline points="400,604 470,588 540,592 624,548" fill="none" stroke="#e6c98f" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="624" cy="548" r="16" fill="#e6c98f"/>
+  <!-- wordmark -->
+  <text x="512" y="842" text-anchor="middle" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-weight="800" font-size="132" letter-spacing="18" fill="url(#gold)">OFG</text>
+</svg>

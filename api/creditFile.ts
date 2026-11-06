@@ -534,3 +534,93 @@ export function parseSmartCredit(text: string): CreditFile {
     warnings,
   };
 }
+
+/** One account's Credit Limit row as the SmartCredit print shows it (bureaus printing "——" are left out). */
+export interface ScPrintedLimit {
+  creditor: string;
+  mask: string;
+  limits: Partial<Record<Bureau, number>>;
+}
+
+const SC_GROUP_HEADER = /^TransUnion®?\s*\tExperian®?\s*\tEquifax®?$/;
+const SC_GRID_CELL = /^(30|60|90|120|150|180|CO|C|R|F|B|OK)$/;
+const SC_DASH = /^[—–-]+$/;
+
+/**
+ * Credit limits read straight from the text of a SmartCredit 3B print (Nov 6, 2026 — Emiliano:
+ * the account read took the High Balance row as the limit, so revolving limits never matched
+ * the report's own Credit Utilization total and every round was held).
+ *
+ * Each account prints its labels, then a value block that starts with the
+ * "TransUnion® Experian® Equifax®" row and the account-number row. A page break can move the
+ * rest of a block below the next account's labels, but blocks keep account order, so every
+ * value row up to the next block belongs to the current one. Credit Limit is the last label
+ * (Utilization follows it on open revolving accounts). Blocks are matched to account headers
+ * by their mask; an account whose header or values are not in the text is left out.
+ */
+export function parseSmartCreditPrintedLimits(text: string): ScPrintedLimit[] {
+  const lines = text.split(/\r?\n/);
+  const start = lines.findIndex((l) => SC_SECTION[l.trim()] !== undefined);
+  if (start < 0) return [];
+  let end = lines.findIndex((l, i) => i > start && l.trim() === "Public Records" && /overview of your public records/i.test(lines[i + 1] || ""));
+  if (end < 0) end = lines.length;
+  const region = lines.slice(start, end).map((l) => l.trim()).filter((t) => !isScNoise(t));
+
+  const heads: Array<{ creditor: string; mask: string | null; utilization: boolean }> = [];
+  const blocks: Array<{ masks: string[]; rows: string[][] }> = [];
+  let block: { masks: string[]; rows: string[][] } | null = null;
+  for (let i = 0; i < region.length; i++) {
+    const t = region[i];
+    const anIdx = region.slice(i + 1, i + 6).findIndex((l) => l === "Account Number");
+    if (anIdx >= 1 && !t.includes("\t") && !SC_LABELS[t] && !SC_SECTION[t] && region.slice(i + 1, i + 1 + anIdx).every((l) => SC_STATUS_LINE.test(l))) {
+      const token = t.split(/\s+/).pop() || "";
+      heads.push({ creditor: splitScHeader(t).creditor, mask: token.includes("*") ? token : null, utilization: false });
+      i += anIdx + 1;
+      continue;
+    }
+    if (t === "Account Number") heads.push({ creditor: "", mask: null, utilization: false }); // header on an image page
+    if (t === "Utilization" && heads.length) heads[heads.length - 1].utilization = true;
+    if (SC_GROUP_HEADER.test(t)) {
+      const masks = splitScValueRow(region[i + 1] || "");
+      block = null;
+      if (masks && masks.some((m) => m.includes("*")) && masks.every((m) => m.includes("*") || SC_DASH.test(m))) {
+        block = { masks, rows: [] };
+        blocks.push(block);
+        i++;
+      }
+      continue;
+    }
+    const cells = splitScValueRow(t);
+    // Payment-grid rows ("30 30 30") can print between the two halves of a split block.
+    if (cells && block && !cells.every((c) => SC_GRID_CELL.test(c))) block.rows.push(cells);
+  }
+
+  const out: ScPrintedLimit[] = [];
+  let next = 0;
+  for (const h of heads) {
+    if (!h.mask || !h.creditor) continue;
+    // Next block (within a short window) printing this header's mask; skipped blocks belong to unreadable headers.
+    let k = -1;
+    for (let j = next; j < Math.min(next + 3, blocks.length); j++) {
+      if (blocks[j].masks.includes(h.mask)) {
+        k = j;
+        break;
+      }
+    }
+    if (k < 0) continue;
+    next = k + 1;
+    const rows = blocks[k].rows;
+    const last = rows[rows.length - 1];
+    if (!last) continue;
+    const utilRow = last.some((c) => /%$/.test(c)) || (h.utilization && last.every((c) => SC_DASH.test(c)));
+    const row = utilRow ? rows[rows.length - 2] : last;
+    if (!row || !row.every((c) => /^\$[\d,]+(\.\d{2})?$/.test(c) || SC_DASH.test(c))) continue;
+    const limits: Partial<Record<Bureau, number>> = {};
+    BUREAUS.forEach((b, bi) => {
+      if (/^\$/.test(row[bi])) limits[b] = Number(row[bi].replace(/[$,]/g, ""));
+    });
+    if (Object.keys(limits).length) out.push({ creditor: h.creditor, mask: h.mask, limits });
+  }
+  return out;
+}
+

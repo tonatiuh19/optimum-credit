@@ -12,7 +12,7 @@
  * Pure (no I/O). Inlined into api/index.ts by scripts/inline-credit-file-engine.mjs.
  */
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFImage, type PDFPage } from "pdf-lib";
-import { BUREAUS, type Bureau, type BureauTradeline, type CreditAccount, type CreditFile } from "./creditFile";
+import { BUREAUS, parseSmartCreditPrintedLimits, type Bureau, type BureauTradeline, type CreditAccount, type CreditFile, type ScPrintedLimit } from "./creditFile";
 import {
   buildCreditAnalysis,
   isClosedTradeline,
@@ -2025,7 +2025,7 @@ export function pv2BuildPdfData(opts: {
 export type Pv2ReportFormat = "smartcredit" | "identityiq" | "mfsn" | "myfico" | "trimerge";
 
 /** Bump when a summary parser changes: cached summaries from an older parser are re-parsed. */
-export const PV2_SUMMARY_PARSER_VERSION = 2;
+export const PV2_SUMMARY_PARSER_VERSION = 3;
 
 export interface Pv2PullSummary {
   /** Parser that produced this summary (cached copies older than PV2_SUMMARY_PARSER_VERSION are re-parsed). */
@@ -2053,6 +2053,8 @@ export interface Pv2PullSummary {
   merged?: { totalAccounts: number | null; openAccounts: number | null; publicRecords: number | null; collections: number | null } | null;
   /** Account blocks / table-of-contents entries the PDF itself prints (layout count, not a bureau total). */
   accountsPrinted?: number | null;
+  /** SmartCredit: each account's Credit Limit row read from the PDF text (parser v3+). */
+  printedLimits?: ScPrintedLimit[];
 }
 
 const PV2_MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
@@ -2226,6 +2228,51 @@ export function pv2ParsePullSummary(text: string): Pv2PullSummary | null {
   return s ? { ...s, parserVersion: PV2_SUMMARY_PARSER_VERSION } : null;
 }
 
+/**
+ * Repairs open revolving credit limits from the PDF's own Credit Limit rows (Nov 6, 2026 —
+ * Emiliano: the read took Bank of America's High Balance $1,279 as its $500 limit, so the
+ * limits never matched the report's Credit Utilization total and every round was held).
+ * Guarded so a correct read is never touched: a bureau is repaired only when its read total
+ * misses the printed total and the printed limits make it match. A printed value is used
+ * only when every entry for the same creditor and a compatible mask agrees on it.
+ * Returns the same object when nothing changes.
+ */
+export function pv2ApplyPrintedLimits<F extends CreditFile>(file: F, summary: Pv2PullSummary | null | undefined): F {
+  const printed = summary?.printedLimits;
+  if (!printed?.length) return file;
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const digits = (m: string | null | undefined) => String(m ?? "").replace(/[^0-9a-z]/gi, "").toLowerCase();
+  const openRevolving = (a: CreditAccount, b: Bureau) => a.section === "revolving" && !!a.bureaus[b] && !isClosedTradeline(a.bureaus[b]!, a);
+  const printedFor = (a: CreditAccount, b: Bureau): number | null => {
+    const name = norm(a.creditor);
+    const own = digits(a.mask);
+    const values = new Set<number>();
+    for (const p of printed) {
+      if (norm(p.creditor) !== name) continue;
+      const d = digits(p.mask);
+      if (own && d && !d.includes(own) && !own.includes(d)) continue;
+      if (typeof p.limits[b] === "number") values.add(p.limits[b]!);
+    }
+    return values.size === 1 ? [...values][0] : null;
+  };
+  let accounts = file.accounts;
+  for (const b of BUREAUS) {
+    const want = summary?.revolving?.[b]?.limit;
+    if (want == null) continue;
+    const tol = Math.max(50, want * 0.02);
+    const total = (list: CreditAccount[]) => list.reduce((n, a) => n + (openRevolving(a, b) ? a.bureaus[b]!.creditLimit ?? 0 : 0), 0);
+    if (Math.abs(total(accounts) - want) <= tol) continue;
+    const repaired = accounts.map((a) => {
+      if (!openRevolving(a, b)) return a;
+      const v = printedFor(a, b);
+      const t = a.bureaus[b]!;
+      return v == null || v === t.creditLimit ? a : { ...a, bureaus: { ...a.bureaus, [b]: { ...t, creditLimit: v } } };
+    });
+    if (Math.abs(total(repaired) - want) <= tol) accounts = repaired;
+  }
+  return accounts === file.accounts ? file : { ...file, accounts };
+}
+
 function pv2ParsePullSummaryLayout(text: string): Pv2PullSummary | null {
   const format = pv2DetectReportFormat(text);
   if (format === "mfsn") return pv2ParseMfsnSummary(text);
@@ -2234,7 +2281,9 @@ function pv2ParsePullSummaryLayout(text: string): Pv2PullSummary | null {
   if (format === "smartcredit" || format === "identityiq") {
     const s = pv2ParseSmartCreditSummary(text);
     const date = pv2Ymd(text.split(/\r?\n/).map((l) => /^(\d{2}\/\d{2}\/\d{4})\s*\t\s*\d{2}\/\d{2}\/\d{4}/.exec(l.trim())?.[1]).find(Boolean));
-    return s ? { ...s, format, reportDate: date } : date ? { format, reportDate: date, perBureau: pv2EmptyBureaus() as Pv2PullSummary["perBureau"], revolving: pv2EmptyBureaus() as Pv2PullSummary["revolving"] } : null;
+    const printedLimits = format === "smartcredit" ? parseSmartCreditPrintedLimits(text) : [];
+    const extra = printedLimits.length ? { printedLimits } : {};
+    return s ? { ...s, format, reportDate: date, ...extra } : date ? { format, reportDate: date, perBureau: pv2EmptyBureaus() as Pv2PullSummary["perBureau"], revolving: pv2EmptyBureaus() as Pv2PullSummary["revolving"], ...extra } : null;
   }
   return null;
 }
