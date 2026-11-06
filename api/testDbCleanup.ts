@@ -61,7 +61,7 @@ export function uniqueTestE164(seed?: string): string {
 
 /** TiDB-safe pool for integration tests (keepAlive + connect timeout). */
 export function createIntegrationTestPool(): Pool {
-  return mysql.createPool({
+  const pool = mysql.createPool({
     host: process.env.DB_HOST,
     port: Number(process.env.DB_PORT || 4000),
     user: process.env.DB_USER,
@@ -77,6 +77,14 @@ export function createIntegrationTestPool(): Pool {
     keepAliveInitialDelay: 10_000,
     connectTimeout: 60_000,
   });
+  // TiDB Serverless sometimes drops a socket mid-run (read ECONNRESET). Retry pool-level
+  // queries on those codes so one network blip doesn't fail a suite or its cleanup.
+  // Connections taken with getConnection() (transactions) are not retried.
+  const query = pool.query.bind(pool) as (...a: unknown[]) => Promise<unknown>;
+  const execute = pool.execute.bind(pool) as (...a: unknown[]) => Promise<unknown>;
+  (pool as any).query = (...a: unknown[]) => withDbRetry(() => query(...a));
+  (pool as any).execute = (...a: unknown[]) => withDbRetry(() => execute(...a));
+  return pool;
 }
 
 /**

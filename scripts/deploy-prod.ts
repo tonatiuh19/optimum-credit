@@ -62,8 +62,14 @@ let testsStarted = false;
 /** Removes every test fixture from the shared DB, synchronously (safe inside signal / exit paths). */
 function purgeTestData(reason: string) {
   console.log(`\n🧹 ${reason}: purging test data from the shared DB...\n`);
-  const r = spawnSync("npm", ["run", "test:cleanup-fixtures"], { stdio: "inherit", env: process.env });
-  purged = r.status === 0;
+  // TiDB can drop a socket mid-cleanup (read ECONNRESET): try 3 times before failing the deploy.
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const r = spawnSync("npm", ["run", "test:cleanup-fixtures"], { stdio: "inherit", env: process.env });
+    purged = r.status === 0;
+    if (purged || attempt === 3) break;
+    console.log(`\n⏳ Cleanup failed; retrying (${attempt}/2)...\n`);
+    spawnSync("sleep", [String(attempt * 5)]);
+  }
   console.log(purged ? "\n✅ Test data cleaned up.\n" : "\n⚠️ Cleanup failed. Run: npm run test:cleanup-fixtures\n");
 }
 

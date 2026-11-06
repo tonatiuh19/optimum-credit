@@ -4,7 +4,7 @@
  * test count, time and current test), the slowest tests, the last failure and a fun status line.
  * Test results stream above the panel. Used by `npm run deploy:prod` on a terminal; `npm test` keeps the default.
  */
-import type { Reporter, TestCase, TestModule, TestSpecification } from "vitest/node";
+import type { Reporter, SerializedError, TestCase, TestModule, TestRunEndReason, TestSpecification } from "vitest/node";
 import fs from "node:fs";
 import path from "node:path";
 import { projectName } from "./deployAsk";
@@ -231,7 +231,22 @@ export default class DashboardReporter implements Reporter {
     );
   }
 
-  onTestRunEnd() {
+  /**
+   * Vitest also fails the run on errors outside a test: a file that cannot load, a failing
+   * beforeAll / afterAll (e.g. the DB dropping during cleanup) or an unhandled rejection.
+   * Those are not test results, so they are collected here; otherwise the run reads
+   * "All tests passed" while vitest exits with code 1.
+   */
+  onTestRunEnd(modules: ReadonlyArray<TestModule> = [], unhandledErrors: ReadonlyArray<SerializedError> = [], reason?: TestRunEndReason) {
+    const outside: Array<{ where: string; error: SerializedError }> = [];
+    for (const m of modules) for (const e of m.errors()) outside.push({ where: shortName(m.moduleId), error: e });
+    for (const e of unhandledErrors) outside.push({ where: "unhandled error", error: e });
+    if (outside.length) {
+      writeFailures([
+        ...this.failures.map((f) => `${shortName(f.module.moduleId)} › ${f.name}`),
+        ...outside.map((o) => `${o.where} › ${String(o.error.message || o.error.name || "error").split("\n")[0]}`),
+      ]);
+    }
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.clearPanel();
@@ -257,10 +272,15 @@ export default class DashboardReporter implements Reporter {
         if (e.stack) process.stdout.write(c.gray(e.stack.split("\n").slice(1, 6).join("\n")) + "\n");
       }
     }
+    for (const o of outside) {
+      process.stdout.write(`\n${c.bold(c.red("ERROR"))} ${o.where} ${c.gray("(outside a test)")}\n${c.red(String(o.error.message || o.error))}\n`);
+      if (o.error.stack) process.stdout.write(c.gray(o.error.stack.split("\n").slice(1, 6).join("\n")) + "\n");
+    }
     const total = this.passed + this.failed + this.skipped;
     const took = clock(Date.now() - this.started);
-    const line = this.failed
-      ? `${c.bold(c.red(`💥 ${this.failed} failed`))} ${c.gray("·")} ${c.green(`${this.passed} passed`)}`
+    const broken = this.failed || outside.length || (reason && reason !== "passed");
+    const line = broken
+      ? `${c.bold(c.red(`💥 ${[this.failed ? `${this.failed} failed` : "", outside.length ? `${outside.length} error(s) outside tests` : "", !this.failed && !outside.length ? `run ${reason}` : ""].filter(Boolean).join(" · ")}`))} ${c.gray("·")} ${c.green(`${this.passed} passed`)}`
       : `${c.bold(c.green("🎉 All tests passed"))} ${c.gray("·")} ${c.green(`${this.passed} passed`)}`;
     process.stdout.write(`\n${line} ${c.gray(`· ${this.skipped} skipped · ${total} total · ${this.done.size} files · ${took}`)}\n`);
     if (this.slowest.length) {
