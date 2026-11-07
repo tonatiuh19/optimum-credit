@@ -183,6 +183,8 @@ export interface CreditFile {
    * the report's own table of contents / account blocks.
    */
   readEntries?: number;
+  /** Values corrected from facts the PDF prints (limits, sections, balances, inquiries, lates, a duplicate), for staff. */
+  printedRepairs?: string[];
 }
 
 // ── shared helpers ──────────────────────────────────────────────────────────
@@ -296,6 +298,8 @@ const SC_SECTION: Record<string, AccountSection> = {
   "Mortgage Accounts": "mortgage",
   "Collections Accounts": "collection",
   "Other Accounts": "other",
+  // Lines of credit print in their own section; SmartCredit's utilization table leaves them out.
+  "Line of Credit Accounts": "other",
   "Unknown Accounts": "unknown",
 };
 
@@ -327,17 +331,18 @@ function splitScValueRow(line: string): string[] | null {
   return cells;
 }
 
+// Bureau names may carry ® ("TransUnion® 30: 0 …" in the Ultra 4K 3B print).
 const SC_DAYS_LATE =
-  /TransUnion\s+30:\s*(\S+)\s+60:\s*(\S+)\s+90:\s*(\S+)\s*\t?\s*Experian\s*\t?\s*30:\s*(\S+)\s+60:\s*(\S+)\s+90:\s*(\S+)\s*\t?\s*Equifax\s*\t?\s*30:\s*(\S+)\s+60:\s*(\S+)\s+90:\s*(\S+)/;
+  /TransUnion®?\s+30:\s*(\S+)\s+60:\s*(\S+)\s+90:\s*(\S+)\s*\t?\s*Experian®?\s*\t?\s*30:\s*(\S+)\s+60:\s*(\S+)\s+90:\s*(\S+)\s*\t?\s*Equifax®?\s*\t?\s*30:\s*(\S+)\s+60:\s*(\S+)\s+90:\s*(\S+)/;
 
 function lateCount(raw: string): number | null {
   return /^\d+$/.test(raw) ? Number(raw) : null;
 }
 
-/** "APPLE CARD/GS BANK USA 110001****" → name + mask. */
+/** "APPLE CARD/GS BANK USA 110001****" → name + mask. Masks can carry letters ("KLARNA QZ6S****", "TILT LN5BNO****"). */
 function splitScHeader(line: string): { creditor: string; mask: string | null } {
-  const m = line.trim().match(/^(.*?)\s+([0-9X*]*\*{2,}[0-9X*]*)$/i);
-  return m
+  const m = line.trim().match(/^(.*?)\s+([0-9A-Z]*\*{2,}[0-9A-Z*]*)$/i);
+  return m && m[1].trim()
     ? { creditor: m[1].trim(), mask: m[2] }
     : { creditor: line.trim(), mask: null };
 }
@@ -391,6 +396,8 @@ export function parseSmartCredit(text: string): CreditFile {
 
   const accounts: CreditAccount[] = [];
   const daysLate: string[][] = [];
+  /** Account each Days Late row printed under (the last header before it). */
+  const daysLateOwner: number[] = [];
   let section: AccountSection = "unknown";
   for (let i = 0; i < region.length; i++) {
     const t = region[i];
@@ -401,6 +408,7 @@ export function parseSmartCredit(text: string): CreditFile {
     const late = t.match(SC_DAYS_LATE);
     if (late) {
       daysLate.push(late.slice(1));
+      daysLateOwner.push(accounts.length - 1);
       continue;
     }
     // Header: creditor line, 1–4 status lines, then the "Account Number" label.
@@ -439,10 +447,23 @@ export function parseSmartCredit(text: string): CreditFile {
       });
     }
   }
-  // "Days Late" rows print once per account, in account order.
-  if (daysLate.length === accounts.length) {
+  // "Days Late" rows print once per account, after that account's header. Same count → account order;
+  // otherwise (an extra / image header — Nov 6, 2026: 96 rows for 97 headers) each row goes to the header
+  // printed before it, and an account that would get two rows gets none (never guessed).
+  const lateFor = new Map<number, string[]>();
+  if (daysLate.length === accounts.length) daysLate.forEach((row, idx) => lateFor.set(idx, row));
+  else {
+    const seen = new Map<number, number>();
+    daysLateOwner.forEach((owner) => seen.set(owner, (seen.get(owner) ?? 0) + 1));
+    daysLate.forEach((row, idx) => {
+      const owner = daysLateOwner[idx];
+      if (owner >= 0 && seen.get(owner) === 1) lateFor.set(owner, row);
+    });
+  }
+  if (lateFor.size) {
     accounts.forEach((account, idx) => {
-      const late = daysLate[idx];
+      const late = lateFor.get(idx);
+      if (!late) return;
       BUREAUS.forEach((b, bi) => {
         const l30 = lateCount(late[bi * 3]);
         const l60 = lateCount(late[bi * 3 + 1]);
@@ -456,7 +477,8 @@ export function parseSmartCredit(text: string): CreditFile {
         };
       });
     });
-  } else {
+  }
+  if (daysLate.length !== accounts.length) {
     warnings.push(
       `SmartCredit days-late rows (${daysLate.length}) ≠ accounts (${accounts.length})`,
     );
@@ -535,16 +557,136 @@ export function parseSmartCredit(text: string): CreditFile {
   };
 }
 
-/** One account's Credit Limit row as the SmartCredit print shows it (bureaus printing "——" are left out). */
+/** One account as the SmartCredit print shows it: its section and Credit Limit row (bureaus printing "——" are left out). */
 export interface ScPrintedLimit {
   creditor: string;
   mask: string;
   limits: Partial<Record<Bureau, number>>;
+  /** Balance Owed row (validated against the Date Opened row above it). */
+  balances?: Partial<Record<Bureau, number>>;
+  /** Date Opened row (MM/DD/YYYY): tells look-alike accounts with one number apart. */
+  opened?: Partial<Record<Bureau, string>>;
+  /** "Days Late - Last 7 Years" per bureau (bureaus printing "––" are left out). */
+  lates?: Partial<Record<Bureau, { late30: number | null; late60: number | null; late90: number | null }>>;
+  /** Section the account is printed under (Revolving Accounts, Installment Accounts, …). */
+  section?: AccountSection;
 }
 
 const SC_GROUP_HEADER = /^TransUnion®?\s*\tExperian®?\s*\tEquifax®?$/;
 const SC_GRID_CELL = /^(30|60|90|120|150|180|CO|C|R|F|B|OK)$/;
 const SC_DASH = /^[—–-]+$/;
+
+// ── MyFreeScoreNow (Three Bureau Credit Report) printed account facts ─────────
+
+const MF_BUREAUS: Bureau[] = ["EQ", "EX", "TU"]; // column order in every MyFreeScoreNow table
+const MF_MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+
+/** "$1,250 N/A $1,250" → per bureau (EQ, EX, TU). Null when the row is not three values. */
+function mfMoneyRow(rest: string): Partial<Record<Bureau, number>> | null {
+  const cells = rest.trim().split(/\s+/);
+  if (cells.length !== 3 || !cells.every((c) => /^\$[\d,]+(\.\d{2})?$/.test(c) || /^(N\/A|—+|-+)$/i.test(c))) return null;
+  const out: Partial<Record<Bureau, number>> = {};
+  cells.forEach((c, i) => {
+    if (c.startsWith("$")) out[MF_BUREAUS[i]] = Number(c.replace(/[$,]/g, ""));
+  });
+  return out;
+}
+
+/** "1 0 N/A" → per bureau counts. */
+function mfCountRow(rest: string): Partial<Record<Bureau, number>> | null {
+  const cells = rest.trim().split(/\s+/);
+  if (cells.length !== 3 || !cells.every((c) => /^\d+$/.test(c) || /^N\/A$/i.test(c))) return null;
+  const out: Partial<Record<Bureau, number>> = {};
+  cells.forEach((c, i) => {
+    if (/^\d+$/.test(c)) out[MF_BUREAUS[i]] = Number(c);
+  });
+  return out;
+}
+
+/** "May 01, 2025 N/A Mar 01, 2026" → per bureau MM/DD/YYYY. */
+function mfDateRow(rest: string): Partial<Record<Bureau, string>> | null {
+  const cells = [...rest.matchAll(/([A-Za-z]{3})[a-z]* (\d{1,2}), (\d{4})|N\/A/g)];
+  if (cells.length !== 3) return null;
+  const out: Partial<Record<Bureau, string>> = {};
+  cells.forEach((m, i) => {
+    const mi = m[1] ? MF_MONTHS.indexOf(m[1].toLowerCase()) : -1;
+    if (mi >= 0) out[MF_BUREAUS[i]] = `${String(mi + 1).padStart(2, "0")}/${m[2].padStart(2, "0")}/${m[3]}`;
+  });
+  return out;
+}
+
+const MF_SECTION: Record<string, AccountSection> = { revolving: "revolving", mortgage: "mortgage", installment: "installment", other: "other", collection: "collection", collections: "collection" };
+
+/**
+ * Account facts a MyFreeScoreNow report prints for each account (Nov 6, 2026), in the same shape as
+ * the SmartCredit ones so every guarded repair applies: credit limit, reported balance, date opened,
+ * 30/60/90+ days past due (7-year Payment Summary) and the section. Each account block starts with
+ * its numbered heading ("2.1 Credit One Bank (CLOSED)", after the table of contents) and prints
+ * label-led rows with Equifax, Experian, TransUnion columns.
+ */
+export function parseMfsnPrintedAccounts(text: string): ScPrintedLimit[] {
+  const lines = text.split(/\r?\n/).map((l) => l.trim());
+  const sections = new Map<string, AccountSection>();
+  let lastToc = -1;
+  lines.forEach((l, i) => {
+    const sec = /^(\d+)\. (Revolving|Mortgage|Installment|Other|Collections?) Accounts \d+$/i.exec(l);
+    if (sec) sections.set(sec[1], MF_SECTION[sec[2].toLowerCase()] ?? "other");
+    if (/^\d+\.\d+ \S.* \d+$/.test(l) && sections.size) lastToc = i;
+  });
+  if (!sections.size) return [];
+  const out: ScPrintedLimit[] = [];
+  let cur: (ScPrintedLimit & { done: Set<string>; lastDigits: string[] }) | null = null;
+  const flush = () => {
+    if (!cur) return;
+    const { done, lastDigits, ...entry } = cur;
+    if (lastDigits.length) out.push({ ...entry, mask: [...new Set(lastDigits)].join(" ") });
+    cur = null;
+  };
+  for (let i = lastToc + 1; i < lines.length; i++) {
+    const l = lines[i];
+    const head = /^(\d+)\.(\d+) (.+?)(?: \((?:CLOSED|OPEN)\))?$/i.exec(l);
+    if (head && sections.has(head[1])) {
+      flush();
+      cur = { creditor: head[3].trim(), mask: "", limits: {}, section: sections.get(head[1]), done: new Set(), lastDigits: [] };
+      continue;
+    }
+    if (!cur) continue;
+    const c = cur as ScPrintedLimit & { done: Set<string>; lastDigits: string[] };
+    const take = (label: string) => {
+      if (!l.startsWith(`${label} `) || c.done.has(label)) return null;
+      c.done.add(label);
+      return l.slice(label.length + 1);
+    };
+    let rest: string | null;
+    if ((rest = take("Account Number")) !== null) {
+      for (const m of rest.matchAll(/[xX*]+ ?([0-9A-Z]{2,})/g)) c.lastDigits.push(m[1]);
+    } else if ((rest = take("Credit Limit")) !== null) {
+      c.limits = mfMoneyRow(rest) ?? {};
+    } else if ((rest = take("Reported Balance")) !== null) {
+      const v = mfMoneyRow(rest);
+      if (v && Object.keys(v).length) c.balances = v;
+    } else if ((rest = take("Date Opened")) !== null) {
+      const v = mfDateRow(rest);
+      if (v && Object.keys(v).length) c.opened = v;
+    } else {
+      // Same meaning as the read's late_30/60/90 for this layout: the 30, 60 and 90 Days Past Due rows
+      // (120+ prints as its own row and stays out, so a repair never changes what "x90" means).
+      for (const [label, field] of [["30 Days Past Due", "late30"], ["60 Days Past Due", "late60"], ["90 Days Past Due", "late90"]] as const) {
+        if ((rest = take(label)) === null) continue;
+        const v = mfCountRow(rest);
+        if (!v) continue;
+        c.lates ??= {};
+        for (const b of MF_BUREAUS) {
+          if (v[b] == null) continue;
+          const t = (c.lates[b] ??= { late30: null, late60: null, late90: null });
+          t[field] = v[b]!;
+        }
+      }
+    }
+  }
+  flush();
+  return out;
+}
 
 /**
  * Credit limits read straight from the text of a SmartCredit 3B print (Nov 6, 2026 — Emiliano:
@@ -566,19 +708,40 @@ export function parseSmartCreditPrintedLimits(text: string): ScPrintedLimit[] {
   if (end < 0) end = lines.length;
   const region = lines.slice(start, end).map((l) => l.trim()).filter((t) => !isScNoise(t));
 
-  const heads: Array<{ creditor: string; mask: string | null; utilization: boolean }> = [];
+  const heads: Array<{ creditor: string; mask: string | null; utilization: boolean; section: AccountSection | null; labels: string[]; late: string[][] }> = [];
+  // null until a section heading is printed ("Unknown Accounts" is a real section: SmartCredit's
+  // utilization total leaves it out, so it must not read as "no section").
+  let section: AccountSection | null = null;
+  /** Labels print as one run right after the header: they give each value row its meaning. */
+  let collecting = false;
   const blocks: Array<{ masks: string[]; rows: string[][] }> = [];
   let block: { masks: string[]; rows: string[][] } | null = null;
   for (let i = 0; i < region.length; i++) {
     const t = region[i];
+    if (SC_SECTION[t]) {
+      section = SC_SECTION[t];
+      continue;
+    }
     const anIdx = region.slice(i + 1, i + 6).findIndex((l) => l === "Account Number");
-    if (anIdx >= 1 && !t.includes("\t") && !SC_LABELS[t] && !SC_SECTION[t] && region.slice(i + 1, i + 1 + anIdx).every((l) => SC_STATUS_LINE.test(l))) {
+    if (anIdx >= 1 && !t.includes("\t") && !SC_LABELS[t] && region.slice(i + 1, i + 1 + anIdx).every((l) => SC_STATUS_LINE.test(l))) {
+      // Account numbers can carry letters (BNPL / loans: "TILT LN5BNO****"): the last token is the mask when masked.
       const token = t.split(/\s+/).pop() || "";
-      heads.push({ creditor: splitScHeader(t).creditor, mask: token.includes("*") ? token : null, utilization: false });
+      const masked = token.includes("*") && t.length > token.length;
+      heads.push({ creditor: masked ? t.slice(0, -token.length).trim() : splitScHeader(t).creditor, mask: masked ? token : null, utilization: false, section, labels: ["Account Number"], late: [] });
+      collecting = true;
       i += anIdx + 1;
       continue;
     }
-    if (t === "Account Number") heads.push({ creditor: "", mask: null, utilization: false }); // header on an image page
+    if (t === "Account Number") {
+      heads.push({ creditor: "", mask: null, utilization: false, section, labels: ["Account Number"], late: [] }); // header on an image page
+      collecting = true;
+      continue;
+    }
+    if (collecting && SC_LABELS[t] && heads.length) heads[heads.length - 1].labels.push(t);
+    else collecting = false;
+    // Days Late prints after its own account's details (the last header before it).
+    const lateRow = t.match(SC_DAYS_LATE);
+    if (lateRow && heads.length) heads[heads.length - 1].late.push(lateRow.slice(1));
     if (t === "Utilization" && heads.length) heads[heads.length - 1].utilization = true;
     if (SC_GROUP_HEADER.test(t)) {
       const masks = splitScValueRow(region[i + 1] || "");
@@ -590,7 +753,9 @@ export function parseSmartCreditPrintedLimits(text: string): ScPrintedLimit[] {
       }
       continue;
     }
-    const cells = splitScValueRow(t);
+    // A label can print on its own value line ("Balance Owed \t$1,036 \t$1,036 \t$1,032"): keep the values.
+    const parts = t.split("\t").map((c) => c.trim());
+    const cells = splitScValueRow(t) ?? (parts.length === 4 && SC_LABELS[parts[0]] ? splitScValueRow(parts.slice(1).join("\t")) : null);
     // Payment-grid rows ("30 30 30") can print between the two halves of a split block.
     if (cells && block && !cells.every((c) => SC_GRID_CELL.test(c))) block.rows.push(cells);
   }
@@ -611,15 +776,53 @@ export function parseSmartCreditPrintedLimits(text: string): ScPrintedLimit[] {
     next = k + 1;
     const rows = blocks[k].rows;
     const last = rows[rows.length - 1];
-    if (!last) continue;
-    const utilRow = last.some((c) => /%$/.test(c)) || (h.utilization && last.every((c) => SC_DASH.test(c)));
-    const row = utilRow ? rows[rows.length - 2] : last;
-    if (!row || !row.every((c) => /^\$[\d,]+(\.\d{2})?$/.test(c) || SC_DASH.test(c))) continue;
     const limits: Partial<Record<Bureau, number>> = {};
-    BUREAUS.forEach((b, bi) => {
-      if (/^\$/.test(row[bi])) limits[b] = Number(row[bi].replace(/[$,]/g, ""));
+    if (last) {
+      const utilRow = last.some((c) => /%$/.test(c)) || (h.utilization && last.every((c) => SC_DASH.test(c)));
+      const row = utilRow ? rows[rows.length - 2] : last;
+      if (row && row.every((c) => /^\$[\d,]+(\.\d{2})?$/.test(c) || SC_DASH.test(c))) {
+        BUREAUS.forEach((b, bi) => {
+          if (/^\$/.test(row[bi])) limits[b] = Number(row[bi].replace(/[$,]/g, ""));
+        });
+      }
+    }
+    // Balance Owed by the block's shape (labels can be cut by a page break or left out): an optional
+    // High Balance row, then 3-4 date rows (last verified, last activity, reported, opened), then the balance.
+    const balances: Partial<Record<Bureau, number>> = {};
+    const isMoney = (r: string[]) => r.every((c) => /^\$[\d,]+(\.\d{2})?$/.test(c) || SC_DASH.test(c)) && r.some((c) => /^\$/.test(c));
+    const isDate = (r: string[]) => r.every((c) => /^\d{2}\/\d{2}\/\d{4}$/.test(c) || SC_DASH.test(c)) && r.some((c) => /^\d{2}\/\d{2}\/\d{4}$/.test(c));
+    let at = rows[0] && isMoney(rows[0]) ? 1 : 0;
+    const dateStart = at;
+    while (rows[at] && isDate(rows[at])) at++;
+    const dateRows = at - dateStart;
+    const balRow = rows[at];
+    const opened: Partial<Record<Bureau, string>> = {};
+    if (dateRows >= 3 && dateRows <= 4 && balRow && isMoney(balRow)) {
+      BUREAUS.forEach((b, bi) => {
+        if (/^\$/.test(balRow[bi])) balances[b] = Number(balRow[bi].replace(/[$,]/g, ""));
+        if (/^\d/.test(rows[at - 1][bi])) opened[b] = rows[at - 1][bi];
+      });
+    }
+    // One Days Late row per account; two under one header means the text is ambiguous → none.
+    const lates: NonNullable<ScPrintedLimit["lates"]> = {};
+    if (h.late.length === 1) {
+      const row = h.late[0];
+      BUREAUS.forEach((b, bi) => {
+        const l30 = lateCount(row[bi * 3]);
+        const l60 = lateCount(row[bi * 3 + 1]);
+        const l90 = lateCount(row[bi * 3 + 2]);
+        if (l30 !== null || l60 !== null || l90 !== null) lates[b] = { late30: l30, late60: l60, late90: l90 };
+      });
+    }
+    out.push({
+      creditor: h.creditor,
+      mask: h.mask,
+      limits,
+      ...(Object.keys(lates).length ? { lates } : {}),
+      ...(Object.keys(balances).length ? { balances } : {}),
+      ...(Object.keys(opened).length ? { opened } : {}),
+      ...(h.section ? { section: h.section } : {}),
     });
-    if (Object.keys(limits).length) out.push({ creditor: h.creditor, mask: h.mask, limits });
   }
   return out;
 }

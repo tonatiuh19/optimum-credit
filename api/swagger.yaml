@@ -8932,6 +8932,28 @@ paths:
           description: Approval status
         "404":
           description: Not found
+  /admin/round-reports/{id}/rebuild:
+    post:
+      tags: [Report Wizard]
+      security: [{ bearerAuth: [] }]
+      summary: "Rebuild a held report (Nov 6, 2026): a report never sent to the client (needs_review or pending_approval) on the client's latest round goes back to its wizard session's Review step with the reads already uploaded; its PDF is removed. Publishing again rebuilds it with the current reader and self-check. Same people as Approve. Audited (report_wizard.rebuild_held_report). The §9 self-check also lists printed_repairs (values corrected from the PDF's own rows) and a held publish alerts REPORT_HELD_ALERT_ADMIN_IDS in-app."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: Back in Review
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  client_id: { type: integer }
+                  round_number: { type: integer }
+                  session_id: { type: integer }
+        "403": { description: Not the report's approver }
+        "409": { description: "not_rebuildable (already sent / approved / rebuilt) or not_latest_round" }
+        "422": { description: no_session }
   /admin/round-reports/{id}/approve:
     post:
       tags: [Report Wizard]

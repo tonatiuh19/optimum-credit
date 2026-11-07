@@ -3709,9 +3709,15 @@
       "positives_in_targets": "No negative account in Positives",
       "projection": "Projection caps (+100, 760)",
       "pages_croa": "3 pages + CROA disclosure",
-      "language": "Facts-only language"
+      "language": "Facts-only language",
+      "printed_repairs": "Corrected from the PDF (before checking)"
     },
     "notApplicable": "not printed on this pull",
+    "rebuild": "Rebuild with the latest checks",
+    "rebuildHint": "Sends this report back to Review with the same PDFs. Open the client's report wizard and Publish again — nothing to upload.",
+    "rebuildConfirm": "Send this held report back to Review? It was never sent to the client. You will publish it again from the wizard with the same PDFs.",
+    "rebuilt": "Round {{round}} is back in Review — open the report wizard and Publish again",
+    "rebuildError": "Could not rebuild the report",
     "passedCount": "{{count}} of {{total}} checks passed",
     "error": "Approval failed",
     "sent": "Approved — report sent to the client",

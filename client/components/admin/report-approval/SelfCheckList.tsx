@@ -1,12 +1,17 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { CheckCircle2, ChevronDown, MinusCircle, XCircle } from "lucide-react";
+import { CheckCircle2, ChevronDown, MinusCircle, Wrench, XCircle } from "lucide-react";
 import type { ReportSelfCheck } from "@/store/slices/reportApprovalSlice";
 
-/** Spec v1.1 §9 checks: failures first (named + detail), passes collapsed. */
-export function SelfCheckList({ checks }: { checks: ReportSelfCheck[] }) {
+/**
+ * Spec v1.1 §9 checks: failures first (named + detail), passes collapsed. What the platform corrected
+ * from the PDF's own rows (printed_repairs) is always shown, apart: information, not a check.
+ */
+export function SelfCheckList({ checks: all }: { checks: ReportSelfCheck[] }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  const repairs = all.find((c) => c.key === "printed_repairs");
+  const checks = all.filter((c) => c.key !== "printed_repairs");
   const failed = checks.filter((c) => c.pass === false);
   const rest = checks.filter((c) => c.pass !== false);
   const Row = ({ c }: { c: ReportSelfCheck }) => {
@@ -22,7 +27,7 @@ export function SelfCheckList({ checks }: { checks: ReportSelfCheck[] }) {
       </li>
     );
   };
-  if (!checks.length) return null;
+  if (!all.length) return null;
   return (
     <div className="space-y-1.5" data-testid="self-check-list">
       {failed.length > 0 && (
@@ -31,6 +36,15 @@ export function SelfCheckList({ checks }: { checks: ReportSelfCheck[] }) {
             <Row key={c.key} c={c} />
           ))}
         </ul>
+      )}
+      {repairs && (
+        <p className="flex items-start gap-2 rounded-lg bg-muted/60 px-2 py-1.5 text-xs" data-testid="self-check-repairs">
+          <Wrench className="w-3.5 h-3.5 shrink-0 mt-px text-primary" />
+          <span className="min-w-0">
+            <span className="font-semibold text-foreground">{t("reportApproval.checks.printed_repairs")}</span>
+            <span className="text-muted-foreground break-words"> · {repairs.detail}</span>
+          </span>
+        </p>
       )}
       <button
         type="button"

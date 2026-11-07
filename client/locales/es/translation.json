@@ -3678,9 +3678,15 @@
       "positives_in_targets": "Ninguna cuenta negativa en Positivos",
       "projection": "Topes de proyección (+100, 760)",
       "pages_croa": "3 páginas + divulgación CROA",
-      "language": "Solo hechos en el texto"
+      "language": "Solo hechos en el texto",
+      "printed_repairs": "Corregido con el PDF (antes de revisar)"
     },
     "notApplicable": "no viene en este reporte",
+    "rebuild": "Reconstruir con las revisiones más recientes",
+    "rebuildHint": "Regresa este reporte a Revisión con los mismos PDFs. Abre el asistente de reportes del cliente y publica de nuevo — no hay que subir nada.",
+    "rebuildConfirm": "¿Regresar este reporte detenido a Revisión? Nunca se envió al cliente. Lo publicarás de nuevo desde el asistente con los mismos PDFs.",
+    "rebuilt": "La Ronda {{round}} regresó a Revisión — abre el asistente de reportes y publica de nuevo",
+    "rebuildError": "No se pudo reconstruir el reporte",
     "passedCount": "{{count}} de {{total}} revisiones aprobadas",
     "error": "No se pudo aprobar",
     "sent": "Aprobado — informe enviado al cliente",

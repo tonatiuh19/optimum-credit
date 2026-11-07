@@ -80,6 +80,20 @@ export const approveRoundReport = createAsyncThunk(
   },
 );
 
+/**
+ * A held / waiting report goes back to its Review step (same reads, no re-upload); publishing again
+ * rebuilds it with the latest reader and self-check.
+ */
+export const rebuildRoundReport = createAsyncThunk("reportApproval/rebuild", async (id: number, { dispatch, rejectWithValue }) => {
+  try {
+    const { data } = await api.post<{ ok: boolean; client_id: number; round_number: number; session_id: number }>(`/admin/round-reports/${id}/rebuild`);
+    void dispatch(fetchPendingReportApprovals());
+    return { id, ...data };
+  } catch (e) {
+    return rejectWithValue(formatAxiosError(e, "Could not rebuild the report"));
+  }
+});
+
 const reportApprovalSlice = createSlice({
   name: "reportApproval",
   initialState,
@@ -106,6 +120,19 @@ const reportApprovalSlice = createSlice({
     b.addCase(approveRoundReport.rejected, (s, a) => {
       s.approving[a.meta.arg.id] = false;
       s.error = String(a.payload || a.error.message || "Approval failed");
+    });
+    b.addCase(rebuildRoundReport.pending, (s, a) => {
+      s.approving[a.meta.arg] = true;
+      s.error = null;
+    });
+    b.addCase(rebuildRoundReport.fulfilled, (s, a) => {
+      s.approving[a.payload.id] = false;
+      s.pending = s.pending.filter((p) => p.id !== a.payload.id);
+      delete s.byId[a.payload.id];
+    });
+    b.addCase(rebuildRoundReport.rejected, (s, a) => {
+      s.approving[a.meta.arg] = false;
+      s.error = String(a.payload || a.error.message || "Could not rebuild the report");
     });
   },
 });

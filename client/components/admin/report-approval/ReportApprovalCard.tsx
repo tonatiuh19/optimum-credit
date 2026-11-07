@@ -2,12 +2,23 @@ import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { useFormik } from "formik";
 import * as Yup from "yup";
-import { CheckCircle2, Clock, Loader2, Send, ShieldAlert, ShieldCheck } from "lucide-react";
+import { CheckCircle2, Clock, Loader2, RefreshCw, Send, ShieldAlert, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
-import { approveRoundReport, fetchReportApproval } from "@/store/slices/reportApprovalSlice";
+import { approveRoundReport, fetchReportApproval, rebuildRoundReport } from "@/store/slices/reportApprovalSlice";
 import { SelfCheckList } from "@/components/admin/report-approval/SelfCheckList";
 
 /**
@@ -15,7 +26,7 @@ import { SelfCheckList } from "@/components/admin/report-approval/SelfCheckList"
  * (or Cesar / Alex) clicks Approve & send; a failed self-check needs a release
  * manager's written override. Nothing reaches the client before that.
  */
-export function ReportApprovalCard({ reportId, onApproved }: { reportId: number; onApproved?: () => void }) {
+export function ReportApprovalCard({ reportId, onApproved, onRebuilt }: { reportId: number; onApproved?: () => void; onRebuilt?: () => void }) {
   const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const { toast } = useToast();
@@ -35,6 +46,16 @@ export function ReportApprovalCard({ reportId, onApproved }: { reportId: number;
     toast({ title: r.payload.delivery_status === "silent" ? t("reportApproval.releasedSilent") : t("reportApproval.sent") });
     onApproved?.();
     return true;
+  };
+
+  const rebuild = async () => {
+    const r = await dispatch(rebuildRoundReport(reportId));
+    if (rebuildRoundReport.rejected.match(r)) {
+      toast({ title: String(r.payload || t("reportApproval.rebuildError")), variant: "destructive" });
+      return;
+    }
+    toast({ title: t("reportApproval.rebuilt", { round: r.payload.round_number }) });
+    onRebuilt?.();
   };
 
   const formik = useFormik({
@@ -102,6 +123,31 @@ export function ReportApprovalCard({ reportId, onApproved }: { reportId: number;
         </form>
       )}
       {failed && !a.can_override && <p className="text-[11px] text-muted-foreground">{t("reportApproval.fixAndRepublish")}</p>}
+      {failed && a.can_approve && (
+        <div className="space-y-1 border-t border-border/60 pt-2">
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button type="button" size="sm" variant="outline" disabled={approving} className="gap-1.5 w-full sm:w-auto" data-testid="report-rebuild">
+                {approving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                {t("reportApproval.rebuild")}
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>{t("reportApproval.rebuild")}</AlertDialogTitle>
+                <AlertDialogDescription>{t("reportApproval.rebuildConfirm")}</AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>{t("common.cancel", { defaultValue: "Cancel" })}</AlertDialogCancel>
+                <AlertDialogAction onClick={() => void rebuild()} data-testid="report-rebuild-confirm">
+                  {t("reportApproval.rebuild")}
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+          <p className="text-[11px] text-muted-foreground">{t("reportApproval.rebuildHint")}</p>
+        </div>
+      )}
     </div>
   );
 }

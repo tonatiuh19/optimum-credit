@@ -1586,11 +1586,32 @@ export function buildCreditAnalysis(
 // ── Review helpers (Claude auditor + reconciliation) ────────────────────────
 
 /** Adds accounts found by the "missing accounts" pass; never duplicates an existing one. */
-export function mergeMissingAccounts<F extends CreditFile>(file: F, extra: CreditAccount[]): { file: F; added: number } {
+export function mergeMissingAccounts<F extends CreditFile>(
+  file: F,
+  extra: CreditAccount[],
+  /**
+   * Creditors known to be short (first 8 letters → accounts missing). Their look-alikes (same
+   * creditor, number, section and open date: Dept of Ed disbursements, Central Research loans) are
+   * added up to that many, unless they repeat an account's bureaus and balances exactly.
+   */
+  shortByCreditor?: Map<string, number>,
+): { file: F; added: number } {
   const key = (a: CreditAccount) =>
     `${alnum(a.creditor)}|${(a.mask ?? "").slice(-4)}|${a.section}|${BUREAUS.map((b) => a.bureaus[b]?.dateOpened ?? "").find(Boolean) ?? ""}`;
+  const exact = (a: CreditAccount) => `${key(a)}|${BUREAUS.map((b) => (a.bureaus[b] ? `${b}:${a.bureaus[b]!.balance ?? ""}` : "")).join(",")}`;
   const have = new Set(file.accounts.map(key));
-  const add = extra.filter((a) => a.creditor && !have.has(key(a)) && BUREAUS.some((b) => a.bureaus[b]));
+  const haveExact = new Set(file.accounts.map(exact));
+  const left = new Map(shortByCreditor ?? []);
+  const add = extra.filter((a) => {
+    if (!a.creditor || !BUREAUS.some((b) => a.bureaus[b])) return false;
+    if (!have.has(key(a))) return true;
+    const c = alnum(a.creditor).slice(0, 8);
+    const n = left.get(c) ?? 0;
+    if (n <= 0 || haveExact.has(exact(a))) return false;
+    left.set(c, n - 1);
+    haveExact.add(exact(a));
+    return true;
+  });
   return { file: { ...file, accounts: [...file.accounts, ...add] }, added: add.length };
 }
 

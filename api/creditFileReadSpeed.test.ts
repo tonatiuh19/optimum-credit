@@ -189,3 +189,38 @@ describe("mergeCreditFileParts: never merges distinct accounts (shadow-run regre
     expect(m.accounts).toHaveLength(1);
   });
 });
+
+describe("mergeCreditFileParts: overlap copies only across the shared page (Nov 6, 2026 — Jeser)", () => {
+  // Four closed $0 student loans with the same number, one per part position; dates missing on some.
+  const loan = (dateOpened: string | null) => acct("ED FINANCIAL/ESA", "0321", ["TU"], { balance: 0, creditLimit: null, accountStatus: "Closed", dateOpened });
+  const filler = (n: number, tag: string) => Array.from({ length: n }, (_, i) => acct(`LENDER ${tag}${i}`, String(1000 + i), ["TU"], { dateOpened: `0${(i % 9) + 1}/2015` }));
+
+  it("look-alike accounts far from the shared page are never merged", () => {
+    const m = mergeCreditFileParts([
+      { file: file({ accounts: [loan("01/2014"), loan(null), ...filler(6, "a")] }), firstPage: 0 },
+      { file: file({ accounts: [...filler(6, "b"), loan(null), loan("09/2016")] }), firstPage: 27 },
+    ]);
+    expect(m.accounts.filter((a) => a.creditor === "ED FINANCIAL/ESA")).toHaveLength(4);
+    expect(m.readEntries).toBe(16);
+  });
+
+  it("each account on the shared page is merged once (one-to-one), the next look-alike stays", () => {
+    const m = mergeCreditFileParts([
+      { file: file({ accounts: [...filler(3, "a"), loan(null)] }), firstPage: 0 },
+      { file: file({ accounts: [loan(null), loan(null), ...filler(2, "b")] }), firstPage: 27 },
+    ]);
+    // The first copy is the overlap of part 1's last loan; the second is a different loan.
+    expect(m.accounts.filter((a) => a.creditor === "ED FINANCIAL/ESA")).toHaveLength(2);
+  });
+
+  it("an overlap copy still merges across three parts", () => {
+    const a = acct("BANK A", "1234", ["TU"], { balance: 70 });
+    const b = acct("BANK B", "5678", ["TU"], { balance: 80 });
+    const m = mergeCreditFileParts([
+      { file: file({ accounts: [...filler(5, "a"), a] }), firstPage: 0 },
+      { file: file({ accounts: [{ ...a }, ...filler(5, "b"), b] }), firstPage: 9 },
+      { file: file({ accounts: [{ ...b }, ...filler(2, "c")] }), firstPage: 18 },
+    ]);
+    expect(m.accounts.map((x) => x.creditor).filter((c) => c.startsWith("BANK"))).toEqual(["BANK A", "BANK B"]);
+  });
+});

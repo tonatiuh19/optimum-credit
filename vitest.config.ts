@@ -21,6 +21,8 @@ export default defineConfig({
     env: {
       VITEST: "true",
     },
+    // One run at a time on the shared TiDB + purge leftovers before / after (api/testGlobalSetup.ts).
+    globalSetup: ["api/testGlobalSetup.ts"],
     projects: [
       {
         plugins: [react()],
@@ -31,14 +33,13 @@ export default defineConfig({
           exclude: CRON_TEST_FILES,
           environment: "node",
           env: { VITEST: "true" },
-          // TiDB Cloud under parallel integration load is often >5s/request;
-          // multi-request hub/voice tests need headroom beyond 20s or deploy flakes.
+          // Integration tests make many round trips to a remote DB; several take 35-40 s even alone.
           // Unit tests still finish in ms.
-          testTimeout: 45_000,
+          testTimeout: 120_000,
           hookTimeout: 90_000,
-          // Cap parallel integration files — each opens pools against shared TiDB.
-          fileParallelism: 2,
-          maxWorkers: 2,
+          // Tests wait on network round trips to TiDB, not CPU: 4 files at once, 2 connections per
+          // pool (8 connections, was 2 files × 5). Same as groundwork.
+          maxWorkers: 4,
           sequence: { groupOrder: 0 },
         },
       },
@@ -53,7 +54,7 @@ export default defineConfig({
           include: CRON_TEST_FILES,
           environment: "node",
           env: { VITEST: "true" },
-          testTimeout: 45_000,
+          testTimeout: 120_000,
           hookTimeout: 90_000,
           fileParallelism: false,
           maxWorkers: 1,

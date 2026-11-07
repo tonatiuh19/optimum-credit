@@ -1071,6 +1071,9 @@ function mergeTradeline(a: BureauTradeline, b: BureauTradeline): BureauTradeline
   return out as unknown as BureauTradeline;
 }
 
+/** Accounts that can sit on the one page two neighbouring parts share (a dense SmartCredit page holds ~3). */
+const PART_OVERLAP_ACCOUNTS = 4;
+
 /** The same account seen in two overlapping parts (same creditor, compatible number, no contradiction). */
 function samePartAccount(x: CreditAccount, y: CreditAccount): boolean {
   if (creditorKey(x.creditor) !== creditorKey(y.creditor)) return false;
@@ -1114,16 +1117,24 @@ export function mergeCreditFileParts<F extends CreditFile & { scoreModel?: strin
   const perBureau = <T,>(pick: (f: F) => Partial<Record<Bureau, T | null>> | undefined) =>
     Object.fromEntries(BUREAUS.map((b) => [b, first((f) => pick(f)?.[b] ?? null)])) as Record<Bureau, T | null>;
   const accounts: CreditAccount[] = [];
+  let previous: CreditAccount[] = [];
   for (const p of parts) {
-    // Overlap copies only come from an EARLIER part — rows within one part are never merged here.
-    const earlier = accounts.slice();
-    for (const raw of p.file.accounts) {
+    // Neighbouring parts share ONE page, so an overlap copy can only be one of the last accounts of
+    // the previous part AND one of the first accounts of this one, matched one-to-one (Nov 6, 2026 —
+    // Jeser: four closed $0 loans ending 0321 in different parts were merged into each other, so
+    // look-alike accounts far apart vanished). Rows within one part are never merged here.
+    const tail = previous.slice(-PART_OVERLAP_ACCOUNTS);
+    const used = new Set<CreditAccount>();
+    const current: CreditAccount[] = [];
+    p.file.accounts.forEach((raw, idx) => {
       const a: CreditAccount = { ...raw, bureaus: { ...raw.bureaus } };
-      const twin = earlier.find((o) => samePartAccount(o, a));
+      const twin = idx < PART_OVERLAP_ACCOUNTS ? tail.find((o) => !used.has(o) && samePartAccount(o, a)) : undefined;
       if (!twin) {
         accounts.push(a);
-        continue;
+        current.push(a);
+        return;
       }
+      used.add(twin);
       for (const b of BUREAUS) {
         const t = a.bureaus[b];
         if (!t) continue;
@@ -1133,7 +1144,8 @@ export function mergeCreditFileParts<F extends CreditFile & { scoreModel?: strin
       if (twin.highCredit == null && a.highCredit != null) twin.highCredit = a.highCredit;
       if (twin.monthlyPayment == null && a.monthlyPayment != null) twin.monthlyPayment = a.monthlyPayment;
       if (!twin.headerStatus && a.headerStatus) twin.headerStatus = a.headerStatus;
-    }
+    });
+    previous = current.length ? current : previous;
   }
   const seenQ = new Set<string>();
   const inquiries = parts.flatMap((p) => p.file.inquiries).filter((q) => {

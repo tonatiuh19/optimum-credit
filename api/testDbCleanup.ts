@@ -69,21 +69,50 @@ export function createIntegrationTestPool(): Pool {
     database: process.env.DB_NAME,
     ssl: { rejectUnauthorized: true },
     waitForConnections: true,
-    // Parallel vitest files share TiDB; 2 was too low under cron+hub load.
-    connectionLimit: 5,
+    // 4 files run at once (vitest maxWorkers 4): 2 connections each, like the app pool under tests.
+    connectionLimit: 2,
     queueLimit: 0,
     timezone: "+00:00",
+    // TiDB Cloud's gateway drops idle connections: retire them before it does (was: dead sockets reused
+    // → read ECONNRESET mid-suite or in cleanup, Nov 6, 2026).
     enableKeepAlive: true,
     keepAliveInitialDelay: 10_000,
-    connectTimeout: 60_000,
+    idleTimeout: 60_000,
+    maxIdle: 2,
+    connectTimeout: 20_000,
   });
-  // TiDB Serverless sometimes drops a socket mid-run (read ECONNRESET). Retry pool-level
-  // queries on those codes so one network blip doesn't fail a suite or its cleanup.
-  // Connections taken with getConnection() (transactions) are not retried.
-  const query = pool.query.bind(pool) as (...a: unknown[]) => Promise<unknown>;
-  const execute = pool.execute.bind(pool) as (...a: unknown[]) => Promise<unknown>;
-  (pool as any).query = (...a: unknown[]) => withDbRetry(() => query(...a));
-  (pool as any).execute = (...a: unknown[]) => withDbRetry(() => execute(...a));
+  return withTransientRetry(pool);
+}
+
+/** Connection-level failures (the statement never reached the server): safe to retry any statement. */
+const CONNECT_FAILURE_CODES = new Set(["ETIMEDOUT", "ECONNREFUSED"]);
+
+/**
+ * Retries a statement whose connection failed to open or dropped — but a write is retried only when
+ * its connection never opened: a write whose connection dropped may already be applied, so repeating it
+ * could insert twice (or hit a false duplicate key). Reads (SELECT / SHOW) retry on any drop.
+ * Two retries, short waits. Exported for its unit test.
+ */
+export function withTransientRetry<P extends Pick<Pool, "query" | "execute" | "getConnection">>(pool: P, waitMs = 1000): P {
+  const withRetry =
+    <F extends (...args: any[]) => Promise<any>>(fn: F, kind: "statement" | "connect"): F =>
+    (async (...args: any[]) => {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          return await fn(...args);
+        } catch (e: any) {
+          const code = String(e?.code || "");
+          const sql = kind === "connect" ? "" : typeof args[0] === "string" ? args[0] : String(args[0]?.sql || "");
+          const readOnly = kind === "statement" && /^\s*(SELECT|SHOW|WITH)\b/i.test(sql);
+          const safe = CONNECT_FAILURE_CODES.has(code) || (readOnly && isRetriableDbError(e));
+          if (attempt >= 2 || !safe) throw e;
+          await new Promise((r) => setTimeout(r, waitMs * (attempt + 1)));
+        }
+      }
+    }) as F;
+  pool.query = withRetry(pool.query.bind(pool), "statement") as P["query"];
+  pool.execute = withRetry(pool.execute.bind(pool), "statement") as P["execute"];
+  pool.getConnection = withRetry(pool.getConnection.bind(pool), "connect") as P["getConnection"];
   return pool;
 }
 

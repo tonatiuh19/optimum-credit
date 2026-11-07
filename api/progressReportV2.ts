@@ -12,7 +12,7 @@
  * Pure (no I/O). Inlined into api/index.ts by scripts/inline-credit-file-engine.mjs.
  */
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFImage, type PDFPage } from "pdf-lib";
-import { BUREAUS, parseSmartCreditPrintedLimits, type Bureau, type BureauTradeline, type CreditAccount, type CreditFile, type ScPrintedLimit } from "./creditFile";
+import { BUREAUS, parseMfsnPrintedAccounts, parseSmartCredit, parseSmartCreditPrintedLimits, type Bureau, type BureauTradeline, type CreditAccount, type CreditFile, type CreditInquiry, type ScPrintedLimit } from "./creditFile";
 import {
   buildCreditAnalysis,
   isClosedTradeline,
@@ -329,13 +329,37 @@ export function pv2ItemKind(a: CreditAccount, tls: BureauTradeline[]): "charge_o
 export function pv2MatchAccounts(before: CreditAccount[], after: CreditAccount[]): Map<CreditAccount, CreditAccount> {
   const out = new Map<CreditAccount, CreditAccount>();
   const used = new Set<CreditAccount>();
+  // Among accounts that fit, the closest wins (Nov 6, 2026): look-alike loans share number and open
+  // month, and the first fit could pair a loan with its sibling (wrong late / balance changes).
+  const closeness = (b: CreditAccount, a: CreditAccount) => {
+    let score = 0;
+    for (const x of BUREAUS) {
+      const tb = b.bureaus[x];
+      const ta = a.bureaus[x];
+      if (!tb || !ta) continue;
+      score += 1;
+      if (tb.balance != null && ta.balance != null) score += tb.balance === ta.balance ? 4 : Math.abs(tb.balance - ta.balance) <= Math.max(50, tb.balance * 0.1) ? 2 : 0;
+      if (tb.creditLimit != null && tb.creditLimit === ta.creditLimit) score += 1;
+    }
+    if (pv2Last4(b) && pv2Last4(b) === pv2Last4(a)) score += 3;
+    return score;
+  };
   const tryMatch = (pred: (b: CreditAccount, a: CreditAccount) => boolean) => {
     for (const b of before) {
       if (out.has(b)) continue;
-      const a = after.find((x) => !used.has(x) && pred(b, x));
-      if (a) {
-        out.set(b, a);
-        used.add(a);
+      let best: CreditAccount | null = null;
+      let bestScore = -1;
+      for (const x of after) {
+        if (used.has(x) || !pred(b, x)) continue;
+        const sc = closeness(b, x);
+        if (sc > bestScore) {
+          best = x;
+          bestScore = sc;
+        }
+      }
+      if (best) {
+        out.set(b, best);
+        used.add(best);
       }
     }
   };
@@ -2055,6 +2079,10 @@ export interface Pv2PullSummary {
   accountsPrinted?: number | null;
   /** SmartCredit: each account's Credit Limit row read from the PDF text (parser v3+). */
   printedLimits?: ScPrintedLimit[];
+  /** MyFreeScoreNow: creditor of each table-of-contents entry, in order (parser v3+). */
+  tocCreditors?: string[];
+  /** SmartCredit / IdentityIQ: the inquiry list as printed in the text (parser v3+). */
+  printedInquiries?: CreditInquiry[];
 }
 
 const PV2_MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
@@ -2150,14 +2178,18 @@ function pv2ParseMfsnSummary(text: string): Pv2PullSummary | null {
   const sections = new Set(
     lines.map((l) => /^(\d+)\. (Revolving|Mortgage|Installment|Other) Accounts \d+$/i.exec(l)?.[1]).filter((x): x is string => !!x),
   );
-  const toc = lines.filter((l) => {
+  const tocLines = lines.filter((l) => {
     const m = /^(\d+)\.\d+ \S.* \d+$/.exec(l);
     return !!m && sections.has(m[1]);
-  }).length;
+  });
+  const toc = tocLines.length;
+  // Creditor of each entry ("4.1 Ed Financial/esa (CLOSED) 24" → "Ed Financial/esa").
+  const tocCreditors = tocLines.map((l) => l.replace(/^\d+\.\d+ /, "").replace(/ \d+$/, "").replace(/\s*\((CLOSED|OPEN)\)\s*$/i, "").trim());
   const dateRow = lines.find((l) => /^Report Date\s+[A-Za-z]+ \d{1,2}, \d{4}/.test(l));
   const date = dateRow ? pv2Ymd(/^Report Date\s+([A-Za-z]+ \d{1,2}, \d{4})/.exec(dateRow)![1]) : null;
   if (!heads.length && !inq && !toc) return null;
-  return { format: "mfsn", reportDate: date, perBureau, revolving, accountsPrinted: toc || null };
+  const printedLimits = parseMfsnPrintedAccounts(text);
+  return { format: "mfsn", reportDate: date, perBureau, revolving, accountsPrinted: toc || null, ...(tocCreditors.length ? { tocCreditors } : {}), ...(printedLimits.length ? { printedLimits } : {}) };
 }
 
 /**
@@ -2229,46 +2261,273 @@ export function pv2ParsePullSummary(text: string): Pv2PullSummary | null {
 }
 
 /**
- * Repairs open revolving credit limits from the PDF's own Credit Limit rows (Nov 6, 2026 —
- * Emiliano: the read took Bank of America's High Balance $1,279 as its $500 limit, so the
- * limits never matched the report's Credit Utilization total and every round was held).
- * Guarded so a correct read is never touched: a bureau is repaired only when its read total
- * misses the printed total and the printed limits make it match. A printed value is used
- * only when every entry for the same creditor and a compatible mask agrees on it.
- * Returns the same object when nothing changes.
+ * Repairs a SmartCredit read from facts the PDF prints (Nov 6, 2026): each account's Credit Limit
+ * row (Emiliano: the read took Bank of America's High Balance $1,279 as its $500 limit) and the
+ * section it is printed under (Jose: two cards read as revolving are printed outside "Revolving
+ * Accounts", which is all SmartCredit's utilization table counts). Guarded so a correct read is
+ * never touched: changes apply only when the read misses a printed revolving-limit total, they make
+ * it match, and no bureau that matched stops matching. A printed fact is used only when every
+ * entry for the same creditor and number agrees on it. Returns the same object when nothing changes.
  */
-export function pv2ApplyPrintedLimits<F extends CreditFile>(file: F, summary: Pv2PullSummary | null | undefined): F {
-  const printed = summary?.printedLimits;
+/**
+ * Every guarded repair from facts the PDF prints, in order: revolving limits + sections, balances,
+ * inquiries. Each step changes a bureau only when the read misses that bureau's printed total and
+ * the printed values make it match. Returns the same object when nothing changes.
+ */
+export function pv2ApplyPrintedFacts<F extends CreditFile>(file: F, summary: Pv2PullSummary | null | undefined): F {
+  let f = file;
+  const notes: string[] = [];
+  for (const step of [pv2ApplyPrintedLimits, pv2ApplyPrintedBalances, pv2ApplyPrintedInquiries, pv2ApplyPrintedLates]) {
+    const next = step(f, summary);
+    if (next !== f) notes.push(...pv2RepairNotes(f, next));
+    f = next;
+  }
+  return notes.length ? { ...f, printedRepairs: [...(file.printedRepairs ?? []), ...notes] } : f;
+}
+
+/** What a repair step changed, in words staff can check against the PDF ("CAPITAL ONE …5178 TU: limit $1,279 → $500"). */
+export function pv2RepairNotes(before: CreditFile, after: CreditFile): string[] {
+  const notes: string[] = [];
+  const name = (a: CreditAccount) => `${a.creditor}${a.mask ? ` …${String(a.mask).replace(/[^0-9a-z]/gi, "").slice(-4)}` : ""}`;
+  const money = (n: number | null | undefined) => (n == null ? "—" : `$${Math.round(n).toLocaleString("en-US")}`);
+  // A dropped duplicate: the before list minus the after list (same object or same name, in order).
+  let rest = before.accounts;
+  if (after.accounts.length < before.accounts.length) {
+    const left = [...after.accounts];
+    const kept: CreditAccount[] = [];
+    for (const a of before.accounts) {
+      const i = left.findIndex((x) => x === a || (x.creditor === a.creditor && x.mask === a.mask));
+      if (i >= 0) {
+        kept.push(a);
+        left.splice(i, 1);
+      } else notes.push(`${name(a)}: duplicate copy of the same card removed`);
+    }
+    rest = kept;
+  }
+  rest.forEach((a, i) => {
+    const b = after.accounts[i];
+    if (!b) return;
+    if (a.section !== b.section) notes.push(`${name(a)}: section ${a.section} → ${b.section}`);
+    for (const x of BUREAUS) {
+      const p = a.bureaus[x];
+      const q = b.bureaus[x];
+      if (!p || !q) continue;
+      if (p.creditLimit !== q.creditLimit) notes.push(`${name(a)} ${x}: limit ${money(p.creditLimit)} → ${money(q.creditLimit)}`);
+      if (p.balance !== q.balance) notes.push(`${name(a)} ${x}: balance ${money(p.balance)} → ${money(q.balance)}`);
+      if (p.late30 !== q.late30 || p.late60 !== q.late60 || p.late90 !== q.late90) {
+        notes.push(`${name(a)} ${x}: lates ${p.late30 ?? 0}/${p.late60 ?? 0}/${p.late90 ?? 0} → ${q.late30 ?? 0}/${q.late60 ?? 0}/${q.late90 ?? 0} (30/60/90)`);
+      }
+    }
+  });
+  if (before.inquiries !== after.inquiries) {
+    for (const x of BUREAUS) {
+      const n0 = before.inquiries.filter((q) => q.bureau === x).length;
+      const n1 = after.inquiries.filter((q) => q.bureau === x).length;
+      if (n0 !== n1) notes.push(`${x} inquiries ${n0} → ${n1} (the printed list)`);
+    }
+  }
+  return notes;
+}
+
+/**
+ * Late-payment counts from each account's "Days Late - Last 7 Years" row (Nov 6, 2026). They decide
+ * which accounts are negative, so a misread count changes dispute items and "removed" wins. No printed
+ * total exists for them, so the guard is the match: used only when exactly one printed account fits
+ * (creditor + number, then Date Opened, then balance for look-alikes); anything ambiguous stays as read.
+ */
+export function pv2ApplyPrintedLates<F extends CreditFile>(file: F, summary: Pv2PullSummary | null | undefined): F {
+  const printed = summary?.printedLimits?.filter((p) => p.lates);
   if (!printed?.length) return file;
   const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
   const digits = (m: string | null | undefined) => String(m ?? "").replace(/[^0-9a-z]/gi, "").toLowerCase();
-  const openRevolving = (a: CreditAccount, b: Bureau) => a.section === "revolving" && !!a.bureaus[b] && !isClosedTradeline(a.bureaus[b]!, a);
-  const printedFor = (a: CreditAccount, b: Bureau): number | null => {
-    const name = norm(a.creditor);
+  let changed = false;
+  const accounts = file.accounts.map((a) => {
     const own = digits(a.mask);
-    const values = new Set<number>();
-    for (const p of printed) {
-      if (norm(p.creditor) !== name) continue;
-      const d = digits(p.mask);
-      if (own && d && !d.includes(own) && !own.includes(d)) continue;
-      if (typeof p.limits[b] === "number") values.add(p.limits[b]!);
+    let base = printed.filter((p) => norm(p.creditor) === norm(a.creditor));
+    if (own) {
+      const ends = base.filter((p) => digits(p.mask).endsWith(own));
+      base = ends.length ? ends : base.filter((p) => !digits(p.mask) || digits(p.mask).includes(own) || own.includes(digits(p.mask)));
     }
-    return values.size === 1 ? [...values][0] : null;
-  };
+    let next = a;
+    for (const b of BUREAUS) {
+      const t = a.bureaus[b];
+      if (!t) continue;
+      let cands = base.filter((p) => p.lates![b]);
+      if (cands.length > 1) {
+        const mo = pv2Month(t.dateOpened);
+        const byOpen = cands.filter((p) => mo && pv2Month(p.opened?.[b]) === mo);
+        cands = byOpen.length ? byOpen : cands;
+      }
+      if (cands.length > 1 && t.balance != null) cands = cands.filter((p) => p.balances?.[b] === t.balance);
+      if (cands.length !== 1) continue;
+      const l = cands[0].lates![b]!;
+      if (t.late30 === l.late30 && t.late60 === l.late60 && t.late90 === l.late90) continue;
+      // Never clear lates the read saw in the payment grid (a grid mark can be an icon the text lacks).
+      const lowers = (t.late30 ?? 0) > (l.late30 ?? 0) || (t.late60 ?? 0) > (l.late60 ?? 0) || (t.late90 ?? 0) > (l.late90 ?? 0);
+      if (lowers && (t.gridMarks ?? []).some((m) => /:(30|60|90|120|150|180|CO|C)$/i.test(String(m)))) continue;
+      next = { ...next, bureaus: { ...next.bureaus, [b]: { ...t, late30: l.late30, late60: l.late60, late90: l.late90 } } };
+      changed = true;
+    }
+    return next;
+  });
+  return changed ? { ...file, accounts } : file;
+}
+
+const pv2Month = (d: string | null | undefined) => {
+  const m = /^(\d{1,2})\/(?:\d{1,2}\/)?(\d{4})$/.exec(String(d ?? "").trim());
+  return m ? `${m[2]}-${m[1].padStart(2, "0")}` : null;
+};
+
+/**
+ * Balances from each account's Balance Owed row (Nov 6, 2026 audit: three recent files off by $4k-$27k).
+ * Look-alike accounts that print one number (11 Central Research loans "510000****") are told apart
+ * by the Date Opened row.
+ */
+export function pv2ApplyPrintedBalances<F extends CreditFile>(file: F, summary: Pv2PullSummary | null | undefined): F {
+  const printed = summary?.printedLimits?.filter((p) => p.balances);
+  if (!printed?.length || !summary) return file;
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const digits = (m: string | null | undefined) => String(m ?? "").replace(/[^0-9a-z]/gi, "").toLowerCase();
   let accounts = file.accounts;
   for (const b of BUREAUS) {
-    const want = summary?.revolving?.[b]?.limit;
+    const want = summary.perBureau?.[b]?.balances;
     if (want == null) continue;
-    const tol = Math.max(50, want * 0.02);
-    const total = (list: CreditAccount[]) => list.reduce((n, a) => n + (openRevolving(a, b) ? a.bureaus[b]!.creditLimit ?? 0 : 0), 0);
+    const tol = Math.max(10, want * 0.01);
+    const total = (list: CreditAccount[]) => list.reduce((n, a) => n + Math.max(0, a.bureaus[b]?.balance ?? 0), 0);
     if (Math.abs(total(accounts) - want) <= tol) continue;
     const repaired = accounts.map((a) => {
-      if (!openRevolving(a, b)) return a;
-      const v = printedFor(a, b);
-      const t = a.bureaus[b]!;
-      return v == null || v === t.creditLimit ? a : { ...a, bureaus: { ...a.bureaus, [b]: { ...t, creditLimit: v } } };
+      const t = a.bureaus[b];
+      if (!t) return a;
+      const own = digits(a.mask);
+      let cands = printed.filter((p) => norm(p.creditor) === norm(a.creditor) && p.balances![b] != null);
+      if (own) {
+        const ends = cands.filter((p) => digits(p.mask).endsWith(own));
+        cands = ends.length ? ends : cands.filter((p) => !digits(p.mask) || digits(p.mask).includes(own) || own.includes(digits(p.mask)));
+      }
+      const values = new Set(cands.map((p) => p.balances![b]!));
+      if (values.size > 1) {
+        const mo = pv2Month(t.dateOpened);
+        const sameOpen = cands.filter((p) => mo && pv2Month(p.opened?.[b]) === mo);
+        values.clear();
+        for (const p of sameOpen) values.add(p.balances![b]!);
+      }
+      if (values.size !== 1) return a;
+      const v = [...values][0];
+      return v === t.balance ? a : { ...a, bureaus: { ...a.bureaus, [b]: { ...t, balance: v } } };
     });
     if (Math.abs(total(repaired) - want) <= tol) accounts = repaired;
+  }
+  return accounts === file.accounts ? file : { ...file, accounts };
+}
+
+/** Inquiries from the printed list, per bureau, when the read's 2-year count misses the printed total and the list matches it. */
+export function pv2ApplyPrintedInquiries<F extends CreditFile>(file: F, summary: Pv2PullSummary | null | undefined): F {
+  const printed = summary?.printedInquiries;
+  if (!printed?.length || !summary) return file;
+  const asOf = parseReportDate(file.reportDate);
+  const count = (list: CreditInquiry[], b: Bureau) =>
+    list.filter((q) => {
+      if (q.bureau !== b) return false;
+      const d = parseReportDate(q.date);
+      return !d || !asOf || pv2WithinTwoYears(d, asOf);
+    }).length;
+  let inquiries = file.inquiries;
+  for (const b of BUREAUS) {
+    const want = summary.perBureau?.[b]?.inquiries2y;
+    if (want == null || count(inquiries, b) === want || count(printed, b) !== want) continue;
+    inquiries = [...inquiries.filter((q) => q.bureau !== b), ...printed.filter((q) => q.bureau === b)];
+  }
+  return inquiries === file.inquiries ? file : { ...file, inquiries };
+}
+
+export function pv2ApplyPrintedLimits<F extends CreditFile>(file: F, summary: Pv2PullSummary | null | undefined): F {
+  const printed = summary?.printedLimits;
+  if (!printed?.length || !summary) return file;
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const digits = (m: string | null | undefined) => String(m ?? "").replace(/[^0-9a-z]/gi, "").toLowerCase();
+  const entriesFor = (a: CreditAccount) => {
+    const name = norm(a.creditor);
+    const own = digits(a.mask);
+    const same = printed.filter((p) => norm(p.creditor) === name);
+    if (!own) return same;
+    // Same visible number first (read "3800" = printed "133800"); then any overlap ("4147" in "414718").
+    const ends = same.filter((p) => digits(p.mask).endsWith(own));
+    return ends.length ? ends : same.filter((p) => !digits(p.mask) || digits(p.mask).includes(own) || own.includes(digits(p.mask)));
+  };
+  const unanimous = <T,>(values: Array<T | undefined>): T | null => {
+    const set = new Set(values.filter((v): v is T => v !== undefined));
+    return set.size === 1 ? [...set][0] : null;
+  };
+  const openRevolving = (a: CreditAccount, b: Bureau) => a.section === "revolving" && !!a.bureaus[b] && !isClosedTradeline(a.bureaus[b]!, a);
+  const bureaus = BUREAUS.filter((b) => summary.revolving?.[b]?.limit != null);
+  if (!bureaus.length) return file;
+  const ok = (list: CreditAccount[], b: Bureau) => {
+    const want = summary.revolving[b]!.limit;
+    const got = list.reduce((n, a) => n + (openRevolving(a, b) ? a.bureaus[b]!.creditLimit ?? 0 : 0), 0);
+    return Math.abs(got - want) <= Math.max(50, want * 0.02);
+  };
+  const before = new Map(bureaus.map((b) => [b, ok(file.accounts, b)]));
+  if (bureaus.every((b) => before.get(b))) return file;
+
+  const withSections = file.accounts.map((a) => {
+    const entries = entriesFor(a);
+    // Several printed accounts share a number (Jose: 13 SchoolsFirst loans + 1 line of credit): keep
+    // the ones whose printed limits agree with this account's limits.
+    const agrees = entries.filter((p) => BUREAUS.every((b) => p.limits[b] == null || a.bureaus[b]?.creditLimit == null || p.limits[b] === a.bureaus[b]!.creditLimit));
+    const section = unanimous(entries.map((p) => p.section)) ?? unanimous(agrees.map((p) => p.section));
+    // Only whether an account counts as revolving changes (what the utilization total measures);
+    // collections and every other classification stay as read.
+    const intoRevolving = section === "revolving" && a.section !== "revolving" && a.section !== "collection";
+    const outOfRevolving = a.section === "revolving" && !!section && section !== "revolving";
+    return intoRevolving || outOfRevolving ? { ...a, section: section! } : a;
+  });
+  const withLimits = (list: CreditAccount[], only?: Bureau) =>
+    list.map((a) => {
+      let next = a;
+      for (const b of only ? [only] : bureaus) {
+        if (!openRevolving(a, b)) continue;
+        const v = unanimous(entriesFor(a).map((p) => p.limits[b]));
+        const t = a.bureaus[b]!;
+        if (v != null && v !== t.creditLimit) next = { ...next, bureaus: { ...next.bureaus, [b]: { ...t, creditLimit: v } } };
+      }
+      return next;
+    });
+  const better = (list: CreditAccount[]) =>
+    bureaus.every((b) => !before.get(b) || ok(list, b)) && bureaus.some((b) => !before.get(b) && ok(list, b));
+
+  // One card read twice under two fragments of its printed number (Nov 6, 2026: "7805" and "5178" of
+  // 517805****, identical limits / balances / open dates): the second copy is dropped — only as a
+  // candidate, so it applies just when the totals then match.
+  const sameData = (x: CreditAccount, y: CreditAccount) =>
+    BUREAUS.every((b) => {
+      const p = x.bureaus[b];
+      const q = y.bureaus[b];
+      if (!p || !q) return !p && !q;
+      return p.balance === q.balance && p.creditLimit === q.creditLimit && pv2Month(p.dateOpened) === pv2Month(q.dateOpened) && String(p.accountStatus ?? "") === String(q.accountStatus ?? "");
+    });
+  const deduped = file.accounts.filter((a, i) => {
+    const own = digits(a.mask);
+    if (!own) return true;
+    return !file.accounts.some((o, j) => {
+      if (j >= i || norm(o.creditor) !== norm(a.creditor) || digits(o.mask) === own || !digits(o.mask) || !sameData(o, a)) return false;
+      // Both numbers sit inside one printed number of this creditor.
+      return printed.some((p) => norm(p.creditor) === norm(a.creditor) && digits(p.mask).includes(own) && digits(p.mask).includes(digits(o.mask)));
+    });
+  });
+  // Sections + limits together, else limits alone (per bureau, as before); each also without the duplicate.
+  const both = withLimits(withSections);
+  if (better(both)) return { ...file, accounts: both };
+  if (deduped.length < file.accounts.length) {
+    const dedupedSections = withSections.filter((a) => deduped.some((d) => d === file.accounts[withSections.indexOf(a)]));
+    for (const candidate of [deduped, withLimits(deduped), withLimits(dedupedSections)]) {
+      if (better(candidate)) return { ...file, accounts: candidate };
+    }
+  }
+  let accounts = file.accounts;
+  for (const b of bureaus) {
+    if (before.get(b)) continue;
+    const repaired = withLimits(accounts, b);
+    if (ok(repaired, b)) accounts = repaired;
   }
   return accounts === file.accounts ? file : { ...file, accounts };
 }
@@ -2281,8 +2540,10 @@ function pv2ParsePullSummaryLayout(text: string): Pv2PullSummary | null {
   if (format === "smartcredit" || format === "identityiq") {
     const s = pv2ParseSmartCreditSummary(text);
     const date = pv2Ymd(text.split(/\r?\n/).map((l) => /^(\d{2}\/\d{2}\/\d{4})\s*\t\s*\d{2}\/\d{2}\/\d{4}/.exec(l.trim())?.[1]).find(Boolean));
-    const printedLimits = format === "smartcredit" ? parseSmartCreditPrintedLimits(text) : [];
-    const extra = printedLimits.length ? { printedLimits } : {};
+    // Same 3B layout for SmartCredit and IdentityIQ; every repair below is guarded by the printed totals.
+    const printedLimits = parseSmartCreditPrintedLimits(text);
+    const printedInquiries = parseSmartCredit(text).inquiries;
+    const extra = { ...(printedLimits.length ? { printedLimits } : {}), ...(printedInquiries.length ? { printedInquiries } : {}) };
     return s ? { ...s, format, reportDate: date, ...extra } : date ? { format, reportDate: date, perBureau: pv2EmptyBureaus() as Pv2PullSummary["perBureau"], revolving: pv2EmptyBureaus() as Pv2PullSummary["revolving"], ...extra } : null;
   }
   return null;
@@ -2341,6 +2602,76 @@ export function pv2ParseSmartCreditSummary(text: string): Pv2PullSummary | null 
  * Half-loaded SmartCredit print, detected against the pull's own summary:
  * any bureau where the read holds under 90% of the accounts the summary lists.
  */
+/**
+ * Entries the reader returned, never fewer than the accounts it holds (a stored read can carry a
+ * stale entry count below its own accounts — Jeser R1: 34 entries, 38 accounts — which made a
+ * complete file look short).
+ */
+export function pv2ReadEntries(file: CreditFile): number {
+  return Math.max(file.readEntries ?? 0, file.accounts.length);
+}
+
+/**
+ * Creditors the report prints more accounts for than the read holds (Nov 6, 2026 — one of 11
+ * Central Research loans and one of 14 Dept of Ed loans were missing; a 1-of-39 gap never reached
+ * the 10% shortfall). Uses the SmartCredit text headers when every page is text. A card printed as
+ * two blocks (one numbered, one "****") counts once.
+ */
+export function pv2CreditorShortfall(file: CreditFile, skeleton: CreditFile | null): Array<{ creditor: string; printed: number; read: number }> {
+  if (!skeleton || skeleton.provider !== "smartcredit" || skeleton.imagePages > 0 || !skeleton.accounts?.length) return [];
+  // Reads spell creditors their own way ("LVNV FUNDING" vs "LVNV FUNDING LLC"): group on the first 8 letters.
+  const key = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 8);
+  // Counted PER BUREAU: one debt printed as separate blocks per bureau (debt buyers, split cards) is one
+  // account on each bureau, so it is never "missing". Block bureaus come from its Days Late row.
+  const count = (accounts: CreditAccount[], confidentOnly: boolean) => {
+    const m = new Map<string, { name: string; perBureau: Record<Bureau, number> }>();
+    for (const a of accounts) {
+      if (confidentOnly && !a.confident) continue;
+      const k = key(a.creditor);
+      if (k.length < 4) continue;
+      const e = m.get(k) ?? { name: a.creditor, perBureau: { TU: 0, EX: 0, EQ: 0 } };
+      for (const b of BUREAUS) if (a.bureaus[b]) e.perBureau[b]++;
+      m.set(k, e);
+    }
+    return m;
+  };
+  const printed = count(skeleton.accounts, true);
+  const read = count(file.accounts, false);
+  const out: Array<{ creditor: string; printed: number; read: number }> = [];
+  for (const [k, p] of printed) {
+    const r = read.get(k);
+    // A creditor the read never names is a spelling the read changed, not a missing account.
+    if (!r) continue;
+    const worst = BUREAUS.map((b) => ({ printed: p.perBureau[b], read: r.perBureau[b] })).filter((x) => x.printed > x.read).sort((x, y) => y.printed - y.read - (x.printed - x.read))[0];
+    if (worst) out.push({ creditor: p.name, ...worst });
+  }
+  return out;
+}
+
+/**
+ * MyFreeScoreNow: creditors its table of contents lists more entries for than the read holds, for the
+ * reconcile pass hint only (the read merges one debt's per-bureau copies, so this over-reports;
+ * the trigger is the entry count). At most as many accounts as entries are missing.
+ */
+export function pv2TocCreditorShortfall(file: CreditFile, summary: Pv2PullSummary | null): Array<{ creditor: string; printed: number; read: number }> {
+  const toc = summary?.tocCreditors;
+  if (!toc?.length) return [];
+  const missing = Math.max(0, (summary?.accountsPrinted ?? toc.length) - pv2ReadEntries(file));
+  if (!missing) return [];
+  const key = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 8);
+  const printed = new Map<string, { name: string; n: number }>();
+  for (const name of toc) {
+    const k = key(name);
+    if (k.length < 4) continue;
+    printed.set(k, { name: printed.get(k)?.name ?? name, n: (printed.get(k)?.n ?? 0) + 1 });
+  }
+  const read = new Map<string, number>();
+  for (const a of file.accounts) read.set(key(a.creditor), (read.get(key(a.creditor)) ?? 0) + 1);
+  return [...printed]
+    .filter(([k, p]) => p.n > (read.get(k) ?? 0))
+    .map(([k, p]) => ({ creditor: p.name, printed: p.n, read: Math.max(read.get(k) ?? 0, p.n - missing) }));
+}
+
 export function pv2SummaryShortfall(file: CreditFile, summary: Pv2PullSummary | null): string | null {
   if (!summary) return null;
   const short: string[] = [];
@@ -2348,7 +2679,7 @@ export function pv2SummaryShortfall(file: CreditFile, summary: Pv2PullSummary | 
   // Layout count vs entries before same-account copies were merged (reads stored before
   // readEntries existed are skipped: their merged count is not comparable). Tri-merge rows are never merged.
   const printed = summary.accountsPrinted != null && file.readEntries != null ? summary.accountsPrinted : (summary.merged?.totalAccounts ?? null);
-  const entries = summary.accountsPrinted != null && file.readEntries != null ? file.readEntries : file.accounts.length;
+  const entries = summary.accountsPrinted != null && file.readEntries != null ? pv2ReadEntries(file) : file.accounts.length;
   if (printed && entries < printed * 0.9) short.push(`${entries} of ${printed} accounts`);
   for (const b of BUREAUS) {
     const total = summary.perBureau[b]?.totalAccounts;
@@ -2388,7 +2719,9 @@ export interface Pv2Check {
     | "positives_in_targets"
     | "projection"
     | "pages_croa"
-    | "language";
+    | "language"
+    /** Informational: what was corrected from the PDF's own rows before checking (only when something was). */
+    | "printed_repairs";
   /** null = not applicable (the pull prints no summary for it). */
   pass: boolean | null;
   detail: string;
@@ -2531,7 +2864,7 @@ export function pv2SelfCheck(input: {
     const printed = layout ? s.accountsPrinted! : (s.merged?.totalAccounts ?? null);
     if (printed != null) {
       any = true;
-      const got = layout ? f.readEntries! : f.accounts.length;
+      const got = layout ? pv2ReadEntries(f) : f.accounts.length;
       // One-sided: layouts can list collections / closed accounts outside the count, so only missing accounts fail.
       if (got < printed - Math.max(1, Math.round(printed * 0.05))) out.push(`${label}: ${got} accounts read, the report lists ${printed}`);
     }
@@ -2680,6 +3013,11 @@ export function pv2SelfCheck(input: {
     const bad = stats.clientText.filter((t) => PV2_BANNED.test(t));
     checks.push({ key: "language", pass: !bad.length, detail: bad.length ? bad.join(" | ").slice(0, 300) : "facts only" });
   }
+  // Staff see every value the platform corrected from the PDF's own rows before these checks ran.
+  {
+    const lines = ([["Before", input.before], ["After", input.after]] as const).flatMap(([label, f]) => (f.printedRepairs ?? []).map((n) => `${label}: ${n}`));
+    if (lines.length) checks.push({ key: "printed_repairs", pass: true, detail: `${lines.slice(0, 12).join("; ")}${lines.length > 12 ? `; … and ${lines.length - 12} more` : ""}` });
+  }
   return { pass: checks.every((c) => c.pass !== false), checks };
 }
 
@@ -2713,8 +3051,8 @@ export function pv2SplitReadVerified(
       if (!near(got, bal, 0.1)) off.push(`${b} balances $${Math.round(got)} vs $${bal}`);
     }
   }
-  if ((s.accountsPrinted ?? 0) > 0 && file.readEntries != null && !near(file.readEntries, s.accountsPrinted!, 0.1)) {
-    off.push(`${file.readEntries} of ${s.accountsPrinted} printed accounts`);
+  if ((s.accountsPrinted ?? 0) > 0 && file.readEntries != null && !near(pv2ReadEntries(file), s.accountsPrinted!, 0.1)) {
+    off.push(`${pv2ReadEntries(file)} of ${s.accountsPrinted} printed accounts`);
   }
   return off.length ? { ok: false, why: off.join(", ") } : { ok: true, why: "matches the report's own totals" };
 }

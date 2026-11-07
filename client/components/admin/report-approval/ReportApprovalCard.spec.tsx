@@ -80,4 +80,30 @@ describe("ReportApprovalCard", () => {
     setup(base({ delivery_status: "sent", approved_by: "Lecca B" }));
     expect(screen.getByTestId("report-approval-done").textContent).toMatch(/Sent to the client · approved by Lecca B/);
   });
+
+  it("held: the approver can send it back to Review (Rebuild); a waiting report has no Rebuild; repairs show as a check line", () => {
+    setup(
+      base({
+        delivery_status: "needs_review",
+        checks: [
+          { key: "account_totals", pass: false, detail: "After EQ: 16 accounts read, summary 24" },
+          { key: "printed_repairs", pass: true, detail: "Before: BK OF AMER TU: limit $1,279 → $500" },
+        ],
+      }),
+    );
+    expect(screen.getByTestId("report-rebuild").textContent).toMatch(/Rebuild with the latest checks/);
+    expect(screen.getByTestId("report-approval-card").textContent).toMatch(/same PDFs/);
+    expect(screen.getByTestId("report-approval-card").textContent).toMatch(/Corrected from the PDF/);
+    expect(screen.getByTestId("report-approval-card").textContent).toMatch(/limit \$1,279 → \$500/);
+  });
+
+  it("held, not an approver → no Rebuild; waiting → no Rebuild", () => {
+    setup(base({ delivery_status: "needs_review", can_approve: false, checks: [{ key: "account_totals", pass: false, detail: "x" }] }));
+    expect(screen.queryByTestId("report-rebuild")).toBeNull();
+  });
+
+  it("pending approval never shows Rebuild", () => {
+    setup(base({}));
+    expect(screen.queryByTestId("report-rebuild")).toBeNull();
+  });
 });
