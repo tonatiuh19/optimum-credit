@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { parseAnetChargeResponse } from "./index";
 
 describe("parseAnetChargeResponse", () => {
-  it("treats responseCode 1 with a transId as approved (Monterrubio Oct 7)", () => {
+  it("treats responseCode 1 with a transId as approved (a client Oct 7)", () => {
     expect(
       parseAnetChargeResponse({
         transactionResponse: {

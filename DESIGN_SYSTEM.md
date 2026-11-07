@@ -285,3 +285,13 @@ Surfaces: New Case schedule, Client panel Payment Schedule, Admin Payments split
 - Approve & send = primary button; the release-manager override is a destructive button behind a required reason textarea (Formik + Yup, ≥ 10 chars).
 - Used in the wizard's last step, the case panel round card (above the delivery timeline) and the dashboard `ReportApprovalQueue` (hidden when empty, anchor `#report-approvals`, inbox item "reports_approval").
 - Wizard preview shows the same self-check above the PDF (accent when it passes, destructive when publishing would hold the report).
+
+## Held reports: explain, don't send staff to reset (Nov 7, 2026)
+
+A report the self-check holds (`needs_review`) is explained from its actual check results (`shared/heldReport.ts` → `explainHeldChecks`), never with a generic "fix and reset":
+
+- **Whose problem it is first.** `cause: "platform"` (the PDF is fine; the platform's reading does not add up to the report's own totals) → title "Held for a check — your PDF is fine", "Nothing to do — Cesar and Alex were notified", and the **Rebuild with the latest checks** button. `cause: "file"` (a quarter or more of the accounts missing) → "re-save the PDF from SmartCredit".
+- **Reasons in plain words from the numbers**: "After report · Experian: credit limits — the platform counted $22,800, the report shows $15,800" (`reportApproval.heldReason.*`, EN + ES). The engineer detail stays in the collapsed check list for Cesar / Alex.
+- **What was corrected** shows apart (wrench line, `printed_repairs`), never counted as a check.
+- **Reset guard**: the Reset round dialog warns when a round it clears is held for a platform reason and keeps the destructive button disabled until "I uploaded the wrong file" is ticked (`reset-held-ack`). Resetting deletes uploads and gives the same result.
+- New held reasons get a `heldReason.<kind>` string in both locales; unknown details fall back to `heldReason.other` (label + detail) so nothing is ever blank.

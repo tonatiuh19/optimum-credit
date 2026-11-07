@@ -1,5 +1,5 @@
 /**
- * Read reuse (Nov 6, 2026 — Jeser): re-uploading the same PDF copied a stored read that was short
+ * Read reuse (Nov 6, 2026 — a client): re-uploading the same PDF copied a stored read that was short
  * of the report's own account list, so the file could never pass. A short read is read again.
  */
 import { describe, expect, it } from "vitest";
@@ -14,7 +14,7 @@ const summary = (o: Partial<Pv2PullSummary>): Pv2PullSummary => ({ perBureau: { 
 
 describe("storedReadIsShort", () => {
   it.each([
-    ["Jeser Before: 35 entries, table of contents lists 39", read(35, 35), summary({ accountsPrinted: 39 }), true],
+    ["Before: 35 entries, table of contents lists 39", read(35, 35), summary({ accountsPrinted: 39 }), true],
     ["one entry short is enough to read again", read(38, 38), summary({ accountsPrinted: 39 }), true],
     ["complete MyFreeScoreNow read (per-bureau copies merged)", read(30, 39), summary({ accountsPrinted: 39 }), false],
     ["stale entry count below the accounts read", read(38, 34), summary({ accountsPrinted: 38 }), false],

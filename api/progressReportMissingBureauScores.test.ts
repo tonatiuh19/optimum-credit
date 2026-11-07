@@ -1,5 +1,5 @@
 /**
- * A bureau with no score (Nov 2, 2026 — Lecca, Dorrian): SmartCredit prints the names on one
+ * A bureau with no score (Nov 2, 2026 — Lecca, a client): SmartCredit prints the names on one
  * line and "694 673 ——" below. The review form must keep each score under its own bureau,
  * never slide TransUnion's number to Equifax. Reports with all three scores are unchanged.
  */
@@ -15,7 +15,7 @@ const page = (row: string, header = "TransUnion® \tExperian® \tEquifax®") =>
 
 describe("extractAllScores: one-line bureau header", () => {
   it.each([
-    ["Equifax missing (Dorrian)", "694 \t673 \t——", { transunion: 694, experian: 673, equifax: null }],
+    ["Equifax missing", "694 \t673 \t——", { transunion: 694, experian: 673, equifax: null }],
     ["Experian missing", "638 \t—— \t631", { transunion: 638, experian: null, equifax: 631 }],
     ["TransUnion missing", "—— \t673 \t655", { transunion: null, experian: 673, equifax: 655 }],
     ["only one score", "—— \t—— \t655", { transunion: null, experian: null, equifax: 655 }],

@@ -502,7 +502,7 @@ export function consolidateSplitAccounts(accounts: CreditAccount[]): CreditAccou
             if (last4(o) !== k || bal(o) !== b) return false;
             const shared = BUREAUS.filter((x) => o.bureaus[x] && a.bureaus[x]);
             if (!shared.length) return true;
-            // Same bureau twice (MyFreeScoreNow, Juan Oct 26): one collection listed under the collector's
+            // Same bureau twice (MyFreeScoreNow, a client Oct 26): one collection listed under the collector's
             // name and again under its client's name — same last 4, same balance, collection on both.
             return shared.every(
               (x) => isCollectionTl(o.bureaus[x]!) && isCollectionTl(a.bureaus[x]!) && o.bureaus[x]!.balance === a.bureaus[x]!.balance,
@@ -1121,7 +1121,7 @@ export function mergeCreditFileParts<F extends CreditFile & { scoreModel?: strin
   for (const p of parts) {
     // Neighbouring parts share ONE page, so an overlap copy can only be one of the last accounts of
     // the previous part AND one of the first accounts of this one, matched one-to-one (Nov 6, 2026 —
-    // Jeser: four closed $0 loans ending 0321 in different parts were merged into each other, so
+    // a client: four closed $0 loans ending 0321 in different parts were merged into each other, so
     // look-alike accounts far apart vanished). Rows within one part are never merged here.
     const tail = previous.slice(-PART_OVERLAP_ACCOUNTS);
     const used = new Set<CreditAccount>();

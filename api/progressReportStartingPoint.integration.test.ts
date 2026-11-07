@@ -138,7 +138,7 @@ describe("a typed score that differs from the PDF holds the report", () => {
   const after = file({ TU: 694, EX: 673, EQ: null }, "09/14/2026");
   it.each([
     ["all match", { transunion: { before: 655, after: 694 }, experian: { before: 670, after: 673 }, equifax: { before: 0, after: 0 } }, true, null],
-    ["wrong Before (Dorrian)", { transunion: { before: 667, after: 694 }, experian: { before: 654, after: 673 }, equifax: { before: 0, after: 0 } }, false, /TU Before: report 667, PDF 655/],
+    ["wrong Before", { transunion: { before: 667, after: 694 }, experian: { before: 654, after: 673 }, equifax: { before: 0, after: 0 } }, false, /TU Before: report 667, PDF 655/],
     ["score typed for a bureau with none", { transunion: { before: 655, after: 694 }, experian: { before: 670, after: 673 }, equifax: { before: 0, after: 688 } }, false, /EQ After: report 688, PDF no score/],
     ["real score left out", { transunion: { before: 655, after: 0 }, experian: { before: 670, after: 673 }, equifax: { before: 0, after: 0 } }, false, /TU After: report no score, PDF 694/],
   ])("%s", async (_n, scores, pass, re) => {

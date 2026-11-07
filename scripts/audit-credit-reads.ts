@@ -28,7 +28,7 @@ const parse = <T>(v: unknown): T | null => {
   }
 };
 
-type Finding = "entries_short" | "summary_shortfall" | "creditor_short" | "bureau_totals" | "balances" | "balances_after_repair" | "limits" | "limits_after_repair" | "inquiries" | "inquiries_after_repair" | "headers_short";
+type Finding = "entries_short" | "summary_shortfall" | "creditor_short" | "bureau_totals" | "balances" | "balances_after_repair" | "limits" | "limits_after_repair" | "inquiries" | "inquiries_after_repair" | "headers_short" | "repair_broke" | "repair_unfixed";
 
 function audit(file: CreditFile, s: Pv2PullSummary | null, skeleton: CreditFile | null): Finding[] {
   const out: Finding[] = [];
@@ -46,6 +46,9 @@ function audit(file: CreditFile, s: Pv2PullSummary | null, skeleton: CreditFile 
   }
   // Each check as read, and after the guarded repairs from printed facts (what staff would still see).
   const repaired = pv2ApplyPrintedFacts(file, s);
+  const limitSum = (f: CreditFile, b: (typeof BUREAUS)[number]) =>
+    f.accounts.filter((a) => a.section === "revolving" && a.bureaus[b] && !isClosedTradeline(a.bureaus[b]!, a)).reduce((n, a) => n + (a.bureaus[b]!.creditLimit ?? 0), 0);
+  const balSum = (f: CreditFile, b: (typeof BUREAUS)[number]) => f.accounts.reduce((n, a) => n + Math.max(0, a.bureaus[b]?.balance ?? 0), 0);
   const balancesOff = (f: CreditFile) =>
     BUREAUS.some((b) => {
       const want = s.perBureau?.[b]?.balances;
@@ -71,6 +74,25 @@ function audit(file: CreditFile, s: Pv2PullSummary | null, skeleton: CreditFile 
       return got !== want;
     });
   };
+  // Gate (Nov 7, 2026): a repair may only change a bureau it makes match, and never break one that matched.
+  const nearLim = (f: CreditFile, b: (typeof BUREAUS)[number]) => {
+    const want = s.revolving?.[b]?.limit;
+    return want == null ? null : near(limitSum(f, b), want, 50, 0.02);
+  };
+  const nearBal = (f: CreditFile, b: (typeof BUREAUS)[number]) => {
+    const want = s.perBureau?.[b]?.balances;
+    return want == null ? null : near(balSum(f, b), want, 10, 0.01);
+  };
+  for (const b of BUREAUS) {
+    for (const [okBefore, okAfter, changed] of [
+      [nearLim(file, b), nearLim(repaired, b), limitSum(file, b) !== limitSum(repaired, b)],
+      [nearBal(file, b), nearBal(repaired, b), balSum(file, b) !== balSum(repaired, b)],
+    ] as const) {
+      if (okBefore === null) continue;
+      if (okBefore && !okAfter) out.push("repair_broke");
+      else if (!okBefore && !okAfter && changed) out.push("repair_unfixed");
+    }
+  }
   if (balancesOff(file)) out.push(balancesOff(repaired) ? "balances_after_repair" : "balances");
   if (limitsOff(file)) out.push(limitsOff(repaired) ? "limits_after_repair" : "limits");
   if (inquiriesOff(file)) out.push(inquiriesOff(repaired) ? "inquiries_after_repair" : "inquiries");
@@ -80,6 +102,8 @@ function audit(file: CreditFile, s: Pv2PullSummary | null, skeleton: CreditFile 
 async function main() {
   const args = process.argv.slice(2);
   const fresh = args.includes("--fresh");
+  // --gate: exit 1 when a repair broke a matching bureau or changed one it did not fix (current reader only).
+  const gate = args.includes("--gate");
   const limit = Number(args.find((a) => /^\d+$/.test(a))) || 0;
   const conn = await mysql.createConnection({
     host: process.env.DB_HOST,
@@ -189,6 +213,17 @@ async function main() {
       console.log(`   ${f.padEnd(20)} ${String(ids.length).padStart(4)}  ${ids.slice(0, 8).join(", ")}${ids.length > 8 ? " …" : ""}`);
     }
   }
+  if (gate) {
+    const bad: string[] = [];
+    for (const [format, g] of byFormat) {
+      if (format.includes("(old reader)")) continue;
+      for (const k of ["repair_broke", "repair_unfixed"] as const) for (const id of g.findings.get(k) ?? []) bad.push(`${k} ${id}`);
+    }
+    if (bad.length) {
+      console.error(`\n❌ Repair gate: ${bad.length} problem(s) — a repair broke a matching total or changed a bureau it did not fix:\n   ${bad.slice(0, 20).join("\n   ")}`);
+      process.exitCode = 1;
+    } else console.log("\n✅ Repair gate: no repair broke a match or changed a bureau without fixing it.");
+  }
   console.log(`\nCross-round: ${roundsChecked} published rounds compared (${gated} skipped: the gate blocks them); ${suspect.length} "removed" account(s) still in the After${suspect.length ? `: ${[...new Set(suspect)].slice(0, 12).join(", ")}` : ""}`);
   console.log(`
 entries_short        fewer entries than the report's own account list (reader / split merge)
@@ -197,7 +232,8 @@ creditor_short       SmartCredit: a creditor has more accounts in the text than 
 headers_short        SmartCredit: 2+ fewer entries than account headers in the text
 bureau_totals        a bureau's printed account total not reached
 balances / limits / inquiries               off as read, fixed by the printed rows (staff never see it)
-*_after_repair                              still off after the repairs (the report is held for review)\n`);
+*_after_repair                              still off after the repairs (the report is held for review)
+repair_broke / repair_unfixed               a repair broke a matching total / changed a bureau it did not fix (gate fails)\n`);
 }
 
 main().catch((e) => {

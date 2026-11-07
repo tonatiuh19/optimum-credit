@@ -334,6 +334,28 @@ async function tagRelease(version: string): Promise<void> {
   }
 }
 
+// ── Repair gate (Nov 7, 2026): report repairs may only change a bureau they make match ──────────
+/** Runs the read audit in gate mode; output kept off the terminal (the test dashboard is live) unless it fails. */
+async function runRepairGate(mode: "quick" | "fresh"): Promise<void> {
+  const args = ["tsx", "scripts/audit-credit-reads.ts", ...(mode === "fresh" ? ["250", "--fresh"] : []), "--gate"];
+  const { code, out } = await new Promise<{ code: number; out: string }>((resolve, reject) => {
+    const child = spawn("npx", args, { stdio: ["ignore", "pipe", "pipe"], shell: false, env: process.env });
+    let buf = "";
+    child.stdout.on("data", (d) => (buf += String(d)));
+    child.stderr.on("data", (d) => (buf += String(d)));
+    child.on("error", reject);
+    child.on("exit", (c) => resolve({ code: c ?? 1, out: buf }));
+  });
+  if (code !== 0) {
+    const found = out.split("\n").filter((l) => /Repair gate|repair_(broke|unfixed)/.test(l)).join("\n");
+    throw new Error(
+      `Repair gate (${mode}) failed — ${found ? "a repair broke a matching total or changed a bureau it did not fix" : "the audit could not run"}. Run: npm run audit:reads -- ${mode === "fresh" ? "250 --fresh " : ""}--gate\n${(found || out).slice(-800)}`,
+    );
+  }
+  const line = out.split("\n").find((l) => /Repair gate/.test(l));
+  console.log(line ? `${line.trim()} (${mode})` : `✅ Repair gate (${mode}) done.`);
+}
+
 /**
  * Typecheck + Vercel inline monolith gate + vitest — must pass before prod.
  * Relative runtime imports from api/index.ts → ERR_MODULE_NOT_FOUND on Vercel.
@@ -361,10 +383,18 @@ async function runPreDeployChecks() {
     // On a terminal: one live progress bar (scripts/vitestProgressReporter.ts) instead of every test line.
     const progress = process.stdout.isTTY ? ["--reporter=./scripts/vitestProgressReporter.ts"] : [];
     stage = "tests";
+    // The full repair gate (re-parses recent PDFs, ~3-4 min) runs at the same time: no added time.
+    const freshGate = runRepairGate("fresh").then(
+      () => null,
+      (e: unknown) => e,
+    );
     await runCommand("npx", ["vitest", "--run", ...progress]).catch((e) => {
       throw interrupted ? e : new Error(`Tests failed.${failedTestsSummary() ? "" : ` (${e instanceof Error ? e.message : e})`}`);
     });
     console.log("\n✅ Tests passed. Continuing to deploy...\n");
+    stage = "repair gate";
+    const gateError = await freshGate;
+    if (gateError) throw gateError;
   } finally {
     testsRunning = false;
     if (!interrupted) purgeTestData("Tests finished");
@@ -390,6 +420,69 @@ const REQUIRED_PROD_ENV: Array<{ name: string; why: string; fix: string }> = [
   { name: "AUTHORIZENET_API_LOGIN_ID", why: "client payments", fix: "Payment gateway → API credentials → add to Vercel Production" },
   { name: "AUTHORIZENET_TRANSACTION_KEY", why: "client payments", fix: "Payment gateway → API credentials → add to Vercel Production" },
 ];
+
+/**
+ * Right after going live: every held report built by an older engine re-checks itself on the live server;
+ * the ones that pass now are rebuilt and wait for approval (Nov 7, 2026). Never fails the deploy.
+ */
+async function selfHealHeldReports(): Promise<void> {
+  const secret = String(process.env.CRON_SECRET || "").trim();
+  const base = "https://www.ofgllc.com";
+  if (!secret) {
+    console.warn("⚠️  Held reports not re-checked (no CRON_SECRET in .env); they re-check when opened.");
+    return;
+  }
+  try {
+    const r = await fetch(`${base}/api/internal/self-heal-held-reports`, { method: "POST", headers: { "x-cron-secret": secret }, signal: AbortSignal.timeout(15 * 60_000) });
+    const body: any = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body?.error || `HTTP ${r.status}`);
+    console.log(`🩺 Held reports re-checked with the new engine: ${body.ready ?? 0} now pass (waiting for approval), ${body.still_held ?? 0} still held, ${body.skipped ?? 0} waiting on reads.`);
+  } catch (e) {
+    console.warn(`⚠️  Held reports not re-checked after the deploy (${e instanceof Error ? e.message : String(e)}); they re-check when opened.`);
+  }
+}
+
+/**
+ * `vercel --prod`, shown live and captured. "fetch failed" after the upload means this machine lost the
+ * connection while the build kept running on Vercel (Nov 7, 2026: both deploys went live anyway). Then the
+ * deployment is checked every 15 s until it is Ready (continue as a normal deploy) or really failed.
+ */
+async function deployToVercel(vercelArgs: string[]): Promise<void> {
+  let output = "";
+  const code = await new Promise<number>((resolve, reject) => {
+    const child = spawn("npx", ["vercel", "--prod", ...vercelArgs], { stdio: ["inherit", "pipe", "pipe"], shell: false, env: process.env });
+    child.stdout.on("data", (d) => {
+      output += String(d);
+      process.stdout.write(d);
+    });
+    child.stderr.on("data", (d) => {
+      output += String(d);
+      process.stderr.write(d);
+    });
+    child.on("error", reject);
+    child.on("exit", (c) => resolve(c ?? 1));
+  });
+  if (code === 0) return;
+  const url = /Production\s+(https:\/\/\S+\.vercel\.app)/.exec(output)?.[1];
+  if (!url) throw new Error(`npx vercel --prod failed with exit code ${code} (nothing was uploaded)`);
+  console.log(`\n⏳ The Vercel CLI lost its connection after uploading. Checking ${url} every 15 s until the build finishes…`);
+  for (let i = 0; i < 80; i++) {
+    let status = "";
+    try {
+      const info = await captureCommand("npx", ["vercel", "inspect", url]);
+      status = /status\s+●?\s*(\w+)/i.exec(info)?.[1]?.toLowerCase() ?? "";
+    } catch {
+      status = ""; // still offline: try again
+    }
+    if (status === "ready") {
+      console.log("✅ The build finished on Vercel and is live.");
+      return;
+    }
+    if (status === "error" || status === "canceled") throw new Error(`The Vercel build ${status === "error" ? "failed" : "was canceled"}: ${url}`);
+    await new Promise((r) => setTimeout(r, 15_000));
+  }
+  throw new Error(`Still not Ready after 20 minutes: check ${url} in the Vercel dashboard, then run npm run deploy:stamp-version -- <version>`);
+}
 
 async function captureCommand(command: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -539,6 +632,9 @@ async function main() {
       "\n⚠️  Skipping pre-deploy checks (--skip-checks / SKIP_DEPLOY_CHECKS).\n",
     );
   }
+  // Always, even with --skip-checks (12 s): no repair may break a match or change a bureau it does not fix.
+  stage = "repair gate";
+  await runRepairGate("quick");
 
   // Again after the checks: nothing committed, pulled or edited meanwhile slips into the upload.
   stage = "git re-check after the tests";
@@ -562,7 +658,7 @@ async function main() {
     `\n🚀 Starting Vercel production deploy for version ${deployVersion}...\n`,
   );
   stage = "Vercel upload";
-  await runCommand("npx", ["vercel", "--prod", ...vercelArgs]);
+  await deployToVercel(vercelArgs);
   stage = "after going live";
 
   // The site is already live here: a network blip on the version stamp must not read as a failed
@@ -580,6 +676,7 @@ async function main() {
         );
         // The site is live either way: still record the release in git.
         await tagRelease(deployVersion);
+        await selfHealHeldReports();
         await announceRelease(deployVersion);
         return;
       }
@@ -592,6 +689,7 @@ async function main() {
     `\n🎉 Production deploy succeeded! app_version updated to ${deployVersion}.`,
   );
   await tagRelease(deployVersion);
+  await selfHealHeldReports();
   await notify(`🎉 <b>${projectName} ${deployVersion} is live.</b>`);
   stage = "release notes";
   await announceRelease(deployVersion);

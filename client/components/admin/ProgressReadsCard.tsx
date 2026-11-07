@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { NextStep } from "@/components/admin/report-approval/NextStep";
 import { useTranslation } from "react-i18next";
 import { AlertTriangle, ArrowLeftRight, CheckCircle2, FileSearch, Gauge, Loader2, RotateCcw, ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -95,6 +96,7 @@ export function ProgressReadsCard({ sessionId, onStartOver }: { sessionId: numbe
           })}
         </p>
         <p className="text-xs text-foreground">{t("reportWizard.reads.incomplete.body")}</p>
+        <NextStep input={{ reads: { incompletePrint: true, scoreUpdateAvailable: !!reads?.score_update_available } }} />
         <ol className="list-decimal pl-5 space-y-1 text-xs text-foreground">
           {(["open", "wait", "save", "upload"] as const).map((k) => (
             <li key={k}>{t(`reportWizard.reads.incomplete.steps.${k}`)}</li>
@@ -118,9 +120,12 @@ export function ProgressReadsCard({ sessionId, onStartOver }: { sessionId: numbe
 
   if (reads?.ready) {
     return (
-      <p className="flex items-center gap-1.5 text-xs text-accent" data-testid="progress-reads-ready">
-        <CheckCircle2 className="w-3.5 h-3.5" /> {t("reportWizard.reads.ready")}
-      </p>
+      <div className="space-y-1.5">
+        <p className="flex items-center gap-1.5 text-xs text-accent" data-testid="progress-reads-ready">
+          <CheckCircle2 className="w-3.5 h-3.5" /> {t("reportWizard.reads.ready")}
+        </p>
+        <NextStep input={{ reads: { ready: true } }} />
+      </div>
     );
   }
   const blocked = reads?.blocked_data_integrity;
@@ -134,6 +139,14 @@ export function ProgressReadsCard({ sessionId, onStartOver }: { sessionId: numbe
         {blocked ? <ShieldAlert className="w-4 h-4 text-destructive" /> : <FileSearch className="w-4 h-4 text-primary" />}
         {blocked ? t("reportWizard.reads.blockedTitle") : t("reportWizard.reads.title")}
       </p>
+      <NextStep
+        input={{
+          reads: {
+            blockedSameFile: !!blocked,
+            failed: reads?.reads.before.status === "failed" || reads?.reads.after.status === "failed",
+          },
+        }}
+      />
       {blocked ? (
         <p className="text-xs text-foreground">{t("reportWizard.reads.blockedBody", { reason: blocked })}</p>
       ) : (

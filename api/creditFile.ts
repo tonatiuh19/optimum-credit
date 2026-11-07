@@ -689,7 +689,7 @@ export function parseMfsnPrintedAccounts(text: string): ScPrintedLimit[] {
 }
 
 /**
- * Credit limits read straight from the text of a SmartCredit 3B print (Nov 6, 2026 — Emiliano:
+ * Credit limits read straight from the text of a SmartCredit 3B print (Nov 6, 2026 — a client:
  * the account read took the High Balance row as the limit, so revolving limits never matched
  * the report's own Credit Utilization total and every round was held).
  *

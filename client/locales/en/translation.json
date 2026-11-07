@@ -1421,6 +1421,8 @@
     "resendRoundErrorTitle": "Could not resend",
     "resendRoundErrorBody": "Try again, or check the client has email/phone on file.",
     "resetRound": "Reset round",
+    "resetRoundHeldWarning": "Round {{round}} was held because of how the platform read it, not your PDF. Resetting deletes your uploads and will give the same result. Use \"Rebuild with the latest checks\" on the report instead, or wait for Cesar / Alex.",
+    "resetRoundHeldConfirm": "I uploaded the wrong file and need to start this round over",
     "resetRoundConfirmTitle": "Reset Round {{round}}?",
     "resetRoundConfirmIntro": "This permanently clears the published report data so you can re-run Generate for this round.",
     "resetRoundCheckRounds": "Rounds cleared: {{rounds}} (this round and any later rounds).",
@@ -3695,6 +3697,21 @@
       }
     }
   },
+  "reportNextStep": {
+    "label": "Next step:",
+    "theApprover": "the approver",
+    "reading": "Reading both reports (about 2–4 minutes). Nothing to do — this updates by itself.",
+    "read_failed": "One report could not be read. Upload that PDF again; if it happens twice, post the client and round in #ofg-bug-features-requests.",
+    "resave_pdf": "Re-save the PDF from SmartCredit after every account has loaded, then upload it again.",
+    "newer_report": "Before and After are the same file. Upload the newer report as After.",
+    "score_update": "Only the scores are readable in this PDF — send a Score update instead (one click below), or re-save the PDF from SmartCredit.",
+    "publish": "Both reports are read. Preview, then Publish.",
+    "approve": "Approve & send.",
+    "approve_rebuilt": "It passed the latest checks — Approve & send.",
+    "wait_approver": "Waiting for {{who}} to approve. Nothing to do.",
+    "held_platform": "Nothing to do — Cesar and Alex were notified, and it re-checks itself after every update. Please don't reset.",
+    "done": "Done — nothing else to do."
+  },
   "reportApproval": {
     "checks": {
       "account_totals": "Account totals vs the pull summary",
@@ -3713,6 +3730,16 @@
       "printed_repairs": "Corrected from the PDF (before checking)"
     },
     "notApplicable": "not printed on this pull",
+    "selfHealed": "Rebuilt automatically with the latest checks — it passes now.",
+    "heldPlatformTitle": "Held for a check — your PDF is fine",
+    "heldPlatformBody": "The platform's reading of this report does not add up to the report's own totals, so it was kept from the client to be safe. This is not caused by your upload — please don't reset the round (it deletes your PDFs and gives the same result).",
+    "heldFileTitle": "Held — the PDF looks incomplete",
+    "heldFileBody": "The report lists many more accounts than the PDF contains, which usually means it was saved before every account loaded. Re-save it from SmartCredit after all accounts are visible, then upload it again.",
+    "heldNextPlatform": "Nothing to do right now: Cesar and Alex were notified automatically. After an update, click Rebuild below and publish again with the same PDFs.",
+    "heldReasonsTitle": "Why it was held",
+    "heldReason": {"limits": "{{pull}} report · {{bureau}}: credit limits — the platform counted {{platform}}, the report shows {{report}}", "balances": "{{pull}} report · {{bureau}}: balances — the platform counted {{platform}}, the report shows {{report}}", "accounts": "{{pull}} report · {{bureau}}: accounts — the platform found {{platform}}, the report lists {{report}}", "open_accounts": "{{pull}} report · {{bureau}}: open accounts — the platform found {{platform}}, the report lists {{report}}", "inquiries": "{{pull}} report · {{bureau}}: inquiries — the platform found {{platform}}, the report lists {{report}}", "other": "{{label}}: {{detail}}"},
+    "heldPull": {"before": "Before", "after": "After", "none": "This"},
+    "heldBureau": {"TU": "TransUnion", "EX": "Experian", "EQ": "Equifax", "none": "all bureaus"},
     "rebuild": "Rebuild with the latest checks",
     "rebuildHint": "Sends this report back to Review with the same PDFs. Open the client's report wizard and Publish again — nothing to upload.",
     "rebuildConfirm": "Send this held report back to Review? It was never sent to the client. You will publish it again from the wizard with the same PDFs.",

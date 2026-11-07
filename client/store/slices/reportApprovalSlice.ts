@@ -16,6 +16,8 @@ export type ReportApproval = {
   approved_by: string | null;
   can_approve: boolean;
   can_override: boolean;
+  /** Opening a held report rebuilt it with the latest engine: this is the new report (was that id). */
+  rebuilt_from?: number | null;
 };
 
 export type PendingReportApproval = {
@@ -107,7 +109,9 @@ const reportApprovalSlice = createSlice({
       s.pendingLoaded = true;
     });
     b.addCase(fetchReportApproval.fulfilled, (s, a) => {
+      // Stored under the id asked for too: a held report that rebuilt itself answers with its new id.
       s.byId[a.payload.id] = a.payload;
+      s.byId[a.meta.arg] = a.payload;
     });
     b.addCase(approveRoundReport.pending, (s, a) => {
       s.approving[a.meta.arg.id] = true;

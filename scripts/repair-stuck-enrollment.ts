@@ -2,7 +2,7 @@
  * One-shot repair for stuck enrollment / empty Docs Verified cases.
  *
  * Usage:
- *   npx tsx scripts/repair-stuck-enrollment.ts           # Joseph + Carlos + Bonner
+ *   npx tsx scripts/repair-stuck-enrollment.ts           # Joseph + a client + Bonner
  *   npx tsx scripts/repair-stuck-enrollment.ts --batch   # also all docs_ready with 0 required tasks
  *
  * Safe to re-run: converts only when no enrolled case; batch only when 0 required task rows.

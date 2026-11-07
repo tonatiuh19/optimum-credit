@@ -190,7 +190,7 @@ describe("mergeCreditFileParts: never merges distinct accounts (shadow-run regre
   });
 });
 
-describe("mergeCreditFileParts: overlap copies only across the shared page (Nov 6, 2026 — Jeser)", () => {
+describe("mergeCreditFileParts: overlap copies only across the shared page (Nov 6, 2026 — a client)", () => {
   // Four closed $0 student loans with the same number, one per part position; dates missing on some.
   const loan = (dateOpened: string | null) => acct("ED FINANCIAL/ESA", "0321", ["TU"], { balance: 0, creditLimit: null, accountStatus: "Closed", dateOpened });
   const filler = (n: number, tag: string) => Array.from({ length: n }, (_, i) => acct(`LENDER ${tag}${i}`, String(1000 + i), ["TU"], { dateOpened: `0${(i % 9) + 1}/2015` }));

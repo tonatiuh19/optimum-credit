@@ -1,5 +1,5 @@
 /**
- * SmartCredit printed credit limits (Nov 6, 2026 — Emiliano): the account read took a card's
+ * SmartCredit printed credit limits (Nov 6, 2026 — a client): the account read took a card's
  * High Balance ($1,279) as its limit ($500), so revolving limits never matched the report's
  * Credit Utilization total and every round was held. Made-up report text in the same layout.
  */
@@ -140,7 +140,7 @@ const summary = (limit: Partial<Record<Bureau, number>>, printedLimits = parseSm
   }) as Pv2PullSummary;
 const limitOf = (f: CreditFile, creditor: string, b: Bureau) => f.accounts.find((a) => a.creditor === creditor)!.bureaus[b]?.creditLimit;
 
-// The read: Bank of America's High Balance taken as its limit on TU / EX (Emiliano's case).
+// The read: Bank of America's High Balance taken as its limit on TU / EX (a client case).
 const emilianoRead = () =>
   file([
     acct("BK OF AMER", null, { TU: tl({ creditLimit: 1279, balance: 153 }), EX: tl({ creditLimit: 1279, balance: 153 }), EQ: tl({ creditLimit: 500, balance: 153 }) }),
@@ -150,7 +150,7 @@ const emilianoRead = () =>
   ]);
 
 describe("pv2ApplyPrintedLimits", () => {
-  it("Emiliano: repairs the wrong limit so totals match the printed $1,600", () => {
+  it("a client: repairs the wrong limit so totals match the printed $1,600", () => {
     const out = pv2ApplyPrintedLimits(emilianoRead(), summary({ TU: 1600, EX: 1600, EQ: 1600 }));
     expect(limitOf(out, "BK OF AMER", "TU")).toBe(500);
     expect(limitOf(out, "BK OF AMER", "EX")).toBe(500);
@@ -209,7 +209,7 @@ describe("pv2ApplyPrintedLimits", () => {
   });
 });
 
-describe("read completeness counts (Nov 6, 2026 — Jeser)", () => {
+describe("read completeness counts (Nov 6, 2026 — a client)", () => {
   it("a stale entry count below the accounts read never makes a complete file look short", async () => {
     const { pv2ReadEntries, pv2SummaryShortfall } = await import("./progressReportV2");
     const accounts = Array.from({ length: 38 }, (_, i) => acct(`LENDER ${i}`, String(i), { TU: tl({}) }));
@@ -221,7 +221,7 @@ describe("read completeness counts (Nov 6, 2026 — Jeser)", () => {
   });
 });
 
-describe("printed sections (Nov 6, 2026 — Jose: lines of credit counted as revolving)", () => {
+describe("printed sections (Nov 6, 2026 — a client: lines of credit counted as revolving)", () => {
   // SmartCredit's utilization table counts only "Revolving Accounts"; a line of credit prints in its own section.
   const text = [
     "Revolving Accounts",
@@ -295,7 +295,7 @@ describe("printed sections (Nov 6, 2026 — Jose: lines of credit counted as rev
     ]);
   const jose = (printedLimits = parseSmartCreditPrintedLimits(text)) => summary({ TU: 300, EQ: 300 }, printedLimits);
 
-  it("Jose: the line of credit and Tilt leave revolving, so limits match SmartCredit's $300", () => {
+  it("a client: the line of credit and Tilt leave revolving, so limits match SmartCredit's $300", () => {
     const out = pv2ApplyPrintedLimits(read(), jose());
     expect(out.accounts.map((a) => a.section)).toEqual(["revolving", "other", "other", "collection"]);
   });
@@ -391,7 +391,7 @@ describe("MyFreeScoreNow table of contents (any missing entry, with creditor hin
     ({ perBureau: { TU: null, EX: null, EQ: null }, revolving: { TU: null, EX: null, EQ: null }, accountsPrinted: names.length, tocCreditors: names }) as Pv2PullSummary;
   const ed = (n: number) => Array.from({ length: n }, () => "Ed Financial/esa");
 
-  it("Jeser: 4 Ed Financial listed, 3 read, 1 entry missing → named, never more than missing", async () => {
+  it("a client: 4 Ed Financial listed, 3 read, 1 entry missing → named, never more than missing", async () => {
     const { pv2TocCreditorShortfall } = await import("./progressReportV2");
     const read = { ...file([...ed(3), "Other A", "Other B"].map((c, i) => acct(c, String(i), { TU: tl({}) }))), readEntries: 5 } as CreditFile;
     expect(pv2TocCreditorShortfall(read, toc([...ed(4), "Other A", "Other B"]))).toEqual([{ creditor: "Ed Financial/esa", printed: 4, read: 3 }]);
@@ -646,5 +646,32 @@ describe("repairs are recorded for staff", () => {
     expect(out.printedRepairs).toEqual(["BK OF AMER TU: limit $1,279 → $500"]);
     const same = pv2ApplyPrintedFacts(out, summary({ TU: 500, EQ: 500 }, printed));
     expect(same).toBe(out); // already repaired: no new notes on load
+  });
+});
+
+describe("a client (Nov 7, 2026): repairs stay one-to-one and per bureau", () => {
+  const card = (mask: string, tu: number | null, ex: number | null) =>
+    acct("CAPITAL ONE", mask, { ...(tu != null ? { TU: tl({ creditLimit: tu }) } : {}), ...(ex != null ? { EX: tl({ creditLimit: ex }) } : {}) });
+
+  it("two read cards fit one printed block → neither takes its value (the $4,000 card is not 'corrected' to $1,000)", () => {
+    const printed = [{ creditor: "CAPITAL ONE", mask: "515676****", limits: { EX: 1000 } }];
+    const read = file([card("5676", null, 1000), card("5676", null, 4000)]);
+    expect(pv2ApplyPrintedLimits(read, summary({ EX: 2000 }, printed))).toBe(read);
+  });
+
+  it("a fix for one bureau never carries changes on another bureau that still does not match", () => {
+    // TU is fixed by the printed $500; on EX the printed $500 would not reach the printed total, so EX keeps the read.
+    const printed = [{ creditor: "CAPITAL ONE", mask: "517805****", limits: { TU: 500, EX: 500 } }, { creditor: "OTHER", mask: "999999****", limits: {} }];
+    const read = file([card("5178", 9000, 9000), acct("OTHER", "9999", { TU: tl({ creditLimit: 1000 }), EX: tl({ creditLimit: 7000 }) })]);
+    const out = pv2ApplyPrintedLimits(read, summary({ TU: 1500, EX: 1000 }, printed));
+    expect(out.accounts[0].bureaus.TU!.creditLimit).toBe(500);
+    expect(out.accounts[0].bureaus.EX!.creditLimit).toBe(9000);
+  });
+
+  it("a stored read saved with repairs applied is never reused (it is read again)", async () => {
+    const { storedReadIsShort } = await import("./index");
+    expect(storedReadIsShort({ accounts: [], printedRepairs: ["x"] }, null)).toBe(true);
+    expect(storedReadIsShort({ accounts: [], printedRepairs: ["x"] }, summary({}))).toBe(true);
+    expect(storedReadIsShort({ accounts: [] }, null)).toBe(false);
   });
 });

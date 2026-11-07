@@ -8426,6 +8426,10 @@ paths:
       tags: [Admin]
       summary: Reset OFG Progress Report round (cascade later rounds)
       description: |
+        The dry-run preview also returns `held: [{ round_number, checks }]` — rounds in this reset whose
+        report the self-check held, with their checks — so the dialog can warn that resetting a report
+        held for a platform reason deletes the uploads and gives the same result (Nov 7, 2026).
+
         Clears published Round `roundNumber` and **all later rounds** (reports,
         PDFs, wizard sessions), rolls pipeline back using the publish history
         `from_stage` when available, best-effort CDN delete, and audit log.

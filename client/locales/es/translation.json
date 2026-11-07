@@ -1390,6 +1390,8 @@
     "resendRoundErrorTitle": "No se pudo reenviar",
     "resendRoundErrorBody": "Intenta de nuevo, o verifica que el cliente tenga correo/teléfono.",
     "resetRound": "Restablecer ronda",
+    "resetRoundHeldWarning": "La Ronda {{round}} se detuvo por cómo la leyó la plataforma, no por tu PDF. Reiniciar borra tus cargas y dará el mismo resultado. Mejor usa \"Reconstruir con las revisiones más recientes\" en el reporte, o espera a Cesar / Alex.",
+    "resetRoundHeldConfirm": "Subí el archivo equivocado y necesito empezar esta ronda de nuevo",
     "resetRoundConfirmTitle": "¿Restablecer la Ronda {{round}}?",
     "resetRoundConfirmIntro": "Esto borra de forma permanente el informe publicado para que puedas volver a Generar esta ronda.",
     "resetRoundCheckRounds": "Rondas a borrar: {{rounds}} (esta y cualquier ronda posterior).",
@@ -3664,6 +3666,21 @@
       }
     }
   },
+  "reportNextStep": {
+    "label": "Siguiente paso:",
+    "theApprover": "la persona que aprueba",
+    "reading": "Leyendo ambos reportes (unos 2–4 minutos). No tienes que hacer nada — se actualiza solo.",
+    "read_failed": "No se pudo leer un reporte. Sube ese PDF de nuevo; si pasa dos veces, manda el cliente y la ronda en #ofg-bug-features-requests.",
+    "resave_pdf": "Vuelve a guardar el PDF desde SmartCredit cuando hayan cargado todas las cuentas y súbelo de nuevo.",
+    "newer_report": "Before y After son el mismo archivo. Sube el reporte más reciente como After.",
+    "score_update": "En este PDF solo se leen los puntajes — envía una actualización de puntajes (un clic abajo) o vuelve a guardar el PDF desde SmartCredit.",
+    "publish": "Ambos reportes están leídos. Vista previa y luego Publicar.",
+    "approve": "Aprobar y enviar.",
+    "approve_rebuilt": "Pasó las revisiones más recientes — Aprobar y enviar.",
+    "wait_approver": "Esperando que {{who}} apruebe. No tienes que hacer nada.",
+    "held_platform": "No tienes que hacer nada — Cesar y Alex ya fueron notificados, y se revisa solo después de cada actualización. Por favor no reinicies.",
+    "done": "Listo — no hay nada más que hacer."
+  },
   "reportApproval": {
     "checks": {
       "account_totals": "Cuentas vs el resumen del reporte",
@@ -3682,6 +3699,16 @@
       "printed_repairs": "Corregido con el PDF (antes de revisar)"
     },
     "notApplicable": "no viene en este reporte",
+    "selfHealed": "Se reconstruyó automáticamente con las revisiones más recientes — ahora pasa.",
+    "heldPlatformTitle": "Detenido por una revisión — tu PDF está bien",
+    "heldPlatformBody": "La lectura de la plataforma no coincide con los totales que imprime el propio reporte, así que se detuvo para el cliente por seguridad. No lo causó tu carga — por favor no reinicies la ronda (borra tus PDFs y da el mismo resultado).",
+    "heldFileTitle": "Detenido — el PDF parece incompleto",
+    "heldFileBody": "El reporte indica muchas más cuentas de las que tiene el PDF; normalmente se guardó antes de que cargaran todas. Vuelve a guardarlo desde SmartCredit cuando se vean todas las cuentas y súbelo de nuevo.",
+    "heldNextPlatform": "No tienes que hacer nada por ahora: Cesar y Alex ya fueron notificados. Después de una actualización, da clic en Reconstruir abajo y publica de nuevo con los mismos PDFs.",
+    "heldReasonsTitle": "Por qué se detuvo",
+    "heldReason": {"limits": "Reporte {{pull}} · {{bureau}}: límites de crédito — la plataforma contó {{platform}}, el reporte muestra {{report}}", "balances": "Reporte {{pull}} · {{bureau}}: saldos — la plataforma contó {{platform}}, el reporte muestra {{report}}", "accounts": "Reporte {{pull}} · {{bureau}}: cuentas — la plataforma encontró {{platform}}, el reporte indica {{report}}", "open_accounts": "Reporte {{pull}} · {{bureau}}: cuentas abiertas — la plataforma encontró {{platform}}, el reporte indica {{report}}", "inquiries": "Reporte {{pull}} · {{bureau}}: consultas — la plataforma encontró {{platform}}, el reporte indica {{report}}", "other": "{{label}}: {{detail}}"},
+    "heldPull": {"before": "Before", "after": "After", "none": "Este"},
+    "heldBureau": {"TU": "TransUnion", "EX": "Experian", "EQ": "Equifax", "none": "todos los burós"},
     "rebuild": "Reconstruir con las revisiones más recientes",
     "rebuildHint": "Regresa este reporte a Revisión con los mismos PDFs. Abre el asistente de reportes del cliente y publica de nuevo — no hay que subir nada.",
     "rebuildConfirm": "¿Regresar este reporte detenido a Revisión? Nunca se envió al cliente. Lo publicarás de nuevo desde el asistente con los mismos PDFs.",

@@ -77,7 +77,7 @@ function build(c: Combo): { before: CreditFile; after: CreditFile; scores: Recor
   const before: CreditFile = {
     provider: "mfsn" as never, reportDate: BASE, scores: { TU: c.missingBaselineBureau ? null : 600, EX: 582, EQ: 609 },
     accounts: [...common(beforeBureaus), ...removedColl, ...stillColl(beforeBureaus), held(beforeBureaus.filter((b) => b !== "EX"))],
-    // The Before read lacks the 2025 inquiries on the missing bureau (Juan's case) — they must not become "new".
+    // The Before read lacks the 2025 inquiries on the missing bureau (a client case) — they must not become "new".
     inquiries: inq(c.inquiries, false).filter((q) => !(c.missingBaselineBureau && q.bureau === "TU")),
     publicRecordsReported: false, imagePages: 0, totalPages: 0, confidence: 1, warnings: [],
   };

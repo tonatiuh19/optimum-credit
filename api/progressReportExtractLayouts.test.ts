@@ -176,7 +176,7 @@ Equifax TransUnion Experian
     ).toBe("myfreescore");
   });
 
-  it("Carlos SmartCredit Ultra 3B: stacked scores + triplicated Credit Report Date", () => {
+  it("a client SmartCredit Ultra 3B: stacked scores + triplicated Credit Report Date", () => {
     const text = `
 Credit Scores
 Credit Report Date

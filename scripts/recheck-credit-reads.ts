@@ -63,14 +63,19 @@ async function main() {
   // 1 + 2: the latest ready read per file (progress and analysis).
   const [rows] = await conn.query<mysql.RowDataPacket[]>(
     // Current reader only (Oct 28+): older reads have no entry count, are never reused and are gated as a base.
-    `SELECT id, purpose, extracted_json, storage_key, enc_iv, enc_tag
+    `SELECT id, purpose, file_sha256, extracted_json, storage_key, enc_iv, enc_tag
        FROM credit_file_extractions
-      WHERE id IN (SELECT MAX(id) FROM credit_file_extractions WHERE status = 'ready' AND extracted_json IS NOT NULL GROUP BY COALESCE(file_sha256, CONCAT('id', id)))
+      WHERE (id IN (SELECT MAX(id) FROM credit_file_extractions WHERE status = 'ready' AND extracted_json IS NOT NULL GROUP BY COALESCE(file_sha256, CONCAT('id', id)))
+             -- Every copy stored with repairs applied (Nov 7 build), reused copies included.
+             OR (status = 'ready' AND JSON_CONTAINS_PATH(extracted_json, 'one', '$.printedRepairs')))
         AND storage_key LIKE 'http%' AND extract_version IS NOT NULL
       ORDER BY id DESC`,
   );
   await conn.end();
   const shortReads: Array<{ id: number; why: string; skeleton: string }> = [];
+  // Today's summaries (printed facts, parser v3) for every file read here: saved with --apply so no
+  // report waits for a PDF download + re-parse on its first open after the deploy.
+  const warm: Array<{ id: number; sha: string | null; summary: string }> = [];
   const analysesChanged: number[] = [];
   for (let i = 0; i < rows.length; i += 8) {
     await Promise.all(
@@ -83,7 +88,11 @@ async function main() {
         const summary = pv2ParsePullSummary(text);
         skeleton.pullSummary2 = summary;
         const file = normalizeStoredRead(stored);
-        if (r.purpose === "progress_before" || r.purpose === "progress_after") {
+        if (summary) warm.push({ id: Number(r.id), sha: r.file_sha256 ? String(r.file_sha256) : null, summary: JSON.stringify(summary) });
+        if ((stored as CreditFile).printedRepairs?.length) {
+          // The Nov 7 build saved repaired values: only a fresh read gets the reader's own values back.
+          shortReads.push({ id: Number(r.id), why: "stored with repairs applied (Nov 7 build) — read again for the reader's own values", skeleton: JSON.stringify(skeleton) });
+        } else if (r.purpose === "progress_before" || r.purpose === "progress_after") {
           const why: string[] = [];
           if (summary?.accountsPrinted && pv2ReadEntries(file) < summary.accountsPrinted) why.push(`${pv2ReadEntries(file)} of ${summary.accountsPrinted} listed`);
           for (const c of pv2CreditorShortfall(file, skeleton)) why.push(`${c.creditor} ${c.read}/${c.printed}`);
@@ -95,7 +104,7 @@ async function main() {
     );
   }
 
-  console.log(`1. Short progress reads: ${shortReads.length}`);
+  console.log(`1. Reads to read again (short, or stored with repairs applied): ${shortReads.length}`);
   for (const s of shortReads) console.log(`   ${s.id}  ${s.why.slice(0, 160)}`);
   if (apply && shortReads.length) {
     conn = await connect();
@@ -110,6 +119,22 @@ async function main() {
     }
     console.log(`   → re-queued ${shortReads.length}; the read cron re-reads them (2-4 min each).`);
     await conn.end();
+  }
+
+  console.log(`\n   Summaries to save (no first-open delay): ${warm.length}`);
+  if (apply && warm.length) {
+    conn = await connect();
+    for (const w of warm) {
+      // Every copy of the same PDF (reused reads share its fingerprint).
+      await conn.query(
+        `UPDATE credit_file_extractions
+            SET text_skeleton_json = JSON_SET(COALESCE(text_skeleton_json, JSON_OBJECT()), '$.pullSummary2', CAST(? AS JSON))
+          WHERE ${w.sha ? "file_sha256 = ?" : "id = ?"}`,
+        [w.summary, w.sha ?? w.id],
+      );
+    }
+    await conn.end();
+    console.log(`   → saved ${warm.length}.`);
   }
 
   console.log(`\n2. Credit analyses the printed-fact repairs would change (listed only): ${analysesChanged.length}`);

@@ -20,6 +20,8 @@ import { useToast } from "@/hooks/use-toast";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { approveRoundReport, fetchReportApproval, rebuildRoundReport } from "@/store/slices/reportApprovalSlice";
 import { SelfCheckList } from "@/components/admin/report-approval/SelfCheckList";
+import { explainHeldChecks, type HeldReason } from "@shared/heldReport";
+import { NextStep } from "@/components/admin/report-approval/NextStep";
 
 /**
  * Spec v1.1 P0-1: a published progress report waits here. The language owner
@@ -38,7 +40,7 @@ export function ReportApprovalCard({ reportId, onApproved, onRebuilt }: { report
   }, [dispatch, reportId]);
 
   const approve = async (overrideReason?: string) => {
-    const r = await dispatch(approveRoundReport({ id: reportId, overrideReason }));
+    const r = await dispatch(approveRoundReport({ id: a?.id ?? reportId, overrideReason }));
     if (approveRoundReport.rejected.match(r)) {
       toast({ title: String(r.payload || t("reportApproval.error")), variant: "destructive" });
       return false;
@@ -49,7 +51,7 @@ export function ReportApprovalCard({ reportId, onApproved, onRebuilt }: { report
   };
 
   const rebuild = async () => {
-    const r = await dispatch(rebuildRoundReport(reportId));
+    const r = await dispatch(rebuildRoundReport(a?.id ?? reportId));
     if (rebuildRoundReport.rejected.match(r)) {
       toast({ title: String(r.payload || t("reportApproval.rebuildError")), variant: "destructive" });
       return;
@@ -83,6 +85,18 @@ export function ReportApprovalCard({ reportId, onApproved, onRebuilt }: { report
     );
   }
   const failed = status === "needs_review";
+  // Held: whose problem it is, the reasons in plain words from the actual numbers, and the next step.
+  const held = failed ? explainHeldChecks(a.checks) : null;
+  const money = (n: number | null) => (n == null ? "—" : `$${n.toLocaleString("en-US")}`);
+  const reasonText = (r: HeldReason) =>
+    r.kind === "other"
+      ? t("reportApproval.heldReason.other", { label: t(`reportApproval.checks.${r.key}`, { defaultValue: r.key }), detail: r.detail })
+      : t(`reportApproval.heldReason.${r.kind}`, {
+          pull: t(`reportApproval.heldPull.${r.pull ?? "none"}`),
+          bureau: t(`reportApproval.heldBureau.${r.bureau ?? "none"}`),
+          platform: r.kind === "limits" || r.kind === "balances" ? money(r.platform) : String(r.platform ?? "—"),
+          report: r.kind === "limits" || r.kind === "balances" ? money(r.report) : String(r.report ?? "—"),
+        });
   return (
     <div
       className={`rounded-xl border px-3 py-3 space-y-2.5 animate-in fade-in ${failed ? "border-destructive/40 bg-destructive/5" : "border-primary/30 bg-primary/5"}`}
@@ -91,11 +105,32 @@ export function ReportApprovalCard({ reportId, onApproved, onRebuilt }: { report
     >
       <p className="flex items-center gap-2 text-sm font-semibold text-foreground">
         {failed ? <ShieldAlert className="w-4 h-4 text-destructive shrink-0" /> : <Clock className="w-4 h-4 text-primary shrink-0" />}
-        {failed ? t("reportApproval.needsReviewTitle") : t("reportApproval.pendingTitle")}
+        {held ? t(held.cause === "file" ? "reportApproval.heldFileTitle" : "reportApproval.heldPlatformTitle") : t("reportApproval.pendingTitle")}
       </p>
-      <p className="text-xs text-muted-foreground">
-        {failed ? t("reportApproval.needsReviewBody") : a.options?.notify_client === false ? t("reportApproval.pendingBodySilent") : t("reportApproval.pendingBody")}
+      <p className="text-xs text-muted-foreground" data-testid="report-held-body">
+        {held
+          ? t(held.cause === "file" ? "reportApproval.heldFileBody" : "reportApproval.heldPlatformBody")
+          : a.options?.notify_client === false
+            ? t("reportApproval.pendingBodySilent")
+            : t("reportApproval.pendingBody")}
       </p>
+      {held && held.reasons.length > 0 && (
+        <div className="rounded-lg border border-destructive/20 bg-background/60 px-2.5 py-2 space-y-1" data-testid="report-held-reasons">
+          <p className="text-[11px] font-semibold text-foreground">{t("reportApproval.heldReasonsTitle")}</p>
+          <ul className="space-y-0.5 list-disc pl-4 text-xs text-muted-foreground">
+            {held.reasons.slice(0, 6).map((r, i) => (
+              <li key={`${r.key}-${i}`}>{reasonText(r)}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <NextStep input={{ delivery: { status, checks: a.checks, canApprove: a.can_approve, rebuilt: !!a.rebuilt_from } }} />
+      {a.rebuilt_from ? (
+        <p className="flex items-center gap-1.5 text-xs font-medium text-accent" data-testid="report-self-healed">
+          <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+          {t("reportApproval.selfHealed")}
+        </p>
+      ) : null}
       <SelfCheckList checks={a.checks} />
       {!failed && a.can_approve && (
         <Button type="button" size="sm" onClick={() => void approve()} disabled={approving} className="gap-1.5 w-full sm:w-auto" data-testid="report-approve">

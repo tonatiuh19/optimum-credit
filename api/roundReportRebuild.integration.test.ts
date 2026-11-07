@@ -107,3 +107,30 @@ describe("rebuild a held report", () => {
     expect((await rebuild(held.reportId, LECCA)).status).toBe(404);
   }, 60_000);
 });
+
+describe("self-healing held reports (guards — never touches what it must not)", () => {
+  it("skips: not held; built by the current engine; an earlier round; no session", async () => {
+    const { selfHealHeldReport, reportEngineVersion } = await import("./index");
+    const waiting = await publishedRound(5, "pending_approval");
+    expect((await selfHealHeldReport(waiting.reportId, "opened")).outcome).toBe("skipped");
+    await pool.query(`DELETE FROM round_report_pdfs WHERE round_report_id = ?`, [waiting.reportId]);
+    await pool.query(`DELETE FROM client_round_reports WHERE id = ?`, [waiting.reportId]);
+
+    const current = await publishedRound(5, "needs_review");
+    await pool.query(`UPDATE client_round_reports SET delivery_options_json = JSON_OBJECT('engine_version', ?) WHERE id = ?`, [reportEngineVersion(), current.reportId]);
+    expect((await selfHealHeldReport(current.reportId, "opened")).outcome).toBe("current");
+
+    const later = await publishedRound(6, "silent");
+    const r = await selfHealHeldReport(current.reportId, "deploy");
+    expect(r).toMatchObject({ outcome: "skipped" });
+    // Nothing was removed by any of these.
+    const [rows] = await pool.query<RowDataPacket[]>(`SELECT id FROM client_round_reports WHERE id IN (?)`, [[current.reportId, later.reportId]]);
+    expect(rows).toHaveLength(2);
+  }, 60_000);
+
+  it("the engine version is a stable fingerprint of the engine code", async () => {
+    const { reportEngineVersion } = await import("./index");
+    expect(reportEngineVersion()).toMatch(/^[0-9a-f]{6,}$/);
+    expect(reportEngineVersion()).toBe(reportEngineVersion());
+  });
+});

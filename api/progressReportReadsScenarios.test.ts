@@ -72,7 +72,7 @@ function mfsnText(o: { toc: number; open: Per; inquiries: Per; collections: Per;
     "Report Date August 07, 2026 August 07, 2026 August 07, 2026".replace(/August 07, 2026/g, o.date),
     ...(o.notPulled
       ? [
-          // Scrambled print text (Juan, Oct 26): an empty table, the missing bureau's notice, then two tables.
+          // Scrambled print text (a client, Oct 26): an empty table, the missing bureau's notice, then two tables.
           "Account Type Open With Balance Total Balance Available Credit Limit Debt-To-Credit Payment",
           "Revolving N/A N/A N/A N/A N/A N/A N/A",
           "Experian Accounts Summary",
@@ -211,7 +211,7 @@ describe("each layout parses its own summary and printed report date", () => {
 const SC = pv2ParsePullSummary(smartCreditText({ total: per(32, 33, 39), open: per(8, 6, 14), balances: per(350000, 351000, 352000), inquiries: per(3, 6, 5), limit: 13524, date: "06/19/2026" }))!;
 const SC_SMALL = pv2ParsePullSummary(smartCreditText({ total: per(5, 5, 5), open: per(1, 1, 1), balances: per(500, 400, 300), inquiries: per(0, 0, 0), limit: 500, date: "06/19/2026" }))!;
 const MFSN = pv2ParsePullSummary(mfsnText({ toc: 24, open: per(9, 3, 10), inquiries: per(2, 7, 0), collections: per(7, 7, 7), date: "August 07, 2026" }))!;
-// TransUnion not pulled that month (no score, no accounts) — Juan's June Before.
+// TransUnion not pulled that month (no score, no accounts) — a client June Before.
 const MFSN_NO_TU = pv2ParsePullSummary(mfsnText({ toc: 19, open: per(0, 2, 8), inquiries: per(0, 15, 21), collections: per(0, 4, 6), date: "June 15, 2026", notPulled: "TU" }))!;
 const FICO = pv2ParsePullSummary(myficoText({ blocks: 11, asOf: "8/25/2026" }))!;
 const TRI = pv2ParsePullSummary(trimergeText({ total: 25, open: 8, collections: 6, ordered: "09/23/2026" }))!;

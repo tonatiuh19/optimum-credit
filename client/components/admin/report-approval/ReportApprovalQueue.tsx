@@ -5,6 +5,7 @@ import { ChevronDown, ShieldAlert, ShieldCheck } from "lucide-react";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { fetchPendingReportApprovals } from "@/store/slices/reportApprovalSlice";
 import { ReportApprovalCard } from "@/components/admin/report-approval/ReportApprovalCard";
+import { NextStep } from "@/components/admin/report-approval/NextStep";
 
 /** Dashboard: progress reports published but not sent (Spec v1.1 P0-1). Hidden when empty. */
 export function ReportApprovalQueue() {
@@ -56,6 +57,9 @@ export function ReportApprovalQueue() {
                   <span className="block text-[11px] text-muted-foreground truncate">
                     {failed ? t("reportApproval.failedCount", { count: it.failed_checks.length }) : t("reportApproval.readyToSend")}
                     {it.published_by ? ` · ${it.published_by}` : ""} · {new Date(it.created_at).toLocaleString(i18n.language, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                  </span>
+                  <span className="block mt-0.5">
+                    <NextStep compact input={{ delivery: { status: it.delivery_status, checks: it.failed_checks, canApprove: it.can_approve } }} />
                   </span>
                 </span>
                 <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${open === it.id ? "rotate-180" : ""}`} />

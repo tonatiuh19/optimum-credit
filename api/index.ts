@@ -7016,7 +7016,7 @@ function parseMfsnPrintedAccounts(text: string): ScPrintedLimit[] {
 }
 
 /**
- * Credit limits read straight from the text of a SmartCredit 3B print (Nov 6, 2026 — Emiliano:
+ * Credit limits read straight from the text of a SmartCredit 3B print (Nov 6, 2026 — a client:
  * the account read took the High Balance row as the limit, so revolving limits never matched
  * the report's own Credit Utilization total and every round was held).
  *
@@ -7647,7 +7647,7 @@ function consolidateSplitAccounts(accounts: CreditAccount[]): CreditAccount[] {
             if (last4(o) !== k || bal(o) !== b) return false;
             const shared = BUREAUS.filter((x) => o.bureaus[x] && a.bureaus[x]);
             if (!shared.length) return true;
-            // Same bureau twice (MyFreeScoreNow, Juan Oct 26): one collection listed under the collector's
+            // Same bureau twice (MyFreeScoreNow, a client Oct 26): one collection listed under the collector's
             // name and again under its client's name — same last 4, same balance, collection on both.
             return shared.every(
               (x) => isCollectionTl(o.bureaus[x]!) && isCollectionTl(a.bureaus[x]!) && o.bureaus[x]!.balance === a.bureaus[x]!.balance,
@@ -8266,7 +8266,7 @@ function mergeCreditFileParts<F extends CreditFile & { scoreModel?: string | nul
   for (const p of parts) {
     // Neighbouring parts share ONE page, so an overlap copy can only be one of the last accounts of
     // the previous part AND one of the first accounts of this one, matched one-to-one (Nov 6, 2026 —
-    // Jeser: four closed $0 loans ending 0321 in different parts were merged into each other, so
+    // a client: four closed $0 loans ending 0321 in different parts were merged into each other, so
     // look-alike accounts far apart vanished). Rows within one part are never merged here.
     const tail = previous.slice(-PART_OVERLAP_ACCOUNTS);
     const used = new Set<CreditAccount>();
@@ -13925,7 +13925,7 @@ function pv2ParseMfsnSummary(text: string): Pv2PullSummary | null {
   const heads = lines.map((l, i) => (/^Account Type Open With Balance/i.test(l) ? i : -1)).filter((i) => i >= 0).slice(0, 3);
   // "You currently have no TransUnion Accounts Summary" = that bureau was not pulled. The tables are then
   // matched to bureaus by position in scrambled text, so their per-bureau open counts can't be trusted
-  // (Juan, Oct 26: Experian's "2 open" landed on TransUnion and blocked a complete Before as half-loaded).
+  // (a client, Oct 26: Experian's "2 open" landed on TransUnion and blocked a complete Before as half-loaded).
   const noSummary = new Set(
     lines
       .map((l) => /You currently have no (Equifax|Experian|TransUnion) Accounts Summary/i.exec(l)?.[1]?.toLowerCase())
@@ -14056,8 +14056,8 @@ function pv2ParsePullSummary(text: string): Pv2PullSummary | null {
 
 /**
  * Repairs a SmartCredit read from facts the PDF prints (Nov 6, 2026): each account's Credit Limit
- * row (Emiliano: the read took Bank of America's High Balance $1,279 as its $500 limit) and the
- * section it is printed under (Jose: two cards read as revolving are printed outside "Revolving
+ * row (a client: the read took Bank of America's High Balance $1,279 as its $500 limit) and the
+ * section it is printed under (a client: two cards read as revolving are printed outside "Revolving
  * Accounts", which is all SmartCredit's utilization table counts). Guarded so a correct read is
  * never touched: changes apply only when the read misses a printed revolving-limit total, they make
  * it match, and no bureau that matched stops matching. A printed fact is used only when every
@@ -14068,13 +14068,24 @@ function pv2ParsePullSummary(text: string): Pv2PullSummary | null {
  * inquiries. Each step changes a bureau only when the read misses that bureau's printed total and
  * the printed values make it match. Returns the same object when nothing changes.
  */
+/** REPORT_REPAIRS=off turns every printed-fact repair off at once (no deploy): reports use the reader's values. */
+function pv2RepairsEnabled(env: Record<string, string | undefined> = typeof process !== "undefined" ? process.env : {}): boolean {
+  return String(env.REPORT_REPAIRS ?? "").trim().toLowerCase() !== "off";
+}
+
 function pv2ApplyPrintedFacts<F extends CreditFile>(file: F, summary: Pv2PullSummary | null | undefined): F {
+  if (!pv2RepairsEnabled()) return file;
   let f = file;
   const notes: string[] = [];
-  for (const step of [pv2ApplyPrintedLimits, pv2ApplyPrintedBalances, pv2ApplyPrintedInquiries, pv2ApplyPrintedLates]) {
-    const next = step(f, summary);
-    if (next !== f) notes.push(...pv2RepairNotes(f, next));
-    f = next;
+  // Until nothing changes (one step can make another one unambiguous); each pass is guarded, at most 3.
+  for (let pass = 0; pass < 3; pass++) {
+    const start = f;
+    for (const step of [pv2ApplyPrintedLimits, pv2ApplyPrintedBalances, pv2ApplyPrintedInquiries, pv2ApplyPrintedLates]) {
+      const next = step(f, summary);
+      if (next !== f) notes.push(...pv2RepairNotes(f, next));
+      f = next;
+    }
+    if (f === start) break;
   }
   return notes.length ? { ...f, printedRepairs: [...(file.printedRepairs ?? []), ...notes] } : f;
 }
@@ -14135,6 +14146,30 @@ function pv2ApplyPrintedLates<F extends CreditFile>(file: F, summary: Pv2PullSum
   const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
   const digits = (m: string | null | undefined) => String(m ?? "").replace(/[^0-9a-z]/gi, "").toLowerCase();
   let changed = false;
+  // First pass: which printed block each read account / bureau resolves to (to spot shared blocks).
+  const claims = new Map<string, number>();
+  const resolve = (a: CreditAccount, b: Bureau) => {
+    const own = digits(a.mask);
+    let base = printed.filter((p) => norm(p.creditor) === norm(a.creditor));
+    if (own) {
+      const ends = base.filter((p) => digits(p.mask).endsWith(own));
+      base = ends.length ? ends : base.filter((p) => !digits(p.mask) || digits(p.mask).includes(own) || own.includes(digits(p.mask)));
+    }
+    const t = a.bureaus[b];
+    if (!t) return null;
+    let cands = base.filter((p) => p.lates![b]);
+    if (cands.length > 1) {
+      const mo = pv2Month(t.dateOpened);
+      const byOpen = cands.filter((p) => mo && pv2Month(p.opened?.[b]) === mo);
+      cands = byOpen.length ? byOpen : cands;
+    }
+    if (cands.length > 1 && t.balance != null) cands = cands.filter((p) => p.balances?.[b] === t.balance);
+    return cands.length === 1 ? cands[0] : null;
+  };
+  for (const a of file.accounts) for (const b of BUREAUS) {
+    const p = resolve(a, b);
+    if (p) claims.set(`${b}|${printed.indexOf(p)}`, (claims.get(`${b}|${printed.indexOf(p)}`) ?? 0) + 1);
+  }
   const accounts = file.accounts.map((a) => {
     const own = digits(a.mask);
     let base = printed.filter((p) => norm(p.creditor) === norm(a.creditor));
@@ -14154,6 +14189,8 @@ function pv2ApplyPrintedLates<F extends CreditFile>(file: F, summary: Pv2PullSum
       }
       if (cands.length > 1 && t.balance != null) cands = cands.filter((p) => p.balances?.[b] === t.balance);
       if (cands.length !== 1) continue;
+      // One-to-one: another read account resolving to the same printed block makes it ambiguous.
+      if (claims.get(`${b}|${printed.indexOf(cands[0])}`)! > 1) continue;
       const l = cands[0].lates![b]!;
       if (t.late30 === l.late30 && t.late60 === l.late60 && t.late90 === l.late90) continue;
       // Never clear lates the read saw in the payment grid (a grid mark can be an icon the text lacks).
@@ -14189,22 +14226,30 @@ function pv2ApplyPrintedBalances<F extends CreditFile>(file: F, summary: Pv2Pull
     const tol = Math.max(10, want * 0.01);
     const total = (list: CreditAccount[]) => list.reduce((n, a) => n + Math.max(0, a.bureaus[b]?.balance ?? 0), 0);
     if (Math.abs(total(accounts) - want) <= tol) continue;
-    const repaired = accounts.map((a) => {
+    // The printed blocks each read account fits (creditor + number, then Date Opened for look-alikes).
+    const fit = accounts.map((a) => {
       const t = a.bureaus[b];
-      if (!t) return a;
+      if (!t) return [] as typeof printed;
       const own = digits(a.mask);
       let cands = printed.filter((p) => norm(p.creditor) === norm(a.creditor) && p.balances![b] != null);
       if (own) {
         const ends = cands.filter((p) => digits(p.mask).endsWith(own));
         cands = ends.length ? ends : cands.filter((p) => !digits(p.mask) || digits(p.mask).includes(own) || own.includes(digits(p.mask)));
       }
-      const values = new Set(cands.map((p) => p.balances![b]!));
-      if (values.size > 1) {
+      if (new Set(cands.map((p) => p.balances![b]!)).size > 1) {
         const mo = pv2Month(t.dateOpened);
-        const sameOpen = cands.filter((p) => mo && pv2Month(p.opened?.[b]) === mo);
-        values.clear();
-        for (const p of sameOpen) values.add(p.balances![b]!);
+        cands = cands.filter((p) => mo && pv2Month(p.opened?.[b]) === mo);
       }
+      return cands;
+    });
+    // One-to-one: a printed block that more read accounts fit than it can be is used by none of them.
+    const used = new Map<unknown, number>();
+    for (const cands of fit) for (const p of cands) used.set(p, (used.get(p) ?? 0) + 1);
+    const repaired = accounts.map((a, i) => {
+      const t = a.bureaus[b];
+      const cands = fit[i];
+      if (!t || !cands.length || cands.length < Math.max(...cands.map((p) => used.get(p) ?? 0))) return a;
+      const values = new Set(cands.map((p) => p.balances![b]!));
       if (values.size !== 1) return a;
       const v = [...values][0];
       return v === t.balance ? a : { ...a, bureaus: { ...a.bureaus, [b]: { ...t, balance: v } } };
@@ -14252,6 +14297,16 @@ function pv2ApplyPrintedLimits<F extends CreditFile>(file: F, summary: Pv2PullSu
     const set = new Set(values.filter((v): v is T => v !== undefined));
     return set.size === 1 ? [...set][0] : null;
   };
+  // One-to-one (Nov 7, 2026 — a client: two Capital One cards ending 5676, one printed block found, so the
+  // $4,000 card was "corrected" to the other card's $1,000): when more read accounts than printed
+  // blocks fit the same creditor + number, which one is which is unknown → no value is taken.
+  const fitsMore = (a: CreditAccount, list: CreditAccount[]) => {
+    const mine = entriesFor(a);
+    if (!mine.length) return false;
+    // Counted in the list being repaired (without a dropped duplicate, a card may be unambiguous).
+    const readers = list.filter((o) => norm(o.creditor) === norm(a.creditor) && entriesFor(o).some((p) => mine.includes(p))).length;
+    return readers > mine.length;
+  };
   const openRevolving = (a: CreditAccount, b: Bureau) => a.section === "revolving" && !!a.bureaus[b] && !isClosedTradeline(a.bureaus[b]!, a);
   const bureaus = BUREAUS.filter((b) => summary.revolving?.[b]?.limit != null);
   if (!bureaus.length) return file;
@@ -14265,7 +14320,7 @@ function pv2ApplyPrintedLimits<F extends CreditFile>(file: F, summary: Pv2PullSu
 
   const withSections = file.accounts.map((a) => {
     const entries = entriesFor(a);
-    // Several printed accounts share a number (Jose: 13 SchoolsFirst loans + 1 line of credit): keep
+    // Several printed accounts share a number (a client: 13 SchoolsFirst loans + 1 line of credit): keep
     // the ones whose printed limits agree with this account's limits.
     const agrees = entries.filter((p) => BUREAUS.every((b) => p.limits[b] == null || a.bureaus[b]?.creditLimit == null || p.limits[b] === a.bureaus[b]!.creditLimit));
     const section = unanimous(entries.map((p) => p.section)) ?? unanimous(agrees.map((p) => p.section));
@@ -14279,15 +14334,26 @@ function pv2ApplyPrintedLimits<F extends CreditFile>(file: F, summary: Pv2PullSu
     list.map((a) => {
       let next = a;
       for (const b of only ? [only] : bureaus) {
-        if (!openRevolving(a, b)) continue;
+        if (!openRevolving(a, b) || fitsMore(a, list)) continue;
         const v = unanimous(entriesFor(a).map((p) => p.limits[b]));
         const t = a.bureaus[b]!;
         if (v != null && v !== t.creditLimit) next = { ...next, bureaus: { ...next.bureaus, [b]: { ...t, creditLimit: v } } };
       }
       return next;
     });
+  // Accepted only when: no matching bureau breaks, every bureau whose total changed now matches (Nov 7,
+  // 2026 — rule tests: dropping a duplicate also moved a bureau that stayed wrong), and one failing bureau
+  // is fixed. Also balances: a dropped account must not move a printed balance total it does not fix.
+  const total = (list: CreditAccount[], b: Bureau) => list.reduce((n, a) => n + (openRevolving(a, b) ? a.bureaus[b]!.creditLimit ?? 0 : 0), 0);
+  const balTotal = (list: CreditAccount[], b: Bureau) => list.reduce((n, a) => n + Math.max(0, a.bureaus[b]?.balance ?? 0), 0);
+  const balOk = (list: CreditAccount[], b: Bureau) => {
+    const want = summary.perBureau?.[b]?.balances;
+    return want == null ? null : Math.abs(balTotal(list, b) - want) <= Math.max(10, want * 0.01);
+  };
   const better = (list: CreditAccount[]) =>
-    bureaus.every((b) => !before.get(b) || ok(list, b)) && bureaus.some((b) => !before.get(b) && ok(list, b));
+    bureaus.every((b) => (!before.get(b) && total(list, b) === total(file.accounts, b)) || ok(list, b)) &&
+    bureaus.some((b) => !before.get(b) && ok(list, b)) &&
+    BUREAUS.every((b) => balTotal(list, b) === balTotal(file.accounts, b) || balOk(list, b) !== false || balOk(file.accounts, b) === false && balOk(list, b) === true);
 
   // One card read twice under two fragments of its printed number (Nov 6, 2026: "7805" and "5178" of
   // 517805****, identical limits / balances / open dates): the second copy is dropped — only as a
@@ -14308,22 +14374,22 @@ function pv2ApplyPrintedLimits<F extends CreditFile>(file: F, summary: Pv2PullSu
       return printed.some((p) => norm(p.creditor) === norm(a.creditor) && digits(p.mask).includes(own) && digits(p.mask).includes(digits(o.mask)));
     });
   });
-  // Sections + limits together, else limits alone (per bureau, as before); each also without the duplicate.
-  const both = withLimits(withSections);
-  if (better(both)) return { ...file, accounts: both };
-  if (deduped.length < file.accounts.length) {
-    const dedupedSections = withSections.filter((a) => deduped.some((d) => d === file.accounts[withSections.indexOf(a)]));
-    for (const candidate of [deduped, withLimits(deduped), withLimits(dedupedSections)]) {
-      if (better(candidate)) return { ...file, accounts: candidate };
+  // Each base (as read / printed sections / without the duplicate / both), then limits PER BUREAU: a
+  // bureau's limits change only when that makes the bureau match (Nov 7, 2026 — a client: a candidate that
+  // fixed TransUnion also kept Experian changes that did not fix Experian). A base is used only when no
+  // matching bureau breaks and at least one failing bureau then matches.
+  const dedupedSections = withSections.filter((_, i) => deduped.includes(file.accounts[i]));
+  const bases = deduped.length < file.accounts.length ? [withSections, file.accounts, dedupedSections, deduped] : [withSections, file.accounts];
+  for (const base of bases) {
+    let accounts = base;
+    for (const b of bureaus) {
+      if (ok(accounts, b)) continue;
+      const repaired = withLimits(accounts, b);
+      if (ok(repaired, b)) accounts = repaired;
     }
+    if (better(accounts)) return { ...file, accounts };
   }
-  let accounts = file.accounts;
-  for (const b of bureaus) {
-    if (before.get(b)) continue;
-    const repaired = withLimits(accounts, b);
-    if (ok(repaired, b)) accounts = repaired;
-  }
-  return accounts === file.accounts ? file : { ...file, accounts };
+  return file;
 }
 
 function pv2ParsePullSummaryLayout(text: string): Pv2PullSummary | null {
@@ -14398,7 +14464,7 @@ function pv2ParseSmartCreditSummary(text: string): Pv2PullSummary | null {
  */
 /**
  * Entries the reader returned, never fewer than the accounts it holds (a stored read can carry a
- * stale entry count below its own accounts — Jeser R1: 34 entries, 38 accounts — which made a
+ * stale entry count below its own accounts — a client R1: 34 entries, 38 accounts — which made a
  * complete file look short).
  */
 function pv2ReadEntries(file: CreditFile): number {
@@ -14482,7 +14548,7 @@ function pv2SummaryShortfall(file: CreditFile, summary: Pv2PullSummary | null): 
     if (parsed < total * 0.9) short.push(`${b} ${parsed} of ${total}`);
   }
   // A bureau the summary shows open accounts for, with nothing read on that bureau (MyFreeScoreNow
-  // Before for Juan: TransUnion column never read → every TransUnion item looked "new").
+  // Before for a client: TransUnion column never read → every TransUnion item looked "new").
   for (const b of BUREAUS) {
     const open = summary.perBureau[b]?.openAccounts;
     if (summary.perBureau[b]?.totalAccounts != null || !open) continue;
@@ -14564,7 +14630,7 @@ function pv2ScoreMismatches(
 }
 
 /**
- * Account count vs the pull's own summary on one bureau (Oct 29, 2026 — Andrea R5).
+ * Account count vs the pull's own summary on one bureau (Oct 29, 2026 — a client R5).
  * Fewer accounts than the summary = missing data (a missing After account would look
  * "removed") → always fails. More accounts can be the summary's own undercount (SmartCredit
  * listed 25 Equifax accounts — two look-alike Capital One cards, $500 and $750 high balance —
@@ -15496,7 +15562,11 @@ async function loadEncryptedCdnFile(
 
 /** A stored read with fewer entries than the report's printed account count (table of contents / blocks / tri-merge total). */
 export function storedReadIsShort(extracted: unknown, summary: Pv2PullSummary | null): boolean {
-  if (!summary || !extracted) return false;
+  if (!extracted) return false;
+  if (!summary) {
+    const f = (typeof extracted === "string" ? (() => { try { return JSON.parse(extracted); } catch { return null; } })() : extracted) as CreditFile | null;
+    return !!f?.printedRepairs?.length;
+  }
   let file: CreditFile;
   try {
     file = (typeof extracted === "string" ? JSON.parse(extracted) : extracted) as CreditFile;
@@ -15504,6 +15574,8 @@ export function storedReadIsShort(extracted: unknown, summary: Pv2PullSummary | 
     return true;
   }
   if (!Array.isArray(file?.accounts)) return true;
+  // Saved by the Nov 7 build with repairs applied: not the reader's own values → read it again.
+  if (file.printedRepairs?.length) return true;
   const printed = summary.accountsPrinted ?? summary.merged?.totalAccounts ?? null;
   if (printed && pv2ReadEntries(file) < printed) return true;
   return !!pv2SummaryShortfall(file, summary);
@@ -15562,7 +15634,7 @@ async function createCreditFileExtraction(opts: {
       [fileSha256, extractVersion, opts.purpose === "progress_before" || opts.purpose === "progress_after" ? 1 : 0],
     );
     // Never reuse a read that is short of the accounts the PDF itself lists: a short read would be
-    // copied to every re-upload of the file (Nov 6, 2026 — Jeser). Reading it again is the fix.
+    // copied to every re-upload of the file (Nov 6, 2026 — a client). Reading it again is the fix.
     const src = prev[0] && !storedReadIsShort(prev[0].extracted_json, (skeleton as (CreditFile & { pullSummary2?: Pv2PullSummary | null }) | null)?.pullSummary2 ?? null) ? prev[0] : null;
     if (src) {
       const [ins] = await pool.query<ResultSetHeader>(
@@ -15759,7 +15831,7 @@ export function creditAnalysisLabelSlugs(a: CreditAnalysisData, file: CreditFile
  */
 async function syncCreditAnalysisFromRead(extractionId: number): Promise<void> {
   const [rows] = await pool.query<RowDataPacket[]>(
-    `SELECT e.extracted_json, ca.id AS analysis_id, ca.client_id, ca.escrow_flag, c.status, c.pipeline_stage
+    `SELECT e.extracted_json, e.text_skeleton_json, ca.id AS analysis_id, ca.client_id, ca.escrow_flag, c.status, c.pipeline_stage
      FROM credit_file_extractions e
      JOIN credit_analyses ca ON ca.id = e.credit_analysis_id
      JOIN clients c ON c.id = ca.client_id
@@ -15768,7 +15840,7 @@ async function syncCreditAnalysisFromRead(extractionId: number): Promise<void> {
   );
   const r = rows[0];
   if (!r?.extracted_json) return;
-  const file: CreditFile = typeof r.extracted_json === "string" ? JSON.parse(r.extracted_json) : r.extracted_json;
+  const file: CreditFile = analysisReadFrom(r.extracted_json, r.text_skeleton_json);
   const a = buildCreditAnalysis(file, {
     escrow: r.escrow_flag === null || r.escrow_flag === undefined ? null : Number(r.escrow_flag) === 1,
   });
@@ -15804,7 +15876,7 @@ let onCreditFileReadyHook: ((extractionId: number) => Promise<void>) | null = nu
  */
 async function creditAnalysisFindingsForAi(extractionId: number): Promise<Record<string, unknown> | null> {
   const [rows] = await pool.query<RowDataPacket[]>(
-    `SELECT e.status, e.extracted_json, ca.id AS analysis_id, ca.escrow_flag,
+    `SELECT e.status, e.extracted_json, e.text_skeleton_json, ca.id AS analysis_id, ca.escrow_flag,
             ca.lender_score_model, ca.lender_score, ca.lender_target_score
      FROM credit_file_extractions e
      LEFT JOIN credit_analyses ca ON ca.id = e.credit_analysis_id
@@ -15813,7 +15885,7 @@ async function creditAnalysisFindingsForAi(extractionId: number): Promise<Record
   );
   const r = rows[0];
   if (!r || r.status !== "ready" || !r.extracted_json) return null;
-  const file = typeof r.extracted_json === "string" ? JSON.parse(r.extracted_json) : r.extracted_json;
+  const file = analysisReadFrom(r.extracted_json, r.text_skeleton_json);
   const a = buildCreditAnalysis(file, {
     escrow: r.escrow_flag == null ? null : Number(r.escrow_flag) === 1,
     lender: r.lender_score != null ? { model: r.lender_score_model ?? null, score: Number(r.lender_score), target: r.lender_target_score != null ? Number(r.lender_target_score) : null } : null,
@@ -15967,7 +16039,7 @@ async function recordLeadCreditInsights(
   opts: { silent?: boolean } = {},
 ): Promise<LeadCreditInsights | null> {
   const [[r]] = await pool.query<RowDataPacket[]>(
-    `SELECT e.id, e.client_id, e.purpose, e.credit_analysis_id, e.extracted_json,
+    `SELECT e.id, e.client_id, e.purpose, e.credit_analysis_id, e.extracted_json, e.text_skeleton_json,
             ca.escrow_flag, ca.lender_target_score,
             c.referrer_id, c.assigned_admin_id, c.first_name, c.last_name
      FROM credit_file_extractions e
@@ -15977,9 +16049,9 @@ async function recordLeadCreditInsights(
     [extractionId],
   );
   if (!r?.extracted_json) return null;
-  const file: CreditFile & { scoreModel?: string | null } =
-    typeof r.extracted_json === "string" ? JSON.parse(r.extracted_json) : r.extracted_json;
-  if (!file?.accounts) return null;
+  const raw = typeof r.extracted_json === "string" ? JSON.parse(r.extracted_json) : r.extracted_json;
+  if (!raw?.accounts) return null;
+  const file: CreditFile & { scoreModel?: string | null } = analysisReadFrom(raw, r.text_skeleton_json);
   const escrow = r.escrow_flag === null || r.escrow_flag === undefined ? null : Number(r.escrow_flag) === 1;
   const analysis = buildCreditAnalysis(file, { escrow });
   const [pkgs] = await pool.query<RowDataPacket[]>(`SELECT slug, price_cents FROM packages WHERE slug IN ('standard','complex')`);
@@ -16107,7 +16179,7 @@ export async function reviewCreditFile(id: number): Promise<{ status: string; re
   );
   if (!Number(claim.affectedRows || 0)) return { status: "skipped", reconciledAdded: 0, findings: 0 };
   const [[r]] = await pool.query<RowDataPacket[]>(
-    `SELECT e.extracted_json, e.storage_key, e.enc_iv, e.enc_tag, e.mime_type, e.model, e.provider,
+    `SELECT e.extracted_json, e.text_skeleton_json, e.storage_key, e.enc_iv, e.enc_tag, e.mime_type, e.model, e.provider,
             e.review_attempts, ca.escrow_flag
      FROM credit_file_extractions e
      LEFT JOIN credit_analyses ca ON ca.id = e.credit_analysis_id
@@ -16117,7 +16189,9 @@ export async function reviewCreditFile(id: number): Promise<{ status: string; re
   let file: CreditFile & { scoreModel?: string | null } =
     typeof r.extracted_json === "string" ? JSON.parse(r.extracted_json) : r.extracted_json;
   const escrow = r.escrow_flag === null || r.escrow_flag === undefined ? null : Number(r.escrow_flag) === 1;
-  let analysis = buildCreditAnalysis(file, { escrow });
+  // `file` stays the reader's values (it is written back when the reconcile adds accounts); the analysis
+  // uses the repaired view.
+  let analysis = buildCreditAnalysis(analysisReadFrom(file, r.text_skeleton_json), { escrow });
   let reconciledAdded = 0;
   let audit: CreditAuditFinding[] = [];
   let error: string | null = null;
@@ -16157,7 +16231,7 @@ export async function reviewCreditFile(id: number): Promise<{ status: string; re
         if (merged.added) {
           file = merged.file;
           await pool.query(`UPDATE credit_file_extractions SET extracted_json = ? WHERE id = ?`, [JSON.stringify(file), id]);
-          analysis = buildCreditAnalysis(file, { escrow });
+          analysis = buildCreditAnalysis(analysisReadFrom(file, r.text_skeleton_json), { escrow });
         }
       }
       // Two independent audits in parallel; blocking findings must agree (self-consistency).
@@ -16263,7 +16337,7 @@ async function reconcileProgressReadPass<F extends CreditFile>(id: number, row: 
   const shortfall = pv2SummaryShortfall(file, summary);
   // Also when only a few accounts of one creditor are missing (a 1-of-39 gap never reaches the 10% shortfall).
   const byCreditor = pv2CreditorShortfall(file, skeleton);
-  // Table of contents / account blocks: any entry missing, not only 10%+ (Jeser: 35 of 39).
+  // Table of contents / account blocks: any entry missing, not only 10%+ (a client: 35 of 39).
   const printedCount = summary?.accountsPrinted ?? null;
   const layoutShort = !!printedCount && pv2ReadEntries(file) < printedCount;
   if (incompleteSmartCreditPrint(file, skeleton)) return file;
@@ -16299,6 +16373,12 @@ async function reconcileProgressReadPass<F extends CreditFile>(id: number, row: 
   if (merged.added && (file as CreditFile).readEntries != null) (merged.file as CreditFile).readEntries = (file as CreditFile).readEntries! + merged.added;
   if (merged.added) console.info("[credit-file:progress-reconcile]", id, `added ${merged.added} (${shortfall ?? perCreditor})`);
   return merged.file;
+}
+
+/** A stored read as analyses use it: the reader's values + the guarded repairs from facts the PDF prints. */
+function analysisReadFrom<F extends CreditFile = CreditFile>(extracted: unknown, skeleton: unknown): F {
+  const file = (typeof extracted === "string" ? JSON.parse(extracted) : extracted) as F;
+  return pv2ApplyPrintedFacts(file, skeletonPullSummary(skeleton));
 }
 
 /** The pull's own summary cached on the extraction row (text_skeleton_json.pullSummary2). */
@@ -17056,7 +17136,7 @@ async function progressPullSummary(row: RowDataPacket): Promise<Pv2PullSummary |
   const skel = row.text_skeleton_json ? (typeof row.text_skeleton_json === "string" ? JSON.parse(row.text_skeleton_json) : row.text_skeleton_json) : null;
   if (skel && Object.prototype.hasOwnProperty.call(skel, "pullSummary2")) {
     const cached = (skel.pullSummary2 as Pv2PullSummary | null) ?? null;
-    // An older parser's summary is re-parsed once (Juan, Oct 26: a cached wrong TransUnion count kept blocking).
+    // An older parser's summary is re-parsed once (a client, Oct 26: a cached wrong TransUnion count kept blocking).
     if (!cached || cached.parserVersion === PV2_SUMMARY_PARSER_VERSION) return cached;
   }
   if (!row.storage_key) return null;
@@ -17860,10 +17940,9 @@ async function completeCreditFileRead(
         return extracted;
       });
     }
-    // Every read (credit analysis too): limits, sections, balances and inquiries the PDF prints repair the
-    // read where it misses the report's own totals (guarded; a matching read is unchanged). Progress reads
-    // apply it again on load, so reads stored before this change are covered there as well.
-    extracted = pv2ApplyPrintedFacts(extracted, skeletonPullSummary(skeleton));
+    // The reader's own values are what is stored (Nov 7, 2026): the printed-fact repairs run in memory
+    // wherever a read is used (progress reads on load, analyses via analysisReadFrom), so a repair is never
+    // made permanent and improves with the parser.
     const check =
       skeleton && skeleton.provider !== "unknown"
         ? crossCheckCreditFile(extracted, skeleton)
@@ -35312,6 +35391,8 @@ type RoundResetPreview = {
   staged_pdf_ids: number[];
   pipeline: { from: string; to: string };
   warnings: string[];
+  /** Rounds in this reset whose report the self-check held (their checks: the dialog explains the cause). */
+  held: Array<{ round_number: number; checks: unknown[] }>;
 };
 
 async function buildRoundReportResetPreview(
@@ -35349,7 +35430,7 @@ async function buildRoundReportResetPreview(
   const rounds = cascadeRoundsFromReset(fromRound, maxRounds);
   const [reports] = await pool.query<RowDataPacket[]>(
     `SELECT id, round_number, pdf_storage_key,
-            delivered_via_email, delivered_via_sms
+            delivered_via_email, delivered_via_sms, delivery_status, self_check_json
      FROM client_round_reports
      WHERE client_id = ? AND round_number IN (?)`,
     [clientId, rounds],
@@ -35462,6 +35543,9 @@ async function buildRoundReportResetPreview(
     staged_pdf_ids: stagedIds,
     pipeline: { from: pipelineFrom, to: pipelineTo },
     warnings: buildRoundResetWarningsInline(mayHaveBeenSent),
+    held: reports
+      .filter((r) => String(r.delivery_status) === "needs_review")
+      .map((r) => ({ round_number: Number(r.round_number), checks: parseWizardJsonField(r.self_check_json) ?? [] })),
   };
 }
 
@@ -38253,6 +38337,195 @@ async function notifyRoundNoChangeAlert(opts: { clientId: number; roundNumber: n
     if (delivered && (delivered.sms || delivered.in_app)) sent++;
   }
   return sent;
+}
+
+// ── Self-healing held reports (Nov 7, 2026) ──────────────────────────────────
+// A report held by the self-check re-checks itself when the engine changes (after every deploy, and when
+// someone opens it): if it now passes it is rebuilt through the normal publish and waits for approval —
+// nobody resets, rebuilds or waits. Still failing → its reasons are refreshed. Nothing is ever sent.
+
+let reportEngineVersionMemo: string | null = null;
+/** Fingerprint of the code that decides what a report contains: any change → held reports re-check. */
+export function reportEngineVersion(): string {
+  reportEngineVersionMemo ??= fnv1a(
+    [pv2SelfCheck, pv2ApplyPrintedFacts, pv2ParsePullSummary, pv2Diff, parseSmartCreditPrintedLimits, parseMfsnPrintedAccounts, normalizeStoredRead, mergeCreditFileParts]
+      .map((f) => String(f))
+      .join("\n"),
+  );
+  return reportEngineVersionMemo;
+}
+
+/** Set by buildApp: the publish route's handler (self-heal publishes through the same code). */
+let finalizeWizardSessionRef: ((req: AuthedRequest, res: Response) => Promise<unknown>) | null = null;
+
+/** Minimal Response for calling a route handler from inside the server. */
+function captureResponse(): { res: Response; result: () => { status: number; body: any } } {
+  let status = 200;
+  let body: any = null;
+  const res: any = {
+    status(code: number) {
+      status = code;
+      return res;
+    },
+    json(b: unknown) {
+      body = b;
+      return res;
+    },
+    send(b: unknown) {
+      body = b;
+      return res;
+    },
+    set() {
+      return res;
+    },
+    setHeader() {
+      return res;
+    },
+  };
+  return { res: res as Response, result: () => ({ status, body }) };
+}
+
+export type SelfHealOutcome = "ready" | "still_held" | "current" | "skipped" | "failed";
+
+/**
+ * Re-checks one held report with today's engine. Never destructive on failure: the held report is only
+ * replaced once the read-only pre-check passes; if the publish then fails, the session is left in Review
+ * (exactly where Rebuild leaves it) and the release managers are told.
+ */
+export async function selfHealHeldReport(reportId: number, trigger: "deploy" | "opened"): Promise<{ outcome: SelfHealOutcome; reportId?: number; reason?: string }> {
+  const [[r]] = await pool.query<RowDataPacket[]>(
+    `SELECT r.id, r.client_id, r.round_number, r.delivery_status, r.wizard_session_id, r.delivery_options_json, r.created_by_admin_id,
+            (SELECT MAX(x.round_number) FROM client_round_reports x WHERE x.client_id = r.client_id) AS last_round
+     FROM client_round_reports r WHERE r.id = ? LIMIT 1`,
+    [reportId],
+  );
+  if (!r || String(r.delivery_status) !== "needs_review" || !r.wizard_session_id) return { outcome: "skipped" };
+  // Later rounds depend on this one: only the latest round rebuilds itself.
+  if (Number(r.round_number) !== Number(r.last_round)) return { outcome: "skipped", reason: "not_latest_round" };
+  const options = parseWizardJsonField<{ notify_client?: boolean; notify_partners?: boolean; engine_version?: string; acknowledged_score_anomalies?: boolean }>(r.delivery_options_json) ?? {};
+  const version = reportEngineVersion();
+  if (options.engine_version === version) return { outcome: "current" };
+
+  const sessionId = Number(r.wizard_session_id);
+  const session = await loadWizardSession(pool, sessionId);
+  if (!session) return { outcome: "skipped", reason: "no_session" };
+  const raw = parseWizardJsonField<OfGReportData>(session.reviewed_json) ?? parseWizardJsonField<OfGReportData>(session.extracted_json);
+  if (!raw) return { outcome: "skipped", reason: "no_data" };
+  const data = syncPrimaryDualFieldsInline(raw);
+  const round = Number(r.round_number);
+
+  // 1) Read-only pre-check with today's engine.
+  let checks: Pv2Check[];
+  let pass: boolean;
+  try {
+    const rendered = wizardSessionIsScoreUpdate(session)
+      ? await renderScoreUpdateForSession(sessionId, data, round)
+      : await renderProgressReportV2ForSession(sessionId, data, round);
+    checks = rendered.selfCheck.checks;
+    pass = rendered.selfCheck.pass;
+  } catch (e: any) {
+    // Reads still being read again (re-queued) → try on the next open / deploy.
+    if (e instanceof ProgressReportGateError) return { outcome: "skipped", reason: e.code };
+    console.error("[self-heal] pre-check", reportId, e?.message ?? e);
+    return { outcome: "failed", reason: "pre_check_error" };
+  }
+  if (!pass) {
+    await pool.query(
+      `UPDATE client_round_reports SET self_check_json = ?, delivery_options_json = JSON_SET(COALESCE(delivery_options_json, JSON_OBJECT()), '$.engine_version', ?) WHERE id = ? AND delivery_status = 'needs_review'`,
+      [JSON.stringify(checks), version, reportId],
+    );
+    return { outcome: "still_held" };
+  }
+
+  // 2) Passes now: replace the held report through the normal publish (same session, same publisher).
+  const actor = Number(r.created_by_admin_id) || reportReleaseManagerIds()[0];
+  if (!finalizeWizardSessionRef) return { outcome: "failed", reason: "publish_unavailable" };
+  const back = await returnHeldReportToReview(reportId, actor, `self_heal_${trigger}`);
+  if (back.ok === false) return { outcome: "skipped", reason: back.code };
+  const { res, result } = captureResponse();
+  await finalizeWizardSessionRef(
+    {
+      params: { id: String(sessionId) },
+      auth: { id: actor, type: "admin" },
+      body: {
+        compliance_acknowledged: true,
+        notify_client: options.notify_client,
+        notify_partners: options.notify_partners,
+        acknowledge_score_anomalies: options.acknowledged_score_anomalies ?? true,
+      },
+    } as unknown as AuthedRequest,
+    res,
+  );
+  const out = result();
+  if (out.status >= 300 || !out.body?.round_report_id) {
+    const why = String(out.body?.error || `status ${out.status}`);
+    console.error("[self-heal] publish", reportId, why);
+    await notifyReportHeldAlert({
+      roundReportId: reportId,
+      clientId: Number(r.client_id),
+      roundNumber: round,
+      clientName: `Client #${r.client_id}`,
+      checks: [{ key: "self_heal", pass: false, detail: `Automatic rebuild passed the checks but could not publish (${why}). The round is back in Review: open the report wizard and Publish.` }],
+    }).catch(() => undefined);
+    return { outcome: "failed", reason: why };
+  }
+  return { outcome: "ready", reportId: Number(out.body.round_report_id) };
+}
+
+/** Every held latest-round report built by an older engine (used right after a deploy). */
+export async function selfHealAllHeldReports(trigger: "deploy" | "opened" = "deploy"): Promise<Record<SelfHealOutcome, number>> {
+  const [rows] = await pool.query<RowDataPacket[]>(`SELECT id FROM client_round_reports WHERE delivery_status = 'needs_review' ORDER BY id`);
+  const tally: Record<SelfHealOutcome, number> = { ready: 0, still_held: 0, current: 0, skipped: 0, failed: 0 };
+  for (const row of rows) {
+    const { outcome } = await selfHealHeldReport(Number(row.id), trigger).catch(() => ({ outcome: "failed" as const }));
+    tally[outcome]++;
+  }
+  return tally;
+}
+
+/**
+ * The held report goes back to its session's Review step (same reads); its PDF rows go. Shared by the
+ * Rebuild button and the self-healing rebuild. Locked so an Approve or a second rebuild cannot race it.
+ */
+async function returnHeldReportToReview(reportId: number, actorId: number, reason: string): Promise<{ ok: true; clientId: number; roundNumber: number; sessionId: number } | { ok: false; code: string }> {
+  const [[r]] = await pool.query<RowDataPacket[]>(
+    `SELECT client_id, round_number, wizard_session_id, delivery_status FROM client_round_reports WHERE id = ? LIMIT 1`,
+    [reportId],
+  );
+  if (!r || !r.wizard_session_id) return { ok: false, code: "not_rebuildable" };
+  const [pdfRows] = await pool.query<RowDataPacket[]>(`SELECT storage_key FROM round_report_pdfs WHERE round_report_id = ?`, [reportId]);
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [[locked]] = await conn.query<RowDataPacket[]>(`SELECT delivery_status FROM client_round_reports WHERE id = ? FOR UPDATE`, [reportId]);
+    if (!locked || !["needs_review", "pending_approval"].includes(String(locked.delivery_status))) {
+      await conn.rollback();
+      return { ok: false, code: "not_rebuildable" };
+    }
+    await conn.query(
+      `UPDATE report_wizard_sessions
+       SET status = 'review', output_pdf_id = NULL, round_report_id = NULL, published_at = NULL, updated_at = NOW()
+       WHERE id = ?`,
+      [r.wizard_session_id],
+    );
+    await conn.query(`DELETE FROM round_report_pdfs WHERE round_report_id = ?`, [reportId]);
+    await conn.query(`DELETE FROM client_round_reports WHERE id = ?`, [reportId]);
+    await conn.query(
+      `INSERT INTO audit_logs (actor_type, actor_id, action, entity_type, entity_id, changes_json, status)
+       VALUES ('admin', ?, 'report_wizard.rebuild_held_report', 'client', ?, ?, 'success')`,
+      [actorId, r.client_id, JSON.stringify({ round_report_id: reportId, round_number: r.round_number, session_id: r.wizard_session_id, previous_status: locked.delivery_status, reason })],
+    );
+    await conn.commit();
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+  for (const p of pdfRows) {
+    if (p.storage_key) await deleteFromCDN(String(p.storage_key)).catch((e: any) => console.warn("[round-report:rebuild] CDN delete", e?.message ?? e));
+  }
+  return { ok: true, clientId: Number(r.client_id), roundNumber: Number(r.round_number), sessionId: Number(r.wizard_session_id) };
 }
 
 /** Release managers by default; override with REPORT_HELD_ALERT_ADMIN_IDS. */
@@ -46771,7 +47044,7 @@ async function chargeCard(opts: {
  * (profile payment). Replaces the deprecated createCustomerProfileTransaction
  * call, whose JSON response is NOT wrapped in a
  * `createCustomerProfileTransactionResponse` key — reading that key made
- * approved charges look declined (Monterrubio, Oct 7 2026).
+ * approved charges look declined (a client, Oct 7 2026).
  */
 async function chargeStoredProfile(opts: {
   amountDollars: string;
@@ -63457,7 +63730,7 @@ function buildApp() {
     | { ok: false; status: number; error: string }
   > {
     const [rows] = await pool.query<RowDataPacket[]>(
-      `SELECT e.status, e.extracted_json, e.error_message,
+      `SELECT e.status, e.extracted_json, e.text_skeleton_json, e.error_message,
               c.first_name, c.last_name, c.preferred_language,
               ca.escrow_flag, ca.lender_score_model, ca.lender_score, ca.lender_target_score
        FROM credit_file_extractions e
@@ -63478,8 +63751,7 @@ function buildApp() {
             : "Report is still being read — try again in a minute",
       };
     }
-    const file =
-      typeof r.extracted_json === "string" ? JSON.parse(r.extracted_json) : r.extracted_json;
+    const file = analysisReadFrom(r.extracted_json, r.text_skeleton_json);
     return {
       ok: true,
       analysis: buildCreditAnalysis(file, {
@@ -63813,6 +64085,20 @@ function buildApp() {
     } catch (e: any) {
       console.error("[credit-file:read-route]", id, e?.message ?? e);
       res.status(500).json({ error: "Read failed" });
+    }
+  });
+
+  // Self-healing held reports right after a deploy (called by scripts/deploy-prod.ts; no cron).
+  app.post("/api/internal/self-heal-held-reports", async (req: any, res) => {
+    const secret = String(process.env.CRON_SECRET || "");
+    if (!secret || !timingSafeStringEqual(String(req.headers["x-cron-secret"] || ""), secret)) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    try {
+      res.json({ ok: true, engine_version: reportEngineVersion(), ...(await selfHealAllHeldReports("deploy")) });
+    } catch (e: any) {
+      console.error("[self-heal:deploy]", e?.message ?? e);
+      res.status(500).json({ error: "Self-heal failed" });
     }
   });
 
@@ -76893,11 +77179,8 @@ function buildApp() {
     },
   );
 
-  app.post(
-    "/api/admin/report-wizard/sessions/:id/finalize",
-    requireAdmin,
-    denyAffiliateAccess,
-    async (req: AuthedRequest, res) => {
+  // Named so the self-healing rebuild of held reports publishes through exactly this code (Nov 7, 2026).
+  const finalizeWizardSession = async (req: AuthedRequest, res: Response) => {
       const sessionId = Number(req.params.id);
       const session = await loadWizardSession(pool, sessionId);
       if (!session) return res.status(404).json({ error: "Session not found" });
@@ -77386,7 +77669,14 @@ function buildApp() {
           `UPDATE client_round_reports
            SET delivery_status = ?, self_check_json = ?, delivery_options_json = ?, approved_by_admin_id = NULL, approved_at = NULL, delivery_result_json = NULL
            WHERE id = ?`,
-          [deliveryStatus, JSON.stringify(rendered.selfCheck.checks), JSON.stringify({ notify_client: notifyClient, notify_partners: notifyPartners }), roundReportId],
+          [
+            deliveryStatus,
+            JSON.stringify(rendered.selfCheck.checks),
+            // engine_version: a held report re-checks itself when the engine changes; the acknowledgment is
+            // replayed by that automatic rebuild (same data, same publisher).
+            JSON.stringify({ notify_client: notifyClient, notify_partners: notifyPartners, engine_version: reportEngineVersion(), acknowledged_score_anomalies: !!req.body?.acknowledge_score_anomalies }),
+            roundReportId,
+          ],
         );
         const partnerEmailStats = await countLinkedReferrerPartnersWithEmail(clientId);
 
@@ -77476,8 +77766,9 @@ function buildApp() {
         console.error("[report-wizard:finalize]", e);
         res.status(500).json({ error: e?.message || "Publish failed" });
       }
-    },
-  );
+  };
+  app.post("/api/admin/report-wizard/sessions/:id/finalize", requireAdmin, denyAffiliateAccess, finalizeWizardSession);
+  finalizeWizardSessionRef = finalizeWizardSession;
 
   // ── Spec v1.1 P0-1: approval gate (publish never sends) ──────────────────
   /**
@@ -77536,16 +77827,30 @@ function buildApp() {
 
   app.get("/api/admin/round-reports/:id/approval", requireAdmin, denyAffiliateAccess, async (req: AuthedRequest, res) => {
     try {
+      // Opening a held report built by an older engine re-checks it first (self-healing, Nov 7, 2026):
+      // if it passes now it was just rebuilt — show the new report waiting for approval.
+      let id = Number(req.params.id);
+      let healed = false;
+      const heal = await selfHealHeldReport(id, "opened").catch((e: any) => {
+        console.error("[self-heal:opened]", id, e?.message ?? e);
+        return null;
+      });
+      if (heal?.outcome === "ready" && heal.reportId) {
+        id = heal.reportId;
+        healed = true;
+      }
       const [[r]] = await pool.query<RowDataPacket[]>(
         `SELECT r.id, r.round_number, r.report_locale, r.delivery_status, r.self_check_json, r.delivery_options_json,
                 r.approved_at, r.delivery_result_json, CONCAT(a.first_name, ' ', a.last_name) approved_by
          FROM client_round_reports r LEFT JOIN admins a ON a.id = r.approved_by_admin_id WHERE r.id = ? LIMIT 1`,
-        [Number(req.params.id)],
+        [id],
       );
       if (!r) return res.status(404).json({ error: "Report not found" });
       const who = await roundReportApprover(Number(req.auth!.id), String(r.report_locale));
       res.json({
         id: Number(r.id),
+        /** Set when this open rebuilt a held report with the latest engine (the id above is the new report). */
+        rebuilt_from: healed ? Number(req.params.id) : null,
         round_number: Number(r.round_number),
         delivery_status: r.delivery_status ? String(r.delivery_status) : null,
         checks: parseWizardJsonField<Pv2Check[]>(r.self_check_json) ?? [],
@@ -77591,41 +77896,9 @@ function buildApp() {
       const who = await roundReportApprover(adminId, String(r.report_locale));
       if (!who.canApprove) return res.status(403).json({ error: "Only the report's approver, Cesar or Alex can rebuild it" });
 
-      const [pdfRows] = await pool.query<RowDataPacket[]>(`SELECT storage_key FROM round_report_pdfs WHERE round_report_id = ?`, [reportId]);
-      const conn = await pool.getConnection();
-      try {
-        await conn.beginTransaction();
-        // Lock the row: an Approve or a second rebuild running now waits, then finds it changed / gone.
-        const [[locked]] = await conn.query<RowDataPacket[]>(`SELECT delivery_status FROM client_round_reports WHERE id = ? FOR UPDATE`, [reportId]);
-        if (!locked || !["needs_review", "pending_approval"].includes(String(locked.delivery_status))) {
-          await conn.rollback();
-          return res.status(409).json({ error: "This report was already approved or rebuilt", code: "not_rebuildable" });
-        }
-        // Children first (same order as the round reset).
-        await conn.query(
-          `UPDATE report_wizard_sessions
-           SET status = 'review', output_pdf_id = NULL, round_report_id = NULL, published_at = NULL, updated_at = NOW()
-           WHERE id = ?`,
-          [r.wizard_session_id],
-        );
-        await conn.query(`DELETE FROM round_report_pdfs WHERE round_report_id = ?`, [reportId]);
-        await conn.query(`DELETE FROM client_round_reports WHERE id = ?`, [reportId]);
-        await conn.query(
-          `INSERT INTO audit_logs (actor_type, actor_id, action, entity_type, entity_id, changes_json, status)
-           VALUES ('admin', ?, 'report_wizard.rebuild_held_report', 'client', ?, ?, 'success')`,
-          [adminId, r.client_id, JSON.stringify({ round_report_id: reportId, round_number: r.round_number, session_id: r.wizard_session_id, previous_status: status })],
-        );
-        await conn.commit();
-      } catch (e) {
-        await conn.rollback();
-        throw e;
-      } finally {
-        conn.release();
-      }
-      for (const p of pdfRows) {
-        if (p.storage_key) await deleteFromCDN(String(p.storage_key)).catch((e: any) => console.warn("[round-report:rebuild] CDN delete", e?.message ?? e));
-      }
-      return res.json({ ok: true, client_id: Number(r.client_id), round_number: Number(r.round_number), session_id: Number(r.wizard_session_id) });
+      const back = await returnHeldReportToReview(reportId, adminId, "rebuild_button");
+      if (back.ok === false) return res.status(409).json({ error: "This report was already approved or rebuilt", code: "not_rebuildable" });
+      return res.json({ ok: true, client_id: back.clientId, round_number: back.roundNumber, session_id: back.sessionId });
     } catch (e: any) {
       console.error("[round-report:rebuild]", e?.message ?? e);
       return res.status(500).json({ error: "Could not rebuild the report" });

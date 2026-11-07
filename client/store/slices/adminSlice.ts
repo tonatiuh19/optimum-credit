@@ -692,6 +692,8 @@ export type RoundReportResetPreview = {
   staged_pdf_ids?: number[];
   pipeline: { from: string; to: string };
   warnings: string[];
+  /** Rounds in this reset whose report the self-check held, with their checks. */
+  held?: Array<{ round_number: number; checks: Array<{ key: string; pass: boolean | null; detail?: string | null }> }>;
 };
 
 export type RoundReportResetResult = {

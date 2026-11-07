@@ -106,4 +106,20 @@ describe("ReportApprovalCard", () => {
     setup(base({}));
     expect(screen.queryByTestId("report-rebuild")).toBeNull();
   });
+
+  it("held for a platform reason: says the PDF is fine, explains in plain words, nothing to do, never says reset", () => {
+    setup(base({ delivery_status: "needs_review", checks: [{ key: "limits", pass: false, detail: "After EX: revolving limits $22,800 vs summary $15,800" }] }));
+    const card = screen.getByTestId("report-approval-card").textContent || "";
+    expect(card).toMatch(/your PDF is fine/);
+    expect(screen.getByTestId("report-held-reasons").textContent).toMatch(/After report · Experian: credit limits — the platform counted \$22,800, the report shows \$15,800/);
+    expect(screen.getByTestId("next-step-held_platform").textContent).toMatch(/Nothing to do — Cesar and Alex were notified, and it re-checks itself/);
+    expect(screen.getByTestId("report-held-body").textContent).toMatch(/please don't reset/);
+  });
+
+  it("held because the PDF is incomplete: says to re-save it, no 'nothing to do'", () => {
+    setup(base({ delivery_status: "needs_review", checks: [{ key: "account_totals", pass: false, detail: "After EQ: 16 accounts read, summary 24" }] }));
+    expect(screen.getByTestId("report-held-body").textContent).toMatch(/Re-save it from SmartCredit/);
+    expect(screen.getByTestId("next-step-resave_pdf")).toBeTruthy();
+    expect(screen.queryByTestId("next-step-held_platform")).toBeNull();
+  });
 });

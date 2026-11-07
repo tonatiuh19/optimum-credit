@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from "react";
+import { explainHeldChecks } from "@shared/heldReport";
 import {
   CheckCircle2,
   X,
@@ -583,6 +584,15 @@ function ReportsTab({
     useState<RoundReportResetPreview | null>(null);
   const [resetLoading, setResetLoading] = useState(false);
   const [resetConfirming, setResetConfirming] = useState(false);
+  // A round held for a platform reason (the PDF is fine): resetting deletes the uploads and changes
+  // nothing, so it takes a deliberate "I uploaded the wrong file" tick (Nov 7, 2026).
+  const [resetHeldAck, setResetHeldAck] = useState(false);
+  const heldPlatformRounds = (resetPreview?.held ?? [])
+    .filter((h) => explainHeldChecks(h.checks).cause === "platform")
+    .map((h) => h.round_number);
+  useEffect(() => {
+    setResetHeldAck(false);
+  }, [resetRound]);
 
   const inRounds = ROUND_STAGES.includes(pipelineStage);
   const highestPublished = reports.reduce((h, r) => {
@@ -1212,6 +1222,23 @@ function ReportsTab({
                         {t("reportWizard.resetRoundEmailWarning")}
                       </p>
                     ))}
+                    {heldPlatformRounds.length > 0 && (
+                      <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 space-y-2" data-testid="reset-held-warning">
+                        <p className="text-[12px] text-foreground leading-relaxed">
+                          {t("reportWizard.resetRoundHeldWarning", { round: heldPlatformRounds.join(", ") })}
+                        </p>
+                        <label className="flex items-start gap-2 text-[12px] text-foreground cursor-pointer">
+                          <input
+                            type="checkbox"
+                            className="mt-0.5 accent-destructive"
+                            checked={resetHeldAck}
+                            onChange={(e) => setResetHeldAck(e.target.checked)}
+                            data-testid="reset-held-ack"
+                          />
+                          {t("reportWizard.resetRoundHeldConfirm")}
+                        </label>
+                      </div>
+                    )}
                   </>
                 )}
               </div>
@@ -1222,7 +1249,7 @@ function ReportsTab({
               {t("common.cancel")}
             </AlertDialogCancel>
             <AlertDialogAction
-              disabled={resetConfirming || resetLoading || !resetPreview}
+              disabled={resetConfirming || resetLoading || !resetPreview || (heldPlatformRounds.length > 0 && !resetHeldAck)}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               onClick={(e) => {
                 e.preventDefault();

@@ -1,5 +1,5 @@
 /**
- * Self-check account totals (Oct 29, 2026 — Andrea R5): a complete SmartCredit PDF listed
+ * Self-check account totals (Oct 29, 2026 — a client R5): a complete SmartCredit PDF listed
  * 25 Equifax accounts (two look-alike Capital One cards) under its own "24" summary, and
  * the exact-match rule held an accurate report. Missing accounts still always fail (they
  * would look "removed"); a small over-count passes with a note unless a negative account
@@ -37,7 +37,7 @@ const summary = (counts: Partial<Record<Bureau, number>>, kind: "total" | "open"
 
 /** n clean open accounts on EQ only. */
 const clean = (n: number) => Array.from({ length: n }, (_, i) => acct(`LENDER ${i}`, String(1000 + i), { EQ: tl({ accountStatus: "Open", dateOpened: `0${(i % 9) + 1}/01/2015` }) }));
-// Andrea: two different closed Capital One cards, same BIN prefix + open month.
+// a client: two different closed Capital One cards, same BIN prefix + open month.
 const capOnePair = () => [acct("CAP ONE", "517805", { EQ: tl() }), acct("CAP ONE", "517805", { EQ: tl() })];
 const late = (o: Partial<BureauTradeline> = {}) => acct("BAD BANK", "4444", { EQ: tl({ accountStatus: "Open", paymentStatus: "Late 30 Days", late30: 2, dateOpened: "01/01/2020", ...o }) });
 
@@ -46,7 +46,7 @@ describe("pv2AccountCountVerdict", () => {
     ["exact match", clean(24), 24, 24, "ok"],
     ["one missing → fail (could look removed)", clean(23), 23, 24, "fail"],
     ["many missing → fail", clean(16), 16, 24, "fail"],
-    ["one extra, look-alike closed cards (Andrea) → note", [...clean(23), ...capOnePair()], 25, 24, "note"],
+    ["one extra, look-alike closed cards → note", [...clean(23), ...capOnePair()], 25, 24, "note"],
     ["over-count beyond the tolerance → fail", clean(27), 27, 24, "fail"],
     ["3% of a large file is tolerated (+2 on 60)", clean(62), 62, 60, "note"],
     ["…but not more (+3 on 60)", clean(63), 63, 60, "fail"],
@@ -73,7 +73,7 @@ describe("pv2SelfCheck account_totals", () => {
   };
   const before = () => file("06/24/2026", [...clean(23), ...capOnePair()]);
 
-  it("Andrea R5: After lists one more Equifax account than its summary → passes, with the reason shown", () => {
+  it("a client R5: After lists one more Equifax account than its summary → passes, with the reason shown", () => {
     const c = run(before(), file("10/26/2026", [...clean(23), ...capOnePair()]), summary({ EQ: 25 }), summary({ EQ: 24 }));
     expect(c.pass).toBe(true);
     expect(c.detail).toBe("After EQ: 25 accounts read, summary 24 (the report lists more than its own summary; no account missing)");
@@ -112,12 +112,12 @@ describe("pv2SelfCheck account_totals", () => {
 });
 
 describe("over-count can never hide a missing account (open / closed split)", () => {
-  // Andrea's real Equifax split: summary 24 = 13 open + 11 closed; read 13 open + 12 closed.
+  // a client real Equifax split: summary 24 = 13 open + 11 closed; read 13 open + 12 closed.
   const openN = (n: number, tag: string) => Array.from({ length: n }, (_, i) => acct(`OPEN ${tag}${i}`, String(3000 + i), { EQ: tl({ accountStatus: "Open", dateOpened: `0${(i % 9) + 1}/01/2016` }) }));
   const closedN = (n: number, tag: string) => Array.from({ length: n }, (_, i) => acct(`CLOSED ${tag}${i}`, String(5000 + i), { EQ: tl({ dateOpened: `0${(i % 9) + 1}/01/2012` }) }));
   const split = { open: 13, closed: 11 };
 
-  it("Andrea: extra closed look-alike, open complete → note", () => {
+  it("a client: extra closed look-alike, open complete → note", () => {
     const accts = [...openN(13, "a"), ...closedN(10, "a"), ...capOnePair()];
     expect(pv2AccountCountVerdict(accts, "EQ", 25, 24, split)).toBe("note");
   });

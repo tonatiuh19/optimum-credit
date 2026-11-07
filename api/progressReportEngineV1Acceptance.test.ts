@@ -1,6 +1,6 @@
 /**
  * Acceptance — Progress Report Engine Fix Spec v1 (Cesar, Oct 22 2026) §8:
- * Jose Fernando Huiza, SmartCredit 3-bureau, 08/06/2026 → 10/07/2026.
+ * a client Fernando Huiza, SmartCredit 3-bureau, 08/06/2026 → 10/07/2026.
  * Fixture = the spec's own values (no name / SSN / address beyond the first
  * name). It also carries the template / TOC rows the old text path published
  * ("10. Collections 53", "30 Days", "Included in - Bankruptcy") to prove they
@@ -113,7 +113,7 @@ const pdf = pv2BuildPdfData({
   sinceStart: { date: "08/06/2026", scores: { EQ: 507, EX: 510, TU: 611 } },
 });
 
-describe("Engine Spec v1 §8 — Jose Fernando Huiza acceptance", () => {
+describe("Engine Spec v1 §8 — a client Fernando Huiza acceptance", () => {
   it("Round 1 (08/06 → 08/06): BLOCKED_DATA_INTEGRITY, not published", () => {
     expect(pv2DataIntegrity(BEFORE, BEFORE)).toMatch(/same report date/);
     expect(pv2DataIntegrity(BEFORE, { ...BEFORE, reportDate: "08/07/2026" })).toMatch(/identical/);
