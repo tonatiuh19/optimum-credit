@@ -44,7 +44,18 @@ function dbConfig() {
 }
 
 async function withDb<T>(fn: (conn: mysql.Connection) => Promise<T>): Promise<T> {
-  const conn = await mysql.createConnection(dbConfig());
+  // TiDB Cloud sometimes takes too long to accept a connection (Nov 7, 2026: "connect ETIMEDOUT" after
+  // every check had passed). Opening a connection sends no statement, so it is always safe to retry.
+  let conn: mysql.Connection | null = null;
+  for (let attempt = 1; !conn; attempt++) {
+    try {
+      conn = await mysql.createConnection(dbConfig());
+    } catch (e: any) {
+      if (attempt >= 3 || !["ETIMEDOUT", "ECONNREFUSED", "ECONNRESET", "PROTOCOL_CONNECTION_LOST"].includes(String(e?.code))) throw e;
+      console.warn(`⏳ Database connection failed (${e.code}); retrying (${attempt}/2)…`);
+      await new Promise((r) => setTimeout(r, attempt * 5_000));
+    }
+  }
   try {
     return await fn(conn);
   } finally {
