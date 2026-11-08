@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildInboundAiUserPrompt,
   countAiOutboundTurns,
+  inboundAiIsAckOnly,
   envFlagOn,
   finalizeInboundAiDecision,
   inboundAiAnthropicReady,
@@ -131,12 +132,15 @@ describe("inboundAiComplianceKeyword", () => {
 });
 
 describe("inboundAiHardEscalateReason", () => {
-  it("forces unknown + max turns + keyword buckets", () => {
+  it("answers unknown numbers (FAQ only) + max turns + keyword buckets", () => {
     expect(
       inboundAiHardEscalateReason("hi", { isUnknown: true, aiTurnCount: 0 }),
-    ).toBe("unknown_contact");
+    ).toBeNull();
     expect(
-      inboundAiHardEscalateReason("hi", { isUnknown: false, aiTurnCount: 3 }),
+      inboundAiHardEscalateReason("hi", { isUnknown: false, aiTurnCount: 5 }),
+    ).toBeNull();
+    expect(
+      inboundAiHardEscalateReason("hi", { isUnknown: false, aiTurnCount: 6 }),
     ).toBe("max_turns");
     expect(
       inboundAiHardEscalateReason("I want a refund now", {
@@ -430,4 +434,27 @@ describe("parseInboundAiDecisionText (parse_error regression, Oct 5–6)", () =>
   it("returns null for non-JSON text", () => {
     expect(parseInboundAiDecisionText("Lo siento, no puedo ayudar")).toBeNull();
   });
+});
+
+describe("inboundAiIsAckOnly (no reply, no escalation)", () => {
+  it.each([
+    "Thank you",
+    "Thank you for the update!",
+    "Gracias ",
+    "ok",
+    "Sounds good!",
+    "👍",
+    "🙏🙏",
+    "Liked “Hi Carlos, it's Cesar.”",
+    "​👍​ to “ Hi Alma, it's Cesar.”",
+    "Perfecto primo",
+  ])("ack: %s", (t) => expect(inboundAiIsAckOnly(t)).toBe(true));
+  it.each([
+    "",
+    "Thanks, when is my next round?",
+    "ok but I have not received my report",
+    "Stop",
+    "Call me",
+    "Gracias, cuánto debo?",
+  ])("real message: %s", (t) => expect(inboundAiIsAckOnly(t)).toBe(false));
 });

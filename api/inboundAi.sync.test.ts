@@ -73,7 +73,7 @@ describe("inboundAi ↔ api/index.ts sync", () => {
     expect(indexSrc).toContain("function inboundAiHoldAlreadySent");
     expect(indexSrc).toContain("function inboundAiStaffRecentlyActive");
     expect(indexSrc).toContain("INBOUND_AI_STAFF_ACTIVE_MINUTES");
-    expect(indexSrc).toMatch(/const INBOUND_AI_STAFF_ACTIVE_MINUTES_DEFAULT\s*=\s*120\b/);
+    expect(indexSrc).toMatch(/const INBOUND_AI_STAFF_ACTIVE_MINUTES_DEFAULT\s*=\s*1440\b/);
     expect(indexSrc).toContain("inbound_ai_hold: true");
   });
 

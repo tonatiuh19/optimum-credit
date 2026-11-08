@@ -18,7 +18,7 @@ import {
 type Row = { direction: string; body: string | null; metadata_json: Record<string, unknown> | null; provider_status?: string; created_at?: Date };
 const NOW = Date.UTC(2026, 9, 24, 0, 22);
 const minAgo = (m: number) => new Date(NOW - m * 60_000);
-const staff = (body: string, m = 600): Row => ({ direction: "outbound", body, metadata_json: null, created_at: minAgo(m) });
+const staff = (body: string, m = 1600): Row => ({ direction: "outbound", body, metadata_json: null, created_at: minAgo(m) });
 const ai = (body: string): Row => ({ direction: "outbound", body, metadata_json: { inbound_ai: true, source: "inbound_ai" }, created_at: minAgo(1) });
 const legacyHold = (lang: "en" | "es"): Row => ai(inboundAiEscalationHoldMessage(lang));
 const taggedHold = (status = "delivered"): Row => ({ ...ai("custom hold"), metadata_json: { inbound_ai: true, inbound_ai_hold: true }, provider_status: status });
@@ -65,7 +65,7 @@ describe("one hold per escalation streak", () => {
     ["failure hold already sent", [failureHold()], 0],
     ["hold failed to deliver → retry once", [taggedHold("failed")], 1],
     ["hold undelivered → retry once", [failureHold("undelivered")], 1],
-    ["staff replied long ago after a hold → new streak", [legacyHold("en"), staff("Hi!", 600)], 1],
+    ["staff replied long ago after a hold → new streak", [legacyHold("en"), staff("Hi!", 1600)], 1],
   ];
   for (const [bName, burst] of bursts)
     it.each(lastOutbound)(`${bName} — %s`, (_n, history, expected) => {
@@ -86,7 +86,7 @@ describe("AI stays out while staff is texting", () => {
     ["staff texted 79 min ago (Friday case)", [staff("Hey, how's your Friday?", 79)], true],
     ["staff texted 5 min ago", [staff("x", 5)], true],
     ["staff texted exactly at the window", [staff("x", INBOUND_AI_STAFF_ACTIVE_MINUTES_DEFAULT)], true],
-    ["staff texted 3 h ago", [staff("x", 180)], false],
+    ["staff texted 25 h ago", [staff("x", 1500)], false],
     ["only AI outbounds", [ai("a"), legacyHold("en")], false],
     ["AI after a recent staff text still counts staff", [staff("x", 30), ai("a")], true],
     ["no outbound at all", [], false],

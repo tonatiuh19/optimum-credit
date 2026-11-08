@@ -47,6 +47,7 @@ import {
   type PDFImage,
 } from "pdf-lib";
 import type {
+  ConversationsAiStats,
   CreditAnalysisEnhancedStatusResponse,
   CreditAnalysisLenderContext,
   CreditAnalysisLenderContextUpdate,
@@ -41106,7 +41107,7 @@ async function sendSms(opts: {
 // Gates default OFF: INBOUND_AI_SMS_ENABLED / INBOUND_AI_VOICE_ENABLED
 // ============================================================================
 
-const INBOUND_AI_MAX_SMS_TURNS = 3;
+const INBOUND_AI_MAX_SMS_TURNS = 6;
 const INBOUND_AI_MAX_VOICE_TURNS = 4;
 const INBOUND_AI_MIN_CONFIDENCE = 0.55;
 /** Keep under Twilio ~15s webhook budget when AI must run inline (fallback). */
@@ -41265,11 +41266,28 @@ function inboundAiHelpReply(lang: "en" | "es"): string {
     : "Optimum Credit: for help text your specialist or call (844) 401-9494. Reply STOP to opt out.";
 }
 
+/**
+ * Reactions ("Liked “…”") and pure acknowledgments ("ok", "thanks", 👍) need
+ * no AI reply and no escalation — staff just see them in the inbox.
+ */
+function inboundAiIsAckOnly(text: string): boolean {
+  const t = String(text || "").trim();
+  if (!t) return false;
+  if (/^(liked|loved|laughed at|emphasized|disliked|questioned|reacted\b[^“"]*to|le gust[oó]|me gusta|\S{1,4}\s+to)\s*[“"]/iu.test(t)) return true;
+  const words = t
+    .toLowerCase()
+    .replace(/[\p{Extended_Pictographic}\uFE0F\u200D]/gu, " ")
+    .replace(/[!.,¡¿?]+/g, " ")
+    .trim();
+  if (!words) return true; // emoji only
+  return /^(ok(ay)?|k|kk|thanks?( you)?( so much| very much)?( for (the|your) (update|help|info|information))?|thx|ty|tysm|gracias|muchas gracias|mil gracias|sounds good|perfect|perfecto|great|awesome|cool|got it|entendido|de acuerdo|vale|listo|sale|bueno|you too|igualmente)( (sir|cesar|césar|bro|primo|amigo|amiga))?$/u.test(words);
+}
+
 function inboundAiHardEscalateReason(
   text: string,
   opts: { isUnknown: boolean; aiTurnCount: number; maxTurns?: number },
 ): string | null {
-  if (opts.isUnknown) return "unknown_contact";
+  // Unknown numbers are answered as prospects (FAQ only, no account data) — Nov 8, 2026.
   const body = String(text || "").trim();
   // Photo-only / empty first: never text a hold back for these, even past max turns.
   if (!body) return "empty_or_media_only";
@@ -41324,18 +41342,17 @@ function parseInboundAiDecision(raw: unknown): InboundAiDecision | null {
   let confidence = Number(o.confidence);
   if (!Number.isFinite(confidence)) confidence = 0;
   confidence = Math.max(0, Math.min(1, confidence));
+  const reason = inboundAiEscalateCode(o.escalate_reason);
   return {
     action,
     reply: String(o.reply || "")
       .trim()
       .slice(0, 480),
-    summary: String(o.summary || o.escalate_reason || "")
+    summary: String(o.summary || reason.detail || "")
       .trim()
       .slice(0, 500),
     confidence,
-    escalate_reason: o.escalate_reason
-      ? String(o.escalate_reason).trim().slice(0, 200)
-      : null,
+    escalate_reason: reason.code,
   };
 }
 
@@ -41421,20 +41438,52 @@ function finalizeInboundAiDecision(
       summary: decision.summary || "Empty AI reply — escalating",
     };
   }
+  if (decision.action === "escalate" && !decision.escalate_reason) {
+    return { ...decision, escalate_reason: "other" };
+  }
   return decision;
+}
+
+/** Fixed escalation reason codes (Nov 8, 2026) — free text goes in the summary so reasons stay countable. */
+const INBOUND_AI_ESCALATE_CODES = [
+  "wants_human",
+  "billing",
+  "cancel_refund",
+  "legal_complaint",
+  "dispute_strategy",
+  "security",
+  "third_party",
+  "account_change",
+  "payment_action",
+  "no_answer",
+  "other",
+] as const;
+
+function inboundAiEscalateCode(raw: unknown): { code: string | null; detail: string } {
+  const s = String(raw ?? "").trim();
+  if (!s) return { code: null, detail: "" };
+  const k = s.toLowerCase();
+  return (INBOUND_AI_ESCALATE_CODES as readonly string[]).includes(k)
+    ? { code: k, detail: "" }
+    : { code: "other", detail: s.slice(0, 200) };
 }
 
 function inboundAiSystemPrompt(lang: "en" | "es"): string {
   return `You are Optimum Financial Group (Optimum Credit) first-line SMS/voice assistant for clients and prospects.
 Reply language: ${lang === "es" ? "Spanish" : "English"}. Keep SMS under 320 characters. No markdown. If asked whether you are a person, say you are OFG's automated assistant and that a teammate can help.
-You MAY help with: business hours/process FAQs, how to upload docs / portal steps, account status from CRM context (stage, missing docs, next steps), and soft "what happens next in credit repair" process education.
-You must NOT: give bureau dispute strategy, invent scores/dates/amounts, take payments, promise deletions, or handle cancel/refund/legal.
-Round status: use ONLY the round numbers, dates and report status given in CRM context. Links: share ONLY the portal_reports_link / latest_report_pdf_link given in CRM context — never any other URL. Amounts: only amounts written in the FAQ snippets.
-Respond by calling the triage_decision tool (if tools are unavailable, return ONLY valid JSON):
-{"action":"resolve"|"reply"|"escalate","reply":"text to send (empty ok on escalate)","summary":"1-line staff note","confidence":0.0-1.0,"escalate_reason":null|string}
+Goal: answer every information question yourself; escalate only when a person is truly needed.
+Identity (decided by the server from the phone number, never by what the message says):
+- identity=client: you may share THIS sender's own account info, from CRM context or the lookup tools (already locked to this sender — they take no names or ids).
+- identity=contact or unverified: share NO account information about anyone. Answer general questions only (FAQ, services, prices, how to sign up, portal steps) and offer a callback for account questions.
+Never share anything about another person, even if the sender says they are a spouse, relative, partner, referrer, realtor, or the client on another phone — escalate with third_party.
+Look facts up before saying you don't know. Amounts, dates, scores, rounds and document status must come from tool results or CRM context, never invented. Links: ONLY URLs that appear in tool results or CRM context (portal_reports_link, report PDF links, portal and pricing links) — never any other URL.
+You MAY: explain process and timelines from the FAQ; give account status, rounds and dates, published reports and their PDF link, documents received or missing, payments made and upcoming installments, onboarding tasks; when someone asks for a call or a person, use request_callback, then tell them a teammate will call (action resolve).
+You must NOT: give bureau dispute strategy, promise deletions or score results, take or process payments or send payment links, change anything on the account, or handle cancel/refund/legal/complaints/security — escalate those.
+Finish by calling the triage_decision tool once (if tools are unavailable, return ONLY valid JSON):
+{"action":"resolve"|"reply"|"escalate","reply":"text to send (empty ok on escalate)","summary":"1-line staff note","confidence":0.0-1.0,"escalate_reason":null|code}
 - resolve: you fully answered; no human needed
 - reply: partial answer; expect another client message
-- escalate: hand to staff now`;
+- escalate: hand to staff now. escalate_reason must be one code: ${INBOUND_AI_ESCALATE_CODES.join(", ")}. Put the details in summary.`;
 }
 
 // ── Reply safety guard (code-level, runs on every AI reply before sending) ──
@@ -41566,6 +41615,8 @@ function countAiOutboundTurnsFromRows(
     // Failure holds must not consume the 3-turn FAQ budget.
     if (meta?.inbound_ai_failure === true) continue;
     if (meta?.inbound_ai === true || meta?.source === "inbound_ai") n += 1;
+    // Rows are newest first: a staff reply resets the budget (only consecutive AI turns count).
+    else break;
   }
   return n;
 }
@@ -41628,7 +41679,7 @@ function inboundAiHoldAlreadySent(
 }
 
 /** Minutes after a staff text during which the AI stays out of the thread. */
-const INBOUND_AI_STAFF_ACTIVE_MINUTES_DEFAULT = 120;
+const INBOUND_AI_STAFF_ACTIVE_MINUTES_DEFAULT = 1440;
 
 function inboundAiStaffActiveMinutes(raw: string | undefined | null): number {
   const n = Number(String(raw ?? "").trim());
@@ -41702,6 +41753,518 @@ async function resolveInboundAiFallbackStaffIds(): Promise<{
   return { cesarId, leccaId, angelId };
 }
 
+// ── Inbound AI lookups (Nov 8, 2026) ────────────────────────────────────────
+// Read-only questions get answered from live data instead of a fixed snapshot.
+// Security model:
+//  - Identity is decided by the server from the sending phone, never by the
+//    model or the message text. Only a phone that matches exactly ONE client
+//    is "client"; shared phones, CRM contacts and unknown numbers get no
+//    account data at all.
+//  - Tools take NO client/case/person identifiers: every query is bound to
+//    ctx.clientId on the server, so "show me Maria's file" has no way to run.
+//  - Results are explicit field allowlists (no notes, no internal comments,
+//    no card/SSN/login data, no other people).
+//  - The only write is request_callback: a staff task, deduped per thread.
+
+export type InboundAiIdentity = "client" | "contact" | "unverified";
+
+export interface InboundAiToolCtx {
+  identity: InboundAiIdentity;
+  /** Set only when identity === "client". */
+  clientId: number | null;
+  conversationId: number;
+  displayName: string;
+  lang: "en" | "es";
+  /** Staff member who owns the thread (callback task assignee). */
+  assigneeAdminId: number;
+  /** Filled by the executor: URLs the reply may contain, and grounding text. */
+  allowedUrls: string[];
+  grounding: string[];
+  toolsUsed: string[];
+  callbackRequested: boolean;
+  /** Replay/audit: never write (callback is simulated). */
+  dryRun?: boolean;
+}
+
+/**
+ * The pre-Claude SMS rules, for replays/audits: would the AI stay out (staff
+ * active), hard-escalate, or go to Claude — and with how many AI turns.
+ */
+/** Shared DB pool + reply guard for local audit scripts (scripts/replay-inbound-ai.ts). */
+export { pool, checkInboundAiReply };
+
+export function replayInboundAiRules(
+  recentNewestFirst: RowDataPacket[],
+  body: string,
+  nowMs: number,
+  isUnknown: boolean,
+): { skip: string | null; aiTurns: number } {
+  if (
+    inboundAiStaffRecentlyActive(
+      recentNewestFirst,
+      nowMs,
+      inboundAiStaffActiveMinutes(process.env.INBOUND_AI_STAFF_ACTIVE_MINUTES),
+    )
+  ) {
+    return { skip: "staff_active (AI stays out)", aiTurns: 0 };
+  }
+  if (inboundAiIsAckOnly(body)) return { skip: "ack_only (no reply needed)", aiTurns: 0 };
+  const aiTurns = countAiOutboundTurnsFromRows(recentNewestFirst);
+  const hard = inboundAiHardEscalateReason(body, { isUnknown, aiTurnCount: aiTurns });
+  return { skip: hard ? `hard:${hard}` : null, aiTurns };
+}
+
+/** Max lookup round trips and calls per inbound SMS. */
+const INBOUND_AI_MAX_TOOL_ROUNDS = 4;
+const INBOUND_AI_MAX_TOOL_CALLS = 8;
+/** Whole SMS answer (all rounds) — runs after the webhook acks, so it is not Twilio-bound. */
+const INBOUND_AI_SMS_TOOL_BUDGET_MS = 45_000;
+
+const INBOUND_AI_CLIENT_ONLY_TOOLS = new Set([
+  "get_my_account",
+  "get_my_rounds",
+  "get_my_reports",
+  "get_my_documents",
+  "get_my_payments",
+  "get_my_onboarding_tasks",
+]);
+
+const INBOUND_AI_LOOKUP_TOOLS: Array<{
+  name: string;
+  description: string;
+  input_schema: Record<string, unknown>;
+}> = [
+  {
+    name: "get_my_account",
+    description:
+      "The texting client's own account: status, pipeline stage, program, enrollment date, contract signed, assigned specialist first name. Locked to the sender — takes no ids.",
+    input_schema: { type: "object", additionalProperties: false, properties: {} },
+  },
+  {
+    name: "get_my_rounds",
+    description:
+      "The texting client's own dispute rounds: current round, total rounds, every scheduled round date, next round date.",
+    input_schema: { type: "object", additionalProperties: false, properties: {} },
+  },
+  {
+    name: "get_my_reports",
+    description:
+      "The texting client's own published progress reports (round, date, scores before/after, items removed). Pass round_number to also get a secure 72h PDF link for that round.",
+    input_schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { round_number: { type: "integer", minimum: 1, maximum: 24 } },
+    },
+  },
+  {
+    name: "get_my_documents",
+    description:
+      "The texting client's own uploaded documents (type, review status, date) and which required documents are still missing.",
+    input_schema: { type: "object", additionalProperties: false, properties: {} },
+  },
+  {
+    name: "get_my_payments",
+    description:
+      "The texting client's own payments made (amount, date, status) and scheduled installments (amount, due date, status). Read-only: cannot take payments.",
+    input_schema: { type: "object", additionalProperties: false, properties: {} },
+  },
+  {
+    name: "get_my_onboarding_tasks",
+    description: "The texting client's own onboarding tasks still pending or completed.",
+    input_schema: { type: "object", additionalProperties: false, properties: {} },
+  },
+  {
+    name: "search_faq",
+    description:
+      "Search OFG's FAQ / knowledge base (process, timelines, documents, billing policy, portal how-to). Use for any general question.",
+    input_schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { query: { type: "string", maxLength: 120 } },
+      required: ["query"],
+    },
+  },
+  {
+    name: "list_services",
+    description: "OFG's public programs/packages with public prices, billing interval and duration.",
+    input_schema: { type: "object", additionalProperties: false, properties: {} },
+  },
+  {
+    name: "request_callback",
+    description:
+      "Log a callback request for staff when the person asks for a call or to talk to someone. Creates one staff task per thread (deduped). After calling it, tell them a teammate will call.",
+    input_schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        preferred_time: { type: "string", maxLength: 80 },
+        topic: { type: "string", maxLength: 160 },
+      },
+    },
+  },
+];
+
+/** Tools offered for this identity — account tools only for a verified single client. */
+export function inboundAiToolsForIdentity(identity: InboundAiIdentity) {
+  return INBOUND_AI_LOOKUP_TOOLS.filter(
+    (t) => identity === "client" || !INBOUND_AI_CLIENT_ONLY_TOOLS.has(t.name),
+  );
+}
+
+/** Identity from the server's phone match: one client = client; anything else gets no account data. */
+export function inboundAiIdentityFor(opts: {
+  clientId: number | null | undefined;
+  clientsOnPhone: number;
+  crmContactId: number | null | undefined;
+}): InboundAiIdentity {
+  if (opts.clientId && opts.clientsOnPhone === 1) return "client";
+  if (!opts.clientId && opts.crmContactId) return "contact";
+  return "unverified";
+}
+
+export async function countClientsByPhone(fromRaw: string): Promise<number> {
+  const variants = phoneMatchVariants(fromRaw);
+  if (!variants.length) return 0;
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT COUNT(*) AS n FROM clients
+     WHERE phone IN (${variants.map(() => "?").join(",")})
+        OR REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(phone,''),'+',''),'-',''),'(',''),')','') IN (${variants.map(() => "?").join(",")})`,
+    [...variants, ...variants.map((v) => normalizePhoneDigits(v))],
+  );
+  return Number(rows[0]?.n || 0);
+}
+
+const inboundAiYmd = (d: unknown): string | null => {
+  if (!d) return null;
+  const t = d instanceof Date ? d : new Date(String(d));
+  if (Number.isNaN(t.getTime())) return null;
+  const iso = t.toISOString().slice(0, 10);
+  const [y, m, dd] = iso.split("-");
+  return `${m}/${dd}/${y}`;
+};
+const inboundAiMoney = (cents: unknown) => `$${(Number(cents || 0) / 100).toFixed(2).replace(/\.00$/, "")}`;
+
+export async function executeInboundAiTool(
+  name: string,
+  argsIn: unknown,
+  ctx: InboundAiToolCtx,
+): Promise<Record<string, unknown>> {
+  const args = argsIn && typeof argsIn === "object" ? (argsIn as Record<string, unknown>) : {};
+  if (!INBOUND_AI_LOOKUP_TOOLS.some((t) => t.name === name)) return { error: "unknown_tool" };
+  // Hard gate (the tool list already hides these): no account data without a verified single client.
+  if (INBOUND_AI_CLIENT_ONLY_TOOLS.has(name) && (ctx.identity !== "client" || !ctx.clientId)) {
+    return { error: "not_verified", message: "No account data for this sender. Offer a callback." };
+  }
+  const clientId = ctx.clientId as number;
+  switch (name) {
+    case "get_my_account": {
+      const [r] = await pool.query<RowDataPacket[]>(
+        `SELECT c.first_name, c.status, c.pipeline_stage, c.created_at, c.contract_signed_at,
+                p.name AS package_name, a.first_name AS specialist
+         FROM clients c
+         LEFT JOIN packages p ON p.id = c.package_id
+         LEFT JOIN admins a ON a.id = c.assigned_admin_id
+         WHERE c.id = ? LIMIT 1`,
+        [clientId],
+      );
+      if (!r[0]) return { error: "not_found" };
+      return {
+        first_name: r[0].first_name,
+        status: r[0].status,
+        pipeline_stage: r[0].pipeline_stage,
+        program: r[0].package_name || null,
+        enrolled_on: inboundAiYmd(r[0].created_at),
+        contract_signed: !!r[0].contract_signed_at,
+        specialist_first_name: r[0].specialist || null,
+      };
+    }
+    case "get_my_rounds": {
+      const caseId = await resolvePrimaryActiveCaseId(pool, clientId);
+      if (!caseId) return { rounds: "no active case" };
+      const [c] = await pool.query<RowDataPacket[]>(
+        `SELECT pipeline_stage, max_rounds FROM credit_repair_cases WHERE id = ? AND client_id = ? LIMIT 1`,
+        [caseId, clientId],
+      );
+      const [pub] = await pool.query<RowDataPacket[]>(
+        `SELECT MAX(round_number) AS r FROM client_round_reports crr
+         WHERE client_id = ? AND ${ROUND_REPORT_CLIENT_VISIBLE_SQL}`,
+        [clientId],
+      );
+      const stage = String(c[0]?.pipeline_stage || "");
+      const maxRounds = clampMaxRounds(c[0]?.max_rounds);
+      const lastPublished = Number(pub[0]?.r || 0);
+      const stageRound = /^round_(\d+)$/.exec(stage);
+      const current = stageRound ? Math.max(Number(stageRound[1]), lastPublished) : lastPublished;
+      const [s] = await pool.query<RowDataPacket[]>(
+        `SELECT round_1_date, round_2_date, round_3_date, round_4_date, round_5_date, extended_dates_json
+         FROM case_round_schedules WHERE case_id = ? LIMIT 1`,
+        [caseId],
+      );
+      const schedule: Record<string, string | null> = {};
+      if (s[0]) {
+        for (let i = 1; i <= 5; i++) schedule[`round_${i}`] = inboundAiYmd(s[0][`round_${i}_date`]);
+        let ext: Record<string, string> = {};
+        try {
+          ext = typeof s[0].extended_dates_json === "string" ? JSON.parse(s[0].extended_dates_json || "{}") : s[0].extended_dates_json || {};
+        } catch {
+          ext = {};
+        }
+        for (const [k, v] of Object.entries(ext || {})) if (Number(k) <= maxRounds) schedule[`round_${k}`] = inboundAiYmd(v);
+      }
+      const next = current + 1;
+      return {
+        pipeline_stage: stage,
+        current_round: current || null,
+        total_rounds: maxRounds,
+        last_published_report_round: lastPublished || null,
+        next_round: next <= maxRounds ? { round: next, expected: schedule[`round_${next}`] ?? null } : null,
+        schedule,
+      };
+    }
+    case "get_my_reports": {
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT round_number, created_at, score_before, score_after, items_removed
+         FROM client_round_reports crr
+         WHERE client_id = ? AND ${ROUND_REPORT_CLIENT_VISIBLE_SQL}
+         ORDER BY round_number DESC, id DESC LIMIT 24`,
+        [clientId],
+      );
+      const seen = new Set<number>();
+      const reports = rows
+        .filter((r) => !seen.has(Number(r.round_number)) && seen.add(Number(r.round_number)))
+        .map((r) => ({
+          round: Number(r.round_number),
+          published: inboundAiYmd(r.created_at),
+          score_before: r.score_before ?? null,
+          score_after: r.score_after ?? null,
+          items_removed: Number(r.items_removed || 0),
+        }));
+      const portal = `${APP_URL}/portal/reports`;
+      const out: Record<string, unknown> = { reports, portal_reports_link: portal };
+      const want = Number(args.round_number);
+      if (Number.isInteger(want) && want > 0) {
+        if (!reports.some((r) => r.round === want)) {
+          out.pdf = `no published report for round ${want}`;
+        } else {
+          const pdf = await findRoundReportPdfRow({ clientId, roundNumber: want });
+          if (pdf?.id) {
+            const token = await createRoundReportDownloadToken(Number(pdf.id), clientId);
+            out.pdf_link = `${APP_URL}/api/public/round-report-pdf/${token}`;
+            out.pdf_link_expires_hours = ROUND_PDF_DOWNLOAD_TTL_HOURS;
+          } else {
+            out.pdf = "PDF not available — use the portal link";
+          }
+        }
+      }
+      return out;
+    }
+    case "get_my_documents": {
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT doc_type, review_status, uploaded_at FROM client_documents
+         WHERE client_id = ? AND funding_application_id IS NULL
+         ORDER BY uploaded_at DESC LIMIT 30`,
+        [clientId],
+      );
+      const docs = rows.map((r) => ({ type: r.doc_type, review_status: r.review_status, uploaded: inboundAiYmd(r.uploaded_at) }));
+      const have = new Set(rows.filter((r) => r.review_status !== "rejected").map((r) => String(r.doc_type)));
+      return {
+        documents: docs,
+        // Same required set as onboarding (ID front/back, SSN card, proof of address).
+        missing_required: ONBOARDING_REQUIRED_DOCS.filter((d) => !have.has(d)),
+        upload_link: `${APP_URL}/portal/documents`,
+      };
+    }
+    case "get_my_payments": {
+      const [paid] = await pool.query<RowDataPacket[]>(
+        `SELECT amount_cents, status, paid_at, created_at FROM payments
+         WHERE client_id = ? ORDER BY COALESCE(paid_at, created_at) DESC LIMIT 10`,
+        [clientId],
+      );
+      const [splits] = await pool.query<RowDataPacket[]>(
+        `SELECT label, amount_cents, due_date, status, paid_at FROM payment_splits
+         WHERE client_id = ? AND status <> 'cancelled' ORDER BY due_date ASC LIMIT 24`,
+        [clientId],
+      );
+      return {
+        payments: paid.map((p) => ({ amount: inboundAiMoney(p.amount_cents), status: p.status, date: inboundAiYmd(p.paid_at || p.created_at) })),
+        installments: splits.map((s) => ({
+          label: String(s.label || "Payment").slice(0, 60),
+          amount: inboundAiMoney(s.amount_cents),
+          due: inboundAiYmd(s.due_date),
+          status: s.status,
+          paid_on: inboundAiYmd(s.paid_at),
+        })),
+      };
+    }
+    case "get_my_onboarding_tasks": {
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT t.title_en, t.title_es, ctc.status FROM client_task_completions ctc
+         JOIN onboarding_task_templates t ON t.id = ctc.task_template_id
+         WHERE ctc.client_id = ? ORDER BY t.sort_order ASC LIMIT 30`,
+        [clientId],
+      );
+      return {
+        tasks: rows.map((r) => ({ title: ctx.lang === "es" ? r.title_es : r.title_en, status: r.status })),
+        portal_link: `${APP_URL}/portal`,
+      };
+    }
+    case "search_faq": {
+      const words = String(args.query || "")
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}\s]/gu, " ")
+        .split(/\s+/)
+        .filter((w) => w.length >= 3)
+        .slice(0, 6);
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT question, answer, category FROM support_faq WHERE is_active = 1 ORDER BY sort_order ASC, id ASC LIMIT 200`,
+      );
+      const scored = rows
+        .map((r) => {
+          const hay = `${r.question} ${r.answer}`.toLowerCase();
+          const q = String(r.question || "").toLowerCase();
+          const score = words.reduce((n, w) => n + (q.includes(w) ? 2 : hay.includes(w) ? 1 : 0), 0);
+          return { r, score };
+        })
+        .filter((x) => x.score > 0 || words.length === 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 5);
+      return {
+        results: scored.map(({ r }) => ({
+          category: r.category,
+          q: String(r.question || "").slice(0, 200),
+          a: String(r.answer || "").slice(0, 700),
+        })),
+      };
+    }
+    case "list_services": {
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT name, subtitle, price_cents, billing_interval, duration_months FROM packages
+         WHERE is_active = 1 ORDER BY sort_order ASC, id ASC LIMIT 12`,
+      );
+      return {
+        services: rows.map((p) => ({
+          name: p.name,
+          subtitle: p.subtitle || null,
+          price: inboundAiMoney(p.price_cents),
+          billing: p.billing_interval,
+          months: Number(p.duration_months || 0) || null,
+        })),
+        pricing_link: `${APP_URL}/pricing`,
+      };
+    }
+    case "request_callback": {
+      ctx.callbackRequested = true;
+      if (ctx.dryRun) return { ok: true, dry_run: true };
+      const preferred = String(args.preferred_time || "").trim().slice(0, 80);
+      const topic = String(args.topic || "").trim().slice(0, 160);
+      // Dedupe key lives in the description (readable), not in the visible labels.
+      const ref = `Thread ref #${ctx.conversationId}.`; // trailing "." so #12 never matches #123
+      const [dupe] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM admin_work_tasks
+         WHERE status <> 'done' AND description LIKE ?
+           AND JSON_CONTAINS(labels_json, JSON_QUOTE('callback'))
+           AND created_at > NOW() - INTERVAL 1 DAY LIMIT 1`,
+        [`%${ref}%`],
+      );
+      if (dupe[0]) return { ok: true, already_requested: true };
+      const caseId = ctx.clientId ? await resolvePrimaryActiveCaseId(pool, ctx.clientId) : null;
+      const who = ctx.identity === "client" ? ctx.displayName : `${ctx.displayName} (unverified sender)`;
+      await pool.query<ResultSetHeader>(
+        `INSERT INTO admin_work_tasks
+           (title, description, status, priority, due_at, labels_json, source, assignee_admin_id, case_id, created_by_admin_id)
+         VALUES (?, ?, 'backlog', 'high', DATE_ADD(NOW(), INTERVAL 4 HOUR), ?, 'optimum', ?, ?, NULL)`,
+        [
+          `Callback: ${who}`.slice(0, 255),
+          [
+            `Requested by text (AI assistant).`,
+            preferred && `Preferred time: ${preferred}`,
+            topic && `Topic: ${topic}`,
+            `Thread: ${APP_URL}/admin/conversations${ctx.clientId ? `?client=${ctx.clientId}` : ""}`,
+            ref,
+          ]
+            .filter(Boolean)
+            .join("\n"),
+          JSON.stringify(["callback", "inbound_ai"]),
+          ctx.assigneeAdminId || null,
+          caseId,
+        ],
+      );
+      return { ok: true, preferred_time: preferred || null };
+    }
+  }
+  return { error: "unknown_tool" };
+}
+
+/**
+ * Voice (Twilio ~15s budget): the same sender-locked lookups, run in parallel
+ * BEFORE the single Claude call instead of a multi-step tool loop.
+ */
+async function loadInboundAiVoiceAccountContext(ctx: InboundAiToolCtx): Promise<string> {
+  if (ctx.identity !== "client" || !ctx.clientId) return "";
+  const names = ["get_my_account", "get_my_rounds", "get_my_reports", "get_my_documents", "get_my_payments"];
+  const parts = await Promise.all(names.map((n) => runInboundAiTool(n, {}, ctx).then((t) => `${n}: ${t}`)));
+  return parts.join("\n");
+}
+
+/**
+ * One-time system note when an SMS thread's phone belongs to several clients
+ * (spouses/family): names them so staff confirm who is texting. The AI never
+ * uses account data for such a phone.
+ */
+async function noteSharedPhoneOnce(conversationId: number, fromRaw: string): Promise<void> {
+  const variants = phoneMatchVariants(fromRaw);
+  if (!variants.length) return;
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT id, first_name, last_name FROM clients
+     WHERE phone IN (${variants.map(() => "?").join(",")})
+        OR REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(phone,''),'+',''),'-',''),'(',''),')','') IN (${variants.map(() => "?").join(",")})
+     ORDER BY id DESC LIMIT 6`,
+    [...variants, ...variants.map((v) => normalizePhoneDigits(v))],
+  );
+  if (rows.length < 2) return;
+  const [seen] = await pool.query<RowDataPacket[]>(
+    `SELECT id FROM conversation_messages
+     WHERE conversation_id = ? AND direction = 'system'
+       AND JSON_EXTRACT(metadata_json, '$.shared_phone_notice') = true LIMIT 1`,
+    [conversationId],
+  );
+  if (seen[0]) return;
+  const names = rows.map((r) => `${r.first_name || ""} ${r.last_name || ""}`.trim() || `#${r.id}`).join(", ");
+  await pool.query(
+    `INSERT INTO conversation_messages (conversation_id, direction, channel, body, metadata_json)
+     VALUES (?, 'system', 'internal', ?, ?)`,
+    [
+      conversationId,
+      `[Shared phone] This number belongs to ${rows.length} clients: ${names}. Confirm who is texting before sharing account details. The AI assistant answers general questions only on this number.`.slice(0, 2000),
+      JSON.stringify({ shared_phone_notice: true, client_ids: rows.map((r) => Number(r.id)) }),
+    ],
+  );
+}
+
+/** Run one tool for the model: never throws, caps size, records links + grounding. */
+async function runInboundAiTool(name: string, args: unknown, ctx: InboundAiToolCtx): Promise<string> {
+  let out: Record<string, unknown>;
+  try {
+    out = await executeInboundAiTool(name, args, ctx);
+  } catch (e: any) {
+    console.warn("[inbound-ai:tool]", name, e?.message || e);
+    out = { error: "lookup_failed" };
+  }
+  ctx.toolsUsed.push(name);
+  const text = JSON.stringify(out).slice(0, 4000);
+  ctx.grounding.push(text);
+  // Spanish replies write tool dates as DD/MM/YYYY — ground those too (same dates, not new ones).
+  const swapped = (text.match(/\b\d{2}\/\d{2}\/\d{4}\b/g) || []).map((d) => {
+    const [m, dd, y] = d.split("/");
+    return `${dd}/${m}/${y} ${Number(dd)}/${Number(m)}/${y} ${Number(m)}/${Number(dd)}/${y} ${y}-${m}-${dd}`;
+  });
+  if (swapped.length) ctx.grounding.push(swapped.join(" "));
+  for (const u of text.match(/https?:\/\/[^\s"\\]+/g) || []) {
+    if (u.startsWith(APP_URL) && !ctx.allowedUrls.includes(u)) ctx.allowedUrls.push(u);
+  }
+  return text;
+}
+
 /** Structured triage output for inbound AI (forced tool_use). */
 const INBOUND_AI_DECISION_TOOL = {
   name: "triage_decision",
@@ -41725,7 +42288,7 @@ const INBOUND_AI_DECISION_TOOL = {
   },
 } as const;
 
-async function callInboundAiClaude(opts: {
+export async function callInboundAiClaude(opts: {
   lang: "en" | "es";
   channel: "sms" | "voice";
   displayName: string;
@@ -41735,6 +42298,10 @@ async function callInboundAiClaude(opts: {
   threadLines: string;
   aiTurnCount: number;
   timeoutMs: number;
+  /** SMS: live read-only lookups bound to the verified sender (voice stays single-shot). */
+  toolCtx?: InboundAiToolCtx;
+  /** Voice: server-decided identity (no tool loop). */
+  identity?: InboundAiIdentity;
 }): Promise<InboundAiDecision> {
   const resolvedKey = inboundAiAnthropicKey(opts.channel);
   if (!resolvedKey) {
@@ -41744,6 +42311,7 @@ async function callInboundAiClaude(opts: {
   const userMsg = [
     `Channel: ${opts.channel}`,
     `Contact: ${opts.displayName}`,
+    `Identity: ${opts.toolCtx?.identity ?? opts.identity ?? "unverified"}`,
     `Language: ${opts.lang}`,
     `Prior AI turns this thread: ${opts.aiTurnCount}`,
     `CRM:\n${opts.crmContext || "(none)"}`,
@@ -41751,77 +42319,112 @@ async function callInboundAiClaude(opts: {
     `Recent thread:\n${opts.threadLines || "(none)"}`,
     `Latest inbound:\n${opts.inboundText}`,
   ].join("\n\n");
+  const ctx = opts.toolCtx;
+  const tools = ctx ? [...inboundAiToolsForIdentity(ctx.identity), INBOUND_AI_DECISION_TOOL] : [INBOUND_AI_DECISION_TOOL];
+  const messages: Array<{ role: "user" | "assistant"; content: unknown }> = [{ role: "user", content: userMsg }];
+  const deadline = Date.now() + (ctx ? INBOUND_AI_SMS_TOOL_BUDGET_MS : opts.timeoutMs);
+  let calls = 0;
   try {
-    const aiRes = await axios.post(
-      "https://api.anthropic.com/v1/messages",
-      {
-        model:
-          String(process.env.ANTHROPIC_MODEL || "").trim() ||
-          "claude-sonnet-4-6",
-        max_tokens: 700,
-        system: inboundAiSystemPrompt(opts.lang),
-        messages: [{ role: "user", content: userMsg }],
-        // Tool call: Claude returns a parsed object, so replies with line
-        // breaks / quotes can no longer break JSON.parse (the Oct 5–6
-        // "parse_error on every message" incident). `auto` + strict (not a
-        // forced tool_choice, which 400s on Opus 5.5 / Sonnet 5.5) — the
-        // system prompt requires the call; text JSON is the fallback.
-        tools: [INBOUND_AI_DECISION_TOOL],
-        tool_choice: { type: "auto" },
-      },
-      {
-        headers: {
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01",
-          "content-type": "application/json",
-          ...(workspaceId ? { "anthropic-workspace-id": workspaceId } : {}),
+    for (let round = 0; round <= INBOUND_AI_MAX_TOOL_ROUNDS; round++) {
+      const left = deadline - Date.now();
+      if (left < 1500) return inboundAiClaudeFailureDecision(opts.lang, "claude_timeout");
+      const aiRes = await axios.post(
+        "https://api.anthropic.com/v1/messages",
+        {
+          model:
+            String(process.env.ANTHROPIC_MODEL || "").trim() ||
+            "claude-sonnet-4-6",
+          max_tokens: 900,
+          system: inboundAiSystemPrompt(opts.lang),
+          messages,
+          // Tool call: Claude returns a parsed object, so replies with line
+          // breaks / quotes can no longer break JSON.parse (the Oct 5–6
+          // "parse_error on every message" incident). `auto` + strict (not a
+          // forced tool_choice, which 400s on Opus 5.5 / Sonnet 5.5) — the
+          // system prompt requires the call; text JSON is the fallback.
+          tools,
+          tool_choice: { type: "auto" },
         },
-        timeout: opts.timeoutMs,
-        validateStatus: () => true,
-      },
-    );
-    await meterAnthropic("ai_inbound_reply", aiRes.data);
-    if (aiRes.status === 401 || aiRes.status === 403) {
-      console.warn(
-        `[inbound-ai] Claude HTTP ${aiRes.status} (${opts.channel}, key=${keySlot})`,
-        String(aiRes.data?.error?.message || "").slice(0, 200),
+        {
+          headers: {
+            "x-api-key": apiKey,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+            ...(workspaceId ? { "anthropic-workspace-id": workspaceId } : {}),
+          },
+          timeout: Math.min(opts.timeoutMs, left),
+          validateStatus: () => true,
+        },
       );
-      return inboundAiClaudeFailureDecision(opts.lang, "claude_auth");
-    }
-    if (aiRes.status < 200 || aiRes.status >= 300) {
-      console.warn(
-        `[inbound-ai] Claude HTTP ${aiRes.status}`,
-        String(aiRes.data?.error?.message || "").slice(0, 200),
+      await meterAnthropic("ai_inbound_reply", aiRes.data);
+      if (aiRes.status === 401 || aiRes.status === 403) {
+        console.warn(
+          `[inbound-ai] Claude HTTP ${aiRes.status} (${opts.channel}, key=${keySlot})`,
+          String(aiRes.data?.error?.message || "").slice(0, 200),
+        );
+        return inboundAiClaudeFailureDecision(opts.lang, "claude_auth");
+      }
+      if (aiRes.status < 200 || aiRes.status >= 300) {
+        console.warn(
+          `[inbound-ai] Claude HTTP ${aiRes.status}`,
+          String(aiRes.data?.error?.message || "").slice(0, 200),
+        );
+        return inboundAiClaudeFailureDecision(opts.lang, "claude_http");
+      }
+      const blocks: any[] = Array.isArray(aiRes.data?.content)
+        ? aiRes.data.content
+        : [];
+      const toolInput = blocks.find(
+        (b) => b?.type === "tool_use" && b?.name === INBOUND_AI_DECISION_TOOL.name,
+      )?.input;
+      const lookups = blocks.filter(
+        (b) => b?.type === "tool_use" && b?.name !== INBOUND_AI_DECISION_TOOL.name,
       );
-      return inboundAiClaudeFailureDecision(opts.lang, "claude_http");
+      // Lookups requested (and no final decision yet): run them, bound to the sender, and continue.
+      if (!toolInput && ctx && lookups.length > 0 && round < INBOUND_AI_MAX_TOOL_ROUNDS) {
+        const results = [];
+        for (const b of lookups) {
+          calls += 1;
+          const content =
+            calls > INBOUND_AI_MAX_TOOL_CALLS
+              ? JSON.stringify({ error: "lookup_limit", message: "Answer with what you have now." })
+              : await runInboundAiTool(String(b.name), b.input, ctx);
+          results.push({ type: "tool_result", tool_use_id: b.id, content });
+        }
+        messages.push({ role: "assistant", content: blocks });
+        messages.push({
+          role: "user",
+          content:
+            round + 1 >= INBOUND_AI_MAX_TOOL_ROUNDS
+              ? [...results, { type: "text", text: "No more lookups: call triage_decision now." }]
+              : results,
+        });
+        continue;
+      }
+      // Fallback: plain-text JSON (older behavior) if no tool block came back.
+      const text = blocks
+        .filter((b) => b?.type === "text")
+        .map((b) => b.text)
+        .join("");
+      const parsed: InboundAiDecision | null = toolInput
+        ? parseInboundAiDecision(toolInput)
+        : parseInboundAiDecisionText(text);
+      if (!parsed) {
+        console.warn(
+          "[inbound-ai] parse_error",
+          JSON.stringify({
+            channel: opts.channel,
+            stop_reason: aiRes.data?.stop_reason ?? null,
+            has_tool: !!toolInput,
+            lookups: lookups.length,
+            text: text.slice(0, 300),
+          }),
+        );
+        return inboundAiClaudeFailureDecision(opts.lang, "parse_error");
+      }
+      return finalizeInboundAiDecision(parsed);
     }
-    const blocks: any[] = Array.isArray(aiRes.data?.content)
-      ? aiRes.data.content
-      : [];
-    const toolInput = blocks.find(
-      (b) => b?.type === "tool_use" && b?.name === INBOUND_AI_DECISION_TOOL.name,
-    )?.input;
-    // Fallback: plain-text JSON (older behavior) if no tool block came back.
-    const text = blocks
-      .filter((b) => b?.type === "text")
-      .map((b) => b.text)
-      .join("");
-    const parsed: InboundAiDecision | null = toolInput
-      ? parseInboundAiDecision(toolInput)
-      : parseInboundAiDecisionText(text);
-    if (!parsed) {
-      console.warn(
-        "[inbound-ai] parse_error",
-        JSON.stringify({
-          channel: opts.channel,
-          stop_reason: aiRes.data?.stop_reason ?? null,
-          has_tool: !!toolInput,
-          text: text.slice(0, 300),
-        }),
-      );
-      return inboundAiClaudeFailureDecision(opts.lang, "parse_error");
-    }
-    return finalizeInboundAiDecision(parsed);
+    return inboundAiClaudeFailureDecision(opts.lang, "parse_error");
   } catch (e: any) {
     const timedOut =
       e?.code === "ECONNABORTED" || /timeout/i.test(String(e?.message || ""));
@@ -41833,7 +42436,7 @@ async function callInboundAiClaude(opts: {
   }
 }
 
-async function loadInboundAiFaqContext(limit = 8): Promise<string> {
+export async function loadInboundAiFaqContext(limit = 8): Promise<string> {
   try {
     const [rows] = await pool.query<RowDataPacket[]>(
       `SELECT question, answer, category FROM support_faq
@@ -42162,7 +42765,7 @@ export async function notifyInboundAiEscalation(opts: {
  * PDF link to the latest report. Returns the context text + the only URLs the
  * AI is allowed to send.
  */
-async function loadInboundAiRoundContext(
+export async function loadInboundAiRoundContext(
   clientId: number,
 ): Promise<{ text: string; allowedUrls: string[] }> {
   const portal = `${APP_URL}/portal/reports`;
@@ -42269,6 +42872,10 @@ async function tryProcessInboundAiSms(opts: {
   ) {
     return { tookOver: false, mode: "skip" };
   }
+  // Reactions / "thanks" / "ok": no AI reply, no escalation — staff see it in the inbox.
+  if (inboundAiIsAckOnly(opts.inboundBody)) {
+    return { tookOver: false, mode: "skip" };
+  }
   const aiTurnCount = countAiOutboundTurnsFromRows(recent);
   const hard = inboundAiHardEscalateReason(opts.inboundBody, {
     isUnknown,
@@ -42281,7 +42888,24 @@ async function tryProcessInboundAiSms(opts: {
   let allowedReplyUrls: string[] = [`${APP_URL}/portal/reports`];
   /** Blocked clients (portal locked) never get an AI reply — staff only. */
   let clientBlocked = false;
-  if (opts.clientId) {
+  // Identity comes only from the phone match: a phone shared by 2+ clients
+  // (spouses, family) is unverified — no client's account data is used.
+  const clientsOnPhone = opts.clientId ? await countClientsByPhone(toPeer) : 0;
+  const identity = inboundAiIdentityFor({
+    clientId: opts.clientId,
+    clientsOnPhone,
+    crmContactId: opts.crmContactId,
+  });
+  if (opts.clientId && identity !== "client") {
+    const [brows] = await pool.query<RowDataPacket[]>(
+      `SELECT status, preferred_language FROM clients WHERE id = ? LIMIT 1`,
+      [opts.clientId],
+    );
+    clientBlocked = String(brows[0]?.status || "") === "blocked";
+    preferredLanguage = brows[0]?.preferred_language ? String(brows[0].preferred_language) : null;
+    displayName = "unverified sender (phone shared by several clients)";
+    crmContext = "kind=shared_phone";
+  } else if (opts.clientId) {
     const [crows] = await pool.query<RowDataPacket[]>(
       `SELECT first_name, last_name, status, pipeline_stage, preferred_language
        FROM clients WHERE id = ? LIMIT 1`,
@@ -42430,6 +43054,8 @@ async function tryProcessInboundAiSms(opts: {
   const threadLines = [...recent]
     .reverse()
     .filter((m) => String(m.body || "").trim())
+    // Staff-only notes that name other clients (shared phone) never reach the AI.
+    .filter((m) => inboundAiParseMeta(m.metadata_json)?.shared_phone_notice !== true)
     .slice(-8)
     .map(
       (m) =>
@@ -42439,6 +43065,7 @@ async function tryProcessInboundAiSms(opts: {
 
   let decision: InboundAiDecision;
   let faqContextUsed = "";
+  let toolCtx: InboundAiToolCtx | null = null;
   if (hard) {
     decision = {
       action: "escalate",
@@ -42470,6 +43097,18 @@ async function tryProcessInboundAiSms(opts: {
   } else {
     const faqContext = await loadInboundAiFaqContext(8);
     faqContextUsed = faqContext;
+    toolCtx = {
+      identity,
+      clientId: identity === "client" ? Number(opts.clientId) : null,
+      conversationId: opts.conversationId,
+      displayName,
+      lang,
+      assigneeAdminId: adminId,
+      allowedUrls: [...allowedReplyUrls],
+      grounding: [],
+      toolsUsed: [],
+      callbackRequested: false,
+    };
     decision = await callInboundAiClaude({
       lang,
       channel: "sms",
@@ -42480,7 +43119,16 @@ async function tryProcessInboundAiSms(opts: {
       threadLines,
       aiTurnCount,
       timeoutMs: INBOUND_AI_SMS_TIMEOUT_MS,
+      toolCtx,
     });
+    allowedReplyUrls = toolCtx.allowedUrls;
+    if (toolCtx.toolsUsed.length || toolCtx.callbackRequested) {
+      await insertInboundAiSystemNote(
+        opts.conversationId,
+        `[Inbound AI] Looked up: ${[...new Set(toolCtx.toolsUsed)].join(", ") || "—"}${toolCtx.callbackRequested ? " · callback task created" : ""}`,
+        { inbound_ai: true, mode: "lookup", identity, tools: toolCtx.toolsUsed, callback: toolCtx.callbackRequested },
+      );
+    }
   }
 
   // Code-level safety check: anything beyond information / round status /
@@ -42489,7 +43137,7 @@ async function tryProcessInboundAiSms(opts: {
   if (decision.action !== "escalate") {
     const blockReason = checkInboundAiReply(decision.reply, {
       allowedUrls: allowedReplyUrls,
-      groundingText: [crmContext, faqContextUsed, threadLines, opts.inboundBody].join("\n"),
+      groundingText: [crmContext, faqContextUsed, threadLines, opts.inboundBody, ...(toolCtx?.grounding ?? [])].join("\n"),
     });
     if (blockReason) {
       blockedDraft = decision.reply;
@@ -42512,6 +43160,17 @@ async function tryProcessInboundAiSms(opts: {
   const billingQuestion = inboundAiIsBillingQuestion(opts.inboundBody);
 
   if (decision.action === "escalate") {
+    // The model's own hold text goes through the same guard; if it breaks a rule, the standard hold is sent.
+    if (
+      decision.reply.trim() &&
+      decision.reply.trim() !== inboundAiEscalationHoldMessage(lang) &&
+      checkInboundAiReply(decision.reply, {
+        allowedUrls: allowedReplyUrls,
+        groundingText: [crmContext, faqContextUsed, threadLines, opts.inboundBody, ...(toolCtx?.grounding ?? [])].join("\n"),
+      })
+    ) {
+      decision = { ...decision, reply: inboundAiEscalationHoldMessage(lang) };
+    }
     const hold = decision.reply.trim();
     const failureHold = inboundAiIsClaudeFailureReason(decision.escalate_reason);
     // One hold per escalation streak (any reason). Re-read the thread right
@@ -66470,6 +67129,77 @@ function buildApp() {
     },
   );
 
+  // How the SMS AI handled texts: answered vs handed to staff, lookups, callbacks.
+  app.get(
+    "/api/admin/conversations/ai-stats",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      if (!(await requireConversationsAccess(req, res))) return;
+      const days = Math.min(90, Math.max(1, Number(req.query.days) || 30));
+      try {
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT JSON_UNQUOTE(JSON_EXTRACT(metadata_json, '$.mode')) AS mode,
+                  JSON_UNQUOTE(JSON_EXTRACT(metadata_json, '$.reason')) AS reason,
+                  JSON_EXTRACT(metadata_json, '$.callback') = true AS callback,
+                  COUNT(*) AS n
+           FROM conversation_messages
+           WHERE direction = 'system'
+             AND JSON_EXTRACT(metadata_json, '$.inbound_ai') = true
+             AND created_at > NOW() - INTERVAL ? DAY
+           GROUP BY 1, 2, 3`,
+          [days],
+        );
+        // Answers = every AI text that wasn't a "teammate will follow up" hold — full and partial answers.
+        const [ans] = await pool.query<RowDataPacket[]>(
+          `SELECT COUNT(*) AS n FROM conversation_messages
+           WHERE direction = 'outbound'
+             AND JSON_EXTRACT(metadata_json, '$.inbound_ai') = true
+             AND COALESCE(JSON_EXTRACT(metadata_json, '$.inbound_ai_hold'), false) = false
+             AND body NOT IN (?, ?)
+             AND created_at > NOW() - INTERVAL ? DAY`,
+          // Older holds were saved without the flag — exclude them by their exact text.
+          [inboundAiEscalationHoldMessage("en"), inboundAiEscalationHoldMessage("es"), days],
+        );
+        const answered = Number(ans[0]?.n || 0);
+        let resolved = 0;
+        let escalated = 0;
+        let lookups = 0;
+        let callbacks = 0;
+        const byReason = new Map<string, number>();
+        for (const r of rows) {
+          const n = Number(r.n || 0);
+          if (r.mode === "resolved") resolved += n;
+          else if (r.mode === "escalated") {
+            escalated += n;
+            const k = String(r.reason || "unspecified").slice(0, 40);
+            byReason.set(k, (byReason.get(k) || 0) + n);
+          } else if (r.mode === "lookup") {
+            lookups += n;
+            if (Number(r.callback) === 1) callbacks += n;
+          }
+        }
+        const body: ConversationsAiStats = {
+          days,
+          resolved,
+          escalated,
+          answered,
+          resolve_rate: answered + escalated > 0 ? Math.round((answered / (answered + escalated)) * 100) : null,
+          lookups,
+          callbacks,
+          escalated_by_reason: [...byReason.entries()]
+            .map(([reason, count]) => ({ reason, count }))
+            .sort((a, b) => b.count - a.count)
+            .slice(0, 12),
+        };
+        res.json(body);
+      } catch (e: any) {
+        console.error("[conversations:ai-stats]", e?.message || e);
+        res.status(500).json({ error: "Failed to load AI stats" });
+      }
+    },
+  );
+
   app.get(
     "/api/admin/conversations/badge",
     requireAdmin,
@@ -72208,6 +72938,11 @@ function buildApp() {
       ofgNumberId,
       assignedAdminId: assigneeId,
     });
+    // Phone shared by 2+ clients: the thread stays on this client (no re-routing),
+    // but staff get a one-time notice naming everyone on the number.
+    await noteSharedPhoneOnce(conversationId, from).catch((e) =>
+      console.warn("[sms:shared-phone-note]", e?.message || e),
+    );
 
     // Reopen + bump unread
     await pool.query(
@@ -82819,7 +83554,7 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
           await insertInboundAiSystemNote(
             conversationId,
             inboundAiEscalatedSystemNote("voice_handoff", reason || "Connecting to staff"),
-            { inbound_ai: true, mode: "escalated", channel: "call" },
+            { inbound_ai: true, mode: "escalated", channel: "call", reason: "voice_handoff" },
           ).catch(() => undefined);
         }
         await notifyInboundAiEscalation({
@@ -82904,7 +83639,21 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
         : contactId
           ? "kind=crm_contact"
           : "";
-      if (clientId) {
+      // Same identity rule as SMS: account data only when the number matches exactly one client.
+      const voiceClientsOnPhone = clientId ? await countClientsByPhone(callerNumber) : 0;
+      const voiceIdentity = inboundAiIdentityFor({
+        clientId,
+        clientsOnPhone: voiceClientsOnPhone,
+        crmContactId: contactId,
+      });
+      if (clientId && voiceIdentity !== "client") {
+        const [srows] = await pool.query<RowDataPacket[]>(
+          `SELECT preferred_language FROM clients WHERE id = ? LIMIT 1`,
+          [clientId],
+        );
+        preferredLanguage = srows[0]?.preferred_language ? String(srows[0].preferred_language) : null;
+        crmContext = "kind=shared_phone";
+      } else if (clientId) {
         const [crows] = await pool.query<RowDataPacket[]>(
           `SELECT first_name, last_name, status, pipeline_stage, preferred_language
            FROM clients WHERE id = ? LIMIT 1`,
@@ -82955,18 +83704,50 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
           escalate_reason: hard,
         };
       } else {
-        const faqContext = await loadInboundAiFaqContext(6);
+        const voiceCtx: InboundAiToolCtx = {
+          identity: voiceIdentity,
+          clientId: voiceIdentity === "client" ? Number(clientId) : null,
+          conversationId: 0,
+          displayName,
+          lang,
+          assigneeAdminId: Number(assignedAdminId || 0),
+          allowedUrls: [],
+          grounding: [],
+          toolsUsed: [],
+          callbackRequested: false,
+        };
+        const [faqContext, accountData] = await Promise.all([
+          loadInboundAiFaqContext(6),
+          loadInboundAiVoiceAccountContext(voiceCtx).catch(() => ""),
+        ]);
+        const voiceCrm = accountData ? `${crmContext}\nAccount data (this caller only):\n${accountData}` : crmContext;
         decision = await callInboundAiClaude({
           lang,
           channel: "voice",
-          displayName,
+          displayName: voiceIdentity === "client" || !clientId ? displayName : "unverified caller",
           inboundText: speech.slice(0, 800),
-          crmContext,
+          crmContext: voiceCrm,
           faqContext,
           threadLines: `(voice turn ${turns + 1})`,
           aiTurnCount: turns,
           timeoutMs: INBOUND_AI_VOICE_TIMEOUT_MS,
+          identity: voiceIdentity,
         });
+        // Same safety guard as SMS: spoken amounts/scores/dates must come from the data; no links.
+        if (decision.action !== "escalate") {
+          const blocked = checkInboundAiReply(decision.reply, {
+            allowedUrls: [],
+            groundingText: [voiceCrm, faqContext, speech, ...voiceCtx.grounding].join("\n"),
+          });
+          if (blocked) {
+            decision = {
+              ...decision,
+              action: "escalate",
+              escalate_reason: `reply_guard:${blocked}`,
+              summary: `AI voice reply blocked (${blocked}) — draft: ${decision.reply.slice(0, 200)}`,
+            };
+          }
+        }
       }
 
       if (decision.action === "escalate") {

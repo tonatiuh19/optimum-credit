@@ -1420,6 +1420,25 @@ export interface AdminDocumentsListResponse {
   status_counts: AdminDocumentsStatusCounts;
 }
 
+/** GET /api/admin/conversations/ai-stats — how the SMS AI handled texts (Nov 8, 2026). */
+export interface ConversationsAiStats {
+  days: number;
+  /** AI answered on its own (resolve). */
+  resolved: number;
+  /** Handed to staff. */
+  escalated: number;
+  /** AI texts that answered (full or partial), excluding "a teammate will follow up" holds. */
+  answered: number;
+  /** answered / (answered + escalated), 0–100; null when nothing yet. */
+  resolve_rate: number | null;
+  /** Texts where the AI looked up live data. */
+  lookups: number;
+  /** Callback tasks the AI created for staff. */
+  callbacks: number;
+  /** Escalations by reason code, most first. */
+  escalated_by_reason: Array<{ reason: string; count: number }>;
+}
+
 export interface AdminConversationsListResponse {
   contacts: ConversationContactHubItem[];
   pagination: PaginationInfo;

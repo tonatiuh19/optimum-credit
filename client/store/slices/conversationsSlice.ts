@@ -7,6 +7,7 @@ import type {
   ConversationContactHubItem,
   ConversationMessage,
   ConversationTemplate,
+  ConversationsAiStats,
 } from "@shared/api";
 
 export type ConversationsView =
@@ -84,6 +85,8 @@ interface ConversationsState {
   templatesLoading: boolean;
   navBadgeUnread: number;
   navBadgeLoading: boolean;
+  /** SMS AI performance (answered vs handed to staff). */
+  aiStats: ConversationsAiStats | null;
   aiSuggestionsLoading: boolean;
   aiSuggestions: Array<{ id: string; label: string; body: string }>;
   retryCallInsightsId: number | null;
@@ -117,6 +120,7 @@ const initialState: ConversationsState = {
   templatesLoading: false,
   navBadgeUnread: 0,
   navBadgeLoading: false,
+  aiStats: null,
   aiSuggestionsLoading: false,
   aiSuggestions: [],
   retryCallInsightsId: null,
@@ -231,6 +235,20 @@ export const fetchConversationsNavBadge = createAsyncThunk(
       return Number(data.unread_total || 0);
     } catch (e: any) {
       return rejectWithValue(formatAxiosError(e, "Failed to load badge"));
+    }
+  },
+);
+
+export const fetchConversationsAiStats = createAsyncThunk(
+  "conversations/aiStats",
+  async (days: number | undefined, { rejectWithValue }) => {
+    try {
+      const { data } = await api.get<ConversationsAiStats>("/admin/conversations/ai-stats", {
+        params: { days: days ?? 30 },
+      });
+      return data;
+    } catch (e: any) {
+      return rejectWithValue(formatAxiosError(e, "Failed to load AI stats"));
     }
   },
 );
@@ -987,6 +1005,9 @@ const slice = createSlice({
 
     b.addCase(fetchConversationsNavBadge.pending, (s) => {
       s.navBadgeLoading = true;
+    });
+    b.addCase(fetchConversationsAiStats.fulfilled, (s, a) => {
+      s.aiStats = a.payload;
     });
     b.addCase(fetchConversationsNavBadge.fulfilled, (s, a) => {
       s.navBadgeLoading = false;

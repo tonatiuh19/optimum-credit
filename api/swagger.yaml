@@ -4412,6 +4412,24 @@ paths:
         "403":
           description: No assigned OFG number
 
+  /admin/conversations/ai-stats:
+    get:
+      tags: [Admin]
+      summary: SMS AI performance (answered vs handed to staff)
+      description: >
+        Counts from inbound-AI system notes over the last N days: texts the AI answered on its own,
+        texts handed to staff (by reason code), live lookups and callback tasks it created.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: query
+          name: days
+          schema: { type: integer, minimum: 1, maximum: 90, default: 30 }
+      responses:
+        "200":
+          description: ConversationsAiStats (days, answered, resolved, escalated, resolve_rate = answered / (answered + escalated), lookups, callbacks, escalated_by_reason[])
+        "403":
+          description: No assigned OFG number
+
   /admin/conversations/ably-token:
     get:
       tags: [Admin]

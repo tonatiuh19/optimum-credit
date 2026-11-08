@@ -28,6 +28,7 @@ import {
 import { getSharedAblyClient, isAblyPermanentlyUnavailable } from "@/lib/ably-client";
 import type { RealtimeChannel } from "ably";
 import AdminPageHeader from "@/components/AdminPageHeader";
+import { ConversationAiStatsPill } from "@/components/admin/conversations/ConversationAiStatsPill";
 import ConversationSocialHub from "@/components/admin/ConversationSocialHub";
 import ConversationCallInsights from "@/components/admin/ConversationCallInsights";
 import {
@@ -1625,6 +1626,7 @@ export default function AdminConversations() {
           description={t("conversations.description")}
           actions={
             <div className="flex items-center gap-2 flex-wrap">
+              <ConversationAiStatsPill />
               <button
               type="button"
               onClick={() => dispatch(setVoiceAvailable(!isAvailable))}

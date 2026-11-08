@@ -15,6 +15,7 @@
     "db:cleanup": "bash scripts/apply-migrations.sh --cleanup",
     "test:cleanup-fixtures": "npx tsx scripts/cleanup-integration-test-clients.ts",
     "audit:reads": "npx tsx scripts/audit-credit-reads.ts",
+    "replay:inbound-ai": "npx tsx scripts/replay-inbound-ai.ts",
     "recheck:reads": "npx tsx scripts/recheck-credit-reads.ts",
     "mcp:admin-ask": "npm --prefix mcp/admin-ask start"
   },

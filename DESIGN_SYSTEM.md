@@ -295,3 +295,12 @@ A report the self-check holds (`needs_review`) is explained from its actual chec
 - **What was corrected** shows apart (wrench line, `printed_repairs`), never counted as a check.
 - **Reset guard**: the Reset round dialog warns when a round it clears is held for a platform reason and keeps the destructive button disabled until "I uploaded the wrong file" is ticked (`reset-held-ack`). Resetting deletes uploads and gives the same result.
 - New held reasons get a `heldReason.<kind>` string in both locales; unknown details fall back to `heldReason.other` (label + detail) so nothing is ever blank.
+
+## Text assistant: live lookups + AI stats pill (Nov 8, 2026)
+
+- **Conversations header pill** (`ConversationAiStatsPill`): `Bot` icon + "AI answered N%" (last 30 days). Accent tone at 50%+, primary below. Opens a popover with an accent progress bar, answered / sent-to-staff tiles, live lookups and callbacks, and the top reasons texts went to staff (reason codes → `conversations.aiStats.reason.*`). Hidden until there is data.
+- **Behaviour staff will see in threads**: a system note "[Inbound AI] Looked up: …" when the AI used live data, a high-priority "Callback: <name>" task when someone asks for a call, no AI replies to reactions / "thanks" / "ok", and no AI replies for 24h after a staff member texts the contact.
+- **Security**: account data only for a phone that matches exactly one client; lookups take no ids and are bound to that client on the server.
+- **Rate** = AI answers (full or partial, not "teammate will follow up" holds) ÷ (answers + texts sent to staff).
+- **Shared phone notice**: a one-time "[Shared phone] This number belongs to N clients: …" system note in the thread (staff only; never shown to the AI).
+- **Voice** uses the same identity rule and safety guard; account data is prefetched (no multi-step lookups) to fit Twilio's time budget.

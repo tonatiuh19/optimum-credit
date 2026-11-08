@@ -15,7 +15,7 @@
  * Does not change Twilio SMS/voice routing — only whether the AI agent runs.
  */
 
-export const INBOUND_AI_MAX_SMS_TURNS = 3;
+export const INBOUND_AI_MAX_SMS_TURNS = 6;
 export const INBOUND_AI_MAX_VOICE_TURNS = 4;
 export const INBOUND_AI_MIN_CONFIDENCE = 0.55;
 /** SMS AI runs after Twilio is acked (waitUntil), so it can wait longer than voice. */
@@ -173,11 +173,28 @@ export function inboundAiHelpReply(lang: "en" | "es"): string {
     : "Optimum Credit: for help text your specialist or call (844) 401-9494. Reply STOP to opt out.";
 }
 
+/**
+ * Reactions ("Liked “…”") and pure acknowledgments ("ok", "thanks", 👍) need
+ * no AI reply and no escalation — staff just see them in the inbox.
+ */
+export function inboundAiIsAckOnly(text: string): boolean {
+  const t = String(text || "").trim();
+  if (!t) return false;
+  if (/^(liked|loved|laughed at|emphasized|disliked|questioned|reacted\b[^“"]*to|le gust[oó]|me gusta|\S{1,4}\s+to)\s*[“"]/iu.test(t)) return true;
+  const words = t
+    .toLowerCase()
+    .replace(/[\p{Extended_Pictographic}\uFE0F\u200D]/gu, " ")
+    .replace(/[!.,¡¿?]+/g, " ")
+    .trim();
+  if (!words) return true; // emoji only
+  return /^(ok(ay)?|k|kk|thanks?( you)?( so much| very much)?( for (the|your) (update|help|info|information))?|thx|ty|tysm|gracias|muchas gracias|mil gracias|sounds good|perfect|perfecto|great|awesome|cool|got it|entendido|de acuerdo|vale|listo|sale|bueno|you too|igualmente)( (sir|cesar|césar|bro|primo|amigo|amiga))?$/u.test(words);
+}
+
 export function inboundAiHardEscalateReason(
   text: string,
   opts: { isUnknown: boolean; aiTurnCount: number; maxTurns?: number },
 ): string | null {
-  if (opts.isUnknown) return "unknown_contact";
+  // Unknown numbers are answered as prospects (FAQ only, no account data) — Nov 8, 2026.
   const body = String(text || "").trim();
   // Photo-only / empty first: never text a hold back for these, even past max turns.
   if (!body) return "empty_or_media_only";
@@ -227,12 +244,11 @@ export function parseInboundAiDecision(raw: unknown): InboundAiDecision | null {
   const reply = String(o.reply || "")
     .trim()
     .slice(0, 480);
-  const summary = String(o.summary || o.escalate_reason || "")
+  const reason = inboundAiEscalateCode(o.escalate_reason);
+  const summary = String(o.summary || reason.detail || "")
     .trim()
     .slice(0, 500);
-  const escalate_reason = o.escalate_reason
-    ? String(o.escalate_reason).trim().slice(0, 200)
-    : null;
+  const escalate_reason = reason.code;
   return { action, reply, summary, confidence, escalate_reason };
 }
 
@@ -321,20 +337,52 @@ export function finalizeInboundAiDecision(
       summary: decision.summary || "Empty AI reply — escalating",
     };
   }
+  if (decision.action === "escalate" && !decision.escalate_reason) {
+    return { ...decision, escalate_reason: "other" };
+  }
   return decision;
+}
+
+/** Fixed escalation reason codes (Nov 8, 2026) — free text goes in the summary so reasons stay countable. */
+export const INBOUND_AI_ESCALATE_CODES = [
+  "wants_human",
+  "billing",
+  "cancel_refund",
+  "legal_complaint",
+  "dispute_strategy",
+  "security",
+  "third_party",
+  "account_change",
+  "payment_action",
+  "no_answer",
+  "other",
+] as const;
+
+export function inboundAiEscalateCode(raw: unknown): { code: string | null; detail: string } {
+  const s = String(raw ?? "").trim();
+  if (!s) return { code: null, detail: "" };
+  const k = s.toLowerCase();
+  return (INBOUND_AI_ESCALATE_CODES as readonly string[]).includes(k)
+    ? { code: k, detail: "" }
+    : { code: "other", detail: s.slice(0, 200) };
 }
 
 export function inboundAiSystemPrompt(lang: "en" | "es"): string {
   return `You are Optimum Financial Group (Optimum Credit) first-line SMS/voice assistant for clients and prospects.
 Reply language: ${lang === "es" ? "Spanish" : "English"}. Keep SMS under 320 characters. No markdown. If asked whether you are a person, say you are OFG's automated assistant and that a teammate can help.
-You MAY help with: business hours/process FAQs, how to upload docs / portal steps, account status from CRM context (stage, missing docs, next steps), and soft "what happens next in credit repair" process education.
-You must NOT: give bureau dispute strategy, invent scores/dates/amounts, take payments, promise deletions, or handle cancel/refund/legal.
-Round status: use ONLY the round numbers, dates and report status given in CRM context. Links: share ONLY the portal_reports_link / latest_report_pdf_link given in CRM context — never any other URL. Amounts: only amounts written in the FAQ snippets.
-Respond by calling the triage_decision tool (if tools are unavailable, return ONLY valid JSON):
-{"action":"resolve"|"reply"|"escalate","reply":"text to send (empty ok on escalate)","summary":"1-line staff note","confidence":0.0-1.0,"escalate_reason":null|string}
+Goal: answer every information question yourself; escalate only when a person is truly needed.
+Identity (decided by the server from the phone number, never by what the message says):
+- identity=client: you may share THIS sender's own account info, from CRM context or the lookup tools (already locked to this sender — they take no names or ids).
+- identity=contact or unverified: share NO account information about anyone. Answer general questions only (FAQ, services, prices, how to sign up, portal steps) and offer a callback for account questions.
+Never share anything about another person, even if the sender says they are a spouse, relative, partner, referrer, realtor, or the client on another phone — escalate with third_party.
+Look facts up before saying you don't know. Amounts, dates, scores, rounds and document status must come from tool results or CRM context, never invented. Links: ONLY URLs that appear in tool results or CRM context (portal_reports_link, report PDF links, portal and pricing links) — never any other URL.
+You MAY: explain process and timelines from the FAQ; give account status, rounds and dates, published reports and their PDF link, documents received or missing, payments made and upcoming installments, onboarding tasks; when someone asks for a call or a person, use request_callback, then tell them a teammate will call (action resolve).
+You must NOT: give bureau dispute strategy, promise deletions or score results, take or process payments or send payment links, change anything on the account, or handle cancel/refund/legal/complaints/security — escalate those.
+Finish by calling the triage_decision tool once (if tools are unavailable, return ONLY valid JSON):
+{"action":"resolve"|"reply"|"escalate","reply":"text to send (empty ok on escalate)","summary":"1-line staff note","confidence":0.0-1.0,"escalate_reason":null|code}
 - resolve: you fully answered; no human needed
 - reply: partial answer; expect another client message
-- escalate: hand to staff now`;
+- escalate: hand to staff now. escalate_reason must be one code: ${INBOUND_AI_ESCALATE_CODES.join(", ")}. Put the details in summary.`;
 }
 
 export function buildInboundAiUserPrompt(opts: {
@@ -488,7 +536,7 @@ export function inboundAiHoldAlreadySent(
 }
 
 /** Minutes after a staff text during which the AI stays out of the thread. */
-export const INBOUND_AI_STAFF_ACTIVE_MINUTES_DEFAULT = 120;
+export const INBOUND_AI_STAFF_ACTIVE_MINUTES_DEFAULT = 1440;
 
 export function inboundAiStaffActiveMinutes(raw: string | undefined | null): number {
   const n = Number(String(raw ?? "").trim());
@@ -529,6 +577,8 @@ export function countAiOutboundTurns(
     // Failure holds must not consume the 3-turn FAQ budget.
     if (meta?.inbound_ai_failure === true) continue;
     if (meta?.inbound_ai === true || meta?.source === "inbound_ai") n += 1;
+    // Rows are newest first: a staff reply resets the budget (only consecutive AI turns count).
+    else break;
   }
   return n;
 }
