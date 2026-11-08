@@ -56,7 +56,7 @@ describe("ReportApprovalCard", () => {
   it("pending, not an approver: no button, says who can approve", () => {
     setup(base({ can_approve: false }));
     expect(screen.queryByTestId("report-approve")).toBeNull();
-    expect(screen.getByTestId("report-approval-card").textContent).toMatch(/language owner, Cesar or Alex/);
+    expect(screen.getByTestId("report-approval-card").textContent).toMatch(/language owner or Cesar/);
   });
 
   it("self-check failed: named failure, no send button; the override form only for a release manager", () => {
@@ -68,7 +68,7 @@ describe("ReportApprovalCard", () => {
     expect(screen.getByTestId("self-check-failed").textContent).toMatch(/Account totals vs the pull summary · Before TU: 11 accounts read, summary 32/);
     expect(screen.queryByTestId("report-approve")).toBeNull();
     expect(screen.queryByTestId("report-override-form")).toBeNull();
-    expect(screen.getByTestId("report-approval-card").textContent).toMatch(/Only Cesar or Alex can override/);
+    expect(screen.getByTestId("report-approval-card").textContent).toMatch(/Only Cesar can override/);
   });
 
   it("self-check failed, release manager: override form with a required reason", () => {
@@ -112,7 +112,7 @@ describe("ReportApprovalCard", () => {
     const card = screen.getByTestId("report-approval-card").textContent || "";
     expect(card).toMatch(/your PDF is fine/);
     expect(screen.getByTestId("report-held-reasons").textContent).toMatch(/After report · Experian: credit limits — the platform counted \$22,800, the report shows \$15,800/);
-    expect(screen.getByTestId("next-step-held_platform").textContent).toMatch(/Nothing to do — Cesar and Alex were notified, and it re-checks itself/);
+    expect(screen.getByTestId("next-step-held_platform").textContent).toMatch(/Nothing to do — Cesar was notified, and it re-checks itself/);
     expect(screen.getByTestId("report-held-body").textContent).toMatch(/please don't reset/);
   });
 

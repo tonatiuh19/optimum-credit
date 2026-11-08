@@ -25,7 +25,7 @@ import { NextStep } from "@/components/admin/report-approval/NextStep";
 
 /**
  * Spec v1.1 P0-1: a published progress report waits here. The language owner
- * (or Cesar / Alex) clicks Approve & send; a failed self-check needs a release
+ * (or Cesar) clicks Approve & send; a failed self-check needs a release
  * manager's written override. Nothing reaches the client before that.
  */
 export function ReportApprovalCard({ reportId, onApproved, onRebuilt }: { reportId: number; onApproved?: () => void; onRebuilt?: () => void }) {

@@ -18000,7 +18000,7 @@ async function executeAdminAiTool(
       const isManager = productivityManagerIds().includes(ctx.adminId);
       const ymd = /^\d{4}-\d{2}-\d{2}$/.test(String(args.date || "")) ? String(args.date) : laYmd();
       if (args.team === true) {
-        if (!isManager) return { ok: false, error: "forbidden", message: "Only Cesar / Alex can see the team scorecard" };
+        if (!isManager) return { ok: false, error: "forbidden", message: "Only Cesar can see the team scorecard" };
         const admins = await productivityAdmins();
         const members = await Promise.all(
           admins.map(async (a) => {
@@ -24245,8 +24245,8 @@ async function executeAdminAiTool(
           error: "awaiting_approval",
           message:
             String(gate.delivery_status) === "needs_review"
-              ? `Round ${roundNumber} failed the progress-report self-check and is held from the client. Fix the data and republish, or Cesar / Alex override in the CRM (case panel → Reports).`
-              : `Round ${roundNumber} is published but waiting for Approve & send (EN owner Lecca / ES owner Angel / Cesar / Alex) in the CRM — it cannot be sent from here.`,
+              ? `Round ${roundNumber} failed the progress-report self-check and is held from the client. Fix the data and republish, or Cesar can override in the CRM (case panel → Reports).`
+              : `Round ${roundNumber} is published but waiting for Approve & send (EN owner Lecca / ES owner Angel / Cesar) in the CRM — it cannot be sent from here.`,
           data: { round_report_id: Number(gate.id), delivery_status: String(gate.delivery_status) },
         };
       }
@@ -32466,9 +32466,9 @@ function roundReportApprovalForAi(r: RowDataPacket): {
       approved_by_admin_id: r.approved_by_admin_id != null ? Number(r.approved_by_admin_id) : null,
       next_step:
         status === "pending_approval"
-          ? "Waiting for Approve & send in the CRM (EN owner Lecca / ES owner Angel / Cesar / Alex). Not sent to the client."
+          ? "Waiting for Approve & send in the CRM (EN owner Lecca / ES owner Angel / Cesar). Not sent to the client."
           : status === "needs_review"
-            ? "Self-check failed (see failed_checks) — held from the client. Fix and republish, or Cesar / Alex override in the CRM."
+            ? "Self-check failed (see failed_checks) — held from the client. Fix and republish, or Cesar can override in the CRM."
             : null,
     },
   };
@@ -78629,7 +78629,7 @@ function buildApp() {
       }
       if (!r.wizard_session_id) return res.status(422).json({ error: "This report has no wizard session to rebuild from", code: "no_session" });
       const who = await roundReportApprover(adminId, String(r.report_locale));
-      if (!who.canApprove) return res.status(403).json({ error: "Only the report's approver, Cesar or Alex can rebuild it" });
+      if (!who.canApprove) return res.status(403).json({ error: "Only the report's approver or Cesar can rebuild it" });
 
       const back = await returnHeldReportToReview(reportId, adminId, "rebuild_button");
       if (back.ok === false) return res.status(409).json({ error: "This report was already approved or rebuilt", code: "not_rebuildable" });
@@ -78660,13 +78660,13 @@ function buildApp() {
       const who = await roundReportApprover(adminId, String(r.report_locale));
       if (!who.canApprove) {
         return res.status(403).json({
-          error: who.lang === "es" ? "Spanish reports are approved by the Spanish owner, Cesar or Alex" : "English reports are approved by the English owner, Cesar or Alex",
+          error: who.lang === "es" ? "Spanish reports are approved by the Spanish owner or Cesar" : "English reports are approved by the English owner or Cesar",
         });
       }
       const overrideReason = String(req.body?.override_reason || "").trim();
       if (status === "needs_review" && !(who.isSuper && overrideReason.length >= 10)) {
         return res.status(422).json({
-          error: "The self-check failed — fix the data and publish again. Cesar or Alex can override with a written reason.",
+          error: "The self-check failed — fix the data and publish again. Cesar can override with a written reason.",
           code: "self_check_failed",
         });
       }
