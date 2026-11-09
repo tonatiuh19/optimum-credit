@@ -152,7 +152,7 @@ const PIPELINE_LABELS: Record<PipelineStage, string> = {
   round_2: "Round 2",
   round_3: "Round 3",
   round_4: "Round 4",
-  round_5: "Round 5",
+  round_5: "Round 5+",
   completed: "Completed",
   cancelled: "Cancelled",
 };

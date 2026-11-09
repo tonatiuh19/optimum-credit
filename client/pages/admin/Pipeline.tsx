@@ -141,7 +141,7 @@ const COLUMNS: {
   },
   {
     stage: "round_5",
-    label: "Round 5",
+    label: "Round 5+",
     topBorder: "border-t-primary",
     accent: "text-primary",
     countBg: "bg-primary/15 text-primary",
