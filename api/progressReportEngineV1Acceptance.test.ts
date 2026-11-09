@@ -15,11 +15,14 @@ import {
   pv2BuildPdfData,
   pv2CleanRemarks,
   pv2DataIntegrity,
+  pv2NoChangesYet,
   pv2DelinquencyMonths,
   pv2Diff,
   pv2IsJunkItem,
   pv2SanitizeFile,
+  pv2SelfCheck,
   pv2Validate,
+  type Pv2RenderStats,
 } from "./progressReportV2";
 import { caseHygieneAlerts, progressReportFileName } from "./index";
 
@@ -116,7 +119,12 @@ const pdf = pv2BuildPdfData({
 describe("Engine Spec v1 §8 — a client Fernando Huiza acceptance", () => {
   it("Round 1 (08/06 → 08/06): BLOCKED_DATA_INTEGRITY, not published", () => {
     expect(pv2DataIntegrity(BEFORE, BEFORE)).toMatch(/same report date/);
-    expect(pv2DataIntegrity(BEFORE, { ...BEFORE, reportDate: "08/07/2026" })).toMatch(/identical/);
+    // Nov 10: same content pulled on a later date = bureaus not updated yet → allowed as "No changes yet".
+    expect(pv2DataIntegrity(BEFORE, { ...BEFORE, reportDate: "08/07/2026" })).toBeNull();
+    expect(pv2NoChangesYet(BEFORE, { ...BEFORE, reportDate: "08/07/2026" })).toBe(true);
+    // …but identical content with an unknown date is still blocked.
+    expect(pv2DataIntegrity(BEFORE, { ...BEFORE, reportDate: null })).toMatch(/identical/);
+    expect(pv2NoChangesYet(BEFORE, AFTER)).toBe(false);
     expect(pv2DataIntegrity(BEFORE, AFTER, { before: "abc", after: "abc" })).toMatch(/same file/);
     expect(pv2DataIntegrity(BEFORE, AFTER)).toBeNull();
   });
@@ -260,12 +268,44 @@ describe("Engine Spec v1 — review fixes (Oct 23 2026)", () => {
     expect(pv2CleanRemarks("LAST PAID: 09/2026 SYNCHRONY BANK")).toBe("LAST PAID: 09/2026");
   });
 
-  it("identical pulls whose TOC page numbers differ are still blocked (sanitized comparison)", () => {
+  it("identical pulls whose TOC page numbers differ compare as identical (sanitized) → No changes yet", () => {
     const b = file("08/06/2026", { EQ: 507, EX: 510, TU: 611 }, false, []);
     const a = { ...b, reportDate: "08/07/2026", accounts: b.accounts.map((x) => (x.creditor === "10. Collections 53" ? { ...x, creditor: "10. Collections 52" } : x)) };
     expect(pv2DataIntegrity(b, a)).toBeNull(); // raw: page number differs
-    expect(pv2DataIntegrity(pv2SanitizeFile(b).file, pv2SanitizeFile(a).file)).toMatch(/identical/);
+    expect(pv2DataIntegrity(pv2SanitizeFile(b).file, pv2SanitizeFile(a).file)).toBeNull();
+    expect(pv2NoChangesYet(pv2SanitizeFile(b).file, pv2SanitizeFile(a).file)).toBe(true);
+    const undated = { ...a, reportDate: null };
+    expect(pv2DataIntegrity(pv2SanitizeFile(b).file, pv2SanitizeFile(undated).file)).toMatch(/identical/);
   });
+
+  it("No changes yet (Nov 10): identical later pull renders the bureaus-30-days wording, 3 pages, self-check passes", async () => {
+    await import("pdf-parse/worker").catch(() => undefined);
+    const { PDFParse } = await import("pdf-parse");
+    const later = { ...BEFORE, reportDate: "09/05/2026" };
+    expect(pv2DataIntegrity(BEFORE, later)).toBeNull();
+    expect(pv2NoChangesYet(BEFORE, later)).toBe(true);
+    const diff0 = pv2Diff(BEFORE, later);
+    expect(diff0.wins).toHaveLength(0);
+    const same = { EQ: { before: 507, after: 507 }, EX: { before: 510, after: 510 }, TU: { before: 611, after: 611 } } as Record<Bureau, { before: number; after: number }>;
+    for (const lang of ["en", "es"] as const) {
+      const data = { ...pv2BuildPdfData({ diff: diff0, clientFirstName: "Alex", clientName: "Alex R.", round: 1, scores: same, phone: "x", site: "ofgllc.com", lang }), noChangesYet: true };
+      const stats: Pv2RenderStats = { targetsRepresented: 0, winsRepresented: 0, pages: 0, croaText: "", clientText: [] };
+      const buf = await generateProgressReportV2Pdf(data, null, stats);
+      expect((await PDFDocument.load(buf)).getPageCount()).toBe(3);
+      const txt = (await new PDFParse({ data: buf }).getText()).text.replace(/\s+/g, " ");
+      if (lang === "en") {
+        expect(txt).toMatch(/shows no changes yet compared to/);
+        expect(txt).toMatch(/up to 30 days/);
+        expect(txt).not.toMatch(/What Came Off Your Report This Round/);
+      } else {
+        expect(txt).toMatch(/todavia no muestra cambios/);
+        expect(txt).not.toMatch(/Lo que salio de su reporte esta ronda/);
+      }
+      const check = pv2SelfCheck({ before: BEFORE, after: later, summaries: { before: null, after: null }, diff: diff0, pdf: data, stats, recordTargets: diff0.targets.length });
+      expect(check.checks.filter((c) => c.pass === false)).toEqual([]);
+      expect(check.checks.find((c) => c.key === "chronology")?.pass).toBe(true);
+    }
+  }, 30_000);
 
   it("since-start: undated (older rounds) prints without a date; redundant line (same start) is skipped", async () => {
     await import("pdf-parse/worker").catch(() => undefined);

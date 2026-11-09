@@ -2151,7 +2151,7 @@ CREATE TABLE IF NOT EXISTS `admin_hubspot_permissions` (
 
 -- ============================================================================
 -- EVENT MARKETING (CRM section — companies / series / sessions / forms / regs)
--- Applied by: 20261001_171800_event_marketing.sql
+-- Applied by: 20261001_171800_event_marketing.sql, 20261109_150000_event_marketing_lifecycle.sql
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS `event_companies` (
   `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -2213,10 +2213,12 @@ CREATE TABLE IF NOT EXISTS `event_sessions` (
   `location_es` VARCHAR(500) DEFAULT NULL,
   `capacity` INT UNSIGNED DEFAULT NULL,
   `status` ENUM('scheduled','cancelled','completed') NOT NULL DEFAULT 'scheduled',
+  `checkin_token` VARCHAR(40) DEFAULT NULL COMMENT 'Secret for the door self check-in QR (/e/checkin/:token)',
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_event_sessions_short_code` (`short_code`),
+  UNIQUE KEY `uq_event_sessions_checkin_token` (`checkin_token`),
   KEY `idx_event_sessions_company_starts` (`company_id`, `status`, `starts_at`),
   KEY `idx_event_sessions_series` (`series_id`, `starts_at`),
   CONSTRAINT `fk_event_sessions_company` FOREIGN KEY (`company_id`) REFERENCES `event_companies`(`id`) ON DELETE CASCADE,
@@ -2253,7 +2255,16 @@ CREATE TABLE IF NOT EXISTS `event_registrations` (
   `source_qr` ENUM('company','session') NOT NULL DEFAULT 'company',
   `checked_in_at` DATETIME DEFAULT NULL,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `status` ENUM('registered','waitlisted','cancelled') NOT NULL DEFAULT 'registered',
+  `check_in_method` ENUM('staff','self','import') DEFAULT NULL,
+  `profile_mismatch` TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'Typed name/phone differs from the existing CRM record (CRM kept as is)',
+  `reminder_24h_sent_at` DATETIME DEFAULT NULL,
+  `reminder_2h_sent_at` DATETIME DEFAULT NULL,
+  `followup_sent_at` DATETIME DEFAULT NULL,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_event_reg_session_client` (`session_id`, `client_id`),
+  KEY `idx_event_reg_session_status` (`session_id`, `status`),
   KEY `idx_event_reg_client` (`client_id`),
   KEY `idx_event_reg_company` (`company_id`, `created_at`),
   KEY `idx_event_reg_session` (`session_id`),

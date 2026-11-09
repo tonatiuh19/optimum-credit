@@ -2,8 +2,12 @@ import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
 import axios from "axios";
 import api, { formatAxiosError } from "@/lib/api";
 import type {
+  EventCheckInTokenResponse,
   EventCompany,
   EventCompanyDetail,
+  EventCompanyResults,
+  EventImportResponse,
+  EventImportRow,
   EventFormField,
   EventFormFieldType,
   EventQrSource,
@@ -12,6 +16,9 @@ import type {
   EventSeriesKind,
   EventSession,
   EventSessionStatus,
+  PublicEventCheckInInfo,
+  PublicEventCheckInRequest,
+  PublicEventCheckInResponse,
   PublicEventLandingResponse,
   PublicEventRegisterRequest,
   PublicEventRegisterResponse,
@@ -44,6 +51,20 @@ interface EventMarketingState {
   detailError: string | null;
   saving: boolean;
   saveError: string | null;
+  results: EventCompanyResults | null;
+  resultsLoading: boolean;
+  resultsError: string | null;
+  importing: boolean;
+  importResult: EventImportResponse | null;
+  importError: string | null;
+
+  // Public door check-in
+  checkInInfo: PublicEventCheckInInfo | null;
+  checkInLoading: boolean;
+  checkInError: string | null;
+  checkInSubmitting: boolean;
+  checkInStatus: PublicEventCheckInResponse["status"] | null;
+  checkInSubmitError: string | null;
 }
 
 const initialState: EventMarketingState = {
@@ -63,6 +84,19 @@ const initialState: EventMarketingState = {
   detailError: null,
   saving: false,
   saveError: null,
+  results: null,
+  resultsLoading: false,
+  resultsError: null,
+  importing: false,
+  importResult: null,
+  importError: null,
+
+  checkInInfo: null,
+  checkInLoading: false,
+  checkInError: null,
+  checkInSubmitting: false,
+  checkInStatus: null,
+  checkInSubmitError: null,
 };
 
 // ─── Public thunks ────────────────────────────────────────────────────────────
@@ -410,6 +444,115 @@ export const checkInEventRegistration = createAsyncThunk(
   },
 );
 
+export const undoEventCheckIn = createAsyncThunk(
+  "eventMarketing/undoCheckIn",
+  async (id: number, { rejectWithValue }) => {
+    try {
+      const { data } = await api.delete<{ registration: EventRegistration }>(
+        `/admin/event-marketing/registrations/${id}/check-in`,
+      );
+      return data.registration;
+    } catch (err) {
+      return rejectWithValue(formatAxiosError(err, "Could not undo check-in."));
+    }
+  },
+);
+
+/** Cancels a registration; the freed seat goes to the next waitlisted person. */
+export const cancelEventRegistration = createAsyncThunk(
+  "eventMarketing/cancelRegistration",
+  async (id: number, { rejectWithValue }) => {
+    try {
+      const { data } = await api.post<EventCompanyDetail>(
+        `/admin/event-marketing/registrations/${id}/cancel`,
+      );
+      return data;
+    } catch (err) {
+      return rejectWithValue(formatAxiosError(err, "Could not cancel registration."));
+    }
+  },
+);
+
+/** Door QR link for a session (created once, then reused). */
+export const fetchEventCheckInLink = createAsyncThunk(
+  "eventMarketing/fetchCheckInLink",
+  async (sessionId: number, { rejectWithValue }) => {
+    try {
+      const { data } = await api.post<EventCheckInTokenResponse>(
+        `/admin/event-marketing/sessions/${sessionId}/checkin-token`,
+      );
+      return { sessionId, ...data };
+    } catch (err) {
+      return rejectWithValue(formatAxiosError(err, "Could not create the door QR."));
+    }
+  },
+);
+
+/** Paper sign-in sheet rows → registrations (+ attended). */
+export const importEventSignInSheet = createAsyncThunk(
+  "eventMarketing/importSheet",
+  async (
+    { sessionId, rows }: { sessionId: number; rows: EventImportRow[] },
+    { rejectWithValue },
+  ) => {
+    try {
+      const { data } = await api.post<EventImportResponse>(
+        `/admin/event-marketing/sessions/${sessionId}/import`,
+        { rows },
+      );
+      return data;
+    } catch (err) {
+      return rejectWithValue(formatAxiosError(err, "Could not import the sign-in sheet."));
+    }
+  },
+);
+
+export const fetchEventResults = createAsyncThunk(
+  "eventMarketing/fetchResults",
+  async (companyId: number, { rejectWithValue }) => {
+    try {
+      const { data } = await api.get<EventCompanyResults>(
+        `/admin/event-marketing/companies/${companyId}/results`,
+      );
+      return data;
+    } catch (err) {
+      return rejectWithValue(formatAxiosError(err, "Could not load results."));
+    }
+  },
+);
+
+export const fetchPublicCheckIn = createAsyncThunk(
+  "eventMarketing/fetchPublicCheckIn",
+  async (token: string, { rejectWithValue }) => {
+    try {
+      const { data } = await publicApi.get<PublicEventCheckInInfo>(
+        `/public/event-marketing/check-in/${encodeURIComponent(token)}`,
+      );
+      return data;
+    } catch (err) {
+      return rejectWithValue(formatAxiosError(err, "Check-in not found."));
+    }
+  },
+);
+
+export const submitPublicCheckIn = createAsyncThunk(
+  "eventMarketing/submitPublicCheckIn",
+  async (
+    { token, body }: { token: string; body: PublicEventCheckInRequest },
+    { rejectWithValue },
+  ) => {
+    try {
+      const { data } = await publicApi.post<PublicEventCheckInResponse>(
+        `/public/event-marketing/check-in/${encodeURIComponent(token)}`,
+        body,
+      );
+      return data;
+    } catch (err) {
+      return rejectWithValue(formatAxiosError(err, "We couldn't check you in."));
+    }
+  },
+);
+
 // ─── Slice ────────────────────────────────────────────────────────────────────
 
 const eventMarketingSlice = createSlice({
@@ -422,6 +565,14 @@ const eventMarketingSlice = createSlice({
     },
     clearSaveError(state) {
       state.saveError = null;
+    },
+    clearEventImport(state) {
+      state.importResult = null;
+      state.importError = null;
+    },
+    resetPublicCheckIn(state) {
+      state.checkInStatus = null;
+      state.checkInSubmitError = null;
     },
   },
   extraReducers: (builder) => {
@@ -689,6 +840,95 @@ const eventMarketingSlice = createSlice({
         state.saving = true;
         state.saveError = null;
       })
+      .addCase(undoEventCheckIn.fulfilled, (state, action) => {
+        if (state.detail) {
+          state.detail = {
+            ...state.detail,
+            registrations: state.detail.registrations.map((r) =>
+              r.id === action.payload.id ? { ...r, ...action.payload } : r,
+            ),
+          };
+        }
+      })
+      .addCase(undoEventCheckIn.rejected, (state, action) => {
+        state.saveError = (action.payload as string) || "Could not undo check-in.";
+      })
+      .addCase(cancelEventRegistration.pending, (state) => {
+        state.saving = true;
+        state.saveError = null;
+      })
+      .addCase(cancelEventRegistration.fulfilled, (state, action) => {
+        state.saving = false;
+        state.detail = action.payload;
+      })
+      .addCase(cancelEventRegistration.rejected, (state, action) => {
+        state.saving = false;
+        state.saveError = (action.payload as string) || "Could not cancel registration.";
+      })
+      .addCase(fetchEventCheckInLink.fulfilled, (state, action) => {
+        if (state.detail) {
+          state.detail = {
+            ...state.detail,
+            sessions: state.detail.sessions.map((s) =>
+              s.id === action.payload.sessionId ? { ...s, has_checkin_token: true } : s,
+            ),
+          };
+        }
+      })
+      .addCase(fetchEventCheckInLink.rejected, (state, action) => {
+        state.saveError = (action.payload as string) || "Could not create the door QR.";
+      })
+      .addCase(importEventSignInSheet.pending, (state) => {
+        state.importing = true;
+        state.importError = null;
+        state.importResult = null;
+      })
+      .addCase(importEventSignInSheet.fulfilled, (state, action) => {
+        state.importing = false;
+        state.importResult = action.payload;
+        state.detail = action.payload.detail;
+      })
+      .addCase(importEventSignInSheet.rejected, (state, action) => {
+        state.importing = false;
+        state.importError = (action.payload as string) || "Could not import the sign-in sheet.";
+      })
+      .addCase(fetchEventResults.pending, (state) => {
+        state.resultsLoading = true;
+        state.resultsError = null;
+      })
+      .addCase(fetchEventResults.fulfilled, (state, action) => {
+        state.resultsLoading = false;
+        state.results = action.payload;
+      })
+      .addCase(fetchEventResults.rejected, (state, action) => {
+        state.resultsLoading = false;
+        state.resultsError = (action.payload as string) || "Could not load results.";
+      })
+      .addCase(fetchPublicCheckIn.pending, (state) => {
+        state.checkInLoading = true;
+        state.checkInError = null;
+      })
+      .addCase(fetchPublicCheckIn.fulfilled, (state, action) => {
+        state.checkInLoading = false;
+        state.checkInInfo = action.payload;
+      })
+      .addCase(fetchPublicCheckIn.rejected, (state, action) => {
+        state.checkInLoading = false;
+        state.checkInInfo = null;
+        state.checkInError = (action.payload as string) || "Check-in not found.";
+      })
+      .addCase(submitPublicCheckIn.pending, (state) => {
+        state.checkInSubmitting = true;
+        state.checkInSubmitError = null;
+      })
+      .addCase(submitPublicCheckIn.fulfilled, (state, action) => {
+        state.checkInSubmitting = false;
+        state.checkInStatus = action.payload.status;
+      })
+      .addCase(submitPublicCheckIn.rejected, (state, action) => {
+        state.checkInSubmitting = false;
+        state.checkInSubmitError = (action.payload as string) || "We couldn't check you in.";
+      })
       .addCase(checkInEventRegistration.fulfilled, (state, action) => {
         state.saving = false;
         if (state.detail) {
@@ -708,7 +948,12 @@ const eventMarketingSlice = createSlice({
   },
 });
 
-export const { clearPublicRegisterLocal, clearSaveError } =
+export const {
+  clearPublicRegisterLocal,
+  clearSaveError,
+  clearEventImport,
+  resetPublicCheckIn,
+} =
   eventMarketingSlice.actions;
 
 export type { EventQrSource };

@@ -26,6 +26,7 @@ import FreeScoreRedirect from "./pages/public/FreeScoreRedirect";
 import AffiliateJoin from "./pages/public/AffiliateJoin";
 import PrepaidOnboardJoin from "./pages/public/PrepaidOnboardJoin";
 import EventLanding from "./pages/public/EventLanding";
+import EventCheckIn from "./pages/public/EventCheckIn";
 import OfyChinoQrRedirect from "./pages/public/OfyChinoQrRedirect";
 
 import ClientLogin from "./pages/auth/ClientLogin";
@@ -134,6 +135,8 @@ function AppShell() {
 
         {/* Event Marketing CRM public landings */}
         <Route path="/e" element={<EventLanding />} />
+        {/* Door QR self check-in (must stay above /e/:companySlug/s/…) */}
+        <Route path="/e/checkin/:token" element={<EventCheckIn />} />
         <Route path="/e/:companySlug" element={<EventLanding />} />
         {/* Printed Chino sign QRs — must stay above the generic session route */}
         <Route

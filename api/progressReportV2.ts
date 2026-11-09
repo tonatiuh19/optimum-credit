@@ -482,6 +482,9 @@ export function pv2SanitizeFile(f: CreditFile): { file: CreditFile; dropped: str
  * PR-P0-5: identical pulls block generation (BLOCKED_DATA_INTEGRITY): same
  * report date, same file hash, or identical scores + balances on every
  * tradeline. Returns the reason, or null.
+ * Nov 10, 2026 (owner decision): identical content pulled on a DIFFERENT
+ * date is real — the bureaus have not answered yet — so it is allowed as a
+ * "No changes yet" report (see pv2NoChangesYet); it still goes through approval.
  */
 export function pv2DataIntegrity(
   before: CreditFile,
@@ -499,9 +502,27 @@ export function pv2DataIntegrity(
         .map((a) => `${pv2Alnum(a.creditor)}|${BUREAUS.map((b) => a.bureaus[b]?.balance ?? "-").join(",")}`)
         .sort()
         .join(";");
-    if (sig(before) === sig(after)) return "Before and After are identical (same scores and balances on every tradeline)";
+    if (sig(before) === sig(after) && !(bd && ad)) return "Before and After are identical (same scores and balances on every tradeline)";
   }
   return null;
+}
+
+/**
+ * Identical scores + balances on every tradeline, but pulled on two different
+ * (known) dates: the bureaus have not updated yet → "No changes yet" report.
+ */
+export function pv2NoChangesYet(before: CreditFile, after: CreditFile): boolean {
+  const bd = parseReportDate(before.reportDate);
+  const ad = parseReportDate(after.reportDate);
+  if (!bd || !ad || bd.getTime() === ad.getTime()) return false;
+  if (!BUREAUS.every((b) => before.scores[b] === after.scores[b])) return false;
+  if (before.accounts.length !== after.accounts.length || before.accounts.length === 0) return false;
+  const sig = (f: CreditFile) =>
+    f.accounts
+      .map((a) => `${pv2Alnum(a.creditor)}|${BUREAUS.map((b) => a.bureaus[b]?.balance ?? "-").join(",")}`)
+      .sort()
+      .join(";");
+  return sig(before) === sig(after);
 }
 
 /**
@@ -1245,6 +1266,7 @@ export function pv2GoalRange(current: number, remainingLift: number, overallUtil
 export interface Pv2Flag {
   code:
     | "parse_failure"
+    | "no_changes_yet"
     | "same_pull"
     | "chronology_swapped"
     | "unverified_movement"
@@ -1497,6 +1519,8 @@ export interface Pv2PdfData {
   lang: Pv2Lang;
   /** Round 1 starting point: no earlier report exists, so nothing is compared yet. */
   startingPoint?: boolean;
+  /** Same accounts/scores as the earlier pull, later date: bureaus have not answered yet. */
+  noChangesYet?: boolean;
   /**
    * No account-level data for this pull: wins / targets sections print
    * nothing client-facing (never "none detected"); delivery is flagged.
@@ -1747,7 +1771,11 @@ export async function generateProgressReportV2Pdf(d: Pv2PdfData, logoPng?: Uint8
   // "Every bureau moved up" only when all three are on both reports and all rose (#5).
   const allUp = moved.length === 3 && moved.every((b) => d.scores[b].after! > d.scores[b].before!);
   p1.para(
-    d.startingPoint
+    d.noChangesYet && !d.startingPoint
+      ? d.lang === "es"
+        ? `${d.clientFirstName}, su informe del ${d.currentDate} todavia no muestra cambios frente al del ${d.baselineDate}. Es normal: los burós tienen hasta 30 dias para responder a las disputas que enviamos. Su proximo informe mostrara los resultados.`
+        : `${d.clientFirstName}, your report from ${d.currentDate} shows no changes yet compared to ${d.baselineDate}. That is normal: the credit bureaus have up to 30 days to respond to the disputes we sent. Your next report will show the results.`
+      : d.startingPoint
       ? d.lang === "es"
         ? `${d.clientFirstName}, este es su punto de partida al ${d.currentDate}. Aun no hay cambios que comparar: sus proximos informes mostraran el progreso desde esta fecha.`
         : `${d.clientFirstName}, this is your starting point as of ${d.currentDate}. There are no changes to compare yet: your next reports will show your progress from this date.`
@@ -1785,7 +1813,7 @@ export async function generateProgressReportV2Pdf(d: Pv2PdfData, logoPng?: Uint8
   // Cesar Oct 26 (#1): no "What Moved Your Score" in the client PDF — new negatives go to the
   // targets table and the internal case notes.
   const sinceStartOnly = d.winsScope === "since_start";
-  if (!d.parseFailure && !d.startingPoint) p1.heading(sinceStartOnly ? L.cameOffSinceStart : L.cameOffThisRound);
+  if (!d.parseFailure && !d.startingPoint && !d.noChangesYet) p1.heading(sinceStartOnly ? L.cameOffSinceStart : L.cameOffThisRound);
   const winTargets: Pv2Target[] = d.wins.map((w) => ({
     item: w.item,
     bureaus: w.bureaus,

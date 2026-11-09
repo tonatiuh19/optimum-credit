@@ -174,6 +174,30 @@ export function inboundAiHelpReply(lang: "en" | "es"): string {
 }
 
 /**
+ * True when the newest outbound text in the thread is an AI message that asked
+ * something ("Want a teammate to call you?") — then "ok thanks" is an ANSWER,
+ * not a sign-off, and must reach the AI. `recentNewestFirst` may include the
+ * inbound being handled.
+ */
+export function inboundAiLastAiTextAskedQuestion(
+  recentNewestFirst: ReadonlyArray<object>,
+): boolean {
+  type Msg = { direction?: unknown; body?: unknown; metadata_json?: unknown };
+  const last = (recentNewestFirst as ReadonlyArray<Msg>).find((m) => String(m.direction) === "outbound");
+  if (!last) return false;
+  let meta: Record<string, unknown> = {};
+  try {
+    meta =
+      typeof last.metadata_json === "string"
+        ? JSON.parse(last.metadata_json)
+        : ((last.metadata_json as Record<string, unknown>) ?? {});
+  } catch {
+    meta = {};
+  }
+  return meta?.inbound_ai === true && /[?¿]/.test(String(last.body ?? ""));
+}
+
+/**
  * Reactions ("Liked “…”") and pure acknowledgments ("ok", "thanks", 👍) need
  * no AI reply and no escalation — staff just see them in the inbox.
  */
@@ -181,13 +205,43 @@ export function inboundAiIsAckOnly(text: string): boolean {
   const t = String(text || "").trim();
   if (!t) return false;
   if (/^(liked|loved|laughed at|emphasized|disliked|questioned|reacted\b[^“"]*to|le gust[oó]|me gusta|\S{1,4}\s+to)\s*[“"]/iu.test(t)) return true;
+  if (/[?¿]/.test(t)) return false; // any question needs an answer
   const words = t
     .toLowerCase()
     .replace(/[\p{Extended_Pictographic}\uFE0F\u200D]/gu, " ")
-    .replace(/[!.,¡¿?]+/g, " ")
+    .replace(/[!.,;:¡]+/g, " ")
+    .replace(/\s+/g, " ")
     .trim();
   if (!words) return true; // emoji only
-  return /^(ok(ay)?|k|kk|thanks?( you)?( so much| very much)?( for (the|your) (update|help|info|information))?|thx|ty|tysm|gracias|muchas gracias|mil gracias|sounds good|perfect|perfecto|great|awesome|cool|got it|entendido|de acuerdo|vale|listo|sale|bueno|you too|igualmente)( (sir|cesar|césar|bro|primo|amigo|amiga))?$/u.test(words);
+  if (words.split(" ").length > 14) return false;
+  // Thanks/ok phrases chained with fillers ("Awesome, man. Thank you for the update.").
+  const ack = [
+    "ok(?:ay|ey|i)?", "k", "kk", "thanks?", "thank you", "thx", "ty", "tysm", "gracias", "muchas gracias",
+    "mil gracias", "sounds good", "perfect", "perfecto", "great", "awesome", "cool", "nice", "excellent",
+    "excelente", "genial", "muy bien", "got it", "noted", "will do", "appreciate it", "i appreciate it",
+    "appreciated", "entendido", "de acuerdo", "vale", "listo", "sale", "bueno", "dale", "claro", "you too",
+    "igualmente",
+  ];
+  const filler = [
+    "man", "sir", "bro", "cesar", "césar", "primo", "amigo", "amiga", "again", "so much", "very much",
+    "a lot", "lol", "for (?:the|your|all the|all your) (?:update|updates|help|info|information)",
+    "for (?:everything|all)", "have a (?:good|great|nice|blessed) (?:day|night|weekend|one)",
+    "que tengas (?:un )?(?:buen|excelente|lindo) (?:día|dia|fin de semana)", "bendiciones", "god bless",
+    "por todo", "por (?:la|tu) (?:información|informacion|ayuda)",
+  ];
+  // Longest phrase first so "thank you" is not read as "thank" + "you".
+  const alt = (xs: string[]) => [...xs].sort((x, y) => y.length - x.length).join("|");
+  const unit = new RegExp(`^(?:${alt([...ack, ...filler])})(?: |$)`, "u");
+  const ackOnly = new RegExp(`^(?:${alt(ack)})(?: |$)`, "u");
+  let rest = words;
+  let sawAck = false;
+  while (rest) {
+    const m = rest.match(unit);
+    if (!m) return false;
+    if (ackOnly.test(rest)) sawAck = true;
+    rest = rest.slice(m[0].length);
+  }
+  return sawAck;
 }
 
 export function inboundAiHardEscalateReason(
@@ -613,13 +667,6 @@ export function pickFallbackEscalationAdminId(opts: {
 }
 
 // ── Reply safety guard (code-level, runs on every AI reply before sending) ──
-
-/** First AI reply in a thread identifies the automated assistant. */
-export function inboundAiDisclosurePrefix(lang: "en" | "es"): string {
-  return lang === "es"
-    ? "Asistente automático de OFG: "
-    : "OFG automated assistant: ";
-}
 
 const INBOUND_AI_BILLING_RE =
   /\b(bill|billed|billing|charge|charged|payment|pay|price|cost|fee|invoice|cobro|cobran|cobrar|pago|pagar|precio|costo|factura|mensualidad)\b/i;

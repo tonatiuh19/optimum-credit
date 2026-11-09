@@ -1546,12 +1546,16 @@ paths:
       tags: [Event Marketing]
       summary: Register for an event (prospect + welcome email/SMS)
       description: |
-        Rate-limited public registration. Upserts prospect by email/phone,
-        attaches labels `event_marketing` + company `label_slug` +
-        `web_lead_review`, inserts `event_registrations`, enforces session
-        capacity, sends templated welcome email + SMS (César From /
-        `GET_CREDIT_REPORT_SMS_FROM_E164`), notifies team
-        `event_registration`, triggers reminder flow `event_registered`.
+        Rate-limited public registration. Matches an existing person by email,
+        then phone, and NEVER edits their CRM record (typed values are kept on
+        the registration; `profile_mismatch` flags differences for staff). New
+        people become prospects. Attaches labels `event_marketing` + company
+        `label_slug` + `web_lead_review`. Seats are counted under a session row
+        lock; a full session returns `status: waitlisted` (waitlist text sent)
+        instead of an error. Re-submitting returns `duplicate: true` and sends
+        nothing. Otherwise sends the templated welcome email (with an
+        add-to-calendar link) + SMS, notifies team `event_registration`, and
+        triggers reminder flow `event_registered`.
       requestBody:
         required: true
         content:
@@ -1575,8 +1579,76 @@ paths:
                 $ref: "#/components/schemas/PublicEventRegisterResponse"
         "400":
           description: Validation error
+        "429":
+          description: Rate limited
+
+  /public/event-marketing/sessions/{code}/calendar.ics:
+    get:
+      tags: [Event Marketing]
+      summary: Add-to-calendar file for one session
+      parameters:
+        - { name: code, in: path, required: true, schema: { type: string } }
+        - { name: lang, in: query, required: false, schema: { type: string, enum: [en, es] } }
+      responses:
+        "200":
+          description: iCalendar file (LA wall clock via TZID=America/Los_Angeles)
+          content:
+            text/calendar: {}
+        "404":
+          description: Unknown or cancelled session
+
+  /public/event-marketing/check-in/{token}:
+    get:
+      tags: [Event Marketing]
+      summary: Door QR — session info for self check-in (no attendee data)
+      parameters:
+        - { name: token, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Session info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicEventCheckInInfo"
+        "404":
+          description: Unknown token or cancelled session
+    post:
+      tags: [Event Marketing]
+      summary: Door QR — check in by phone/email, or register a walk-in
+      description: |
+        Rate-limited. Finds the person's registration for this session (email,
+        then phone) and checks them in (`check_in_method: self`). With no
+        registration, returns `needs_registration`; sending `answers`
+        (first_name, last_name, phone, optional email/preferred_language)
+        registers + checks in the walk-in (always seated). Only open from 3h
+        before start until 2h after the end. Never returns names.
+      parameters:
+        - { name: token, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                phone: { type: string }
+                email: { type: string }
+                answers: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [checked_in, already_checked_in, needs_registration] }
+        "400":
+          description: Missing or invalid phone/email
+        "404":
+          description: Unknown token
         "409":
-          description: Session full
+          description: Check-in window closed
         "429":
           description: Rate limited
 
@@ -1727,6 +1799,10 @@ paths:
     put:
       tags: [Event Marketing, Admin]
       summary: Update event session
+      description: |
+        Cancelling texts/emails everyone registered or waitlisted; changing
+        `starts_at` sends a new-date notice and re-arms reminders; raising
+        (or removing) capacity promotes the waitlist. `notified` = people told.
       security: [{ bearerAuth: [] }]
       parameters:
         - name: id
@@ -1735,7 +1811,73 @@ paths:
           schema: { type: integer }
       responses:
         "200":
-          description: Session updated
+          description: Session updated (+ `notified` count)
+
+  /admin/event-marketing/sessions/{id}/checkin-token:
+    post:
+      tags: [Event Marketing, Admin]
+      summary: Create (or reuse) the session's door self check-in QR link
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: Token + absolute URL (/e/checkin/{token})
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  url: { type: string }
+
+  /admin/event-marketing/sessions/{id}/import:
+    post:
+      tags: [Event Marketing, Admin]
+      summary: Import a paper sign-in sheet into a session
+      description: |
+        Up to 300 rows. Each row registers (always seated) and, unless
+        `attended: false`, checks in (`check_in_method: import`). Existing
+        CRM people are never overwritten. No confirmation is sent; attendees of
+        a session that ended in the last 72h get the normal follow-up.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rows]
+              properties:
+                rows:
+                  type: array
+                  maxItems: 300
+                  items:
+                    type: object
+                    required: [first_name, last_name, phone]
+                    properties:
+                      first_name: { type: string }
+                      last_name: { type: string }
+                      phone: { type: string }
+                      email: { type: string }
+                      preferred_language: { type: string, enum: [en, es] }
+                      attended: { type: boolean, default: true }
+      responses:
+        "200":
+          description: Per-row results + counts (imported, duplicates, failed) + refreshed company detail
+
+  /admin/event-marketing/companies/{id}/results:
+    get:
+      tags: [Event Marketing, Admin]
+      summary: Event funnel per session — registered, attended, no-show, new contacts, paid clients, revenue
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: Totals (paying clients counted once) + one row per session
 
   /admin/event-marketing/companies/{id}/form-fields:
     post:
@@ -1792,6 +1934,32 @@ paths:
       responses:
         "200":
           description: Registration checked in
+    delete:
+      tags: [Event Marketing, Admin]
+      summary: Undo a check-in
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Check-in removed
+
+  /admin/event-marketing/registrations/{id}/cancel:
+    post:
+      tags: [Event Marketing, Admin]
+      summary: Cancel a registration (frees the seat; next waitlisted person is promoted and texted)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Refreshed company detail
 
   /go/free-score:
     get:
@@ -10505,6 +10673,29 @@ components:
         mfsn_url: { type: string }
         email_sent: { type: boolean }
         sms_sent: { type: boolean }
+        status: { type: string, enum: [registered, waitlisted] }
+        duplicate: { type: boolean }
+        calendar_url: { type: string, nullable: true }
+
+    PublicEventCheckInInfo:
+      type: object
+      properties:
+        company:
+          type: object
+          properties:
+            slug: { type: string }
+            name: { type: string }
+            name_es: { type: string, nullable: true }
+        session:
+          type: object
+          properties:
+            title_en: { type: string }
+            title_es: { type: string }
+            starts_at: { type: string }
+            location_en: { type: string, nullable: true }
+            location_es: { type: string, nullable: true }
+        form_fields: { type: array, items: { type: object } }
+        window_open: { type: boolean }
 
     ReminderFlowStep:
       type: object

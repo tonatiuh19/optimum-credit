@@ -65,6 +65,9 @@ import type {
   CreditAnalysisResult,
   CreditAnalysisAnalystFlat as SharedCreditAnalysisAnalystFlat,
   AdminNotifyEventKey,
+  EventCheckInMethod,
+  EventRegistrationStatus,
+  EventSessionResult,
   AdminNotifyChannel,
   AdminNotificationPrefs,
   AdminNotifyEventToggles,
@@ -12277,6 +12280,9 @@ function pv2SanitizeFile(f: CreditFile): { file: CreditFile; dropped: string[] }
  * PR-P0-5: identical pulls block generation (BLOCKED_DATA_INTEGRITY): same
  * report date, same file hash, or identical scores + balances on every
  * tradeline. Returns the reason, or null.
+ * Nov 10, 2026 (owner decision): identical content pulled on a DIFFERENT
+ * date is real — the bureaus have not answered yet — so it is allowed as a
+ * "No changes yet" report (see pv2NoChangesYet); it still goes through approval.
  */
 function pv2DataIntegrity(
   before: CreditFile,
@@ -12294,9 +12300,27 @@ function pv2DataIntegrity(
         .map((a) => `${pv2Alnum(a.creditor)}|${BUREAUS.map((b) => a.bureaus[b]?.balance ?? "-").join(",")}`)
         .sort()
         .join(";");
-    if (sig(before) === sig(after)) return "Before and After are identical (same scores and balances on every tradeline)";
+    if (sig(before) === sig(after) && !(bd && ad)) return "Before and After are identical (same scores and balances on every tradeline)";
   }
   return null;
+}
+
+/**
+ * Identical scores + balances on every tradeline, but pulled on two different
+ * (known) dates: the bureaus have not updated yet → "No changes yet" report.
+ */
+function pv2NoChangesYet(before: CreditFile, after: CreditFile): boolean {
+  const bd = parseReportDate(before.reportDate);
+  const ad = parseReportDate(after.reportDate);
+  if (!bd || !ad || bd.getTime() === ad.getTime()) return false;
+  if (!BUREAUS.every((b) => before.scores[b] === after.scores[b])) return false;
+  if (before.accounts.length !== after.accounts.length || before.accounts.length === 0) return false;
+  const sig = (f: CreditFile) =>
+    f.accounts
+      .map((a) => `${pv2Alnum(a.creditor)}|${BUREAUS.map((b) => a.bureaus[b]?.balance ?? "-").join(",")}`)
+      .sort()
+      .join(";");
+  return sig(before) === sig(after);
 }
 
 /**
@@ -13040,6 +13064,7 @@ function pv2GoalRange(current: number, remainingLift: number, overallUtil: numbe
 interface Pv2Flag {
   code:
     | "parse_failure"
+    | "no_changes_yet"
     | "same_pull"
     | "chronology_swapped"
     | "unverified_movement"
@@ -13292,6 +13317,8 @@ interface Pv2PdfData {
   lang: Pv2Lang;
   /** Round 1 starting point: no earlier report exists, so nothing is compared yet. */
   startingPoint?: boolean;
+  /** Same accounts/scores as the earlier pull, later date: bureaus have not answered yet. */
+  noChangesYet?: boolean;
   /**
    * No account-level data for this pull: wins / targets sections print
    * nothing client-facing (never "none detected"); delivery is flagged.
@@ -13542,7 +13569,11 @@ async function generateProgressReportV2Pdf(d: Pv2PdfData, logoPng?: Uint8Array |
   // "Every bureau moved up" only when all three are on both reports and all rose (#5).
   const allUp = moved.length === 3 && moved.every((b) => d.scores[b].after! > d.scores[b].before!);
   p1.para(
-    d.startingPoint
+    d.noChangesYet && !d.startingPoint
+      ? d.lang === "es"
+        ? `${d.clientFirstName}, su informe del ${d.currentDate} todavia no muestra cambios frente al del ${d.baselineDate}. Es normal: los burós tienen hasta 30 dias para responder a las disputas que enviamos. Su proximo informe mostrara los resultados.`
+        : `${d.clientFirstName}, your report from ${d.currentDate} shows no changes yet compared to ${d.baselineDate}. That is normal: the credit bureaus have up to 30 days to respond to the disputes we sent. Your next report will show the results.`
+      : d.startingPoint
       ? d.lang === "es"
         ? `${d.clientFirstName}, este es su punto de partida al ${d.currentDate}. Aun no hay cambios que comparar: sus proximos informes mostraran el progreso desde esta fecha.`
         : `${d.clientFirstName}, this is your starting point as of ${d.currentDate}. There are no changes to compare yet: your next reports will show your progress from this date.`
@@ -13580,7 +13611,7 @@ async function generateProgressReportV2Pdf(d: Pv2PdfData, logoPng?: Uint8Array |
   // Cesar Oct 26 (#1): no "What Moved Your Score" in the client PDF — new negatives go to the
   // targets table and the internal case notes.
   const sinceStartOnly = d.winsScope === "since_start";
-  if (!d.parseFailure && !d.startingPoint) p1.heading(sinceStartOnly ? L.cameOffSinceStart : L.cameOffThisRound);
+  if (!d.parseFailure && !d.startingPoint && !d.noChangesYet) p1.heading(sinceStartOnly ? L.cameOffSinceStart : L.cameOffThisRound);
   const winTargets: Pv2Target[] = d.wins.map((w) => ({
     item: w.item,
     bureaus: w.bureaus,
@@ -17307,6 +17338,14 @@ async function renderProgressReportV2ForSession(
   if (integrity) {
     throw new ProgressReportGateError("blocked_data_integrity", `Blocked (data integrity): ${integrity}. Upload the correct After pull.`, st);
   }
+  // Same accounts + scores on a later pull: allowed as a "No changes yet" report (still needs approval).
+  const noChangesYet = !reads.startingPoint && pv2NoChangesYet(pv2SanitizeFile(before).file, pv2SanitizeFile(after).file);
+  if (noChangesYet) {
+    flags.push({
+      code: "no_changes_yet",
+      message: `No changes yet: ${after.reportDate ?? "the After pull"} matches ${before.reportDate ?? "the Before pull"} (bureaus have not updated).`,
+    });
+  }
   const sinceStart = roundNumber > 1 ? await loadProgressSinceStart(sessionId).catch(() => null) : null;
   // P1-2: "This round" only when the Before IS the prior round's After pull; otherwise the
   // Before is the enrollment baseline and the diff is labeled "Since you started".
@@ -17341,6 +17380,7 @@ async function renderProgressReportV2ForSession(
     programRound: roundNumber,
   });
   if (reads.startingPoint) pdfData.startingPoint = true;
+  if (noChangesYet) pdfData.noChangesYet = true;
   flags.push(
     ...pv2Validate({
       diff,
@@ -36699,6 +36739,12 @@ function mapEventSessionRow(
       | "completed",
     registration_count:
       r.registration_count != null ? Number(r.registration_count) : undefined,
+    waitlist_count:
+      r.waitlist_count != null ? Number(r.waitlist_count) : undefined,
+    attended_count:
+      r.attended_count != null ? Number(r.attended_count) : undefined,
+    has_checkin_token:
+      r.checkin_token !== undefined ? Boolean(r.checkin_token) : undefined,
     public_url: slug
       ? eventSessionPublicPath(slug, shortCode)
       : undefined,
@@ -36750,6 +36796,14 @@ function mapEventRegistrationRow(r: RowDataPacket) {
       ? "session"
       : "company") as "company" | "session",
     checked_in_at: r.checked_in_at != null ? String(r.checked_in_at) : null,
+    status: (["registered", "waitlisted", "cancelled"].includes(String(r.status))
+      ? String(r.status)
+      : "registered") as EventRegistrationStatus,
+    check_in_method:
+      r.check_in_method != null
+        ? (String(r.check_in_method) as EventCheckInMethod)
+        : null,
+    profile_mismatch: Boolean(r.profile_mismatch),
     created_at: String(r.created_at || ""),
     first_name: r.first_name != null ? String(r.first_name) : undefined,
     last_name: r.last_name != null ? String(r.last_name) : undefined,
@@ -36876,7 +36930,7 @@ async function seedDefaultEventFormFields(companyId: number): Promise<void> {
 async function loadEventCompanyDetail(companyId: number) {
   const [companyRows] = await pool.query<RowDataPacket[]>(
     `SELECT c.*,
-            (SELECT COUNT(*) FROM event_registrations er WHERE er.company_id = c.id) AS registration_count
+            (SELECT COUNT(*) FROM event_registrations er WHERE er.company_id = c.id AND er.status = 'registered') AS registration_count
      FROM event_companies c WHERE c.id = ? LIMIT 1`,
     [companyId],
   );
@@ -36888,7 +36942,9 @@ async function loadEventCompanyDetail(companyId: number) {
   );
   const [sessionRows] = await pool.query<RowDataPacket[]>(
     `SELECT s.*, ser.name_en AS series_name_en, ser.name_es AS series_name_es,
-            (SELECT COUNT(*) FROM event_registrations er WHERE er.session_id = s.id) AS registration_count
+            (SELECT COUNT(*) FROM event_registrations er WHERE er.session_id = s.id AND er.status = 'registered') AS registration_count,
+            (SELECT COUNT(*) FROM event_registrations er WHERE er.session_id = s.id AND er.status = 'waitlisted') AS waitlist_count,
+            (SELECT COUNT(*) FROM event_registrations er WHERE er.session_id = s.id AND er.status <> 'cancelled' AND er.checked_in_at IS NOT NULL) AS attended_count
      FROM event_sessions s
      JOIN event_series ser ON ser.id = s.series_id
      WHERE s.company_id = ?
@@ -36918,6 +36974,686 @@ async function loadEventCompanyDetail(companyId: number) {
     form_fields: fieldRows.map(mapEventFormFieldRow),
     registrations: regRows.map(mapEventRegistrationRow),
   };
+}
+
+// ============================================================================
+// EVENT MARKETING LIFECYCLE — one registration path (public form, door QR,
+// paper-sheet import), waitlist, reminders, follow-up, cancel/reschedule
+// notices, auto-complete. Existing CRM people are NEVER overwritten: what was
+// typed is kept on the registration and a mismatch is flagged for staff.
+// ============================================================================
+
+/** UTC-parts Date (LA wall clock decoded as UTC) → mysql DATETIME string. */
+function eventSqlDateTime(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
+}
+
+function eventPhoneKey(raw: string | null | undefined): string {
+  const d = String(raw || "").replace(/\D/g, "");
+  return d.length > 10 ? d.slice(-10) : d;
+}
+
+/** True when what was typed disagrees with the CRM record (blank CRM fields never count). */
+function eventProfileMismatch(
+  crm: { first_name?: unknown; last_name?: unknown; phone?: unknown },
+  typed: { firstName: string; lastName: string; phone: string },
+): boolean {
+  const norm = (v: unknown) => String(v ?? "").trim().toLowerCase();
+  const crmFirst = norm(crm.first_name);
+  const crmLast = norm(crm.last_name);
+  const crmPhone = eventPhoneKey(String(crm.phone ?? ""));
+  if (crmFirst && typed.firstName && crmFirst !== norm(typed.firstName)) return true;
+  if (crmLast && typed.lastName && crmLast !== norm(typed.lastName)) return true;
+  if (crmPhone && typed.phone && crmPhone !== eventPhoneKey(typed.phone)) return true;
+  return false;
+}
+
+/** Door check-in is open from 3h before start until 2h after the end (LA wall clock). */
+function eventCheckInWindowOpen(
+  startsAt: string | Date,
+  endsAt: string | Date | null,
+  laNow: Date = laWallClockAsUtcDate(),
+): boolean {
+  const start = eventStartsAtMs(startsAt);
+  if (Number.isNaN(start)) return false;
+  const endRaw = endsAt ? eventStartsAtMs(endsAt) : NaN;
+  const end = Number.isNaN(endRaw) ? start + 4 * 3600_000 : endRaw;
+  const now = laNow.getTime();
+  return now >= start - 3 * 3600_000 && now <= end + 2 * 3600_000;
+}
+
+type EventLifecycleKind =
+  | "waitlisted"
+  | "promoted"
+  | "reminder_24h"
+  | "reminder_2h"
+  | "cancelled"
+  | "rescheduled"
+  | "followup_attended"
+  | "followup_no_show";
+
+type EventLifecycleVars = {
+  first_name: string;
+  title: string;
+  when: string;
+  location: string;
+  link: string;
+};
+
+/** Short bilingual copy for lifecycle texts/emails (SMS ≤ 320 chars). */
+function eventLifecycleCopy(
+  kind: EventLifecycleKind,
+  lang: "en" | "es",
+  v: EventLifecycleVars,
+): { subject: string; text: string } {
+  const name = v.first_name || (lang === "es" ? "hola" : "there");
+  const where = v.location ? `${v.location}` : "";
+  const es = lang === "es";
+  switch (kind) {
+    case "waitlisted":
+      return es
+        ? { subject: `Lista de espera: ${v.title}`, text: `Hola ${name}, ${v.title} (${v.when}) está lleno. Estás en la lista de espera y te avisaremos por mensaje si se libera un lugar. — OFG` }
+        : { subject: `Waitlist: ${v.title}`, text: `Hi ${name}, ${v.title} (${v.when}) is full. You're on the waitlist and we'll text you if a spot opens. — OFG` };
+    case "promoted":
+      return es
+        ? { subject: `¡Tienes lugar! ${v.title}`, text: `¡Buenas noticias ${name}! Se liberó un lugar: ya estás registrado(a) para ${v.title}, ${v.when}${where}. — OFG` }
+        : { subject: `You're in! ${v.title}`, text: `Good news ${name}! A spot opened up: you're now registered for ${v.title}, ${v.when}${where}. — OFG` };
+    case "reminder_24h":
+      return es
+        ? { subject: `Mañana: ${v.title}`, text: `Hola ${name}, te recordamos: ${v.title} es mañana, ${v.when}${where}. ¡Te esperamos! — OFG` }
+        : { subject: `Tomorrow: ${v.title}`, text: `Hi ${name}, a reminder: ${v.title} is tomorrow, ${v.when}${where}. See you there! — OFG` };
+    case "reminder_2h":
+      return es
+        ? { subject: `Hoy: ${v.title}`, text: `Hola ${name}, ${v.title} empieza pronto: ${v.when}${where}.${v.link ? ` ${v.link}` : ""} — OFG` }
+        : { subject: `Today: ${v.title}`, text: `Hi ${name}, ${v.title} starts soon: ${v.when}${where}.${v.link ? ` ${v.link}` : ""} — OFG` };
+    case "cancelled":
+      return es
+        ? { subject: `Cancelado: ${v.title}`, text: `Hola ${name}, lo sentimos: ${v.title} (${v.when}) fue cancelado. Te avisaremos de la próxima fecha. — OFG` }
+        : { subject: `Cancelled: ${v.title}`, text: `Hi ${name}, we're sorry: ${v.title} (${v.when}) has been cancelled. We'll let you know about the next date. — OFG` };
+    case "rescheduled":
+      return es
+        ? { subject: `Nueva fecha: ${v.title}`, text: `Hola ${name}, ${v.title} cambió de fecha: ahora es ${v.when}${where}. Tu registro sigue activo. — OFG` }
+        : { subject: `New date: ${v.title}`, text: `Hi ${name}, ${v.title} has a new date: ${v.when}${where}. Your registration is still active. — OFG` };
+    case "followup_attended":
+      return es
+        ? { subject: `Gracias por venir a ${v.title}`, text: `¡Gracias por venir, ${name}! Tu siguiente paso: revisa tu crédito gratis aquí ${v.link} o responde a este mensaje para una consulta gratuita. — OFG` }
+        : { subject: `Thanks for coming to ${v.title}`, text: `Thanks for coming, ${name}! Your next step: check your credit free here ${v.link} or reply to this text for a free consultation. — OFG` };
+    case "followup_no_show":
+      return es
+        ? { subject: `Te extrañamos en ${v.title}`, text: `Hola ${name}, te extrañamos en ${v.title}. Revisa tu crédito gratis aquí ${v.link} o responde a este mensaje y te ayudamos. — OFG` }
+        : { subject: `We missed you at ${v.title}`, text: `Hi ${name}, we missed you at ${v.title}. Check your credit free here ${v.link} or reply to this text and we'll help. — OFG` };
+  }
+}
+
+/** Sends one lifecycle notice by SMS + email; never throws (Twilio blocks STOP'd numbers). */
+async function sendEventLifecycleMessage(opts: {
+  kind: EventLifecycleKind;
+  lang: "en" | "es";
+  phone: string | null;
+  email: string | null;
+  vars: EventLifecycleVars;
+}): Promise<{ smsSent: boolean; emailSent: boolean }> {
+  const copy = eventLifecycleCopy(opts.kind, opts.lang, opts.vars);
+  let smsSent = false;
+  let emailSent = false;
+  const phone = String(opts.phone || "").trim();
+  if (phone && eventPhoneKey(phone).length >= 10) {
+    try {
+      const from = await resolveGetCreditReportSmsFromE164();
+      if (from) {
+        await sendSms({ to: phone, from, body: copy.text.slice(0, 320) });
+        smsSent = true;
+      }
+    } catch (e: any) {
+      console.error(`[event-lifecycle:${opts.kind}] sms`, e?.message ?? e);
+    }
+  }
+  const email = String(opts.email || "").trim();
+  if (email && email.includes("@")) {
+    try {
+      await sendEmail({
+        to: email,
+        subject: copy.subject,
+        html: emailLayout({
+          title: copy.subject,
+          preheader: copy.text.slice(0, 120),
+          bodyHtml: `<p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;white-space:pre-wrap;">${escapeHtml(copy.text)}</p>`,
+          lang: opts.lang,
+        }),
+      });
+      emailSent = true;
+    } catch (e: any) {
+      console.error(`[event-lifecycle:${opts.kind}] email`, e?.message ?? e);
+    }
+  }
+  return { smsSent, emailSent };
+}
+
+/** Contact + session vars for one registration row (answers win: CRM is never overwritten). */
+function eventRegistrationContact(r: RowDataPacket): {
+  lang: "en" | "es";
+  phone: string | null;
+  email: string | null;
+  firstName: string;
+} {
+  const answers =
+    parseWizardJsonField<Record<string, unknown>>(r.answers_json) || {};
+  const lang =
+    String(answers.preferred_language || r.preferred_language || "en") === "es"
+      ? "es"
+      : "en";
+  return {
+    lang,
+    phone: String(answers.phone || r.phone || "").trim() || null,
+    email: String(answers.email || r.email || "").trim() || null,
+    firstName: String(answers.first_name || r.first_name || "").trim(),
+  };
+}
+
+function eventSessionVars(
+  s: RowDataPacket,
+  lang: "en" | "es",
+  firstName: string,
+  link: string,
+): EventLifecycleVars {
+  const es = lang === "es";
+  return {
+    first_name: firstName,
+    title: String((es ? s.title_es : s.title_en) || s.title_en || ""),
+    when: formatEventSessionWhen(s.starts_at as string | Date, lang),
+    location: formatEventSessionLocation(
+      String((es ? s.location_es || s.location_en : s.location_en) || ""),
+    ),
+    link,
+  };
+}
+
+type EventRegisterResult = {
+  clientId: number;
+  registrationId: number;
+  status: "registered" | "waitlisted";
+  duplicate: boolean;
+  profileMismatch: boolean;
+  isNewClient: boolean;
+  sessionRow: RowDataPacket | null;
+};
+
+/**
+ * The single registration path. Matches an existing person by email, then
+ * phone, and NEVER edits their CRM record. Seats are counted under a row lock
+ * on the session so two last-seat sign-ups cannot both get in; a full session
+ * waitlists (unless `forceSeat`: the person is physically at the door).
+ * Re-submitting is idempotent: same registration, no duplicate row.
+ */
+async function registerEventAttendee(opts: {
+  companyId: number;
+  labelSlug: string;
+  sessionId: number | null;
+  firstName: string;
+  lastName: string;
+  email: string;
+  phone: string;
+  lang: "en" | "es";
+  answers: Record<string, unknown>;
+  sourceQr: "company" | "session";
+  checkIn?: "staff" | "self" | "import" | null;
+  forceSeat?: boolean;
+}): Promise<EventRegisterResult> {
+  const email = opts.email.trim().toLowerCase();
+  let clientId: number | null = null;
+  let crmRow: RowDataPacket | null = null;
+  if (email) {
+    const [byEmail] = await pool.query<RowDataPacket[]>(
+      `SELECT id, first_name, last_name, phone FROM clients WHERE email = ? LIMIT 1`,
+      [email],
+    );
+    if (byEmail[0]) {
+      clientId = Number(byEmail[0].id);
+      crmRow = byEmail[0];
+    }
+  }
+  if (!clientId && opts.phone) {
+    const byPhone = await findClientIdByPhone(opts.phone);
+    if (byPhone) {
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT id, first_name, last_name, phone FROM clients WHERE id = ? LIMIT 1`,
+        [byPhone],
+      );
+      if (rows[0]) {
+        clientId = byPhone;
+        crmRow = rows[0];
+      }
+    }
+  }
+  const isNewClient = !clientId;
+  const profileMismatch = crmRow
+    ? eventProfileMismatch(crmRow as { first_name?: unknown; last_name?: unknown; phone?: unknown }, {
+        firstName: opts.firstName,
+        lastName: opts.lastName,
+        phone: opts.phone,
+      })
+    : false;
+  if (!clientId) {
+    const [ins] = await pool.query<ResultSetHeader>(
+      `INSERT INTO clients
+         (email, first_name, last_name, phone, preferred_language,
+          assigned_admin_id, status, pipeline_stage)
+       VALUES (?, ?, ?, ?, ?, NULL, 'prospect', 'prospect')`,
+      [email || null, opts.firstName, opts.lastName, opts.phone, opts.lang],
+    );
+    clientId = ins.insertId;
+  }
+
+  const labelSlugs = [
+    EVENT_MARKETING_SOURCE_LABEL,
+    String(opts.labelSlug || "").trim(),
+    WEB_LEAD_REVIEW_LABEL,
+  ].filter(Boolean);
+  await attachLabelsBySlug(clientId, labelSlugs).catch((e: any) =>
+    console.error("[event-marketing] labels", e?.message ?? e),
+  );
+
+  const answersToStore = JSON.stringify({
+    ...opts.answers,
+    first_name: opts.firstName,
+    last_name: opts.lastName,
+    email,
+    phone: opts.phone,
+    preferred_language: opts.lang,
+  });
+  const checkIn = opts.checkIn || null;
+
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    let sessionRow: RowDataPacket | null = null;
+    let seriesId: number | null = null;
+    if (opts.sessionId != null) {
+      const [sessRows] = await conn.query<RowDataPacket[]>(
+        `SELECT * FROM event_sessions WHERE id = ? AND company_id = ? LIMIT 1 FOR UPDATE`,
+        [opts.sessionId, opts.companyId],
+      );
+      sessionRow = sessRows[0] || null;
+      seriesId = sessionRow ? Number(sessionRow.series_id) : null;
+    }
+    const [existing] = await conn.query<RowDataPacket[]>(
+      `SELECT id, status, checked_in_at FROM event_registrations
+       WHERE client_id = ? AND company_id = ? AND session_id <=> ?
+       ORDER BY id ASC LIMIT 1 FOR UPDATE`,
+      [clientId, opts.companyId, opts.sessionId],
+    );
+    const prev = existing[0];
+
+    let seatFree = true;
+    const capacity =
+      sessionRow?.capacity != null ? Number(sessionRow.capacity) : null;
+    if (sessionRow && capacity != null && capacity > 0) {
+      // Locking (current) read: under REPEATABLE READ a plain SELECT would use
+      // this transaction's snapshot and miss a seat taken while we waited for the lock.
+      const [cntRows] = await conn.query<RowDataPacket[]>(
+        `SELECT COUNT(*) AS cnt FROM event_registrations
+         WHERE session_id = ? AND status = 'registered' FOR UPDATE`,
+        [opts.sessionId],
+      );
+      seatFree = Number(cntRows[0]?.cnt || 0) < capacity;
+    }
+
+    if (prev && String(prev.status) !== "cancelled") {
+      // Idempotent re-submit: keep the row; a door/import arrival takes a seat.
+      let status = String(prev.status) as "registered" | "waitlisted";
+      if (status === "waitlisted" && (opts.forceSeat || seatFree)) {
+        status = "registered";
+      }
+      const newCheckIn = checkIn && !prev.checked_in_at ? checkIn : null;
+      await conn.query(
+        `UPDATE event_registrations
+         SET status = ?,
+             profile_mismatch = GREATEST(profile_mismatch, ?)${newCheckIn ? ", checked_in_at = NOW(), check_in_method = ?" : ""}
+         WHERE id = ?`,
+        newCheckIn
+          ? [status, profileMismatch ? 1 : 0, newCheckIn, prev.id]
+          : [status, profileMismatch ? 1 : 0, prev.id],
+      );
+      await conn.commit();
+      return {
+        clientId,
+        registrationId: Number(prev.id),
+        status,
+        duplicate: true,
+        profileMismatch,
+        isNewClient,
+        sessionRow,
+      };
+    }
+
+    const status: "registered" | "waitlisted" =
+      seatFree || opts.forceSeat ? "registered" : "waitlisted";
+    let registrationId: number;
+    if (prev) {
+      await conn.query(
+        `UPDATE event_registrations
+         SET status = ?, answers_json = ?, source_qr = ?, series_id = ?,
+             profile_mismatch = ?,
+             checked_in_at = IF(? IS NULL, NULL, NOW()), check_in_method = ?,
+             reminder_24h_sent_at = NULL, reminder_2h_sent_at = NULL, followup_sent_at = NULL
+         WHERE id = ?`,
+        [status, answersToStore, opts.sourceQr, seriesId, profileMismatch ? 1 : 0, checkIn, checkIn, prev.id],
+      );
+      registrationId = Number(prev.id);
+    } else {
+      const [regIns] = await conn.query<ResultSetHeader>(
+        `INSERT INTO event_registrations
+           (client_id, company_id, series_id, session_id, answers_json, source_qr,
+            status, profile_mismatch, checked_in_at, check_in_method)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, IF(? IS NULL, NULL, NOW()), ?)`,
+        [clientId, opts.companyId, seriesId, opts.sessionId, answersToStore, opts.sourceQr,
+          status, profileMismatch ? 1 : 0, checkIn, checkIn],
+      );
+      registrationId = regIns.insertId;
+    }
+    await conn.commit();
+    return {
+      clientId,
+      registrationId,
+      status,
+      duplicate: false,
+      profileMismatch,
+      isNewClient,
+      sessionRow,
+    };
+  } catch (e) {
+    await conn.rollback().catch(() => null);
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
+/** Fills freed seats from the waitlist (oldest first) and texts the people promoted. */
+async function promoteEventWaitlist(sessionId: number): Promise<number> {
+  const conn = await pool.getConnection();
+  let promoted: RowDataPacket[] = [];
+  let sessionRow: RowDataPacket | null = null;
+  try {
+    await conn.beginTransaction();
+    const [sessRows] = await conn.query<RowDataPacket[]>(
+      `SELECT * FROM event_sessions WHERE id = ? LIMIT 1 FOR UPDATE`,
+      [sessionId],
+    );
+    sessionRow = sessRows[0] || null;
+    if (!sessionRow || String(sessionRow.status) !== "scheduled") {
+      await conn.commit();
+      return 0;
+    }
+    const capacity =
+      sessionRow.capacity != null ? Number(sessionRow.capacity) : null;
+    const [cntRows] = await conn.query<RowDataPacket[]>(
+      `SELECT COUNT(*) AS cnt FROM event_registrations WHERE session_id = ? AND status = 'registered' FOR UPDATE`,
+      [sessionId],
+    );
+    const free =
+      capacity == null || capacity <= 0
+        ? 1000
+        : capacity - Number(cntRows[0]?.cnt || 0);
+    if (free > 0) {
+      const [wait] = await conn.query<RowDataPacket[]>(
+        `SELECT er.id, er.answers_json, c.first_name, c.phone, c.email, c.preferred_language
+         FROM event_registrations er JOIN clients c ON c.id = er.client_id
+         WHERE er.session_id = ? AND er.status = 'waitlisted'
+         ORDER BY er.created_at ASC, er.id ASC LIMIT ? FOR UPDATE`,
+        [sessionId, Math.min(free, 1000)],
+      );
+      if (wait.length) {
+        await conn.query(
+          `UPDATE event_registrations SET status = 'registered' WHERE id IN (?)`,
+          [wait.map((w) => Number(w.id))],
+        );
+      }
+      promoted = wait;
+    }
+    await conn.commit();
+  } catch (e) {
+    await conn.rollback().catch(() => null);
+    throw e;
+  } finally {
+    conn.release();
+  }
+  for (const r of promoted) {
+    const c = eventRegistrationContact(r);
+    await sendEventLifecycleMessage({
+      kind: "promoted",
+      lang: c.lang,
+      phone: c.phone,
+      email: c.email,
+      vars: eventSessionVars(sessionRow!, c.lang, c.firstName, ""),
+    });
+  }
+  return promoted.length;
+}
+
+/** Notifies everyone still holding a seat or waitlist spot that a session was cancelled / moved. */
+async function notifyEventSessionChange(
+  sessionId: number,
+  kind: "cancelled" | "rescheduled",
+): Promise<number> {
+  const [sessRows] = await pool.query<RowDataPacket[]>(
+    `SELECT * FROM event_sessions WHERE id = ? LIMIT 1`,
+    [sessionId],
+  );
+  const s = sessRows[0];
+  if (!s) return 0;
+  if (kind === "rescheduled") {
+    await pool.query(
+      `UPDATE event_registrations
+       SET reminder_24h_sent_at = NULL, reminder_2h_sent_at = NULL
+       WHERE session_id = ? AND status <> 'cancelled'`,
+      [sessionId],
+    );
+  }
+  const [regs] = await pool.query<RowDataPacket[]>(
+    `SELECT er.id, er.answers_json, c.first_name, c.phone, c.email, c.preferred_language
+     FROM event_registrations er JOIN clients c ON c.id = er.client_id
+     WHERE er.session_id = ? AND er.status IN ('registered','waitlisted')
+     LIMIT 1000`,
+    [sessionId],
+  );
+  for (const r of regs) {
+    const c = eventRegistrationContact(r);
+    await sendEventLifecycleMessage({
+      kind,
+      lang: c.lang,
+      phone: c.phone,
+      email: c.email,
+      vars: eventSessionVars(s, c.lang, c.firstName, ""),
+    });
+  }
+  return regs.length;
+}
+
+/**
+ * Cron step (every 5 min via /api/cron/process-queue):
+ *  1. 24h and 2h reminders (claimed row-by-row so overlapping runs never double-send;
+ *     people who registered within the last few hours are skipped — they just got a confirmation),
+ *  2. auto-complete sessions that ended over an hour ago,
+ *  3. one follow-up per registration after a completed session: attended vs no-show
+ *     (9am–8pm LA only, within 72h of the end — never blast old events).
+ * `sessionIds` scopes a run (tests share the live DB).
+ */
+async function runEventMarketingCronStep(opts?: {
+  sessionIds?: number[];
+  now?: Date;
+}): Promise<{ reminders_24h: number; reminders_2h: number; completed: number; followups: number }> {
+  const out = { reminders_24h: 0, reminders_2h: 0, completed: 0, followups: 0 };
+  const laNow = laWallClockAsUtcDate(opts?.now);
+  const at = (ms: number) => eventSqlDateTime(new Date(laNow.getTime() + ms));
+  const scope = opts?.sessionIds?.length ? opts.sessionIds : null;
+  const scopeSql = scope ? " AND s.id IN (?)" : "";
+  const scopeArgs = scope ? [scope] : [];
+  const nowMs = (opts?.now ?? new Date()).getTime();
+
+  const remind = async (
+    kind: "reminder_24h" | "reminder_2h",
+    column: "reminder_24h_sent_at" | "reminder_2h_sent_at",
+    fromMs: number,
+    toMs: number,
+    skipIfRegisteredWithinMs: number,
+  ) => {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT er.id, er.created_at, er.answers_json, c.first_name, c.phone, c.email, c.preferred_language,
+              s.id AS s_id, s.title_en, s.title_es, s.starts_at, s.location_en, s.location_es,
+              co.class_link_url
+       FROM event_registrations er
+       JOIN event_sessions s ON s.id = er.session_id
+       JOIN event_companies co ON co.id = s.company_id
+       JOIN clients c ON c.id = er.client_id
+       WHERE er.status = 'registered' AND s.status = 'scheduled'
+         AND er.${column} IS NULL
+         AND s.starts_at > ? AND s.starts_at <= ?${scopeSql}
+       ORDER BY s.starts_at ASC LIMIT 40`,
+      [at(fromMs), at(toMs), ...scopeArgs],
+    );
+    for (const r of rows) {
+      const [claim] = await pool.query<ResultSetHeader>(
+        `UPDATE event_registrations SET ${column} = NOW() WHERE id = ? AND ${column} IS NULL`,
+        [r.id],
+      );
+      if (!claim.affectedRows) continue;
+      const createdMs = new Date(r.created_at as string | Date).getTime();
+      if (!Number.isNaN(createdMs) && nowMs - createdMs < skipIfRegisteredWithinMs) continue;
+      const c = eventRegistrationContact(r);
+      await sendEventLifecycleMessage({
+        kind,
+        lang: c.lang,
+        phone: c.phone,
+        email: c.email,
+        vars: eventSessionVars(r, c.lang, c.firstName, kind === "reminder_2h" ? String(r.class_link_url || "") : ""),
+      });
+      if (kind === "reminder_24h") out.reminders_24h++;
+      else out.reminders_2h++;
+    }
+  };
+  await remind("reminder_24h", "reminder_24h_sent_at", 3 * 3600_000, 24 * 3600_000, 6 * 3600_000);
+  await remind("reminder_2h", "reminder_2h_sent_at", 0, 2.25 * 3600_000, 3600_000);
+
+  const [done] = await pool.query<ResultSetHeader>(
+    `UPDATE event_sessions s SET s.status = 'completed'
+     WHERE s.status = 'scheduled'
+       AND COALESCE(s.ends_at, s.starts_at + INTERVAL 3 HOUR) < ?${scopeSql}`,
+    [at(-3600_000), ...scopeArgs],
+  );
+  out.completed = Number(done.affectedRows || 0);
+
+  const laHour = laNow.getUTCHours();
+  if (laHour >= 9 && laHour < 20) {
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `SELECT er.id, er.checked_in_at, er.answers_json, c.first_name, c.phone, c.email, c.preferred_language,
+              s.id AS s_id, s.title_en, s.title_es, s.starts_at, s.location_en, s.location_es
+       FROM event_registrations er
+       JOIN event_sessions s ON s.id = er.session_id
+       JOIN clients c ON c.id = er.client_id
+       WHERE er.status = 'registered' AND s.status = 'completed'
+         AND er.followup_sent_at IS NULL
+         AND COALESCE(s.ends_at, s.starts_at + INTERVAL 3 HOUR) >= ?
+         AND COALESCE(s.ends_at, s.starts_at + INTERVAL 3 HOUR) < ?${scopeSql}
+       ORDER BY s.starts_at ASC LIMIT 40`,
+      [at(-72 * 3600_000), at(-3600_000), ...scopeArgs],
+    );
+    for (const r of rows) {
+      const [claim] = await pool.query<ResultSetHeader>(
+        `UPDATE event_registrations SET followup_sent_at = NOW() WHERE id = ? AND followup_sent_at IS NULL`,
+        [r.id],
+      );
+      if (!claim.affectedRows) continue;
+      const c = eventRegistrationContact(r);
+      await sendEventLifecycleMessage({
+        kind: r.checked_in_at ? "followup_attended" : "followup_no_show",
+        lang: c.lang,
+        phone: c.phone,
+        email: c.email,
+        vars: eventSessionVars(r, c.lang, c.firstName, MFSN_FREE_SNAPSHOT_URL),
+      });
+      out.followups++;
+    }
+  }
+  return out;
+}
+
+/** RFC 5545 calendar file for one session (LA wall clock via TZID). */
+function buildEventSessionIcs(s: RowDataPacket, lang: "en" | "es", url: string): string {
+  const fmt = (v: string | Date) => {
+    const ms = eventStartsAtMs(v);
+    const d = new Date(ms);
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}T${p(d.getUTCHours())}${p(d.getUTCMinutes())}00`;
+  };
+  const esc = (t: string) => t.replace(/\\/g, "\\\\").replace(/[,;]/g, (m) => `\\${m}`).replace(/\r?\n/g, "\\n");
+  const startMs = eventStartsAtMs(s.starts_at as string | Date);
+  const end = s.ends_at ? (s.ends_at as string | Date) : new Date(startMs + 2 * 3600_000);
+  const title = String((lang === "es" ? s.title_es : s.title_en) || s.title_en || "OFG event");
+  const loc = String((lang === "es" ? s.location_es || s.location_en : s.location_en) || "");
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+  return [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//Optimum Financial Group//Events//EN",
+    "CALSCALE:GREGORIAN",
+    "METHOD:PUBLISH",
+    // Outlook needs the zone defined to honor TZID (US Pacific rules since 2007).
+    "BEGIN:VTIMEZONE",
+    "TZID:America/Los_Angeles",
+    "BEGIN:DAYLIGHT",
+    "TZOFFSETFROM:-0800",
+    "TZOFFSETTO:-0700",
+    "TZNAME:PDT",
+    "DTSTART:20070311T020000",
+    "RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=2SU",
+    "END:DAYLIGHT",
+    "BEGIN:STANDARD",
+    "TZOFFSETFROM:-0700",
+    "TZOFFSETTO:-0800",
+    "TZNAME:PST",
+    "DTSTART:20071104T020000",
+    "RRULE:FREQ=YEARLY;BYMONTH=11;BYDAY=1SU",
+    "END:STANDARD",
+    "END:VTIMEZONE",
+    "BEGIN:VEVENT",
+    `UID:event-session-${Number(s.id)}@ofgllc.com`,
+    `DTSTAMP:${stamp}`,
+    `DTSTART;TZID=America/Los_Angeles:${fmt(s.starts_at as string | Date)}`,
+    `DTEND;TZID=America/Los_Angeles:${fmt(end)}`,
+    `SUMMARY:${esc(title)}`,
+    loc ? `LOCATION:${esc(loc)}` : "",
+    `DESCRIPTION:${esc(`Optimum Financial Group — ${url}`)}`,
+    `URL:${url}`,
+    "END:VEVENT",
+    "END:VCALENDAR",
+  ]
+    .filter(Boolean)
+    .map(icsFold)
+    .join("\r\n");
+}
+
+/** RFC 5545 §3.1: lines longer than 75 octets continue on the next line after CRLF + space. */
+function icsFold(line: string): string {
+  const bytes = Buffer.from(line, "utf8");
+  if (bytes.length <= 75) return line;
+  const parts: string[] = [];
+  let chunk = "";
+  let size = 0;
+  for (const ch of line) {
+    const n = Buffer.byteLength(ch, "utf8");
+    const limit = parts.length === 0 ? 75 : 74; // continuation lines start with a space
+    if (size + n > limit) {
+      parts.push(chunk);
+      chunk = "";
+      size = 0;
+    }
+    chunk += ch;
+    size += n;
+  }
+  parts.push(chunk);
+  return parts.join("\r\n ");
 }
 
 async function notifyEventRegistration(opts: {
@@ -41267,6 +42003,30 @@ function inboundAiHelpReply(lang: "en" | "es"): string {
 }
 
 /**
+ * True when the newest outbound text in the thread is an AI message that asked
+ * something ("Want a teammate to call you?") — then "ok thanks" is an ANSWER,
+ * not a sign-off, and must reach the AI. `recentNewestFirst` may include the
+ * inbound being handled.
+ */
+function inboundAiLastAiTextAskedQuestion(
+  recentNewestFirst: ReadonlyArray<object>,
+): boolean {
+  type Msg = { direction?: unknown; body?: unknown; metadata_json?: unknown };
+  const last = (recentNewestFirst as ReadonlyArray<Msg>).find((m) => String(m.direction) === "outbound");
+  if (!last) return false;
+  let meta: Record<string, unknown> = {};
+  try {
+    meta =
+      typeof last.metadata_json === "string"
+        ? JSON.parse(last.metadata_json)
+        : ((last.metadata_json as Record<string, unknown>) ?? {});
+  } catch {
+    meta = {};
+  }
+  return meta?.inbound_ai === true && /[?¿]/.test(String(last.body ?? ""));
+}
+
+/**
  * Reactions ("Liked “…”") and pure acknowledgments ("ok", "thanks", 👍) need
  * no AI reply and no escalation — staff just see them in the inbox.
  */
@@ -41274,13 +42034,43 @@ function inboundAiIsAckOnly(text: string): boolean {
   const t = String(text || "").trim();
   if (!t) return false;
   if (/^(liked|loved|laughed at|emphasized|disliked|questioned|reacted\b[^“"]*to|le gust[oó]|me gusta|\S{1,4}\s+to)\s*[“"]/iu.test(t)) return true;
+  if (/[?¿]/.test(t)) return false; // any question needs an answer
   const words = t
     .toLowerCase()
     .replace(/[\p{Extended_Pictographic}\uFE0F\u200D]/gu, " ")
-    .replace(/[!.,¡¿?]+/g, " ")
+    .replace(/[!.,;:¡]+/g, " ")
+    .replace(/\s+/g, " ")
     .trim();
   if (!words) return true; // emoji only
-  return /^(ok(ay)?|k|kk|thanks?( you)?( so much| very much)?( for (the|your) (update|help|info|information))?|thx|ty|tysm|gracias|muchas gracias|mil gracias|sounds good|perfect|perfecto|great|awesome|cool|got it|entendido|de acuerdo|vale|listo|sale|bueno|you too|igualmente)( (sir|cesar|césar|bro|primo|amigo|amiga))?$/u.test(words);
+  if (words.split(" ").length > 14) return false;
+  // Thanks/ok phrases chained with fillers ("Awesome, man. Thank you for the update.").
+  const ack = [
+    "ok(?:ay|ey|i)?", "k", "kk", "thanks?", "thank you", "thx", "ty", "tysm", "gracias", "muchas gracias",
+    "mil gracias", "sounds good", "perfect", "perfecto", "great", "awesome", "cool", "nice", "excellent",
+    "excelente", "genial", "muy bien", "got it", "noted", "will do", "appreciate it", "i appreciate it",
+    "appreciated", "entendido", "de acuerdo", "vale", "listo", "sale", "bueno", "dale", "claro", "you too",
+    "igualmente",
+  ];
+  const filler = [
+    "man", "sir", "bro", "cesar", "césar", "primo", "amigo", "amiga", "again", "so much", "very much",
+    "a lot", "lol", "for (?:the|your|all the|all your) (?:update|updates|help|info|information)",
+    "for (?:everything|all)", "have a (?:good|great|nice|blessed) (?:day|night|weekend|one)",
+    "que tengas (?:un )?(?:buen|excelente|lindo) (?:día|dia|fin de semana)", "bendiciones", "god bless",
+    "por todo", "por (?:la|tu) (?:información|informacion|ayuda)",
+  ];
+  // Longest phrase first so "thank you" is not read as "thank" + "you".
+  const alt = (xs: string[]) => [...xs].sort((x, y) => y.length - x.length).join("|");
+  const unit = new RegExp(`^(?:${alt([...ack, ...filler])})(?: |$)`, "u");
+  const ackOnly = new RegExp(`^(?:${alt(ack)})(?: |$)`, "u");
+  let rest = words;
+  let sawAck = false;
+  while (rest) {
+    const m = rest.match(unit);
+    if (!m) return false;
+    if (ackOnly.test(rest)) sawAck = true;
+    rest = rest.slice(m[0].length);
+  }
+  return sawAck;
 }
 
 function inboundAiHardEscalateReason(
@@ -41487,13 +42277,6 @@ Finish by calling the triage_decision tool once (if tools are unavailable, retur
 }
 
 // ── Reply safety guard (code-level, runs on every AI reply before sending) ──
-
-/** First AI reply in a thread identifies the automated assistant. */
-function inboundAiDisclosurePrefix(lang: "en" | "es"): string {
-  return lang === "es"
-    ? "Asistente automático de OFG: "
-    : "OFG automated assistant: ";
-}
 
 const INBOUND_AI_BILLING_RE =
   /\b(bill|billed|billing|charge|charged|payment|pay|price|cost|fee|invoice|cobro|cobran|cobrar|pago|pagar|precio|costo|factura|mensualidad)\b/i;
@@ -41791,7 +42574,7 @@ export interface InboundAiToolCtx {
  * active), hard-escalate, or go to Claude — and with how many AI turns.
  */
 /** Shared DB pool + reply guard for local audit scripts (scripts/replay-inbound-ai.ts). */
-export { pool, checkInboundAiReply };
+export { pool, checkInboundAiReply, laWallClockAsUtcDate, eventSqlDateTime, registerEventAttendee, runEventMarketingCronStep, promoteEventWaitlist, eventProfileMismatch, eventCheckInWindowOpen, eventLifecycleCopy, buildEventSessionIcs };
 
 export function replayInboundAiRules(
   recentNewestFirst: RowDataPacket[],
@@ -41808,7 +42591,9 @@ export function replayInboundAiRules(
   ) {
     return { skip: "staff_active (AI stays out)", aiTurns: 0 };
   }
-  if (inboundAiIsAckOnly(body)) return { skip: "ack_only (no reply needed)", aiTurns: 0 };
+  if (inboundAiIsAckOnly(body) && !inboundAiLastAiTextAskedQuestion(recentNewestFirst)) {
+    return { skip: "ack_only (no reply needed)", aiTurns: 0 };
+  }
   const aiTurns = countAiOutboundTurnsFromRows(recentNewestFirst);
   const hard = inboundAiHardEscalateReason(body, { isUnknown, aiTurnCount: aiTurns });
   return { skip: hard ? `hard:${hard}` : null, aiTurns };
@@ -42873,7 +43658,8 @@ async function tryProcessInboundAiSms(opts: {
     return { tookOver: false, mode: "skip" };
   }
   // Reactions / "thanks" / "ok": no AI reply, no escalation — staff see it in the inbox.
-  if (inboundAiIsAckOnly(opts.inboundBody)) {
+  // (Unless the AI just asked something — then "ok thanks" is the answer.)
+  if (inboundAiIsAckOnly(opts.inboundBody) && !inboundAiLastAiTextAskedQuestion(recent)) {
     return { tookOver: false, mode: "skip" };
   }
   const aiTurnCount = countAiOutboundTurnsFromRows(recent);
@@ -43153,10 +43939,8 @@ async function tryProcessInboundAiSms(opts: {
   if (blockedDraft) {
     console.warn("[inbound-ai:reply-guard]", opts.conversationId, decision.escalate_reason);
   }
-  // First AI reply in a thread says it's OFG's automated assistant.
-  if (decision.action !== "escalate" && aiTurnCount === 0) {
-    decision = { ...decision, reply: `${inboundAiDisclosurePrefix(lang)}${decision.reply}` };
-  }
+  // No "automated assistant" label on replies (Nov 10, 2026, owner decision);
+  // the AI still says it is OFG's automated assistant whenever someone asks.
   const billingQuestion = inboundAiIsBillingQuestion(opts.inboundBody);
 
   if (decision.action === "escalate") {
@@ -53733,7 +54517,7 @@ function buildApp() {
       );
       const [sessionRows] = await pool.query<RowDataPacket[]>(
         `SELECT s.*, ser.name_en AS series_name_en, ser.name_es AS series_name_es,
-                (SELECT COUNT(*) FROM event_registrations er WHERE er.session_id = s.id) AS registration_count
+                (SELECT COUNT(*) FROM event_registrations er WHERE er.session_id = s.id AND er.status = 'registered') AS registration_count
          FROM event_sessions s
          JOIN event_series ser ON ser.id = s.series_id
          WHERE s.company_id = ? AND s.status = 'scheduled'
@@ -53912,9 +54696,8 @@ function buildApp() {
         return res.status(400).json({ error: "Unable to submit" });
       }
 
-      // Resolve session (optional) + capacity
-      let sessionRow: RowDataPacket | null = null;
-      let seriesId: number | null = null;
+      // Resolve session (optional). Capacity, waitlist and duplicates are
+      // decided atomically inside registerEventAttendee.
       if (sessionId == null) {
         const [scheduled] = await pool.query<RowDataPacket[]>(
           `SELECT id, starts_at, status FROM event_sessions
@@ -53934,7 +54717,7 @@ function buildApp() {
       }
       if (sessionId != null) {
         const [sessRows] = await pool.query<RowDataPacket[]>(
-          `SELECT * FROM event_sessions
+          `SELECT id, status FROM event_sessions
            WHERE id = ? AND company_id = ? LIMIT 1`,
           [sessionId, companyId],
         );
@@ -53946,110 +54729,66 @@ function buildApp() {
             .status(400)
             .json({ error: "That session is not available" });
         }
-        sessionRow = sessRows[0];
-        seriesId = Number(sessRows[0].series_id);
-        const capacity =
-          sessRows[0].capacity != null ? Number(sessRows[0].capacity) : null;
-        if (capacity != null && capacity > 0) {
-          const [cntRows] = await pool.query<RowDataPacket[]>(
-            `SELECT COUNT(*) AS cnt FROM event_registrations WHERE session_id = ?`,
-            [sessionId],
-          );
-          const cnt = Number(cntRows[0]?.cnt || 0);
-          if (cnt >= capacity) {
-            return res
-              .status(409)
-              .json({ error: "This session is full. Please choose another." });
-          }
-        }
       }
 
-      let clientId: number | null = null;
-      let status: string | null = null;
-
-      const [byEmail] = await pool.query<RowDataPacket[]>(
-        `SELECT id, status FROM clients WHERE email = ? LIMIT 1`,
-        [email],
-      );
-      if (byEmail[0]) {
-        clientId = Number(byEmail[0].id);
-        status = String(byEmail[0].status || "");
-      } else {
-        const byPhone = await findClientIdByPhone(phoneRaw);
-        if (byPhone) {
-          clientId = byPhone;
-          const [rows] = await pool.query<RowDataPacket[]>(
-            `SELECT status FROM clients WHERE id = ? LIMIT 1`,
-            [clientId],
-          );
-          status = rows[0] ? String(rows[0].status || "") : null;
-        }
-      }
-
-      if (clientId) {
-        if (status === "prospect") {
-          await pool.query(
-            `UPDATE clients
-             SET first_name = ?, last_name = ?,
-                 phone = ?,
-                 preferred_language = ?,
-                 email = COALESCE(NULLIF(TRIM(email), ''), ?)
-             WHERE id = ?`,
-            [firstName, lastName, phoneRaw, lang, email, clientId],
-          );
-        } else {
-          await pool.query(
-            `UPDATE clients
-             SET phone = COALESCE(NULLIF(TRIM(phone), ''), ?),
-                 preferred_language = COALESCE(preferred_language, ?)
-             WHERE id = ?`,
-            [phoneRaw, lang, clientId],
-          );
-        }
-      } else {
-        const [ins] = await pool.query<ResultSetHeader>(
-          `INSERT INTO clients
-             (email, first_name, last_name, phone, preferred_language,
-              assigned_admin_id, status, pipeline_stage)
-           VALUES (?, ?, ?, ?, ?, NULL, 'prospect', 'prospect')`,
-          [email, firstName, lastName, phoneRaw, lang],
-        );
-        clientId = ins.insertId;
-        status = "prospect";
-      }
-
-      const labelSlugs = [
-        EVENT_MARKETING_SOURCE_LABEL,
-        String(companyRow.label_slug || "").trim(),
-        WEB_LEAD_REVIEW_LABEL,
-      ].filter(Boolean);
-      await attachLabelsBySlug(clientId!, labelSlugs).catch((e: any) =>
-        console.error("[event-marketing] labels", e?.message ?? e),
-      );
-
-      const answersToStore: Record<string, unknown> = {
-        ...answers,
-        first_name: firstName,
-        last_name: lastName,
+      // Existing CRM people are never overwritten (typed values stay on the
+      // registration; staff see a mismatch flag).
+      const reg = await registerEventAttendee({
+        companyId,
+        labelSlug: String(companyRow.label_slug || ""),
+        sessionId,
+        firstName,
+        lastName,
         email,
         phone: phoneRaw,
-        preferred_language: lang,
-      };
+        lang,
+        answers,
+        sourceQr,
+      });
+      const clientId: number = reg.clientId;
+      const registrationId = reg.registrationId;
+      const sessionRow = reg.sessionRow;
+      const calendarUrl = sessionRow
+        ? `${APP_URL}/api/public/event-marketing/sessions/${encodeURIComponent(String(sessionRow.short_code))}/calendar.ics?lang=${lang}`
+        : null;
 
-      const [regIns] = await pool.query<ResultSetHeader>(
-        `INSERT INTO event_registrations
-           (client_id, company_id, series_id, session_id, answers_json, source_qr)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [
-          clientId,
-          companyId,
-          seriesId,
-          sessionId,
-          JSON.stringify(answersToStore),
-          sourceQr,
-        ],
-      );
-      const registrationId = regIns.insertId;
+      if (reg.duplicate) {
+        // Same person + session: nothing re-sent, no duplicate staff alert.
+        return res.json({
+          ok: true,
+          client_id: clientId,
+          registration_id: registrationId,
+          event_kind: company.slug,
+          mfsn_url: MFSN_FREE_SNAPSHOT_URL,
+          email_sent: false,
+          sms_sent: false,
+          status: reg.status,
+          duplicate: true,
+          calendar_url: reg.status === "registered" ? calendarUrl : null,
+        });
+      }
+
+      if (reg.status === "waitlisted" && sessionRow) {
+        const sent = await sendEventLifecycleMessage({
+          kind: "waitlisted",
+          lang,
+          phone: phoneRaw,
+          email,
+          vars: eventSessionVars(sessionRow, lang, firstName, ""),
+        });
+        return res.json({
+          ok: true,
+          client_id: clientId,
+          registration_id: registrationId,
+          event_kind: company.slug,
+          mfsn_url: MFSN_FREE_SNAPSHOT_URL,
+          email_sent: sent.emailSent,
+          sms_sent: sent.smsSent,
+          status: "waitlisted",
+          duplicate: false,
+          calendar_url: null,
+        });
+      }
 
       const isEs = lang === "es";
       const sessionTitle = sessionRow
@@ -54104,7 +54843,10 @@ function buildApp() {
 
       let emailSent = false;
       try {
-        const bodyHtml = `<p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;white-space:pre-wrap;">${escapeHtml(emailBodyText)}</p>`;
+        const calendarHtml = calendarUrl
+          ? `<p style="margin:0 0 16px;font-size:14px;"><a href="${escapeHtml(calendarUrl)}" style="color:#1d4ed8;font-weight:600;">${isEs ? "Agregar a mi calendario" : "Add to my calendar"}</a></p>`
+          : "";
+        const bodyHtml = `<p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;white-space:pre-wrap;">${escapeHtml(emailBodyText)}</p>${calendarHtml}`;
         await sendEmail({
           to: email,
           subject: emailSubject || (isEs ? "Registro confirmado" : "You're registered"),
@@ -54160,6 +54902,9 @@ function buildApp() {
         mfsn_url: MFSN_FREE_SNAPSHOT_URL,
         email_sent: emailSent,
         sms_sent: smsSent,
+        status: "registered",
+        duplicate: false,
+        calendar_url: calendarUrl,
       });
     } catch (err: any) {
       if (sendFriendlyError(res, err, { duplicateLabel: "email" })) return;
@@ -54167,6 +54912,203 @@ function buildApp() {
       res
         .status(500)
         .json({ error: "We couldn't submit your registration. Please try again." });
+    }
+  });
+
+
+  // Calendar file for one session (linked from the confirmation email/page).
+  app.get(
+    "/api/public/event-marketing/sessions/:code/calendar.ics",
+    async (req, res) => {
+      const code = String(req.params.code || "").trim().toLowerCase().slice(0, 32);
+      const lang: "en" | "es" = String(req.query.lang || "") === "es" ? "es" : "en";
+      try {
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT s.*, c.slug AS company_slug FROM event_sessions s
+           JOIN event_companies c ON c.id = s.company_id
+           WHERE s.short_code = ? AND c.is_active = 1 LIMIT 1`,
+          [code],
+        );
+        const s = rows[0];
+        if (!s || String(s.status) === "cancelled") {
+          return res.status(404).json({ error: "Event not found" });
+        }
+        const url = `${APP_URL}${eventSessionPublicPath(String(s.company_slug), String(s.short_code))}`;
+        res.setHeader("Content-Type", "text/calendar; charset=utf-8");
+        res.setHeader("Content-Disposition", `attachment; filename="ofg-${code}.ics"`);
+        res.send(buildEventSessionIcs(s, lang, url));
+      } catch (err: any) {
+        console.error("[public:event-marketing:ics]", err?.message ?? err);
+        res.status(500).json({ error: "Unable to build calendar file" });
+      }
+    },
+  );
+
+  /** Door QR: session info for the self check-in page (no attendee data). */
+  app.get("/api/public/event-marketing/check-in/:token", async (req, res) => {
+    const token = String(req.params.token || "").trim().slice(0, 40);
+    if (!token) return res.status(404).json({ error: "Check-in not found" });
+    try {
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT s.*, c.slug AS company_slug, c.name AS company_name, c.name_es AS company_name_es
+         FROM event_sessions s JOIN event_companies c ON c.id = s.company_id
+         WHERE s.checkin_token = ? AND c.is_active = 1 LIMIT 1`,
+        [token],
+      );
+      const s = rows[0];
+      if (!s || String(s.status) === "cancelled") {
+        return res.status(404).json({ error: "Check-in not found" });
+      }
+      const [fieldRows] = await pool.query<RowDataPacket[]>(
+        `SELECT * FROM event_form_fields WHERE company_id = ? AND is_active = 1
+         ORDER BY sort_order ASC, id ASC`,
+        [s.company_id],
+      );
+      res.json({
+        company: {
+          slug: String(s.company_slug),
+          name: String(s.company_name),
+          name_es: s.company_name_es != null ? String(s.company_name_es) : null,
+        },
+        session: {
+          title_en: String(s.title_en),
+          title_es: String(s.title_es),
+          starts_at: eventDateTimeIso(s.starts_at),
+          location_en: s.location_en != null ? String(s.location_en) : null,
+          location_es: s.location_es != null ? String(s.location_es) : null,
+        },
+        form_fields: fieldRows.map(mapEventFormFieldRow),
+        window_open: eventCheckInWindowOpen(s.starts_at, s.ends_at ?? null),
+      });
+    } catch (err: any) {
+      console.error("[public:event-marketing:check-in:get]", err?.message ?? err);
+      res.status(500).json({ error: "Unable to load check-in" });
+    }
+  });
+
+  /**
+   * Door QR self check-in. Finds the person's registration for THIS session by
+   * phone/email and checks them in; a walk-in sends answers and is registered
+   * + checked in (always seated — they are at the door). The response never
+   * reveals who matched (no names), so phones cannot be probed for identities.
+   */
+  app.post("/api/public/event-marketing/check-in/:token", async (req, res) => {
+    if (
+      hitRateLimit(rateLimitKey(req, "public-event-check-in"), 30, 15 * 60 * 1000)
+    ) {
+      return res.status(429).json({ error: "Too many requests. Try again later." });
+    }
+    const token = String(req.params.token || "").trim().slice(0, 40);
+    const b = req.body || {};
+    const answers =
+      b.answers && typeof b.answers === "object" && !Array.isArray(b.answers)
+        ? (b.answers as Record<string, unknown>)
+        : null;
+    const email = String(answers?.email ?? b.email ?? "").trim().toLowerCase();
+    const phone = String(answers?.phone ?? b.phone ?? "").trim();
+    if (!phone && !email) {
+      return res.status(400).json({ error: "Phone or email is required" });
+    }
+    if (email && !PUBLIC_EMAIL_RE.test(email)) {
+      return res.status(400).json({ error: "Invalid email address" });
+    }
+    if (phone && (normalizePhoneDigits(phone).length < 10 || isPlaceholderPhone(phone))) {
+      return res.status(400).json({ error: "Invalid phone number" });
+    }
+    try {
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT s.*, c.label_slug, c.name AS company_name FROM event_sessions s
+         JOIN event_companies c ON c.id = s.company_id
+         WHERE s.checkin_token = ? AND c.is_active = 1 LIMIT 1`,
+        [token],
+      );
+      const s = rows[0];
+      if (!s || String(s.status) === "cancelled") {
+        return res.status(404).json({ error: "Check-in not found" });
+      }
+      if (!eventCheckInWindowOpen(s.starts_at, s.ends_at ?? null)) {
+        return res.status(409).json({ error: "Check-in is not open right now" });
+      }
+      const sessionId = Number(s.id);
+
+      // 1) Already registered for this session? (email first, then phone)
+      const ids: number[] = [];
+      if (email) {
+        const [byEmail] = await pool.query<RowDataPacket[]>(
+          `SELECT id FROM clients WHERE email = ? LIMIT 1`,
+          [email],
+        );
+        if (byEmail[0]) ids.push(Number(byEmail[0].id));
+      }
+      if (phone) {
+        const byPhone = await findClientIdByPhone(phone);
+        if (byPhone && !ids.includes(byPhone)) ids.push(byPhone);
+      }
+      if (ids.length) {
+        const [regs] = await pool.query<RowDataPacket[]>(
+          `SELECT id, checked_in_at FROM event_registrations
+           WHERE session_id = ? AND client_id IN (?) AND status <> 'cancelled'
+           ORDER BY id ASC LIMIT 1`,
+          [sessionId, ids],
+        );
+        if (regs[0]) {
+          if (regs[0].checked_in_at) {
+            return res.json({ status: "already_checked_in" });
+          }
+          await pool.query(
+            `UPDATE event_registrations
+             SET checked_in_at = COALESCE(checked_in_at, NOW()),
+                 check_in_method = COALESCE(check_in_method, 'self'),
+                 status = 'registered'
+             WHERE id = ?`,
+            [regs[0].id],
+          );
+          return res.json({ status: "checked_in" });
+        }
+      }
+
+      // 2) Walk-in: needs the short form.
+      const firstName = String(answers?.first_name ?? "").trim();
+      const lastName = String(answers?.last_name ?? "").trim();
+      if (!answers || !firstName || !lastName || !phone) {
+        return res.json({ status: "needs_registration" });
+      }
+      if (looksLikeSpamPersonName(firstName, lastName) && email && looksLikeSpamEmail(email)) {
+        return res.status(400).json({ error: "Unable to submit" });
+      }
+      const lang: "en" | "es" =
+        String(answers.preferred_language ?? "en").toLowerCase() === "es" ? "es" : "en";
+      const reg = await registerEventAttendee({
+        companyId: Number(s.company_id),
+        labelSlug: String(s.label_slug || ""),
+        sessionId,
+        firstName,
+        lastName,
+        email,
+        phone,
+        lang,
+        answers,
+        sourceQr: "session",
+        checkIn: "self",
+        forceSeat: true,
+      });
+      if (reg.isNewClient) {
+        notifyEventRegistration({
+          clientId: reg.clientId,
+          firstName,
+          lastName,
+          email,
+          phone,
+          lang,
+          companyName: String(s.company_name),
+          sessionTitle: String(s.title_en),
+        }).catch((e: any) => console.error("[event-marketing] staff notify", e?.message ?? e));
+      }
+      return res.json({ status: "checked_in" });
+    } catch (err: any) {
+      if (sendFriendlyError(res, err, { duplicateLabel: "email" })) return;
+      console.error("[public:event-marketing:check-in]", err?.message ?? err);
+      res.status(500).json({ error: "We couldn't check you in. Please ask a staff member." });
     }
   });
 
@@ -54182,7 +55124,7 @@ function buildApp() {
       try {
         const [rows] = await pool.query<RowDataPacket[]>(
           `SELECT c.*,
-                  (SELECT COUNT(*) FROM event_registrations er WHERE er.company_id = c.id) AS registration_count
+                  (SELECT COUNT(*) FROM event_registrations er WHERE er.company_id = c.id AND er.status = 'registered') AS registration_count
            FROM event_companies c
            ORDER BY c.sort_order ASC, c.id ASC`,
         );
@@ -54663,6 +55605,11 @@ function buildApp() {
         return res.status(400).json({ error: "Nothing to update" });
       }
       try {
+        const [beforeRows] = await pool.query<RowDataPacket[]>(
+          `SELECT status, starts_at, capacity FROM event_sessions WHERE id = ? LIMIT 1`,
+          [id],
+        );
+        const before = beforeRows[0];
         args.push(id);
         const [result] = await pool.query<ResultSetHeader>(
           `UPDATE event_sessions SET ${updates.join(", ")} WHERE id = ?`,
@@ -54670,6 +55617,33 @@ function buildApp() {
         );
         if (result.affectedRows === 0) {
           return res.status(404).json({ error: "Not found" });
+        }
+        // Lifecycle: tell registrants about a cancel / new date; refill seats.
+        const [afterRows] = await pool.query<RowDataPacket[]>(
+          `SELECT status, starts_at, capacity FROM event_sessions WHERE id = ? LIMIT 1`,
+          [id],
+        );
+        const after = afterRows[0];
+        let notified = 0;
+        if (before && after) {
+          const wasScheduled = String(before.status) === "scheduled";
+          if (wasScheduled && String(after.status) === "cancelled") {
+            notified = await notifyEventSessionChange(id, "cancelled");
+          } else if (
+            String(after.status) === "scheduled" &&
+            eventDateTimeIso(before.starts_at) !== eventDateTimeIso(after.starts_at)
+          ) {
+            notified = await notifyEventSessionChange(id, "rescheduled");
+          }
+          const capBefore = before.capacity != null ? Number(before.capacity) : null;
+          const capAfter = after.capacity != null ? Number(after.capacity) : null;
+          if (
+            String(after.status) === "scheduled" &&
+            capBefore !== capAfter &&
+            (capAfter == null || capBefore == null || capAfter > capBefore)
+          ) {
+            await promoteEventWaitlist(id);
+          }
         }
         const [rows] = await pool.query<RowDataPacket[]>(
           `SELECT s.*, ser.name_en AS series_name_en, ser.name_es AS series_name_es,
@@ -54682,6 +55656,7 @@ function buildApp() {
         );
         res.json({
           session: mapEventSessionRow(rows[0], String(rows[0].company_slug)),
+          notified,
         });
       } catch (err: any) {
         if (sendFriendlyError(res, err, { duplicateLabel: "short_code" }))
@@ -54875,7 +55850,9 @@ function buildApp() {
       try {
         const [result] = await pool.query<ResultSetHeader>(
           `UPDATE event_registrations
-           SET checked_in_at = COALESCE(checked_in_at, NOW())
+           SET checked_in_at = COALESCE(checked_in_at, NOW()),
+               check_in_method = COALESCE(check_in_method, 'staff'),
+               status = IF(status = 'cancelled', status, 'registered')
            WHERE id = ?`,
           [id],
         );
@@ -54895,6 +55872,319 @@ function buildApp() {
       } catch (err: any) {
         console.error("[admin:event-marketing:check-in]", err?.message ?? err);
         res.status(500).json({ error: "Unable to check in" });
+      }
+    },
+  );
+
+
+  // Undo a staff/door check-in (wrong person tapped).
+  app.delete(
+    "/api/admin/event-marketing/registrations/:id/check-in",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!id || Number.isNaN(id)) {
+        return res.status(400).json({ error: "Invalid registration id" });
+      }
+      try {
+        const [result] = await pool.query<ResultSetHeader>(
+          `UPDATE event_registrations SET checked_in_at = NULL, check_in_method = NULL WHERE id = ?`,
+          [id],
+        );
+        if (result.affectedRows === 0) return res.status(404).json({ error: "Not found" });
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT er.*, c.first_name, c.last_name, c.email, c.phone, s.title_en AS session_title_en
+           FROM event_registrations er JOIN clients c ON c.id = er.client_id
+           LEFT JOIN event_sessions s ON s.id = er.session_id
+           WHERE er.id = ? LIMIT 1`,
+          [id],
+        );
+        res.json({ registration: mapEventRegistrationRow(rows[0]) });
+      } catch (err: any) {
+        console.error("[admin:event-marketing:undo-check-in]", err?.message ?? err);
+        res.status(500).json({ error: "Unable to undo check-in" });
+      }
+    },
+  );
+
+  // Cancel one registration (frees the seat → next waitlisted person is promoted).
+  app.post(
+    "/api/admin/event-marketing/registrations/:id/cancel",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!id || Number.isNaN(id)) {
+        return res.status(400).json({ error: "Invalid registration id" });
+      }
+      try {
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT company_id, session_id, status FROM event_registrations WHERE id = ? LIMIT 1`,
+          [id],
+        );
+        if (!rows[0]) return res.status(404).json({ error: "Not found" });
+        await pool.query(
+          `UPDATE event_registrations SET status = 'cancelled' WHERE id = ?`,
+          [id],
+        );
+        if (rows[0].session_id != null && String(rows[0].status) === "registered") {
+          await promoteEventWaitlist(Number(rows[0].session_id));
+        }
+        const detail = await loadEventCompanyDetail(Number(rows[0].company_id));
+        res.json(detail);
+      } catch (err: any) {
+        console.error("[admin:event-marketing:cancel-reg]", err?.message ?? err);
+        res.status(500).json({ error: "Unable to cancel registration" });
+      }
+    },
+  );
+
+  // Door QR: create (or reuse) the session's self check-in secret.
+  app.post(
+    "/api/admin/event-marketing/sessions/:id/checkin-token",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!id || Number.isNaN(id)) {
+        return res.status(400).json({ error: "Invalid session id" });
+      }
+      try {
+        await pool.query(
+          `UPDATE event_sessions SET checkin_token = ? WHERE id = ? AND checkin_token IS NULL`,
+          [crypto.randomBytes(18).toString("base64url"), id],
+        );
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT checkin_token FROM event_sessions WHERE id = ? LIMIT 1`,
+          [id],
+        );
+        if (!rows[0]?.checkin_token) return res.status(404).json({ error: "Not found" });
+        const token = String(rows[0].checkin_token);
+        res.json({ token, url: `${APP_URL}/e/checkin/${token}` });
+      } catch (err: any) {
+        console.error("[admin:event-marketing:checkin-token]", err?.message ?? err);
+        res.status(500).json({ error: "Unable to create check-in code" });
+      }
+    },
+  );
+
+  // Paper sign-in sheet → registrations (+ attended). Never overwrites CRM data;
+  // sends no confirmation texts (the event already happened or is happening).
+  app.post(
+    "/api/admin/event-marketing/sessions/:id/import",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req, res) => {
+      const id = Number(req.params.id);
+      if (!id || Number.isNaN(id)) {
+        return res.status(400).json({ error: "Invalid session id" });
+      }
+      const rowsIn = Array.isArray(req.body?.rows) ? (req.body.rows as unknown[]) : [];
+      if (!rowsIn.length) return res.status(400).json({ error: "No rows to import" });
+      if (rowsIn.length > 300) return res.status(400).json({ error: "Import up to 300 rows at a time" });
+      try {
+        const [sessRows] = await pool.query<RowDataPacket[]>(
+          `SELECT s.id, s.company_id, s.status, c.label_slug FROM event_sessions s
+           JOIN event_companies c ON c.id = s.company_id WHERE s.id = ? LIMIT 1`,
+          [id],
+        );
+        const s = sessRows[0];
+        if (!s) return res.status(404).json({ error: "Not found" });
+        if (String(s.status) === "cancelled") {
+          return res.status(400).json({ error: "That session is cancelled" });
+        }
+        const results: Array<{
+          index: number; ok: boolean; error?: string; client_id?: number;
+          duplicate?: boolean; new_contact?: boolean; profile_mismatch?: boolean;
+        }> = [];
+        for (let i = 0; i < rowsIn.length; i++) {
+          const r = (rowsIn[i] && typeof rowsIn[i] === "object" ? rowsIn[i] : {}) as Record<string, unknown>;
+          const firstName = String(r.first_name ?? "").trim().slice(0, 100);
+          const lastName = String(r.last_name ?? "").trim().slice(0, 100);
+          const phone = String(r.phone ?? "").trim().slice(0, 20);
+          const email = String(r.email ?? "").trim().toLowerCase().slice(0, 255);
+          const lang: "en" | "es" = String(r.preferred_language ?? "") === "es" ? "es" : "en";
+          const attended = r.attended === undefined ? true : Boolean(r.attended);
+          if (!firstName || !lastName) {
+            results.push({ index: i, ok: false, error: "name_required" });
+            continue;
+          }
+          if (normalizePhoneDigits(phone).length < 10 || isPlaceholderPhone(phone)) {
+            results.push({ index: i, ok: false, error: "invalid_phone" });
+            continue;
+          }
+          if (email && !PUBLIC_EMAIL_RE.test(email)) {
+            results.push({ index: i, ok: false, error: "invalid_email" });
+            continue;
+          }
+          try {
+            const reg = await registerEventAttendee({
+              companyId: Number(s.company_id),
+              labelSlug: String(s.label_slug || ""),
+              sessionId: id,
+              firstName,
+              lastName,
+              email,
+              phone,
+              lang,
+              answers: { source: "paper_sheet" },
+              sourceQr: "session",
+              checkIn: attended ? "import" : null,
+              forceSeat: true,
+            });
+            results.push({
+              index: i,
+              ok: true,
+              client_id: reg.clientId,
+              duplicate: reg.duplicate,
+              new_contact: reg.isNewClient,
+              profile_mismatch: reg.profileMismatch,
+            });
+          } catch (e: any) {
+            console.error("[admin:event-marketing:import-row]", e?.message ?? e);
+            results.push({ index: i, ok: false, error: "save_failed" });
+          }
+        }
+        const detail = await loadEventCompanyDetail(Number(s.company_id));
+        res.json({
+          imported: results.filter((r) => r.ok && !r.duplicate).length,
+          duplicates: results.filter((r) => r.ok && r.duplicate).length,
+          failed: results.filter((r) => !r.ok).length,
+          results,
+          detail,
+        });
+      } catch (err: any) {
+        console.error("[admin:event-marketing:import]", err?.message ?? err);
+        res.status(500).json({ error: "Unable to import sign-in sheet" });
+      }
+    },
+  );
+
+  // Results: registered → attended → paid, per session and in total.
+  app.get(
+    "/api/admin/event-marketing/companies/:id/results",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req, res) => {
+      const companyId = Number(req.params.id);
+      if (!companyId || Number.isNaN(companyId)) {
+        return res.status(400).json({ error: "Invalid company id" });
+      }
+      try {
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT s.id AS session_id, s.title_en, s.title_es, s.starts_at, s.status, s.capacity,
+                  COALESCE(SUM(er.status = 'registered'), 0) AS registered,
+                  COALESCE(SUM(er.status = 'waitlisted'), 0) AS waitlisted,
+                  COALESCE(SUM(er.status <> 'cancelled' AND er.checked_in_at IS NOT NULL), 0) AS attended,
+                  COALESCE(SUM(er.status = 'registered' AND er.checked_in_at IS NULL AND s.status = 'completed'), 0) AS no_show,
+                  COALESCE(SUM(er.status <> 'cancelled' AND c.created_at >= er.created_at - INTERVAL 5 MINUTE), 0) AS new_contacts
+           FROM event_sessions s
+           LEFT JOIN event_registrations er ON er.session_id = s.id
+           LEFT JOIN clients c ON c.id = er.client_id
+           WHERE s.company_id = ?
+           GROUP BY s.id, s.title_en, s.title_es, s.starts_at, s.status, s.capacity
+           ORDER BY s.starts_at DESC`,
+          [companyId],
+        );
+        const [noSession] = await pool.query<RowDataPacket[]>(
+          `SELECT COALESCE(SUM(er.status = 'registered'), 0) AS registered,
+                  COALESCE(SUM(er.status <> 'cancelled' AND er.checked_in_at IS NOT NULL), 0) AS attended,
+                  COALESCE(SUM(er.status <> 'cancelled' AND c.created_at >= er.created_at - INTERVAL 5 MINUTE), 0) AS new_contacts,
+                  COUNT(er.id) AS n
+           FROM event_registrations er JOIN clients c ON c.id = er.client_id
+           WHERE er.company_id = ? AND er.session_id IS NULL`,
+          [companyId],
+        );
+        const [paid] = await pool.query<RowDataPacket[]>(
+          `SELECT x.session_id, COUNT(*) AS paid_clients, SUM(x.cents) AS revenue_cents FROM (
+             SELECT er.session_id, er.client_id, SUM(p.amount_cents) AS cents
+             FROM event_registrations er
+             JOIN payments p ON p.client_id = er.client_id AND p.status = 'succeeded'
+               AND COALESCE(p.paid_at, p.created_at) >= er.created_at
+             WHERE er.company_id = ? AND er.status <> 'cancelled'
+               -- Only people who were NOT already paying before they registered.
+               AND NOT EXISTS (
+                 SELECT 1 FROM payments p0 WHERE p0.client_id = er.client_id AND p0.status = 'succeeded'
+                   AND COALESCE(p0.paid_at, p0.created_at) < er.created_at
+               )
+             GROUP BY er.session_id, er.client_id
+           ) x GROUP BY x.session_id`,
+          [companyId],
+        );
+        const paidBy = new Map<string, { paid_clients: number; revenue_cents: number }>();
+        for (const p of paid) {
+          paidBy.set(String(p.session_id ?? "none"), {
+            paid_clients: Number(p.paid_clients || 0),
+            revenue_cents: Number(p.revenue_cents || 0),
+          });
+        }
+        const sessions: EventSessionResult[] = rows.map((r) => ({
+          session_id: Number(r.session_id),
+          title_en: String(r.title_en),
+          title_es: String(r.title_es),
+          starts_at: eventDateTimeIso(r.starts_at),
+          status: String(r.status) as "scheduled" | "cancelled" | "completed",
+          capacity: r.capacity != null ? Number(r.capacity) : null,
+          registered: Number(r.registered || 0),
+          waitlisted: Number(r.waitlisted || 0),
+          attended: Number(r.attended || 0),
+          no_show: Number(r.no_show || 0),
+          new_contacts: Number(r.new_contacts || 0),
+          paid_clients: paidBy.get(String(r.session_id))?.paid_clients ?? 0,
+          revenue_cents: paidBy.get(String(r.session_id))?.revenue_cents ?? 0,
+        }));
+        if (Number(noSession[0]?.n || 0) > 0) {
+          sessions.push({
+            session_id: null,
+            title_en: "No session picked",
+            title_es: "Sin sesión elegida",
+            starts_at: null,
+            status: null,
+            capacity: null,
+            registered: Number(noSession[0].registered || 0),
+            waitlisted: 0,
+            attended: Number(noSession[0].attended || 0),
+            no_show: 0,
+            new_contacts: Number(noSession[0].new_contacts || 0),
+            paid_clients: paidBy.get("none")?.paid_clients ?? 0,
+            revenue_cents: paidBy.get("none")?.revenue_cents ?? 0,
+          });
+        }
+        const sum = (k: "registered" | "waitlisted" | "attended" | "no_show" | "new_contacts") =>
+          sessions.reduce((a, r) => a + r[k], 0);
+        // A person at two sessions pays once: totals count each client once.
+        const [paidTotal] = await pool.query<RowDataPacket[]>(
+          `SELECT COUNT(*) AS paid_clients, COALESCE(SUM(x.cents), 0) AS revenue_cents FROM (
+             SELECT p.client_id, SUM(p.amount_cents) AS cents
+             FROM payments p
+             JOIN (SELECT client_id, MIN(created_at) AS first_reg FROM event_registrations
+                   WHERE company_id = ? AND status <> 'cancelled' GROUP BY client_id) f
+               ON f.client_id = p.client_id
+             WHERE p.status = 'succeeded' AND COALESCE(p.paid_at, p.created_at) >= f.first_reg
+               AND NOT EXISTS (
+                 SELECT 1 FROM payments p0 WHERE p0.client_id = p.client_id AND p0.status = 'succeeded'
+                   AND COALESCE(p0.paid_at, p0.created_at) < f.first_reg
+               )
+             GROUP BY p.client_id
+           ) x`,
+          [companyId],
+        );
+        res.json({
+          totals: {
+            registered: sum("registered"),
+            waitlisted: sum("waitlisted"),
+            attended: sum("attended"),
+            no_show: sum("no_show"),
+            new_contacts: sum("new_contacts"),
+            paid_clients: Number(paidTotal[0]?.paid_clients || 0),
+            revenue_cents: Number(paidTotal[0]?.revenue_cents || 0),
+          },
+          sessions,
+        });
+      } catch (err: any) {
+        console.error("[admin:event-marketing:results]", err?.message ?? err);
+        res.status(500).json({ error: "Unable to load results" });
       }
     },
   );
@@ -73956,6 +75246,14 @@ function buildApp() {
         console.error("[cron:credit-reviews]", e?.message ?? e);
       }
 
+      let eventMarketing = { reminders_24h: 0, reminders_2h: 0, completed: 0, followups: 0 };
+      try {
+        // Tests share the live DB: never touch real event registrations from cron tests.
+        if (process.env.VITEST !== "true") eventMarketing = await runEventMarketingCronStep();
+      } catch (e: any) {
+        console.error("[cron:event-marketing]", e?.message ?? e);
+      }
+
       let prospectTemperature = { checked: 0, changed: 0, alerts: 0 };
       try {
         // Tests share the live DB: never rescore every real prospect (slow, and
@@ -73979,6 +75277,7 @@ function buildApp() {
         credit_files: creditFiles,
         prospect_temperature: prospectTemperature,
         credit_reviews: creditReviews,
+        event_marketing: eventMarketing,
       });
     } catch (e: any) {
       console.error("[cron:process-queue]", e?.message ?? e);
@@ -77824,6 +79123,8 @@ function buildApp() {
         const r = await ensureProgressReads(sessionId);
         let blocked: string | null = null;
         if (r.before && r.after && !r.startingPoint) blocked = pv2DataIntegrity(pv2SanitizeFile(r.before).file, pv2SanitizeFile(r.after).file, r.hashes);
+        const noChangesYet = !!(r.before && r.after && !r.startingPoint && !blocked) &&
+          pv2NoChangesYet(pv2SanitizeFile(r.before).file, pv2SanitizeFile(r.after).file);
         const st = r.status;
         const sides = ["before", "after"] as const;
         const incomplete = sides.filter((s) => st[s].code === "incomplete_print");
@@ -77863,6 +79164,7 @@ function buildApp() {
           score_update: scoreUpdate,
           score_update_available: settled && incomplete.length > 0 && !r.startingPoint,
           starting_point: r.startingPoint,
+          no_changes_yet: noChangesYet,
           scores_from_reads: !!meta.scores_from_reads || !!scoresSynced,
           read_scores: { before: readBefore?.scores ?? null, after: readAfter?.scores ?? null },
           incomplete_sides: incomplete,

@@ -143,11 +143,11 @@ describe("reads gate scenarios", () => {
       blocked: /same report date \(10\/22\/2026\)/,
     },
     {
-      name: "different dates but identical scores and balances on every tradeline → blocked (data integrity)",
+      // Nov 10 (owner): bureaus haven't updated yet → allowed as a "No changes yet" report (still needs approval).
+      name: "different dates but identical scores and balances on every tradeline → ready, no_changes_yet",
       before: complete("06/19/2026", 4000),
       after: complete("10/22/2026", 4000),
-      expectBody: { ready: false },
-      blocked: /identical \(same scores and balances on every tradeline\)/,
+      expectBody: { ready: true, blocked_data_integrity: null, no_changes_yet: true },
     },
     {
       name: "same file uploaded twice → blocked (data integrity)",

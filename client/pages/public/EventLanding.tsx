@@ -4,13 +4,16 @@ import { useFormik } from "formik";
 import * as Yup from "yup";
 import { useTranslation } from "react-i18next";
 import {
+  CalendarPlus,
   CheckCircle2,
   ExternalLink,
+  Hourglass,
   Loader2,
   Mail,
   MessageSquare,
 } from "lucide-react";
 import PageMeta from "@/components/PageMeta";
+import { EventPublicShell } from "@/components/public/EventPublicShell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -252,7 +255,7 @@ export default function EventLanding() {
     publicRegisterResult?.mfsn_url || publicLanding?.mfsn_url || "";
 
   return (
-    <div className="relative min-h-[100dvh] flex flex-col bg-background">
+    <>
       <PageMeta
         title={
           company
@@ -263,39 +266,9 @@ export default function EventLanding() {
         titleFull
         noIndex
       />
+      <EventPublicShell>
 
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 overflow-hidden"
-      >
-        <div className="absolute inset-0 bg-gradient-to-b from-primary/[0.07] via-background to-muted/40" />
-        <div className="absolute -top-24 right-[-10%] h-[28rem] w-[28rem] rounded-full bg-primary/[0.08] blur-3xl" />
-        <div className="absolute bottom-[-10%] left-[-8%] h-[22rem] w-[22rem] rounded-full bg-accent/[0.07] blur-3xl" />
-      </div>
 
-      <header className="relative z-10 overflow-hidden border-b border-border/70">
-        <div
-          aria-hidden
-          className="absolute inset-0 bg-gradient-to-r from-primary/[0.08] via-card/90 to-accent/[0.06]"
-        />
-        <div className="relative mx-auto flex max-w-3xl flex-col items-center gap-2.5 px-4 py-6 sm:py-7">
-          <div className="relative rounded-2xl border border-border/60 bg-card/90 px-5 py-3 shadow-sm shadow-primary/10 backdrop-blur-sm">
-            <img
-              src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_dark.png"
-              alt={t("eventMarketing.public.brandName")}
-              className="h-9 w-auto sm:h-11 dark:hidden"
-            />
-            <img
-              src="https://disruptinglabs.com/data/optimum/assets/images/logos/logo_with_title_white.png"
-              alt=""
-              aria-hidden
-              className="hidden h-9 w-auto sm:h-11 dark:block"
-            />
-          </div>
-        </div>
-      </header>
-
-      <main className="relative z-10 flex-1 mx-auto w-full max-w-xl px-4 py-8 sm:py-10 space-y-6">
         {companies.length > 1 && (
           <Tabs
             value={company?.slug || companies[0]?.slug}
@@ -331,18 +304,47 @@ export default function EventLanding() {
             {t("eventMarketing.public.noEvents")}
           </div>
         ) : publicRegisterResult ? (
-          <div className="rounded-xl border border-accent/30 bg-accent/[0.04] p-5 sm:p-7 space-y-5 animate-fade-up">
+          <div
+            className={cn(
+              "rounded-xl border p-5 sm:p-7 space-y-5 animate-fade-up",
+              publicRegisterResult.status === "waitlisted"
+                ? "border-primary/30 bg-primary/[0.04]"
+                : "border-accent/30 bg-accent/[0.04]",
+            )}
+            data-testid="event-register-result"
+          >
             <div className="flex items-start gap-3">
-              <CheckCircle2 className="w-7 h-7 text-accent shrink-0 mt-0.5" />
+              {publicRegisterResult.status === "waitlisted" ? (
+                <Hourglass className="w-7 h-7 text-primary shrink-0 mt-0.5" />
+              ) : (
+                <CheckCircle2 className="w-7 h-7 text-accent shrink-0 mt-0.5" />
+              )}
               <div className="space-y-1 min-w-0">
                 <h1 className="text-xl font-bold text-foreground">
-                  {t("eventMarketing.public.thanksTitle")}
+                  {publicRegisterResult.status === "waitlisted"
+                    ? t("eventMarketing.public.waitlistTitle")
+                    : publicRegisterResult.duplicate
+                      ? t("eventMarketing.public.alreadyTitle")
+                      : t("eventMarketing.public.thanksTitle")}
                 </h1>
                 <p className="text-sm text-muted-foreground leading-relaxed">
-                  {t("eventMarketing.public.thanksBody")}
+                  {publicRegisterResult.status === "waitlisted"
+                    ? t("eventMarketing.public.waitlistBody")
+                    : publicRegisterResult.duplicate
+                      ? t("eventMarketing.public.alreadyBody")
+                      : t("eventMarketing.public.thanksBody")}
                 </p>
               </div>
             </div>
+            {publicRegisterResult.calendar_url && (
+              <Button asChild variant="outline" className="w-full">
+                <a href={publicRegisterResult.calendar_url}>
+                  <CalendarPlus className="w-4 h-4 mr-2" />
+                  {t("eventMarketing.public.calendar")}
+                </a>
+              </Button>
+            )}
+            {!publicRegisterResult.duplicate && (
             <div className="grid gap-2 sm:grid-cols-2 text-sm">
               <div className="flex items-center gap-2 rounded-lg border border-border bg-background/80 px-3 py-2.5">
                 <Mail className="w-4 h-4 text-primary shrink-0" />
@@ -361,6 +363,7 @@ export default function EventLanding() {
                 </span>
               </div>
             </div>
+            )}
             {mfsnUrl && company?.offer_free_report && (
               <Button asChild className="w-full">
                 <a href={mfsnUrl} target="_blank" rel="noopener noreferrer">
@@ -455,8 +458,8 @@ export default function EventLanding() {
             </form>
           </>
         )}
-      </main>
-    </div>
+      </EventPublicShell>
+    </>
   );
 }
 

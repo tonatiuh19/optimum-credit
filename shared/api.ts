@@ -2668,6 +2668,8 @@ export type EventFormFieldType =
   | "checkbox"
   | "language";
 export type EventQrSource = "company" | "session";
+export type EventRegistrationStatus = "registered" | "waitlisted" | "cancelled";
+export type EventCheckInMethod = "staff" | "self" | "import";
 
 export interface EventCompany {
   id: number;
@@ -2722,7 +2724,12 @@ export interface EventSession {
   location_es: string | null;
   capacity: number | null;
   status: EventSessionStatus;
+  /** Seated (registered) people only. */
   registration_count?: number;
+  waitlist_count?: number;
+  attended_count?: number;
+  /** Door self check-in QR has been generated. */
+  has_checkin_token?: boolean;
   public_url?: string;
   series_name_en?: string;
   series_name_es?: string;
@@ -2751,6 +2758,10 @@ export interface EventRegistration {
   answers_json: Record<string, unknown> | null;
   source_qr: EventQrSource;
   checked_in_at: string | null;
+  status: EventRegistrationStatus;
+  check_in_method: EventCheckInMethod | null;
+  /** What was typed differs from the CRM record (CRM kept as is). */
+  profile_mismatch: boolean;
   created_at: string;
   first_name?: string;
   last_name?: string;
@@ -2799,6 +2810,102 @@ export interface PublicEventRegisterResponse {
   mfsn_url: string;
   email_sent: boolean;
   sms_sent: boolean;
+  /** "waitlisted" when the session was full. */
+  status: "registered" | "waitlisted";
+  /** Same person + session already registered: nothing re-sent. */
+  duplicate: boolean;
+  /** .ics download for the picked session (null without a session). */
+  calendar_url: string | null;
+}
+
+/** GET /api/public/event-marketing/check-in/:token */
+export interface PublicEventCheckInInfo {
+  company: { slug: string; name: string; name_es: string | null };
+  session: {
+    title_en: string;
+    title_es: string;
+    starts_at: string;
+    location_en: string | null;
+    location_es: string | null;
+  };
+  form_fields: EventFormField[];
+  /** Door check-in only works from 3h before start until 2h after the end. */
+  window_open: boolean;
+}
+
+/** POST /api/public/event-marketing/check-in/:token */
+export interface PublicEventCheckInRequest {
+  /** Lookup by phone and/or email; add answers to register a walk-in. */
+  phone?: string;
+  email?: string;
+  answers?: Record<string, unknown>;
+}
+
+export interface PublicEventCheckInResponse {
+  status: "checked_in" | "already_checked_in" | "needs_registration";
+}
+
+/** POST /api/admin/event-marketing/sessions/:id/checkin-token */
+export interface EventCheckInTokenResponse {
+  token: string;
+  url: string;
+}
+
+/** One row typed from a paper sign-in sheet. */
+export interface EventImportRow {
+  first_name: string;
+  last_name: string;
+  phone: string;
+  email?: string;
+  preferred_language?: "en" | "es";
+  attended?: boolean;
+}
+
+export interface EventImportRequest {
+  rows: EventImportRow[];
+}
+
+export interface EventImportResultRow {
+  index: number;
+  ok: boolean;
+  error?: string;
+  client_id?: number;
+  duplicate?: boolean;
+  new_contact?: boolean;
+  profile_mismatch?: boolean;
+}
+
+export interface EventImportResponse {
+  imported: number;
+  duplicates: number;
+  failed: number;
+  results: EventImportResultRow[];
+  detail: EventCompanyDetail;
+}
+
+export interface EventSessionResult {
+  session_id: number | null;
+  title_en: string;
+  title_es: string;
+  starts_at: string | null;
+  status: EventSessionStatus | null;
+  capacity: number | null;
+  registered: number;
+  waitlisted: number;
+  attended: number;
+  /** Seated, not checked in, session completed. */
+  no_show: number;
+  /** Contacts created by this event (not already in the CRM). */
+  new_contacts: number;
+  /** People with a successful payment after registering. */
+  paid_clients: number;
+  revenue_cents: number;
+}
+
+/** GET /api/admin/event-marketing/companies/:id/results */
+export interface EventCompanyResults {
+  totals: Omit<EventSessionResult, "session_id" | "title_en" | "title_es" | "starts_at" | "status" | "capacity">;
+  sessions: EventSessionResult[];
 }
 
 /** POST /api/admin/clients/:id/notes */

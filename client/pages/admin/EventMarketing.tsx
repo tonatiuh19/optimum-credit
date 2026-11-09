@@ -5,16 +5,22 @@ import { useTranslation } from "react-i18next";
 import QRCode from "qrcode";
 import {
   CalendarDays,
-  CheckCircle2,
+  ClipboardList,
   Copy,
+  DoorOpen,
   Download,
   Loader2,
   Plus,
   QrCode,
+  Search,
   Trash2,
   Users,
 } from "lucide-react";
 import AdminPageHeader from "@/components/AdminPageHeader";
+import { EventResultsPanel } from "@/components/admin/events/EventResultsPanel";
+import { EventImportDialog } from "@/components/admin/events/EventImportDialog";
+import { EventDoorQrDialog } from "@/components/admin/events/EventDoorQrDialog";
+import { EventRegistrationRow } from "@/components/admin/events/EventRegistrationRow";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -37,7 +43,6 @@ import {
 } from "@/components/ui/dialog";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
-  checkInEventRegistration,
   createEventCompany,
   createEventFormField,
   createEventSeries,
@@ -53,6 +58,7 @@ import {
 import type {
   EventFormField,
   EventFormFieldType,
+  EventRegistrationStatus,
   EventSeries,
   EventSession,
   EventSessionStatus,
@@ -134,6 +140,10 @@ export default function AdminEventMarketing() {
   );
   const [editingField, setEditingField] = useState<EventFormField | null>(null);
   const [qrBusy, setQrBusy] = useState<string | null>(null);
+  const [doorQrFor, setDoorQrFor] = useState<EventSession | null>(null);
+  const [importFor, setImportFor] = useState<EventSession | null>(null);
+  const [regFilter, setRegFilter] = useState<EventRegistrationStatus | "all">("all");
+  const [regSearch, setRegSearch] = useState("");
 
   useEffect(() => {
     dispatch(fetchEventCompanies()).catch((e) =>
@@ -345,6 +355,8 @@ export default function AdminEventMarketing() {
           setSessionDialog(false);
           setEditingSession(null);
           resetForm();
+          // Cancel / new date / more seats change registrations: refresh counts.
+          void dispatch(fetchEventCompanyDetail(company.id));
         }
       } else {
         const res = await dispatch(
@@ -420,6 +432,18 @@ export default function AdminEventMarketing() {
     for (const s of detail?.series || []) map.set(s.id, s);
     return map;
   }, [detail?.series]);
+
+  const visibleRegs = useMemo(() => {
+    const q = regSearch.trim().toLowerCase();
+    const qDigits = q.replace(/\D/g, "");
+    return (detail?.registrations || []).filter((r) => {
+      if (regFilter !== "all" && r.status !== regFilter) return false;
+      if (!q) return true;
+      const hay = [r.first_name, r.last_name, r.email].filter(Boolean).join(" ").toLowerCase();
+      if (hay.includes(q)) return true;
+      return qDigits.length >= 3 && String(r.phone || "").replace(/\D/g, "").includes(qDigits);
+    });
+  }, [detail?.registrations, regFilter, regSearch]);
 
   const handleDownloadQr = async (
     pathOrUrl: string | undefined | null,
@@ -587,6 +611,9 @@ export default function AdminEventMarketing() {
                   </TabsTrigger>
                   <TabsTrigger value="regs">
                     {t("eventMarketing.admin.tabs.registrations")}
+                  </TabsTrigger>
+                  <TabsTrigger value="results">
+                    {t("eventMarketing.admin.tabs.results")}
                   </TabsTrigger>
                 </TabsList>
 
@@ -830,11 +857,43 @@ export default function AdminEventMarketing() {
                                 {" · "}
                                 {t(`eventMarketing.status.${s.status}`)}
                                 {typeof s.registration_count === "number"
-                                  ? ` · ${s.registration_count} ${t("eventMarketing.admin.regsShort")}`
+                                  ? ` · ${
+                                      s.capacity
+                                        ? t("eventMarketing.admin.capacityOf", { count: s.registration_count, capacity: s.capacity })
+                                        : `${s.registration_count} ${t("eventMarketing.admin.regsShort")}`
+                                    }`
+                                  : ""}
+                                {s.waitlist_count
+                                  ? ` · ${s.waitlist_count} ${t("eventMarketing.admin.waitlistShort")}`
+                                  : ""}
+                                {s.attended_count
+                                  ? ` · ${s.attended_count} ${t("eventMarketing.admin.attendedShort")}`
                                   : ""}
                               </div>
                             </div>
                             <div className="flex flex-wrap gap-1.5">
+                              {s.status !== "cancelled" && (
+                                <>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => setDoorQrFor(s)}
+                                    title={t("eventMarketing.admin.doorQr")}
+                                  >
+                                    <DoorOpen className="w-3.5 h-3.5 sm:mr-1" />
+                                    <span className="hidden sm:inline">{t("eventMarketing.admin.doorQr")}</span>
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => setImportFor(s)}
+                                    title={t("eventMarketing.admin.import.button")}
+                                  >
+                                    <ClipboardList className="w-3.5 h-3.5 sm:mr-1" />
+                                    <span className="hidden sm:inline">{t("eventMarketing.admin.import.button")}</span>
+                                  </Button>
+                                </>
+                              )}
                               <Button
                                 size="sm"
                                 variant="outline"
@@ -944,54 +1003,46 @@ export default function AdminEventMarketing() {
                 </TabsContent>
 
                 <TabsContent value="regs" className="mt-4 space-y-2">
-                  {(detail?.registrations || []).length === 0 ? (
+                  {(detail?.registrations || []).length > 0 && (
+                    <div className="flex flex-col sm:flex-row gap-2 pb-1">
+                      <div className="relative flex-1">
+                        <Search className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                        <Input
+                          value={regSearch}
+                          onChange={(e) => setRegSearch(e.target.value)}
+                          placeholder={t("eventMarketing.admin.searchRegs")}
+                          className="pl-8"
+                        />
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {(["all", "registered", "waitlisted", "cancelled"] as const).map((f) => (
+                          <Button
+                            key={f}
+                            size="sm"
+                            variant={regFilter === f ? "default" : "outline"}
+                            onClick={() => setRegFilter(f)}
+                          >
+                            {f === "all"
+                              ? t("eventMarketing.admin.filterAll")
+                              : t(`eventMarketing.admin.regStatus.${f}`)}
+                          </Button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {visibleRegs.length === 0 ? (
                     <p className="text-sm text-muted-foreground py-6">
                       {t("eventMarketing.admin.emptyRegs")}
                     </p>
                   ) : (
-                    (detail?.registrations || []).map((r) => (
-                      <div
-                        key={r.id}
-                        className="rounded-lg border border-border bg-card px-3 py-3 flex flex-wrap items-center justify-between gap-2"
-                      >
-                        <div className="min-w-0 space-y-0.5">
-                          <div className="text-sm font-medium">
-                            {[r.first_name, r.last_name]
-                              .filter(Boolean)
-                              .join(" ") || `#${r.client_id}`}
-                          </div>
-                          <div className="text-xs text-muted-foreground">
-                            {r.email || "—"}
-                            {r.phone ? ` · ${r.phone}` : ""}
-                            {r.session_title_en
-                              ? ` · ${r.session_title_en}`
-                              : ""}
-                            {" · "}
-                            {t(`eventMarketing.source.${r.source_qr}`)}
-                          </div>
-                          {r.checked_in_at && (
-                            <div className="text-xs text-accent inline-flex items-center gap-1">
-                              <CheckCircle2 className="w-3.5 h-3.5" />
-                              {t("eventMarketing.admin.checkedInAt", {
-                                when: String(r.checked_in_at).replace("T", " ").slice(0, 16),
-                              })}
-                            </div>
-                          )}
-                        </div>
-                        {!r.checked_in_at && (
-                          <Button
-                            size="sm"
-                            disabled={saving}
-                            onClick={() =>
-                              dispatch(checkInEventRegistration(r.id))
-                            }
-                          >
-                            {t("eventMarketing.admin.checkIn")}
-                          </Button>
-                        )}
-                      </div>
+                    visibleRegs.map((r) => (
+                      <EventRegistrationRow key={r.id} r={r} saving={saving} />
                     ))
                   )}
+                </TabsContent>
+
+                <TabsContent value="results" className="mt-4">
+                  {panel === "results" && <EventResultsPanel companyId={company.id} />}
                 </TabsContent>
               </Tabs>
             </>
@@ -1226,6 +1277,11 @@ export default function AdminEventMarketing() {
                 </SelectContent>
               </Select>
             </div>
+            {editingSession && (
+              <p className="text-xs text-muted-foreground rounded-lg bg-muted/50 px-3 py-2">
+                {t("eventMarketing.admin.notifyOnSave")}
+              </p>
+            )}
             <DialogFooter>
               <Button
                 type="button"
@@ -1337,6 +1393,24 @@ export default function AdminEventMarketing() {
           </form>
         </DialogContent>
       </Dialog>
+
+      {doorQrFor && (
+        <EventDoorQrDialog
+          sessionId={doorQrFor.id}
+          sessionTitle={langEs ? doorQrFor.title_es : doorQrFor.title_en}
+          shortCode={doorQrFor.short_code}
+          open={!!doorQrFor}
+          onOpenChange={(o) => !o && setDoorQrFor(null)}
+        />
+      )}
+      {importFor && (
+        <EventImportDialog
+          sessionId={importFor.id}
+          sessionTitle={langEs ? importFor.title_es : importFor.title_en}
+          open={!!importFor}
+          onOpenChange={(o) => !o && setImportFor(null)}
+        />
+      )}
     </div>
   );
 }

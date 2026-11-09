@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   checkInboundAiReply,
-  inboundAiDisclosurePrefix,
   inboundAiIsBillingQuestion,
   inboundAiSystemPrompt,
 } from "./inboundAi";
@@ -53,9 +52,8 @@ describe("billing + disclosure", () => {
     expect(inboundAiIsBillingQuestion("¿Cuándo es mi próximo pago?")).toBe(true);
     expect(inboundAiIsBillingQuestion("How do I upload my ID?")).toBe(false);
   });
-  it("discloses the automated assistant and no longer hides it", () => {
-    expect(inboundAiDisclosurePrefix("en")).toMatch(/automated assistant/);
-    expect(inboundAiDisclosurePrefix("es")).toMatch(/Asistente automático/);
+  it("has no reply label but never hides the assistant when asked", () => {
+    expect(inboundAiSystemPrompt("en")).toMatch(/If asked whether you are a person, say you are OFG's automated assistant/);
     expect(inboundAiSystemPrompt("en")).not.toMatch(/Never say you are an AI/);
     expect(inboundAiSystemPrompt("en")).toMatch(/portal_reports_link/);
   });

@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { NextStep } from "@/components/admin/report-approval/NextStep";
 import { useTranslation } from "react-i18next";
-import { AlertTriangle, ArrowLeftRight, CheckCircle2, FileSearch, Gauge, Loader2, RotateCcw, ShieldAlert } from "lucide-react";
+import { AlertTriangle, ArrowLeftRight, CheckCircle2, FileSearch, Gauge, Hourglass, Loader2, RotateCcw, ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { fetchWizardReads, setReportWizardScoreUpdate, type WizardReadState } from "@/store/slices/reportWizardSlice";
@@ -124,6 +124,18 @@ export function ProgressReadsCard({ sessionId, onStartOver }: { sessionId: numbe
         <p className="flex items-center gap-1.5 text-xs text-accent" data-testid="progress-reads-ready">
           <CheckCircle2 className="w-3.5 h-3.5" /> {t("reportWizard.reads.ready")}
         </p>
+        {reads.no_changes_yet && (
+          <p
+            className="flex items-start gap-2 rounded-lg border border-primary/25 bg-primary/5 px-3 py-2 text-xs text-foreground animate-in fade-in"
+            data-testid="progress-reads-no-changes"
+          >
+            <Hourglass className="w-3.5 h-3.5 mt-0.5 shrink-0 text-primary" />
+            {t("reportWizard.reads.noChangesYet", {
+              before: reads.report_dates.before ?? "—",
+              after: reads.report_dates.after ?? "—",
+            })}
+          </p>
+        )}
         <NextStep input={{ reads: { ready: true } }} />
       </div>
     );

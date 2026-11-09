@@ -113,7 +113,7 @@ describe("SMS AI reply guard (end-to-end)", () => {
     await pool.end();
   });
 
-  it("sends a safe answer with the disclosure and keeps the thread open", async () => {
+  it("sends a safe answer with no assistant label and keeps the thread open", async () => {
     claudeReply = {
       action: "resolve",
       reply: "You're in round 2. You can see your reports in the client portal.",
@@ -123,7 +123,7 @@ describe("SMS AI reply guard (end-to-end)", () => {
     };
     const rows = await textIn("What round am I in?", `SM1${RUN}`);
     const out = rows.filter((r) => r.direction === "outbound");
-    expect(out[out.length - 1]?.body).toMatch(/^OFG automated assistant: You're in round 2/);
+    expect(out[out.length - 1]?.body).toMatch(/^You're in round 2/);
     expect(rows[rows.length - 1]?.thread_status).toBe("open");
   });
 

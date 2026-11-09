@@ -3,6 +3,7 @@ import {
   buildInboundAiUserPrompt,
   countAiOutboundTurns,
   inboundAiIsAckOnly,
+  inboundAiLastAiTextAskedQuestion,
   envFlagOn,
   finalizeInboundAiDecision,
   inboundAiAnthropicReady,
@@ -448,6 +449,11 @@ describe("inboundAiIsAckOnly (no reply, no escalation)", () => {
     "Liked “Hi Carlos, it's Cesar.”",
     "​👍​ to “ Hi Alma, it's Cesar.”",
     "Perfecto primo",
+    "Awesome, man. Thank you for the update.",
+    "Thanks so much, have a great day!",
+    "Ok perfect, thank you Cesar 🙏",
+    "Muchas gracias por la información, bendiciones",
+    "Got it, will do. Thanks again!",
   ])("ack: %s", (t) => expect(inboundAiIsAckOnly(t)).toBe(true));
   it.each([
     "",
@@ -456,5 +462,24 @@ describe("inboundAiIsAckOnly (no reply, no escalation)", () => {
     "Stop",
     "Call me",
     "Gracias, cuánto debo?",
+    "Thanks for nothing",
+    "Thank you, I sent the documents",
+    "Great, but my score dropped",
+    "Ok thank you. When is the next update",
+    "Thanks!!! Can you send me the report",
   ])("real message: %s", (t) => expect(inboundAiIsAckOnly(t)).toBe(false));
+});
+
+describe("inboundAiLastAiTextAskedQuestion (ok/thanks after an AI question is an answer)", () => {
+  const ai = (body: string) => ({ direction: "outbound", body, metadata_json: JSON.stringify({ inbound_ai: true }) });
+  const staff = (body: string) => ({ direction: "outbound", body, metadata_json: null });
+  const inbound = (body: string) => ({ direction: "inbound", body, metadata_json: null });
+  it("true only when the newest outbound is an AI question", () => {
+    expect(inboundAiLastAiTextAskedQuestion([inbound("ok thanks"), ai("Want a teammate to call you?")])).toBe(true);
+    expect(inboundAiLastAiTextAskedQuestion([inbound("ok"), ai("¿Quieres que te llamen?")])).toBe(true);
+    expect(inboundAiLastAiTextAskedQuestion([inbound("ok"), ai("You're in round 2.")])).toBe(false);
+    expect(inboundAiLastAiTextAskedQuestion([inbound("ok"), staff("Can you send your ID?")])).toBe(false);
+    expect(inboundAiLastAiTextAskedQuestion([inbound("ok")])).toBe(false);
+    expect(inboundAiLastAiTextAskedQuestion([inbound("ok"), { direction: "outbound", body: "x?", metadata_json: "{bad" }])).toBe(false);
+  });
 });

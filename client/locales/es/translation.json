@@ -1535,7 +1535,8 @@
       "mode": {
         "reused": "El mismo archivo ya se había leído: se reutilizó al instante.",
         "batch": "Tomando la ruta de respaldo: puede tardar unos minutos más."
-      }
+      },
+      "noChangesYet": "Aún sin cambios: el reporte del {{after}} es igual al del {{before}} (los burós no han actualizado). Puedes publicar: el reporte dirá \"aún sin cambios, los burós tienen hasta 30 días\", y aún necesita aprobación."
     },
     "scoreUpdate": {
       "offerTitle": "¿Enviar una actualización de puntaje?",
@@ -2981,7 +2982,8 @@
         "copy": "Copy y ofertas",
         "sessions": "Series y sesiones",
         "fields": "Campos del formulario",
-        "registrations": "Registros"
+        "registrations": "Registros",
+        "results": "Resultados"
       },
       "fields": {
         "slug": "Slug de URL",
@@ -3045,7 +3047,67 @@
       "systemField": "Sistema",
       "regsShort": "regs",
       "checkIn": "Check-in",
-      "checkedInAt": "Check-in {{when}}"
+      "checkedInAt": "Check-in {{when}}",
+      "doorQr": "QR de entrada",
+      "doorQrHint": "Imprímelo en la entrada: los invitados lo escanean para registrar su llegada, o se inscriben ahí mismo si no se registraron.",
+      "doorQrDownload": "Descargar QR de entrada",
+      "doorQrCopy": "Copiar enlace",
+      "doorQrCopied": "Enlace copiado",
+      "waitlistShort": "en espera",
+      "attendedShort": "asistieron",
+      "capacityOf": "{{count}} de {{capacity}} lugares",
+      "notifyOnSave": "Si cancelas esta sesión o cambias la fecha, se avisa por mensaje a los registrados automáticamente.",
+      "undoCheckIn": "Deshacer llegada",
+      "cancelReg": "Cancelar registro",
+      "cancelRegConfirm": "¿Cancelar este registro? Su lugar pasa a la siguiente persona en la lista de espera.",
+      "regStatus": {
+        "registered": "Registrado",
+        "waitlisted": "En espera",
+        "cancelled": "Cancelado"
+      },
+      "checkInMethod": {
+        "staff": "por el equipo",
+        "self": "en la entrada",
+        "import": "de la hoja de registro"
+      },
+      "mismatch": "Los datos escritos no coinciden con el CRM",
+      "mismatchHint": "Se conservó el registro del CRM. Escrito: {{typed}}",
+      "filterAll": "Todos",
+      "searchRegs": "Buscar nombre, teléfono o correo",
+      "import": {
+        "button": "Agregar hoja de registro",
+        "title": "Agregar una hoja de registro en papel",
+        "description": "Pega una persona por línea: nombre, apellido, teléfono, correo (opcional). Todos se marcan como asistentes. No se envían confirmaciones; si el evento terminó en los últimos 3 días, reciben el mensaje de agradecimiento habitual.",
+        "placeholder": "Maria, Lopez, (909) 555-1234, maria@email.com\nJuan, Perez, 9095556789",
+        "attended": "Marcar a todos como asistentes",
+        "language": "Idioma",
+        "preview": "{{count}} personas listas para agregar",
+        "rowError": "Línea {{line}}: {{error}}",
+        "submit": "Agregar {{count}} personas",
+        "done": "{{imported}} agregadas, {{duplicates}} ya registradas, {{failed}} omitidas",
+        "errors": {
+          "name_required": "nombre y apellido son obligatorios",
+          "invalid_phone": "el teléfono no es válido",
+          "invalid_email": "el correo no es válido",
+          "save_failed": "no se pudo guardar"
+        }
+      },
+      "results": {
+        "title": "Resultados del evento",
+        "subtitle": "Del registro al cliente que paga, por sesión",
+        "registered": "Registrados",
+        "attended": "Asistieron",
+        "showRate": "Tasa de asistencia",
+        "noShow": "No asistieron",
+        "waitlisted": "En espera",
+        "newContacts": "Contactos nuevos",
+        "paidClients": "Se hicieron clientes",
+        "revenue": "Ingresos",
+        "session": "Sesión",
+        "empty": "Aún no hay sesiones. Agrega una sesión para ver resultados.",
+        "noSession": "Sin sesión elegida",
+        "autoNote": "Los recordatorios salen 24 horas y 2 horas antes de cada sesión. Al terminar, los asistentes reciben un agradecimiento y quienes no vinieron un mensaje de seguimiento."
+      }
     },
     "public": {
       "metaTitle": "Registro de evento",
@@ -3067,7 +3129,12 @@
       "getReport": "Obtén tu reporte de crédito gratis",
       "langEn": "English",
       "langEs": "Español",
-      "selectOption": "Seleccionar…"
+      "selectOption": "Seleccionar…",
+      "calendar": "Agregar a mi calendario",
+      "waitlistTitle": "Estás en la lista de espera",
+      "waitlistBody": "Esta sesión está llena. Te avisaremos por mensaje en cuanto se libere un lugar.",
+      "alreadyTitle": "Ya estás registrado(a)",
+      "alreadyBody": "No necesitas registrarte otra vez. Te recordaremos antes del evento."
     },
     "kind": {
       "in_person": "Presencial",
@@ -3082,6 +3149,35 @@
     "source": {
       "company": "QR de empresa",
       "session": "QR de sesión"
+    },
+    "checkIn": {
+      "metaTitle": "Registro de llegada",
+      "title": "¡Bienvenido(a)! Registremos tu llegada",
+      "lookupLabel": "Tu número de teléfono",
+      "lookupHint": "Usa el teléfono con el que te registraste.",
+      "lookupSubmit": "Registrar mi llegada",
+      "walkInTitle": "No encontramos tu registro",
+      "walkInBody": "¡No hay problema! Llena esto para unirte al evento de hoy.",
+      "walkInSubmit": "Unirme y registrar llegada",
+      "successTitle": "¡Llegada registrada!",
+      "successBody": "Disfruta el evento. Alguien del equipo te atenderá en breve.",
+      "alreadyTitle": "Tu llegada ya estaba registrada",
+      "alreadyBody": "Bienvenido(a) de nuevo, todo listo.",
+      "nextPerson": "Registrar a otra persona",
+      "closedTitle": "El registro de llegada no está abierto ahora",
+      "closedBody": "Se abre 3 horas antes de que empiece el evento.",
+      "notFound": "Este enlace no es válido. Pregunta a alguien del equipo.",
+      "useEmail": "Usar correo",
+      "usePhone": "Usar teléfono",
+      "emailLabel": "Tu correo",
+      "firstName": "Nombre",
+      "lastName": "Apellido",
+      "phone": "Teléfono",
+      "email": "Correo (opcional)",
+      "language": "Idioma preferido",
+      "required": "Obligatorio",
+      "invalidPhone": "Escribe un teléfono válido de 10 dígitos",
+      "invalidEmail": "Escribe un correo válido"
     }
   },
   "adminPeople": {

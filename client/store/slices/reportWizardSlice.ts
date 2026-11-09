@@ -61,6 +61,8 @@ export type WizardReadsStatus = {
   score_update_available?: boolean;
   incomplete_sides?: Array<"before" | "after">;
   starting_point?: boolean;
+  /** Same accounts + scores as the earlier pull, later date: publishes a "No changes yet" report. */
+  no_changes_yet?: boolean;
   /** The server filled the review scores from the reads (once per extraction). */
   scores_from_reads?: boolean;
   read_scores?: { before: Record<"TU" | "EX" | "EQ", number | null> | null; after: Record<"TU" | "EX" | "EQ", number | null> | null };

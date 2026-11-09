@@ -1566,7 +1566,8 @@
       "mode": {
         "reused": "Same file was already read — reused instantly.",
         "batch": "Taking the backup route — this can take a few more minutes."
-      }
+      },
+      "noChangesYet": "No changes yet: the {{after}} report matches {{before}} (the bureaus haven't updated). You can publish: the client report will say \"no changes yet, bureaus have up to 30 days\", and it still needs approval."
     },
     "scoreUpdate": {
       "offerTitle": "Send a Score update instead?",
@@ -3012,7 +3013,8 @@
         "copy": "Copy & offers",
         "sessions": "Series & sessions",
         "fields": "Form fields",
-        "registrations": "Registrations"
+        "registrations": "Registrations",
+        "results": "Results"
       },
       "fields": {
         "slug": "URL slug",
@@ -3076,7 +3078,67 @@
       "systemField": "System",
       "regsShort": "regs",
       "checkIn": "Check in",
-      "checkedInAt": "Checked in {{when}}"
+      "checkedInAt": "Checked in {{when}}",
+      "doorQr": "Door QR",
+      "doorQrHint": "Print this at the entrance: guests scan it to check themselves in, or sign up on the spot if they didn't register.",
+      "doorQrDownload": "Download door QR",
+      "doorQrCopy": "Copy link",
+      "doorQrCopied": "Link copied",
+      "waitlistShort": "waitlist",
+      "attendedShort": "attended",
+      "capacityOf": "{{count}} of {{capacity}} seats",
+      "notifyOnSave": "Registrants are texted automatically if you cancel this session or change its date.",
+      "undoCheckIn": "Undo check-in",
+      "cancelReg": "Cancel registration",
+      "cancelRegConfirm": "Cancel this registration? Their seat goes to the next person on the waitlist.",
+      "regStatus": {
+        "registered": "Registered",
+        "waitlisted": "Waitlist",
+        "cancelled": "Cancelled"
+      },
+      "checkInMethod": {
+        "staff": "by staff",
+        "self": "at the door",
+        "import": "from sign-in sheet"
+      },
+      "mismatch": "Typed info differs from the CRM",
+      "mismatchHint": "The CRM record was kept as is. Typed: {{typed}}",
+      "filterAll": "All",
+      "searchRegs": "Search name, phone or email",
+      "import": {
+        "button": "Add sign-in sheet",
+        "title": "Add a paper sign-in sheet",
+        "description": "Paste one person per line: first name, last name, phone, email (optional). Everyone is marked as attended. No confirmation texts are sent; if the event ended in the last 3 days, they get the usual thank-you follow-up.",
+        "placeholder": "Maria, Lopez, (909) 555-1234, maria@email.com\nJuan, Perez, 9095556789",
+        "attended": "Mark everyone as attended",
+        "language": "Language",
+        "preview": "{{count}} people ready to add",
+        "rowError": "Line {{line}}: {{error}}",
+        "submit": "Add {{count}} people",
+        "done": "{{imported}} added, {{duplicates}} already registered, {{failed}} skipped",
+        "errors": {
+          "name_required": "first and last name are required",
+          "invalid_phone": "phone number is not valid",
+          "invalid_email": "email is not valid",
+          "save_failed": "could not be saved"
+        }
+      },
+      "results": {
+        "title": "Event results",
+        "subtitle": "From sign-up to paying client, per session",
+        "registered": "Registered",
+        "attended": "Attended",
+        "showRate": "Show-up rate",
+        "noShow": "No-shows",
+        "waitlisted": "Waitlist",
+        "newContacts": "New contacts",
+        "paidClients": "Became clients",
+        "revenue": "Revenue",
+        "session": "Session",
+        "empty": "No sessions yet. Add a session to start tracking results.",
+        "noSession": "No session picked",
+        "autoNote": "Reminders go out 24 hours and 2 hours before each session. After it ends, attendees get a thank-you and no-shows get a we-missed-you text."
+      }
     },
     "public": {
       "metaTitle": "Event registration",
@@ -3098,7 +3160,12 @@
       "getReport": "Get your free credit report",
       "langEn": "English",
       "langEs": "Español",
-      "selectOption": "Select…"
+      "selectOption": "Select…",
+      "calendar": "Add to my calendar",
+      "waitlistTitle": "You're on the waitlist",
+      "waitlistBody": "This session is full. We'll text you right away if a spot opens.",
+      "alreadyTitle": "You're already registered",
+      "alreadyBody": "No need to sign up again. We'll remind you before the event."
     },
     "kind": {
       "in_person": "In person",
@@ -3113,6 +3180,35 @@
     "source": {
       "company": "Company QR",
       "session": "Session QR"
+    },
+    "checkIn": {
+      "metaTitle": "Event check-in",
+      "title": "Welcome! Let's check you in",
+      "lookupLabel": "Your phone number",
+      "lookupHint": "Use the phone you registered with.",
+      "lookupSubmit": "Check me in",
+      "walkInTitle": "We didn't find your registration",
+      "walkInBody": "No problem! Fill this in to join today's event.",
+      "walkInSubmit": "Join and check in",
+      "successTitle": "You're checked in!",
+      "successBody": "Enjoy the event. A team member will be with you shortly.",
+      "alreadyTitle": "You're already checked in",
+      "alreadyBody": "Welcome back, you're all set.",
+      "nextPerson": "Check in another person",
+      "closedTitle": "Check-in isn't open right now",
+      "closedBody": "Check-in opens 3 hours before the event starts.",
+      "notFound": "This check-in link isn't valid. Please ask a staff member.",
+      "useEmail": "Use email instead",
+      "usePhone": "Use phone instead",
+      "emailLabel": "Your email",
+      "firstName": "First name",
+      "lastName": "Last name",
+      "phone": "Phone",
+      "email": "Email (optional)",
+      "language": "Preferred language",
+      "required": "Required",
+      "invalidPhone": "Enter a valid 10-digit phone number",
+      "invalidEmail": "Enter a valid email"
     }
   },
   "adminPeople": {
