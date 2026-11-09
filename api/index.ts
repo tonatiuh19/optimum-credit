@@ -79821,6 +79821,8 @@ function buildApp() {
     return { canApprove: isManager || adminId === ownerId, isSuper: isManager, lang };
   };
 
+  /** Whole approval queue in one response (oldest first); `truncated` if ever larger. */
+  const PENDING_APPROVAL_QUEUE_MAX = 1000;
   app.get("/api/admin/round-reports/pending-approval", requireAdmin, denyAffiliateAccess, async (req: AuthedRequest, res) => {
     try {
       const [rows] = await pool.query<RowDataPacket[]>(
@@ -79831,13 +79833,22 @@ function buildApp() {
          JOIN clients c ON c.id = r.client_id
          LEFT JOIN admins a ON a.id = r.created_by_admin_id
          WHERE r.delivery_status IN ('pending_approval', 'needs_review')
-         ORDER BY r.created_at ASC LIMIT 200`,
+         ORDER BY r.created_at ASC LIMIT ?`,
+        [PENDING_APPROVAL_QUEUE_MAX + 1],
       );
+      // Nov 10, 2026: the old LIMIT 200 hid the newest reports once the queue passed 200.
+      const truncated = rows.length > PENDING_APPROVAL_QUEUE_MAX;
+      if (truncated) rows.length = PENDING_APPROVAL_QUEUE_MAX;
       const adminId = Number(req.auth!.id);
+      // One permission lookup per locale (not per report).
+      const approverByLocale = new Map<string, Awaited<ReturnType<typeof roundReportApprover>>>();
+      for (const locale of new Set(rows.map((r) => String(r.report_locale)))) {
+        approverByLocale.set(locale, await roundReportApprover(adminId, locale));
+      }
       const items = await Promise.all(
         rows.map(async (r) => {
           const checks = parseWizardJsonField<Pv2Check[]>(r.self_check_json) ?? [];
-          const who = await roundReportApprover(adminId, String(r.report_locale));
+          const who = approverByLocale.get(String(r.report_locale))!;
           return {
             id: Number(r.id),
             client_id: Number(r.client_id),
@@ -79855,7 +79866,7 @@ function buildApp() {
           };
         }),
       );
-      res.json({ items });
+      res.json({ items, total: items.length, truncated });
     } catch (e: any) {
       console.error("[round-report:pending]", e?.message || e);
       res.status(500).json({ error: "Could not load reports waiting for approval" });

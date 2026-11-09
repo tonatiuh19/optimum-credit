@@ -9109,7 +9109,7 @@ paths:
       summary: "Spec v1.1 P0-1: progress reports published but not sent (pending_approval | needs_review), with failed self-checks and whether the caller can approve / override"
       responses:
         "200":
-          description: "{ items[] } — each item has report_kind: progress_report | score_update"
+          description: "{ items[], total, truncated } — whole queue oldest first (up to 1000; truncated=true if more); each item has report_kind: progress_report | score_update"
   /admin/round-reports/{id}/approval:
     get:
       tags: [Report Wizard]
