@@ -40,6 +40,7 @@ const seededClientIds: number[] = [];
 const prevSms = process.env.INBOUND_AI_SMS_ENABLED;
 const prevVoice = process.env.INBOUND_AI_VOICE_ENABLED;
 const prevKey = process.env.ANTHROPIC_API_KEY;
+const prevSmsKey = process.env.ANTHROPIC_SMS_API_KEY;
 const prevAllow = process.env.INBOUND_AI_ADMIN_IDS;
 
 describe("inbound AI SMS webhook", () => {
@@ -50,6 +51,8 @@ describe("inbound AI SMS webhook", () => {
     process.env.INBOUND_AI_SMS_ENABLED = "1";
     // Keep Claude off for deterministic STOP/unknown paths; escalate without API.
     delete process.env.ANTHROPIC_API_KEY;
+    // SMS prefers its own key; clear it too so no real Claude call is made.
+    delete process.env.ANTHROPIC_SMS_API_KEY;
     // Clear César-only allowlist from local .env so the fixture agent can run AI.
     delete process.env.INBOUND_AI_ADMIN_IDS;
     process.env.VITEST = "true";
@@ -109,6 +112,8 @@ describe("inbound AI SMS webhook", () => {
     else process.env.INBOUND_AI_VOICE_ENABLED = prevVoice;
     if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY;
     else process.env.ANTHROPIC_API_KEY = prevKey;
+    if (prevSmsKey === undefined) delete process.env.ANTHROPIC_SMS_API_KEY;
+    else process.env.ANTHROPIC_SMS_API_KEY = prevSmsKey;
     if (prevAllow === undefined) delete process.env.INBOUND_AI_ADMIN_IDS;
     else process.env.INBOUND_AI_ADMIN_IDS = prevAllow;
 
@@ -232,7 +237,7 @@ describe("inbound AI SMS webhook", () => {
     }
   });
 
-  it("unknown number: hard-escalates with hold SMS after flush", async () => {
+  it("unknown number: reaches the AI (no unknown_contact hard rule); Claude off → hold SMS", async () => {
     const unknownPhone = uniqueTestE164(`${RUN_ID}-unk`);
     const sid = `SM_unk_${RUN_ID}`;
     const wh = await request(app)
@@ -271,6 +276,14 @@ describe("inbound AI SMS webhook", () => {
     );
     expect(hold).toBeTruthy();
     expect(String(hold?.body || "")).toMatch(/teammate|equipo/i);
+    // Unknown numbers are no longer hard-escalated — they reach the AI step
+    // (FAQ-only identity); here it falls back only because Claude is off.
+    const note = msgs.find(
+      (m) => m.direction === "system" && String(JSON.stringify(m.metadata_json || "")).includes("escalated"),
+    );
+    const meta = typeof note?.metadata_json === "string" ? JSON.parse(note.metadata_json) : note?.metadata_json;
+    expect(String(meta?.reason || "")).toMatch(/claude_unavailable/);
+    expect(String(meta?.reason || "")).not.toMatch(/unknown_contact/);
   });
 
   it("CRM contact + HELP: sends compliance HELP reply", async () => {
