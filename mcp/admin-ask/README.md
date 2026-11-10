@@ -139,4 +139,4 @@ Then Customize → MCP → Connect → same consent flow.
 
 ## Legacy stdio (ops only)
 
-`mcp/admin-ask` still proxies `/api/admin/ai/tools` with `ADMIN_AI_MCP_TOKEN` for break-glass / CI. Prefer remote OAuth for people.
+`mcp/admin-ask` still proxies `/api/admin/ai/tools` with `ADMIN_AI_MCP_TOKEN` for break-glass / CI. Prefer remote OAuth for people. **Since Nov 10, 2026 that token is read-only:** lookups work, but every write or send tool (including `update_lead_signals`) returns `forbidden` — connect through remote OAuth to make changes.

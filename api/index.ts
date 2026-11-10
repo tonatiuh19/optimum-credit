@@ -3236,6 +3236,9 @@ function adminAiFeatureEnabled(): boolean {
   return v === "1" || v === "true" || v === "on" || v === "yes";
 }
 
+/** Session marker for the static ADMIN_AI_MCP_TOKEN (read-only since Nov 10, 2026). */
+const ADMIN_AI_MCP_MASTER_JTI = "admin-ai-mcp";
+
 function adminAiRoleAllowed(role: string | null | undefined): boolean {
   return role === "super_admin" || role === "admin";
 }
@@ -3277,6 +3280,13 @@ export const ADMIN_AI_WRITE_TOOLS: ReadonlySet<string> = new Set([
   "update_referrer",
   "attach_referrer",
   "update_lead_signals",
+  "import_event_signin_sheet",
+  "event_check_in",
+  "approve_round_report",
+  "rebuild_round_report",
+  "set_conversation_status",
+  "assign_conversation",
+  "review_client_document",
 ]);
 
 /** Writes that reach someone outside OFG (SMS / WhatsApp / email). MCP clients
@@ -3291,6 +3301,9 @@ export const ADMIN_AI_SEND_TOOLS: ReadonlySet<string> = new Set([
   "send_text",
   "send_whatsapp",
   "send_wa",
+  // Reach the client too: approving sends the report; rejecting a document texts + emails them.
+  "approve_round_report",
+  "review_client_document",
 ]);
 
 export type AdminAiToolAnnotations = {
@@ -4771,7 +4784,7 @@ export const ADMIN_AI_TOOLS: Array<{
   {
     name: "list_reports_pending_approval",
     description:
-      "Progress reports published but NOT sent (Spec v1.1 approval gate): pending_approval = waiting for Approve & send; needs_review = self-check failed (failed checks listed). Hidden from the client until approved. Approval happens only in the CRM (case panel / dashboard) by the language owner (EN Lecca, ES Angel) or Cesar / Alex. Read-only.",
+      "Progress reports published but NOT sent (Spec v1.1 approval gate): pending_approval = waiting for Approve & send; needs_review = self-check failed (failed checks listed). Hidden from the client until approved. Approve with approve_round_report (or in the CRM case panel / dashboard) — only the language owner (EN Lecca, ES Angel) or Cesar; rebuild with rebuild_round_report. Read-only.",
     input_schema: { type: "object", properties: { limit: { type: "integer", description: "1–50, default 20 (oldest first; total = how many are really waiting)" }, client_id: { type: "integer", description: "Only this client" } } },
   },
   {
@@ -5470,6 +5483,161 @@ export const ADMIN_AI_TOOLS: Array<{
         confirm_phrase: { type: "string" },
       },
       required: ["code", "discount_type", "discount_value"],
+    },
+  },
+  // ── Nov 10, 2026: events, report approval, conversations, document review ──
+  {
+    name: "list_events",
+    description:
+      "Event marketing (partner schools / community events): every partner (event company) with its sessions — date (Pacific wall time), status (scheduled / completed / cancelled), seats taken vs capacity, waitlist, attended, and whether a door check-in QR exists. Read-only.",
+    input_schema: {
+      type: "object",
+      properties: {
+        company_id: { type: "integer", description: "Only this partner" },
+        upcoming_only: { type: "boolean", description: "Only scheduled sessions that have not started" },
+      },
+    },
+  },
+  {
+    name: "get_event_registrations",
+    description:
+      "People registered for an event session (or a whole partner): name, phone, email, status (registered / waitlisted / cancelled), checked-in time and how (staff, door QR, sign-in sheet), and profile_mismatch (what they typed differs from their CRM record — the CRM was NOT changed). Read-only.",
+    input_schema: {
+      type: "object",
+      properties: {
+        session_id: { type: "integer" },
+        company_id: { type: "integer" },
+        status: { type: "string", enum: ["registered", "waitlisted", "cancelled"] },
+        limit: { type: "integer", description: "1–200, default 50" },
+      },
+    },
+  },
+  {
+    name: "get_event_results",
+    description:
+      "Event funnel for a partner, per session and in total: registered, waitlisted, attended, no-shows, new contacts created by the event, people who became paying clients after registering (existing payers excluded) and their revenue in cents. Read-only.",
+    input_schema: { type: "object", properties: { company_id: { type: "integer" } }, required: ["company_id"] },
+  },
+  {
+    name: "import_event_signin_sheet",
+    description:
+      "Add people from a paper sign-in sheet to one session (always seated; marked attended unless attended=false). Existing CRM people are matched by email then phone and NEVER overwritten. Sends no confirmation; if the session ended in the last 3 days they get the normal thank-you follow-up. Up to 300 rows. ALWAYS dry-run first (confirm=false), then confirm=true + confirm_phrase=\"CONFIRM\".",
+    input_schema: {
+      type: "object",
+      properties: {
+        session_id: { type: "integer" },
+        rows: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              first_name: { type: "string" },
+              last_name: { type: "string" },
+              phone: { type: "string" },
+              email: { type: "string" },
+              preferred_language: { type: "string", enum: ["en", "es"] },
+              attended: { type: "boolean" },
+            },
+            required: ["first_name", "last_name", "phone"],
+          },
+        },
+        confirm: { type: "boolean" },
+        confirm_phrase: { type: "string" },
+      },
+      required: ["session_id", "rows"],
+    },
+  },
+  {
+    name: "event_check_in",
+    description:
+      "Check a registration in at an event (check_in_method=staff), or undo a check-in (undo=true). registration_id from get_event_registrations. ALWAYS dry-run first (confirm=false), then confirm=true + confirm_phrase=\"CONFIRM\".",
+    input_schema: {
+      type: "object",
+      properties: {
+        registration_id: { type: "integer" },
+        undo: { type: "boolean" },
+        confirm: { type: "boolean" },
+        confirm_phrase: { type: "string" },
+      },
+      required: ["registration_id"],
+    },
+  },
+  {
+    name: "approve_round_report",
+    description:
+      "Approve & send a held progress report (from list_reports_pending_approval): the client gets it (portal + their usual email/SMS unless the report was published silently) and partners are emailed. Only the report's language owner or Cesar may approve; a report whose self-check FAILED (needs_review) can only be sent by Cesar with override_reason (10+ characters, logged). ALWAYS dry-run first (confirm=false) to see who it goes to, then confirm=true + confirm_phrase=\"CONFIRM\" — and only after the user explicitly approves sending.",
+    input_schema: {
+      type: "object",
+      properties: {
+        report_id: { type: "integer" },
+        override_reason: { type: "string", description: "Required only for a failed self-check (Cesar)" },
+        confirm: { type: "boolean" },
+        confirm_phrase: { type: "string" },
+      },
+      required: ["report_id"],
+    },
+  },
+  {
+    name: "rebuild_round_report",
+    description:
+      "Send a held report (never sent) back to review with the same PDFs so it is rebuilt with the latest checks — staff then publish again from the report wizard; nothing to upload. Only the client's latest round; only its approver or Cesar. ALWAYS dry-run first (confirm=false), then confirm=true + confirm_phrase=\"CONFIRM\".",
+    input_schema: {
+      type: "object",
+      properties: { report_id: { type: "integer" }, confirm: { type: "boolean" }, confirm_phrase: { type: "string" } },
+      required: ["report_id"],
+    },
+  },
+  {
+    name: "set_conversation_status",
+    description:
+      "Close, reopen, snooze or archive a client's Conversations threads (same as the inbox buttons). Needs an assigned OFG number. ALWAYS dry-run first (confirm=false), then confirm=true + confirm_phrase=\"CONFIRM\".",
+    input_schema: {
+      type: "object",
+      properties: {
+        client_id: { type: "integer" },
+        status: { type: "string", enum: ["open", "closed", "snoozed", "archived"] },
+        confirm: { type: "boolean" },
+        confirm_phrase: { type: "string" },
+      },
+      required: ["client_id", "status"],
+    },
+  },
+  {
+    name: "assign_conversation",
+    description:
+      "Assign a client's open Conversations threads to a staff member (admin_id from search_admins), or unassign with unassign=true. ALWAYS dry-run first (confirm=false), then confirm=true + confirm_phrase=\"CONFIRM\".",
+    input_schema: {
+      type: "object",
+      properties: {
+        client_id: { type: "integer" },
+        admin_id: { type: "integer" },
+        unassign: { type: "boolean" },
+        confirm: { type: "boolean" },
+        confirm_phrase: { type: "string" },
+      },
+      required: ["client_id"],
+    },
+  },
+  {
+    name: "get_conversation_ai_stats",
+    description:
+      "How the texting AI handled inbound texts over the last N days (1–90, default 30): answered by the AI vs sent to staff, answer rate, live account lookups, callbacks created, and the top reasons texts went to staff. Read-only.",
+    input_schema: { type: "object", properties: { days: { type: "integer" } } },
+  },
+  {
+    name: "review_client_document",
+    description:
+      "Approve or reject a client's uploaded document (document_id from list_case_documents). Rejecting REQUIRES a reason and texts + emails the client to re-upload. When ID front/back, SSN card and proof of address are all approved, a New Client moves to Docs Verified automatically. Super admins only. ALWAYS dry-run first (confirm=false), then confirm=true + confirm_phrase=\"CONFIRM\" after the user approves.",
+    input_schema: {
+      type: "object",
+      properties: {
+        document_id: { type: "integer" },
+        decision: { type: "string", enum: ["approved", "rejected"] },
+        reason: { type: "string" },
+        confirm: { type: "boolean" },
+        confirm_phrase: { type: "string" },
+      },
+      required: ["document_id", "decision"],
     },
   },
 ];
@@ -18018,9 +18186,18 @@ async function completeCreditFileRead(
 async function executeAdminAiTool(
   rawName: string,
   argsIn: Record<string, unknown>,
-  ctx: { adminId: number },
+  ctx: { adminId: number; readOnly?: boolean },
 ): Promise<AdminAiToolResult> {
   const name = resolveAdminAiToolName(String(rawName || "").trim());
+  // The static ADMIN_AI_MCP_TOKEN is lookup-only (Nov 10, 2026): a leaked token
+  // can never text clients or change data. Use OAuth for writes.
+  if (ctx.readOnly && ADMIN_AI_WRITE_TOOLS.has(name)) {
+    return {
+      ok: false,
+      error: "forbidden",
+      message: "This connection uses the read-only master token. Sign in with OAuth to make changes or send messages.",
+    };
+  }
   const args: Record<string, unknown> = argsIn && typeof argsIn === "object" ? { ...argsIn } : {};
   // Phones typed through Claude / MCP get the same +1 storage format as the CRM forms.
   normalizePhoneFieldsInBody(args);
@@ -18034,6 +18211,343 @@ async function executeAdminAiTool(
         error: "forbidden",
         message: "Write tools are not available to affiliate accounts",
       };
+    }
+
+    // ── Nov 10, 2026: events, report approval, conversations, document review ──
+    // Each write reuses the exact function behind the CRM button (same rules + permissions).
+    const coreResult = (out: { status: number; body: any }): AdminAiToolResult =>
+      out.status >= 200 && out.status < 300
+        ? { ok: true, data: out.body }
+        : {
+            ok: false,
+            error:
+              out.body?.code
+                ? String(out.body.code)
+                : out.status === 403
+                  ? "forbidden"
+                  : out.status === 404
+                    ? "not_found"
+                    : out.status === 409
+                      ? "conflict"
+                      : out.status >= 500
+                        ? "server_error"
+                        : "invalid_args",
+            message: String(out.body?.error || out.body?.message || `HTTP ${out.status}`),
+          };
+
+    if (name === "list_events") {
+      const where: string[] = [];
+      const params: unknown[] = [];
+      if (Number(args.company_id) > 0) {
+        where.push("c.id = ?");
+        params.push(Number(args.company_id));
+      }
+      const [companies] = await pool.query<RowDataPacket[]>(
+        `SELECT c.id, c.slug, c.name, c.is_active FROM event_companies c
+         ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY c.sort_order, c.id`,
+        params,
+      );
+      if (!companies.length) return { ok: true, data: { companies: [] } };
+      const upcoming = args.upcoming_only === true;
+      const [sessions] = await pool.query<RowDataPacket[]>(
+        `SELECT s.id, s.company_id, s.short_code, s.title_en, s.starts_at, s.ends_at, s.location_en, s.capacity, s.status,
+                s.checkin_token IS NOT NULL AS has_door_qr,
+                (SELECT COUNT(*) FROM event_registrations er WHERE er.session_id = s.id AND er.status = 'registered') AS seated,
+                (SELECT COUNT(*) FROM event_registrations er WHERE er.session_id = s.id AND er.status = 'waitlisted') AS waitlisted,
+                (SELECT COUNT(*) FROM event_registrations er WHERE er.session_id = s.id AND er.status <> 'cancelled' AND er.checked_in_at IS NOT NULL) AS attended
+         FROM event_sessions s WHERE s.company_id IN (?)
+         ${upcoming ? "AND s.status = 'scheduled' AND s.starts_at >= ?" : ""}
+         ORDER BY s.starts_at`,
+        upcoming ? [companies.map((c) => c.id), eventSqlDateTime(laWallClockAsUtcDate())] : [companies.map((c) => c.id)],
+      );
+      return {
+        ok: true,
+        data: {
+          times: "Pacific wall time",
+          companies: companies.map((c) => ({
+            id: Number(c.id),
+            slug: String(c.slug),
+            name: String(c.name),
+            active: Boolean(c.is_active),
+            href: `/admin/event-marketing`,
+            sessions: sessions
+              .filter((s) => Number(s.company_id) === Number(c.id))
+              .map((s) => ({
+                id: Number(s.id),
+                short_code: String(s.short_code),
+                title: String(s.title_en),
+                starts_at: eventDateTimeIso(s.starts_at),
+                ends_at: s.ends_at ? eventDateTimeIso(s.ends_at) : null,
+                location: s.location_en ? String(s.location_en) : null,
+                status: String(s.status),
+                capacity: s.capacity != null ? Number(s.capacity) : null,
+                seated: Number(s.seated || 0),
+                waitlisted: Number(s.waitlisted || 0),
+                attended: Number(s.attended || 0),
+                has_door_qr: Boolean(Number(s.has_door_qr)),
+              })),
+          })),
+        },
+      };
+    }
+
+    if (name === "get_event_registrations") {
+      const sessionId = Number(args.session_id) || 0;
+      const companyId = Number(args.company_id) || 0;
+      if (!sessionId && !companyId) {
+        return { ok: false, error: "invalid_args", message: "session_id or company_id is required (see list_events)" };
+      }
+      const limit = adminAiClampLimitMax(args.limit, 50, 200);
+      const where = [sessionId ? "er.session_id = ?" : "er.company_id = ?"];
+      const params: unknown[] = [sessionId || companyId];
+      const st = String(args.status || "");
+      if (["registered", "waitlisted", "cancelled"].includes(st)) {
+        where.push("er.status = ?");
+        params.push(st);
+      }
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT er.*, c.first_name, c.last_name, c.email, c.phone, s.title_en AS session_title_en
+         FROM event_registrations er JOIN clients c ON c.id = er.client_id
+         LEFT JOIN event_sessions s ON s.id = er.session_id
+         WHERE ${where.join(" AND ")} ORDER BY er.created_at DESC LIMIT ?`,
+        [...params, limit],
+      );
+      return {
+        ok: true,
+        data: {
+          count: rows.length,
+          registrations: rows.map((r) => {
+            const m = mapEventRegistrationRow(r);
+            return {
+              registration_id: m.id,
+              client_id: m.client_id,
+              name: [m.first_name, m.last_name].filter(Boolean).join(" "),
+              phone: m.phone ?? null,
+              email: m.email ?? null,
+              session: m.session_title_en,
+              status: m.status,
+              checked_in_at: m.checked_in_at,
+              check_in_method: m.check_in_method,
+              profile_mismatch: m.profile_mismatch,
+              href: `/admin/clients?client=${m.client_id}`,
+            };
+          }),
+        },
+      };
+    }
+
+    if (name === "get_event_results") {
+      const companyId = Number(args.company_id) || 0;
+      if (!companyId) return { ok: false, error: "invalid_args", message: "company_id is required (see list_events)" };
+      return coreResult(await loadEventCompanyResultsCore(companyId));
+    }
+
+    if (name === "import_event_signin_sheet") {
+      const sessionId = Number(args.session_id) || 0;
+      const rows = Array.isArray(args.rows) ? args.rows : [];
+      if (!sessionId) return { ok: false, error: "invalid_args", message: "session_id is required (see list_events)" };
+      if (!rows.length || rows.length > 300) {
+        return { ok: false, error: "invalid_args", message: "rows must have 1–300 people" };
+      }
+      const confirmed = adminAiWriteConfirmed(args);
+      if (!confirmed.ok) {
+        const [[s]] = await pool.query<RowDataPacket[]>(
+          `SELECT id, title_en, starts_at, status FROM event_sessions WHERE id = ? LIMIT 1`,
+          [sessionId],
+        );
+        if (!s) return { ok: false, error: "not_found", message: "Session not found" };
+        return {
+          ok: true,
+          dry_run: true,
+          preview: {
+            session: String(s.title_en),
+            starts_at: eventDateTimeIso(s.starts_at),
+            status: String(s.status),
+            people: rows.length,
+            marked_attended: rows.filter((r: any) => r?.attended !== false).length,
+            note: "Existing CRM people are matched and never overwritten; no confirmation texts are sent.",
+          },
+          message: (confirmed as { message?: string }).message,
+        };
+      }
+      const out = await importEventSignInSheetCore(sessionId, rows);
+      if (out.status === 200 && out.body?.detail) delete out.body.detail; // big; staff see it in the CRM
+      return coreResult(out);
+    }
+
+    if (name === "event_check_in") {
+      const regId = Number(args.registration_id) || 0;
+      if (!regId) return { ok: false, error: "invalid_args", message: "registration_id is required (see get_event_registrations)" };
+      const [[r]] = await pool.query<RowDataPacket[]>(
+        `SELECT er.id, er.status, er.checked_in_at, c.first_name, c.last_name, s.title_en, s.status AS session_status
+         FROM event_registrations er JOIN clients c ON c.id = er.client_id
+         LEFT JOIN event_sessions s ON s.id = er.session_id WHERE er.id = ? LIMIT 1`,
+        [regId],
+      );
+      if (!r) return { ok: false, error: "not_found", message: "Registration not found" };
+      const undo = args.undo === true;
+      if (!undo && String(r.session_status) === "cancelled") {
+        return { ok: false, error: "invalid_args", message: "That session was cancelled" };
+      }
+      if (!undo && String(r.status) === "cancelled") {
+        return { ok: false, error: "invalid_args", message: "This registration was cancelled" };
+      }
+      const confirmed = adminAiWriteConfirmed(args);
+      if (!confirmed.ok) {
+        return {
+          ok: true,
+          dry_run: true,
+          preview: {
+            person: `${r.first_name || ""} ${r.last_name || ""}`.trim(),
+            session: r.title_en ? String(r.title_en) : null,
+            action: undo ? "undo check-in" : "check in",
+            already_checked_in: !!r.checked_in_at,
+          },
+          message: (confirmed as { message?: string }).message,
+        };
+      }
+      if (undo) {
+        await pool.query(`UPDATE event_registrations SET checked_in_at = NULL, check_in_method = NULL WHERE id = ?`, [regId]);
+      } else {
+        await pool.query(
+          `UPDATE event_registrations
+           SET checked_in_at = COALESCE(checked_in_at, NOW()),
+               check_in_method = COALESCE(check_in_method, 'staff'),
+               status = IF(status = 'cancelled', status, 'registered')
+           WHERE id = ?`,
+          [regId],
+        );
+      }
+      return { ok: true, data: { registration_id: regId, checked_in: !undo } };
+    }
+
+    if (name === "approve_round_report" || name === "rebuild_round_report") {
+      const reportId = Number(args.report_id) || 0;
+      if (!reportId) return { ok: false, error: "invalid_args", message: "report_id is required (see list_reports_pending_approval)" };
+      const [[r]] = await pool.query<RowDataPacket[]>(
+        `SELECT r.id, r.client_id, r.round_number, r.report_locale, r.delivery_status, r.self_check_json, r.delivery_options_json,
+                CONCAT(c.first_name, ' ', c.last_name) AS client_name
+         FROM client_round_reports r JOIN clients c ON c.id = r.client_id WHERE r.id = ? LIMIT 1`,
+        [reportId],
+      );
+      if (!r) return { ok: false, error: "not_found", message: "Report not found" };
+      const who = await roundReportApprover(ctx.adminId, String(r.report_locale));
+      const confirmed = adminAiWriteConfirmed(args);
+      if (!confirmed.ok) {
+        const opts = parseWizardJsonField<{ notify_client?: boolean; notify_partners?: boolean }>(r.delivery_options_json) ?? {};
+        const failed = (parseWizardJsonField<Pv2Check[]>(r.self_check_json) ?? []).filter((c) => c.pass === false);
+        return {
+          ok: true,
+          dry_run: true,
+          preview: {
+            client: String(r.client_name || ""),
+            round: Number(r.round_number),
+            language: String(r.report_locale),
+            delivery_status: String(r.delivery_status),
+            failed_checks: failed.map((c) => `${c.key}: ${c.detail}`),
+            you_can: name === "approve_round_report"
+              ? (who.canApprove ? (String(r.delivery_status) === "needs_review" ? (who.isSuper ? "override with a reason" : "not approve (self-check failed; Cesar only)") : "approve") : "not approve (language owner or Cesar only)")
+              : (who.canApprove ? "rebuild" : "not rebuild (approver or Cesar only)"),
+            ...(name === "approve_round_report"
+              ? { client_notified: opts.notify_client !== false, partners_emailed: opts.notify_client !== false && opts.notify_partners !== false }
+              : {}),
+            href: `/admin/clients?client=${Number(r.client_id)}`,
+          },
+          message: (confirmed as { message?: string }).message,
+        };
+      }
+      return coreResult(
+        name === "approve_round_report"
+          ? await approveRoundReportCore(reportId, ctx.adminId, args.override_reason != null ? String(args.override_reason) : null)
+          : await rebuildRoundReportCore(reportId, ctx.adminId),
+      );
+    }
+
+    if (name === "set_conversation_status" || name === "assign_conversation") {
+      const clientId = Number(args.client_id) || 0;
+      if (!clientId) return { ok: false, error: "invalid_args", message: "client_id is required" };
+      let assignee: number | null | undefined;
+      if (name === "assign_conversation") {
+        if (args.unassign === true) assignee = null;
+        else if (Number(args.admin_id) > 0) assignee = Number(args.admin_id);
+        else return { ok: false, error: "invalid_args", message: "admin_id (from search_admins) or unassign=true is required" };
+      } else if (!["open", "closed", "snoozed", "archived"].includes(String(args.status || ""))) {
+        return { ok: false, error: "invalid_args", message: "status must be open, closed, snoozed or archived" };
+      }
+      if (assignee) {
+        const [[a]] = await pool.query<RowDataPacket[]>(
+          `SELECT id, first_name, last_name FROM admins WHERE id = ? AND status = 'active' LIMIT 1`,
+          [assignee],
+        );
+        if (!a) return { ok: false, error: "not_found", message: "No active staff member with that admin_id (use search_admins)" };
+      }
+      const confirmed = adminAiWriteConfirmed(args);
+      if (!confirmed.ok) {
+        const [[c]] = await pool.query<RowDataPacket[]>(
+          `SELECT CONCAT(first_name, ' ', last_name) AS name,
+                  (SELECT COUNT(*) FROM conversations WHERE client_id = ? AND status = 'open') AS open_threads
+           FROM clients WHERE id = ? LIMIT 1`,
+          [clientId, clientId],
+        );
+        if (!c) return { ok: false, error: "not_found", message: "Client not found" };
+        return {
+          ok: true,
+          dry_run: true,
+          preview: {
+            client: String(c.name || ""),
+            open_threads: Number(c.open_threads || 0),
+            action: name === "assign_conversation" ? (assignee === null ? "unassign" : `assign to admin #${assignee}`) : `set status ${String(args.status)}`,
+          },
+          message: (confirmed as { message?: string }).message,
+        };
+      }
+      return coreResult(
+        name === "assign_conversation"
+          ? await assignClientConversationsCore(clientId, ctx.adminId, assignee)
+          : await setClientConversationStatusCore(clientId, ctx.adminId, String(args.status)),
+      );
+    }
+
+    if (name === "get_conversation_ai_stats") {
+      const days = Math.min(90, Math.max(1, Number(args.days) || 30));
+      return coreResult(await loadConversationsAiStatsCore(ctx.adminId, days));
+    }
+
+    if (name === "review_client_document") {
+      const docId = Number(args.document_id) || 0;
+      const decision = String(args.decision || "");
+      const reason = String(args.reason || "").trim();
+      if (!docId) return { ok: false, error: "invalid_args", message: "document_id is required (see list_case_documents)" };
+      if (!["approved", "rejected"].includes(decision)) return { ok: false, error: "invalid_args", message: "decision must be approved or rejected" };
+      if (decision === "rejected" && !reason) return { ok: false, error: "invalid_args", message: "A reason is required to reject (the client sees it)" };
+      const [[me]] = await pool.query<RowDataPacket[]>(`SELECT role FROM admins WHERE id = ? LIMIT 1`, [ctx.adminId]);
+      if (String(me?.role || "") !== "super_admin") {
+        return { ok: false, error: "forbidden", message: "Only super admins can review documents" };
+      }
+      const [[d]] = await pool.query<RowDataPacket[]>(
+        `SELECT d.id, d.doc_type, d.file_name, d.review_status, d.client_id, CONCAT(c.first_name, ' ', c.last_name) AS client_name
+         FROM client_documents d JOIN clients c ON c.id = d.client_id WHERE d.id = ? LIMIT 1`,
+        [docId],
+      );
+      if (!d) return { ok: false, error: "not_found", message: "Document not found" };
+      const confirmed = adminAiWriteConfirmed(args);
+      if (!confirmed.ok) {
+        return {
+          ok: true,
+          dry_run: true,
+          preview: {
+            client: String(d.client_name || ""),
+            document: DOC_TYPE_LABELS[String(d.doc_type)] || String(d.doc_type),
+            file: String(d.file_name || ""),
+            current_status: String(d.review_status || "pending"),
+            decision,
+            ...(decision === "rejected" ? { client_is_texted_and_emailed: true, reason } : {}),
+            href: `/admin/clients?client=${Number(d.client_id)}`,
+          },
+          message: (confirmed as { message?: string }).message,
+        };
+      }
+      return coreResult(await reviewClientDocumentCore(docId, ctx.adminId, decision, decision === "rejected" ? reason : null));
     }
 
     if (name === "get_scorecard") {
@@ -28457,7 +28971,8 @@ async function runAdminAiChatWithTools(opts: {
   tools_used: string[];
   citations: Array<{ type: string; href: string; label?: string }>;
 }> {
-  const apiKey = String(process.env.ANTHROPIC_API_KEY || "").trim();
+  // Nov 10, 2026: same working key as reports/SMS (the shared key is missing in production).
+  const apiKey = reportsAnthropicKey();
   if (!apiKey) {
     const err = new Error("ANTHROPIC_API_KEY is not configured") as Error & {
       code?: string;
@@ -28516,6 +29031,7 @@ async function runAdminAiChatWithTools(opts: {
           "x-api-key": apiKey,
           "anthropic-version": "2023-06-01",
           "content-type": "application/json",
+          ...anthropicWorkspaceHeader(apiKey),
         },
         timeout: ADMIN_AI_HTTP_TIMEOUT_MS,
         validateStatus: () => true,
@@ -33163,7 +33679,7 @@ async function requireAdminAiAccess(
       actor: "admin",
       id: mcpAdminId,
       email: String(rows[0].email),
-      jti: "admin-ai-mcp",
+      jti: ADMIN_AI_MCP_MASTER_JTI,
     };
     return next();
   }
@@ -38667,7 +39183,7 @@ async function runClaudeMorningDigestBrief(
   error?: string;
 }> {
   const fallback = buildDeterministicMorningBrief(snapshot);
-  const apiKey = String(process.env.ANTHROPIC_API_KEY || "").trim();
+  const apiKey = reportsAnthropicKey();
   if (!apiKey) {
     return {
       brief: fallback,
@@ -38707,6 +39223,7 @@ async function runClaudeMorningDigestBrief(
           "x-api-key": apiKey,
           "anthropic-version": "2023-06-01",
           "content-type": "application/json",
+          ...anthropicWorkspaceHeader(apiKey),
         },
         timeout: 22_000,
       },
@@ -39220,10 +39737,626 @@ export async function selfHealAllHeldReports(trigger: "deploy" | "opened" = "dep
   return tally;
 }
 
+/** Who may approve / override / rebuild a round report (language owner or release manager). */
+async function roundReportApprover(adminId: number, locale: string) {
+  const lang = locale === "es" ? "es" : "en";
+  const ownerId = await resolveLanguageOwnerAdminId(lang);
+  const isManager = reportReleaseManagerIds().includes(adminId);
+  return { canApprove: isManager || adminId === ownerId, isSuper: isManager, lang };
+}
+
+async function rebuildRoundReportCore(reportIdIn: number, adminIdIn: number): Promise<{ status: number; body: any }> {
+  const __R = (status: number, body: any) => ({ status, body });
+  const req = { params: { id: String(reportIdIn) }, auth: { id: adminIdIn }, body: {} } as const;
+
+    const reportId = Number(req.params.id);
+    const adminId = Number(req.auth!.id);
+    if (!reportId) return __R(400, { error: "Invalid report id" });
+    try {
+      const [[r]] = await pool.query<RowDataPacket[]>(
+        `SELECT r.id, r.client_id, r.round_number, r.report_locale, r.delivery_status, r.wizard_session_id,
+                (SELECT MAX(x.round_number) FROM client_round_reports x WHERE x.client_id = r.client_id) AS last_round
+         FROM client_round_reports r WHERE r.id = ? LIMIT 1`,
+        [reportId],
+      );
+      if (!r) return __R(404, { error: "Report not found" });
+      const status = String(r.delivery_status || "");
+      if (status !== "needs_review" && status !== "pending_approval") {
+        return __R(409, { error: "Only a report that was never sent can be rebuilt", code: "not_rebuildable" });
+      }
+      if (Number(r.round_number) !== Number(r.last_round)) {
+        return __R(409, { error: "Only the client's latest round can be rebuilt — later rounds depend on it", code: "not_latest_round" });
+      }
+      if (!r.wizard_session_id) return __R(422, { error: "This report has no wizard session to rebuild from", code: "no_session" });
+      const who = await roundReportApprover(adminId, String(r.report_locale));
+      if (!who.canApprove) return __R(403, { error: "Only the report's approver or Cesar can rebuild it" });
+
+      const back = await returnHeldReportToReview(reportId, adminId, "rebuild_button");
+      if (back.ok === false) return __R(409, { error: "This report was already approved or rebuilt", code: "not_rebuildable" });
+      return __R(200, { ok: true, client_id: back.clientId, round_number: back.roundNumber, session_id: back.sessionId });
+    } catch (e: any) {
+      console.error("[round-report:rebuild]", e?.message ?? e);
+      return __R(500, { error: "Could not rebuild the report" });
+    }
+  
+}
+
+async function approveRoundReportCore(reportIdIn: number, adminIdIn: number, overrideReasonIn: string | null): Promise<{ status: number; body: any }> {
+  const __R = (status: number, body: any) => ({ status, body });
+  const req = { params: { id: String(reportIdIn) }, auth: { id: adminIdIn }, body: { override_reason: overrideReasonIn ?? undefined } } as const;
+
+    const reportId = Number(req.params.id);
+    const adminId = Number(req.auth!.id);
+    try {
+      const [[r]] = await pool.query<RowDataPacket[]>(
+        `SELECT r.id, r.client_id, r.case_id, r.round_number, r.report_locale, r.delivery_status, r.delivery_options_json,
+                JSON_UNQUOTE(JSON_EXTRACT(r.engine_json, '$.engine')) AS engine_kind,
+                r.score_before, r.score_after, r.items_removed, c.first_name, c.last_name, c.email, c.phone, c.preferred_language,
+                (SELECT p.id FROM round_report_pdfs p WHERE p.round_report_id = r.id ORDER BY p.id DESC LIMIT 1) pdf_id
+         FROM client_round_reports r JOIN clients c ON c.id = r.client_id WHERE r.id = ? LIMIT 1`,
+        [reportId],
+      );
+      if (!r) return __R(404, { error: "Report not found" });
+      const status = String(r.delivery_status || "");
+      if (status !== "pending_approval" && status !== "needs_review") {
+        return __R(409, { error: status === "sent" || status === "silent" ? "Already approved" : "This report is not waiting for approval" });
+      }
+      const who = await roundReportApprover(adminId, String(r.report_locale));
+      if (!who.canApprove) {
+        return __R(403, {
+          error: who.lang === "es" ? "Spanish reports are approved by the Spanish owner or Cesar" : "English reports are approved by the English owner or Cesar",
+        });
+      }
+      const overrideReason = String(req.body?.override_reason || "").trim();
+      if (status === "needs_review" && !(who.isSuper && overrideReason.length >= 10)) {
+        return __R(422, {
+          error: "The self-check failed — fix the data and publish again. Cesar can override with a written reason.",
+          code: "self_check_failed",
+        });
+      }
+      if (!r.pdf_id) return __R(422, { error: "No PDF stored for this report" });
+      const [claim] = await pool.query<ResultSetHeader>(
+        `UPDATE client_round_reports SET delivery_status = 'sending', approved_by_admin_id = ?, approved_at = NOW() WHERE id = ? AND delivery_status = ?`,
+        [adminId, reportId, status],
+      );
+      if (!claim.affectedRows) return __R(409, { error: "Someone else is approving this report" });
+      const opts = parseWizardJsonField<{ notify_client?: boolean; notify_partners?: boolean }>(r.delivery_options_json) ?? {};
+      const notifyClient = opts.notify_client !== false;
+      let result: Awaited<ReturnType<typeof deliverRoundReportToClient>> | null = null;
+      try {
+        // Visible before the send so the links in the messages open.
+        await pool.query(`UPDATE client_round_reports SET delivery_status = ? WHERE id = ?`, [notifyClient ? "sent" : "silent", reportId]);
+        result = await deliverRoundReportToClient({
+          roundReportId: reportId,
+          outputPdfId: Number(r.pdf_id),
+          clientId: Number(r.client_id),
+          caseId: r.case_id != null ? Number(r.case_id) : null,
+          roundNumber: Number(r.round_number),
+          adminId,
+          notifyClient,
+          notifyPartners: notifyClient && opts.notify_partners !== false,
+          firstName: String(r.first_name || ""),
+          lastName: String(r.last_name || ""),
+          lang: String(r.preferred_language || "en"),
+          email: r.email ? String(r.email) : null,
+          phone: r.phone ? String(r.phone) : null,
+          scoreBefore: Number(r.score_before || 0),
+          scoreAfter: Number(r.score_after || 0),
+          itemsRemoved: Number(r.items_removed || 0),
+          scoreUpdate: r.engine_kind === "score_update",
+        });
+      } catch (e) {
+        await pool.query(`UPDATE client_round_reports SET delivery_status = ?, approved_by_admin_id = NULL, approved_at = NULL WHERE id = ?`, [status, reportId]);
+        throw e;
+      }
+      const deliveryResult = {
+        client_notify: result.clientNotify,
+        partners_emailed: result.partnersEmailed,
+        partners_pdf_load_failed: result.partnersPdfLoadFailed,
+        ...(status === "needs_review" ? { override_reason: overrideReason } : {}),
+      };
+      await pool.query(`UPDATE client_round_reports SET delivery_result_json = ? WHERE id = ?`, [JSON.stringify(deliveryResult), reportId]);
+      // Silent (backfilled) rounds never alert. Never fails the send.
+      if (notifyClient) {
+        await notifyRoundNoChangeAlert({
+          clientId: Number(r.client_id),
+          roundNumber: Number(r.round_number),
+          clientName: `${r.first_name || ""} ${r.last_name || ""}`.trim() || `Client #${r.client_id}`,
+        }).catch((e: any) => console.error("[round-no-change-alert]", reportId, e?.message ?? e));
+      }
+      await pool.query(
+        `INSERT INTO audit_logs (actor_type, actor_id, action, entity_type, entity_id, changes_json, status)
+         VALUES ('admin', ?, ?, 'client_round_report', ?, ?, 'success')`,
+        [adminId, status === "needs_review" ? "report_wizard.approved_override" : "report_wizard.approved_sent", reportId, JSON.stringify({ round_number: Number(r.round_number), ...deliveryResult })],
+      );
+      return __R(200, { ok: true, delivery_status: notifyClient ? "sent" : "silent", ...deliveryResult, secure_pdf_url: result.securePdfUrl || null });
+    } catch (e: any) {
+      console.error("[round-report:approve]", reportId, e?.message || e);
+      return __R(500, { error: e?.message || "Approval failed" });
+    }
+  
+}
+
 /**
  * The held report goes back to its session's Review step (same reads); its PDF rows go. Shared by the
  * Rebuild button and the self-healing rebuild. Locked so an Approve or a second rebuild cannot race it.
  */
+async function reviewClientDocumentCore(docIdIn: number, adminIdIn: number, decisionIn: string, reasonIn: string | null): Promise<{ status: number; body: any }> {
+  const __R = (status: number, body: any) => ({ status, body });
+  const req = { params: { id: String(docIdIn) }, auth: { id: adminIdIn }, body: { decision: decisionIn, reason: reasonIn ?? undefined } } as const;
+
+      const id = Number(req.params.id);
+      const { decision, reason } = req.body || {};
+      if (!["approved", "rejected"].includes(decision)) {
+        return __R(400, { error: "decision must be approved or rejected" });
+      }
+      if (decision === "rejected" && !reason) {
+        return __R(400, { error: "Reason required for rejection" });
+      }
+      const [docs] = await pool.query<RowDataPacket[]>(
+        `SELECT d.id, d.doc_type, d.client_id, c.first_name, c.email, c.phone, c.preferred_language
+         FROM client_documents d JOIN clients c ON c.id = d.client_id
+         WHERE d.id = ? LIMIT 1`,
+        [id],
+      );
+      if (docs.length === 0)
+        return __R(404, { error: "Not found" });
+      const d = docs[0];
+      await pool.query<ResultSetHeader>(
+        `UPDATE client_documents
+         SET review_status = ?, rejection_reason = ?, reviewed_by_admin_id = ?, reviewed_at = NOW()
+         WHERE id = ?`,
+        [decision, decision === "rejected" ? reason : null, req.auth!.id, id],
+      );
+
+      if (decision === "rejected") {
+        const portalUrl = `${APP_URL}/portal/documents`;
+        const tpl = tplDocumentRejected({
+          firstName: d.first_name,
+          docType: d.doc_type,
+          reason,
+          portalUrl,
+          lang: d.preferred_language || "en",
+        });
+        await sendEmail({
+          to: d.email,
+          subject: tpl.subject,
+          html: tpl.html,
+        }).catch(() => null);
+        if (d.phone) {
+          await sendClientSmsFromAdmin({
+            adminId: req.auth!.id,
+            to: d.phone,
+            body: `Optimum Credit: your ${DOC_TYPE_LABELS[d.doc_type] || d.doc_type} needs to be re-uploaded. Reason: ${reason}. Log in at: ${APP_URL}/portal/documents`,
+          }).catch(() => null);
+        }
+      }
+
+      const required = ["id_front", "id_back", "ssn_card", "proof_of_address"];
+      const [docStats] = await pool.query<RowDataPacket[]>(
+        `SELECT doc_type, MAX(review_status = 'approved') AS approved
+         FROM client_documents
+         WHERE client_id = ? AND doc_type IN ('id_front','id_back','ssn_card','proof_of_address')
+         GROUP BY doc_type`,
+        [d.client_id],
+      );
+      const approvedSet = new Set(
+        (docStats as any[])
+          .filter((r) => Number(r.approved) === 1)
+          .map((r) => r.doc_type),
+      );
+      const allApproved = required.every((r) => approvedSet.has(r));
+      if (allApproved) {
+        const [cur] = await pool.query<RowDataPacket[]>(
+          `SELECT pipeline_stage FROM clients WHERE id = ? LIMIT 1`,
+          [d.client_id],
+        );
+        if (cur[0]?.pipeline_stage === "new_client") {
+          // advanceCasePipeline also moves the client's active credit_repair_cases
+          // row to docs_ready — a plain UPDATE clients here would leave the case
+          // stuck at new_client and out of sync with the client.
+          await advanceCasePipeline(pool, {
+            clientId: d.client_id,
+            stage: "docs_ready",
+            adminId: req.auth!.id,
+            notes: "Auto-advanced: all documents approved",
+          });
+          await pool.query<ResultSetHeader>(
+            `UPDATE clients SET status='active' WHERE id = ? AND status <> 'active'`,
+            [d.client_id],
+          );
+          triggerReminderFlow("docs_ready", d.client_id).catch((e) =>
+            console.error("[flow:docs_ready]", e?.message),
+          );
+          // Notify client that all their documents have been approved
+          const portalUrl = `${APP_URL}/portal/documents`;
+          const approvedTpl = tplAllDocsApproved({
+            firstName: d.first_name,
+            portalUrl,
+            lang: d.preferred_language || "en",
+          });
+          await sendEmail({
+            to: d.email,
+            subject: approvedTpl.subject,
+            html: approvedTpl.html,
+          }).catch(() => null);
+          if (d.phone) {
+            await sendClientSmsFromAdmin({
+              adminId: req.auth!.id,
+              to: d.phone,
+              body: `Optimum Credit: great news! All your documents have been verified and your case is now being processed. Log in to track your progress: ${APP_URL}/portal`,
+            }).catch(() => null);
+          }
+        }
+      }
+
+      return __R(200, { ok: true, auto_advanced: allApproved });
+    
+}
+
+async function assignClientConversationsCore(clientIdIn: number, adminIdIn: number, assigneeIn: number | null | undefined): Promise<{ status: number; body: any }> {
+  const __R = (status: number, body: any) => ({ status, body });
+  const req = { params: { id: String(clientIdIn) }, auth: { id: adminIdIn }, body: { assigned_admin_id: assigneeIn } } as const;
+
+      if (!(await adminHasConversationsAccess(req.auth!.id))) {
+        return __R(403, { error: "conversations_number_required", message: "Conversations is available only to staff with an assigned OFG phone number." });
+      }
+      const clientId = Number(req.params.id);
+      if (!(await adminCanMutateClientConversations(req.auth!.id, clientId))) {
+        return __R(404, { error: "Not found" });
+      }
+      const assignee =
+        req.body?.assigned_admin_id === null
+          ? null
+          : Number(req.body?.assigned_admin_id ?? req.auth!.id);
+      const ofgIds = await adminAssignedPhoneNumberIds(req.auth!.id);
+      const scope = adminClientConversationScopeSql(
+        "conversations",
+        req.auth!.id,
+        ofgIds,
+      );
+      // Bootstrap: if no in-scope rows yet, still allow assign when client has zero threads
+      const [existing] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM conversations WHERE client_id = ? AND status = 'open' LIMIT 1`,
+        [clientId],
+      );
+      if (!existing[0]) {
+        // no open threads — nothing to assign; ok
+      } else {
+        await pool.query(
+          `UPDATE conversations SET assigned_admin_id = ?
+           WHERE client_id = ? AND status = 'open' AND ${scope.sql}`,
+          [assignee, clientId, ...scope.params],
+        );
+      }
+      await publishConversationRealtime({
+        type: "assign",
+        payload: { client_id: clientId, assigned_admin_id: assignee },
+        adminIds: await resolveConversationRealtimeAdminIds({
+          client_id: clientId,
+          assigned_admin_id: assignee,
+        }),
+      });
+      return __R(200, { ok: true });
+    
+}
+
+async function setClientConversationStatusCore(clientIdIn: number, adminIdIn: number, statusIn: string): Promise<{ status: number; body: any }> {
+  const __R = (status: number, body: any) => ({ status, body });
+  const req = { params: { id: String(clientIdIn) }, auth: { id: adminIdIn }, body: { status: statusIn } } as const;
+
+      if (!(await adminHasConversationsAccess(req.auth!.id))) {
+        return __R(403, { error: "conversations_number_required", message: "Conversations is available only to staff with an assigned OFG phone number." });
+      }
+      const clientId = Number(req.params.id);
+      if (!clientId) return __R(400, { error: "Invalid id" });
+      if (!(await adminCanMutateClientConversations(req.auth!.id, clientId))) {
+        return __R(404, { error: "Not found" });
+      }
+      const status = String(req.body?.status || "").trim();
+      if (!["open", "snoozed", "closed", "archived"].includes(status)) {
+        return __R(400, { error: "Invalid status" });
+      }
+      try {
+        const result = await setContactConversationStatus({
+          clientId,
+          status: status as "open" | "snoozed" | "closed" | "archived",
+          adminId: req.auth!.id,
+        });
+        return __R(200, { ok: true, ...result });
+      } catch (e: any) {
+        console.error("[conversations:status]", e?.message || e);
+        return __R(500, { error: "Failed to update status" });
+      }
+    
+}
+
+async function loadConversationsAiStatsCore(adminIdIn: number, daysIn: number): Promise<{ status: number; body: any }> {
+  const __R = (status: number, body: any) => ({ status, body });
+  const req = { auth: { id: adminIdIn }, query: { days: String(daysIn) } } as const;
+
+      if (!(await adminHasConversationsAccess(req.auth!.id))) {
+        return __R(403, { error: "conversations_number_required", message: "Conversations is available only to staff with an assigned OFG phone number." });
+      }
+      const days = Math.min(90, Math.max(1, Number(req.query.days) || 30));
+      try {
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT JSON_UNQUOTE(JSON_EXTRACT(metadata_json, '$.mode')) AS mode,
+                  JSON_UNQUOTE(JSON_EXTRACT(metadata_json, '$.reason')) AS reason,
+                  JSON_EXTRACT(metadata_json, '$.callback') = true AS callback,
+                  COUNT(*) AS n
+           FROM conversation_messages
+           WHERE direction = 'system'
+             AND JSON_EXTRACT(metadata_json, '$.inbound_ai') = true
+             AND created_at > NOW() - INTERVAL ? DAY
+           GROUP BY 1, 2, 3`,
+          [days],
+        );
+        // Answers = every AI text that wasn't a "teammate will follow up" hold — full and partial answers.
+        const [ans] = await pool.query<RowDataPacket[]>(
+          `SELECT COUNT(*) AS n FROM conversation_messages
+           WHERE direction = 'outbound'
+             AND JSON_EXTRACT(metadata_json, '$.inbound_ai') = true
+             AND COALESCE(JSON_EXTRACT(metadata_json, '$.inbound_ai_hold'), false) = false
+             AND body NOT IN (?, ?)
+             AND created_at > NOW() - INTERVAL ? DAY`,
+          // Older holds were saved without the flag — exclude them by their exact text.
+          [inboundAiEscalationHoldMessage("en"), inboundAiEscalationHoldMessage("es"), days],
+        );
+        const answered = Number(ans[0]?.n || 0);
+        let resolved = 0;
+        let escalated = 0;
+        let lookups = 0;
+        let callbacks = 0;
+        const byReason = new Map<string, number>();
+        for (const r of rows) {
+          const n = Number(r.n || 0);
+          if (r.mode === "resolved") resolved += n;
+          else if (r.mode === "escalated") {
+            escalated += n;
+            const k = String(r.reason || "unspecified").slice(0, 40);
+            byReason.set(k, (byReason.get(k) || 0) + n);
+          } else if (r.mode === "lookup") {
+            lookups += n;
+            if (Number(r.callback) === 1) callbacks += n;
+          }
+        }
+        const body: ConversationsAiStats = {
+          days,
+          resolved,
+          escalated,
+          answered,
+          resolve_rate: answered + escalated > 0 ? Math.round((answered / (answered + escalated)) * 100) : null,
+          lookups,
+          callbacks,
+          escalated_by_reason: [...byReason.entries()]
+            .map(([reason, count]) => ({ reason, count }))
+            .sort((a, b) => b.count - a.count)
+            .slice(0, 12),
+        };
+        return __R(200, body);
+      } catch (e: any) {
+        console.error("[conversations:ai-stats]", e?.message || e);
+        return __R(500, { error: "Failed to load AI stats" });
+      }
+    
+}
+
+async function loadEventCompanyResultsCore(companyIdIn: number): Promise<{ status: number; body: any }> {
+  const __R = (status: number, body: any) => ({ status, body });
+  const req = { params: { id: String(companyIdIn) } } as const;
+
+      const companyId = Number(req.params.id);
+      if (!companyId || Number.isNaN(companyId)) {
+        return __R(400, { error: "Invalid company id" });
+      }
+      try {
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT s.id AS session_id, s.title_en, s.title_es, s.starts_at, s.status, s.capacity,
+                  COALESCE(SUM(er.status = 'registered'), 0) AS registered,
+                  COALESCE(SUM(er.status = 'waitlisted'), 0) AS waitlisted,
+                  COALESCE(SUM(er.status <> 'cancelled' AND er.checked_in_at IS NOT NULL), 0) AS attended,
+                  COALESCE(SUM(er.status = 'registered' AND er.checked_in_at IS NULL AND s.status = 'completed'), 0) AS no_show,
+                  COALESCE(SUM(er.status <> 'cancelled' AND c.created_at >= er.created_at - INTERVAL 5 MINUTE), 0) AS new_contacts
+           FROM event_sessions s
+           LEFT JOIN event_registrations er ON er.session_id = s.id
+           LEFT JOIN clients c ON c.id = er.client_id
+           WHERE s.company_id = ?
+           GROUP BY s.id, s.title_en, s.title_es, s.starts_at, s.status, s.capacity
+           ORDER BY s.starts_at DESC`,
+          [companyId],
+        );
+        const [noSession] = await pool.query<RowDataPacket[]>(
+          `SELECT COALESCE(SUM(er.status = 'registered'), 0) AS registered,
+                  COALESCE(SUM(er.status <> 'cancelled' AND er.checked_in_at IS NOT NULL), 0) AS attended,
+                  COALESCE(SUM(er.status <> 'cancelled' AND c.created_at >= er.created_at - INTERVAL 5 MINUTE), 0) AS new_contacts,
+                  COUNT(er.id) AS n
+           FROM event_registrations er JOIN clients c ON c.id = er.client_id
+           WHERE er.company_id = ? AND er.session_id IS NULL`,
+          [companyId],
+        );
+        const [paid] = await pool.query<RowDataPacket[]>(
+          `SELECT x.session_id, COUNT(*) AS paid_clients, SUM(x.cents) AS revenue_cents FROM (
+             SELECT er.session_id, er.client_id, SUM(p.amount_cents) AS cents
+             FROM event_registrations er
+             JOIN payments p ON p.client_id = er.client_id AND p.status = 'succeeded'
+               AND COALESCE(p.paid_at, p.created_at) >= er.created_at
+             WHERE er.company_id = ? AND er.status <> 'cancelled'
+               -- Only people who were NOT already paying before they registered.
+               AND NOT EXISTS (
+                 SELECT 1 FROM payments p0 WHERE p0.client_id = er.client_id AND p0.status = 'succeeded'
+                   AND COALESCE(p0.paid_at, p0.created_at) < er.created_at
+               )
+             GROUP BY er.session_id, er.client_id
+           ) x GROUP BY x.session_id`,
+          [companyId],
+        );
+        const paidBy = new Map<string, { paid_clients: number; revenue_cents: number }>();
+        for (const p of paid) {
+          paidBy.set(String(p.session_id ?? "none"), {
+            paid_clients: Number(p.paid_clients || 0),
+            revenue_cents: Number(p.revenue_cents || 0),
+          });
+        }
+        const sessions: EventSessionResult[] = rows.map((r) => ({
+          session_id: Number(r.session_id),
+          title_en: String(r.title_en),
+          title_es: String(r.title_es),
+          starts_at: eventDateTimeIso(r.starts_at),
+          status: String(r.status) as "scheduled" | "cancelled" | "completed",
+          capacity: r.capacity != null ? Number(r.capacity) : null,
+          registered: Number(r.registered || 0),
+          waitlisted: Number(r.waitlisted || 0),
+          attended: Number(r.attended || 0),
+          no_show: Number(r.no_show || 0),
+          new_contacts: Number(r.new_contacts || 0),
+          paid_clients: paidBy.get(String(r.session_id))?.paid_clients ?? 0,
+          revenue_cents: paidBy.get(String(r.session_id))?.revenue_cents ?? 0,
+        }));
+        if (Number(noSession[0]?.n || 0) > 0) {
+          sessions.push({
+            session_id: null,
+            title_en: "No session picked",
+            title_es: "Sin sesión elegida",
+            starts_at: null,
+            status: null,
+            capacity: null,
+            registered: Number(noSession[0].registered || 0),
+            waitlisted: 0,
+            attended: Number(noSession[0].attended || 0),
+            no_show: 0,
+            new_contacts: Number(noSession[0].new_contacts || 0),
+            paid_clients: paidBy.get("none")?.paid_clients ?? 0,
+            revenue_cents: paidBy.get("none")?.revenue_cents ?? 0,
+          });
+        }
+        const sum = (k: "registered" | "waitlisted" | "attended" | "no_show" | "new_contacts") =>
+          sessions.reduce((a, r) => a + r[k], 0);
+        // A person at two sessions pays once: totals count each client once.
+        const [paidTotal] = await pool.query<RowDataPacket[]>(
+          `SELECT COUNT(*) AS paid_clients, COALESCE(SUM(x.cents), 0) AS revenue_cents FROM (
+             SELECT p.client_id, SUM(p.amount_cents) AS cents
+             FROM payments p
+             JOIN (SELECT client_id, MIN(created_at) AS first_reg FROM event_registrations
+                   WHERE company_id = ? AND status <> 'cancelled' GROUP BY client_id) f
+               ON f.client_id = p.client_id
+             WHERE p.status = 'succeeded' AND COALESCE(p.paid_at, p.created_at) >= f.first_reg
+               AND NOT EXISTS (
+                 SELECT 1 FROM payments p0 WHERE p0.client_id = p.client_id AND p0.status = 'succeeded'
+                   AND COALESCE(p0.paid_at, p0.created_at) < f.first_reg
+               )
+             GROUP BY p.client_id
+           ) x`,
+          [companyId],
+        );
+        return __R(200, {
+          totals: {
+            registered: sum("registered"),
+            waitlisted: sum("waitlisted"),
+            attended: sum("attended"),
+            no_show: sum("no_show"),
+            new_contacts: sum("new_contacts"),
+            paid_clients: Number(paidTotal[0]?.paid_clients || 0),
+            revenue_cents: Number(paidTotal[0]?.revenue_cents || 0),
+          },
+          sessions,
+        });
+      } catch (err: any) {
+        console.error("[admin:event-marketing:results]", err?.message ?? err);
+        return __R(500, { error: "Unable to load results" });
+      }
+    
+}
+
+async function importEventSignInSheetCore(sessionIdIn: number, rowsArg: unknown): Promise<{ status: number; body: any }> {
+  const __R = (status: number, body: any) => ({ status, body });
+  const req = { params: { id: String(sessionIdIn) }, body: { rows: rowsArg } as { rows: unknown } & Record<string, any> };
+
+      const id = Number(req.params.id);
+      if (!id || Number.isNaN(id)) {
+        return __R(400, { error: "Invalid session id" });
+      }
+      const rowsIn = Array.isArray(req.body?.rows) ? (req.body.rows as unknown[]) : [];
+      if (!rowsIn.length) return __R(400, { error: "No rows to import" });
+      if (rowsIn.length > 300) return __R(400, { error: "Import up to 300 rows at a time" });
+      try {
+        const [sessRows] = await pool.query<RowDataPacket[]>(
+          `SELECT s.id, s.company_id, s.status, c.label_slug FROM event_sessions s
+           JOIN event_companies c ON c.id = s.company_id WHERE s.id = ? LIMIT 1`,
+          [id],
+        );
+        const s = sessRows[0];
+        if (!s) return __R(404, { error: "Not found" });
+        if (String(s.status) === "cancelled") {
+          return __R(400, { error: "That session is cancelled" });
+        }
+        const results: Array<{
+          index: number; ok: boolean; error?: string; client_id?: number;
+          duplicate?: boolean; new_contact?: boolean; profile_mismatch?: boolean;
+        }> = [];
+        for (let i = 0; i < rowsIn.length; i++) {
+          const r = (rowsIn[i] && typeof rowsIn[i] === "object" ? rowsIn[i] : {}) as Record<string, unknown>;
+          const firstName = String(r.first_name ?? "").trim().slice(0, 100);
+          const lastName = String(r.last_name ?? "").trim().slice(0, 100);
+          const phone = String(r.phone ?? "").trim().slice(0, 20);
+          const email = String(r.email ?? "").trim().toLowerCase().slice(0, 255);
+          const lang: "en" | "es" = String(r.preferred_language ?? "") === "es" ? "es" : "en";
+          const attended = r.attended === undefined ? true : Boolean(r.attended);
+          if (!firstName || !lastName) {
+            results.push({ index: i, ok: false, error: "name_required" });
+            continue;
+          }
+          if (normalizePhoneDigits(phone).length < 10 || isPlaceholderPhone(phone)) {
+            results.push({ index: i, ok: false, error: "invalid_phone" });
+            continue;
+          }
+          if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+            results.push({ index: i, ok: false, error: "invalid_email" });
+            continue;
+          }
+          try {
+            const reg = await registerEventAttendee({
+              companyId: Number(s.company_id),
+              labelSlug: String(s.label_slug || ""),
+              sessionId: id,
+              firstName,
+              lastName,
+              email,
+              phone,
+              lang,
+              answers: { source: "paper_sheet" },
+              sourceQr: "session",
+              checkIn: attended ? "import" : null,
+              forceSeat: true,
+            });
+            results.push({
+              index: i,
+              ok: true,
+              client_id: reg.clientId,
+              duplicate: reg.duplicate,
+              new_contact: reg.isNewClient,
+              profile_mismatch: reg.profileMismatch,
+            });
+          } catch (e: any) {
+            console.error("[admin:event-marketing:import-row]", e?.message ?? e);
+            results.push({ index: i, ok: false, error: "save_failed" });
+          }
+        }
+        const detail = await loadEventCompanyDetail(Number(s.company_id));
+        return __R(200, {
+          imported: results.filter((r) => r.ok && !r.duplicate).length,
+          duplicates: results.filter((r) => r.ok && r.duplicate).length,
+          failed: results.filter((r) => !r.ok).length,
+          results,
+          detail,
+        });
+      } catch (err: any) {
+        console.error("[admin:event-marketing:import]", err?.message ?? err);
+        return __R(500, { error: "Unable to import sign-in sheet" });
+      }
+    
+}
+
 async function returnHeldReportToReview(reportId: number, actorId: number, reason: string): Promise<{ ok: true; clientId: number; roundNumber: number; sessionId: number } | { ok: false; code: string }> {
   const [[r]] = await pool.query<RowDataPacket[]>(
     `SELECT client_id, round_number, wizard_session_id, delivery_status FROM client_round_reports WHERE id = ? LIMIT 1`,
@@ -42574,7 +43707,7 @@ export interface InboundAiToolCtx {
  * active), hard-escalate, or go to Claude — and with how many AI turns.
  */
 /** Shared DB pool + reply guard for local audit scripts (scripts/replay-inbound-ai.ts). */
-export { pool, checkInboundAiReply, laWallClockAsUtcDate, eventSqlDateTime, registerEventAttendee, runEventMarketingCronStep, promoteEventWaitlist, eventProfileMismatch, eventCheckInWindowOpen, eventLifecycleCopy, buildEventSessionIcs };
+export { pool, checkInboundAiReply, adminAiInputSchemaToZod, laWallClockAsUtcDate, eventSqlDateTime, registerEventAttendee, runEventMarketingCronStep, promoteEventWaitlist, eventProfileMismatch, eventCheckInWindowOpen, eventLifecycleCopy, buildEventSessionIcs };
 
 export function replayInboundAiRules(
   recentNewestFirst: RowDataPacket[],
@@ -51420,7 +52553,7 @@ type ToolDef = {
 type ExecuteTool = (
   name: string,
   args: Record<string, unknown>,
-  ctx: { adminId: number },
+  ctx: { adminId: number; readOnly?: boolean },
 ) => Promise<AdminAiToolResult>;
 
 type MountOptimumMcpOpts = {
@@ -51514,6 +52647,9 @@ function adminAiInputSchemaToZod(
         base = z.array(z.coerce.number().int());
       } else if (items.type === "number") {
         base = z.array(z.coerce.number());
+      } else if (items.type === "object") {
+        // Lists of records (e.g. sign-in sheet rows): validate each item by its own schema.
+        base = z.array(adminAiInputSchemaToZod(items).passthrough());
       } else {
         base = z.array(z.string());
       }
@@ -51726,7 +52862,7 @@ function mountOptimumMcpRoutes(opts: MountOptimumMcpOpts): void {
           actor: "admin",
           id: legacyMasterAdminId,
           email: admin.email,
-          jti: "admin-ai-mcp",
+          jti: ADMIN_AI_MCP_MASTER_JTI,
         };
         return next();
       }
@@ -52314,7 +53450,10 @@ function mountOptimumMcpRoutes(opts: MountOptimumMcpOpts): void {
             }
           }
 
-          const result = await executeTool(t.name, cleaned, { adminId });
+          const result = await executeTool(t.name, cleaned, {
+            adminId,
+            readOnly: req.auth!.jti === ADMIN_AI_MCP_MASTER_JTI,
+          });
           if (result.ok === false) {
             await insertAdminAiAuditLog({
               adminId,
@@ -53147,7 +54286,7 @@ function buildApp() {
       res.json({
         enabled,
         role_allowed: adminAiRoleAllowed(role),
-        configured: !!String(process.env.ANTHROPIC_API_KEY || "").trim(),
+        configured: !!reportsAnthropicKey(),
       });
     },
   );
@@ -53440,7 +54579,10 @@ function buildApp() {
         req.body && typeof req.body === "object" && !Array.isArray(req.body)
           ? (req.body as Record<string, unknown>)
           : {};
-      const result = await executeAdminAiTool(toolName, args, { adminId });
+      const result = await executeAdminAiTool(toolName, args, {
+        adminId,
+        readOnly: req.auth!.jti === ADMIN_AI_MCP_MASTER_JTI,
+      });
       if (result.ok === false) {
         await insertAdminAiAuditLog({
           adminId,
@@ -55975,90 +57117,10 @@ function buildApp() {
     "/api/admin/event-marketing/sessions/:id/import",
     requireAdmin,
     denyAffiliateAccess,
-    async (req, res) => {
-      const id = Number(req.params.id);
-      if (!id || Number.isNaN(id)) {
-        return res.status(400).json({ error: "Invalid session id" });
-      }
-      const rowsIn = Array.isArray(req.body?.rows) ? (req.body.rows as unknown[]) : [];
-      if (!rowsIn.length) return res.status(400).json({ error: "No rows to import" });
-      if (rowsIn.length > 300) return res.status(400).json({ error: "Import up to 300 rows at a time" });
-      try {
-        const [sessRows] = await pool.query<RowDataPacket[]>(
-          `SELECT s.id, s.company_id, s.status, c.label_slug FROM event_sessions s
-           JOIN event_companies c ON c.id = s.company_id WHERE s.id = ? LIMIT 1`,
-          [id],
-        );
-        const s = sessRows[0];
-        if (!s) return res.status(404).json({ error: "Not found" });
-        if (String(s.status) === "cancelled") {
-          return res.status(400).json({ error: "That session is cancelled" });
-        }
-        const results: Array<{
-          index: number; ok: boolean; error?: string; client_id?: number;
-          duplicate?: boolean; new_contact?: boolean; profile_mismatch?: boolean;
-        }> = [];
-        for (let i = 0; i < rowsIn.length; i++) {
-          const r = (rowsIn[i] && typeof rowsIn[i] === "object" ? rowsIn[i] : {}) as Record<string, unknown>;
-          const firstName = String(r.first_name ?? "").trim().slice(0, 100);
-          const lastName = String(r.last_name ?? "").trim().slice(0, 100);
-          const phone = String(r.phone ?? "").trim().slice(0, 20);
-          const email = String(r.email ?? "").trim().toLowerCase().slice(0, 255);
-          const lang: "en" | "es" = String(r.preferred_language ?? "") === "es" ? "es" : "en";
-          const attended = r.attended === undefined ? true : Boolean(r.attended);
-          if (!firstName || !lastName) {
-            results.push({ index: i, ok: false, error: "name_required" });
-            continue;
-          }
-          if (normalizePhoneDigits(phone).length < 10 || isPlaceholderPhone(phone)) {
-            results.push({ index: i, ok: false, error: "invalid_phone" });
-            continue;
-          }
-          if (email && !PUBLIC_EMAIL_RE.test(email)) {
-            results.push({ index: i, ok: false, error: "invalid_email" });
-            continue;
-          }
-          try {
-            const reg = await registerEventAttendee({
-              companyId: Number(s.company_id),
-              labelSlug: String(s.label_slug || ""),
-              sessionId: id,
-              firstName,
-              lastName,
-              email,
-              phone,
-              lang,
-              answers: { source: "paper_sheet" },
-              sourceQr: "session",
-              checkIn: attended ? "import" : null,
-              forceSeat: true,
-            });
-            results.push({
-              index: i,
-              ok: true,
-              client_id: reg.clientId,
-              duplicate: reg.duplicate,
-              new_contact: reg.isNewClient,
-              profile_mismatch: reg.profileMismatch,
-            });
-          } catch (e: any) {
-            console.error("[admin:event-marketing:import-row]", e?.message ?? e);
-            results.push({ index: i, ok: false, error: "save_failed" });
-          }
-        }
-        const detail = await loadEventCompanyDetail(Number(s.company_id));
-        res.json({
-          imported: results.filter((r) => r.ok && !r.duplicate).length,
-          duplicates: results.filter((r) => r.ok && r.duplicate).length,
-          failed: results.filter((r) => !r.ok).length,
-          results,
-          detail,
-        });
-      } catch (err: any) {
-        console.error("[admin:event-marketing:import]", err?.message ?? err);
-        res.status(500).json({ error: "Unable to import sign-in sheet" });
-      }
-    },
+    async (req: AuthedRequest, res) => {
+    const out = await importEventSignInSheetCore(Number(req.params.id), req.body?.rows);
+    res.status(out.status).json(out.body);
+  },
   );
 
   // Results: registered → attended → paid, per session and in total.
@@ -56066,127 +57128,10 @@ function buildApp() {
     "/api/admin/event-marketing/companies/:id/results",
     requireAdmin,
     denyAffiliateAccess,
-    async (req, res) => {
-      const companyId = Number(req.params.id);
-      if (!companyId || Number.isNaN(companyId)) {
-        return res.status(400).json({ error: "Invalid company id" });
-      }
-      try {
-        const [rows] = await pool.query<RowDataPacket[]>(
-          `SELECT s.id AS session_id, s.title_en, s.title_es, s.starts_at, s.status, s.capacity,
-                  COALESCE(SUM(er.status = 'registered'), 0) AS registered,
-                  COALESCE(SUM(er.status = 'waitlisted'), 0) AS waitlisted,
-                  COALESCE(SUM(er.status <> 'cancelled' AND er.checked_in_at IS NOT NULL), 0) AS attended,
-                  COALESCE(SUM(er.status = 'registered' AND er.checked_in_at IS NULL AND s.status = 'completed'), 0) AS no_show,
-                  COALESCE(SUM(er.status <> 'cancelled' AND c.created_at >= er.created_at - INTERVAL 5 MINUTE), 0) AS new_contacts
-           FROM event_sessions s
-           LEFT JOIN event_registrations er ON er.session_id = s.id
-           LEFT JOIN clients c ON c.id = er.client_id
-           WHERE s.company_id = ?
-           GROUP BY s.id, s.title_en, s.title_es, s.starts_at, s.status, s.capacity
-           ORDER BY s.starts_at DESC`,
-          [companyId],
-        );
-        const [noSession] = await pool.query<RowDataPacket[]>(
-          `SELECT COALESCE(SUM(er.status = 'registered'), 0) AS registered,
-                  COALESCE(SUM(er.status <> 'cancelled' AND er.checked_in_at IS NOT NULL), 0) AS attended,
-                  COALESCE(SUM(er.status <> 'cancelled' AND c.created_at >= er.created_at - INTERVAL 5 MINUTE), 0) AS new_contacts,
-                  COUNT(er.id) AS n
-           FROM event_registrations er JOIN clients c ON c.id = er.client_id
-           WHERE er.company_id = ? AND er.session_id IS NULL`,
-          [companyId],
-        );
-        const [paid] = await pool.query<RowDataPacket[]>(
-          `SELECT x.session_id, COUNT(*) AS paid_clients, SUM(x.cents) AS revenue_cents FROM (
-             SELECT er.session_id, er.client_id, SUM(p.amount_cents) AS cents
-             FROM event_registrations er
-             JOIN payments p ON p.client_id = er.client_id AND p.status = 'succeeded'
-               AND COALESCE(p.paid_at, p.created_at) >= er.created_at
-             WHERE er.company_id = ? AND er.status <> 'cancelled'
-               -- Only people who were NOT already paying before they registered.
-               AND NOT EXISTS (
-                 SELECT 1 FROM payments p0 WHERE p0.client_id = er.client_id AND p0.status = 'succeeded'
-                   AND COALESCE(p0.paid_at, p0.created_at) < er.created_at
-               )
-             GROUP BY er.session_id, er.client_id
-           ) x GROUP BY x.session_id`,
-          [companyId],
-        );
-        const paidBy = new Map<string, { paid_clients: number; revenue_cents: number }>();
-        for (const p of paid) {
-          paidBy.set(String(p.session_id ?? "none"), {
-            paid_clients: Number(p.paid_clients || 0),
-            revenue_cents: Number(p.revenue_cents || 0),
-          });
-        }
-        const sessions: EventSessionResult[] = rows.map((r) => ({
-          session_id: Number(r.session_id),
-          title_en: String(r.title_en),
-          title_es: String(r.title_es),
-          starts_at: eventDateTimeIso(r.starts_at),
-          status: String(r.status) as "scheduled" | "cancelled" | "completed",
-          capacity: r.capacity != null ? Number(r.capacity) : null,
-          registered: Number(r.registered || 0),
-          waitlisted: Number(r.waitlisted || 0),
-          attended: Number(r.attended || 0),
-          no_show: Number(r.no_show || 0),
-          new_contacts: Number(r.new_contacts || 0),
-          paid_clients: paidBy.get(String(r.session_id))?.paid_clients ?? 0,
-          revenue_cents: paidBy.get(String(r.session_id))?.revenue_cents ?? 0,
-        }));
-        if (Number(noSession[0]?.n || 0) > 0) {
-          sessions.push({
-            session_id: null,
-            title_en: "No session picked",
-            title_es: "Sin sesión elegida",
-            starts_at: null,
-            status: null,
-            capacity: null,
-            registered: Number(noSession[0].registered || 0),
-            waitlisted: 0,
-            attended: Number(noSession[0].attended || 0),
-            no_show: 0,
-            new_contacts: Number(noSession[0].new_contacts || 0),
-            paid_clients: paidBy.get("none")?.paid_clients ?? 0,
-            revenue_cents: paidBy.get("none")?.revenue_cents ?? 0,
-          });
-        }
-        const sum = (k: "registered" | "waitlisted" | "attended" | "no_show" | "new_contacts") =>
-          sessions.reduce((a, r) => a + r[k], 0);
-        // A person at two sessions pays once: totals count each client once.
-        const [paidTotal] = await pool.query<RowDataPacket[]>(
-          `SELECT COUNT(*) AS paid_clients, COALESCE(SUM(x.cents), 0) AS revenue_cents FROM (
-             SELECT p.client_id, SUM(p.amount_cents) AS cents
-             FROM payments p
-             JOIN (SELECT client_id, MIN(created_at) AS first_reg FROM event_registrations
-                   WHERE company_id = ? AND status <> 'cancelled' GROUP BY client_id) f
-               ON f.client_id = p.client_id
-             WHERE p.status = 'succeeded' AND COALESCE(p.paid_at, p.created_at) >= f.first_reg
-               AND NOT EXISTS (
-                 SELECT 1 FROM payments p0 WHERE p0.client_id = p.client_id AND p0.status = 'succeeded'
-                   AND COALESCE(p0.paid_at, p0.created_at) < f.first_reg
-               )
-             GROUP BY p.client_id
-           ) x`,
-          [companyId],
-        );
-        res.json({
-          totals: {
-            registered: sum("registered"),
-            waitlisted: sum("waitlisted"),
-            attended: sum("attended"),
-            no_show: sum("no_show"),
-            new_contacts: sum("new_contacts"),
-            paid_clients: Number(paidTotal[0]?.paid_clients || 0),
-            revenue_cents: Number(paidTotal[0]?.revenue_cents || 0),
-          },
-          sessions,
-        });
-      } catch (err: any) {
-        console.error("[admin:event-marketing:results]", err?.message ?? err);
-        res.status(500).json({ error: "Unable to load results" });
-      }
-    },
+    async (req: AuthedRequest, res) => {
+    const out = await loadEventCompanyResultsCore(Number(req.params.id));
+    res.status(out.status).json(out.body);
+  },
   );
 
   // ============================================================================
@@ -67536,115 +68481,9 @@ function buildApp() {
     "/api/admin/documents/:id/review",
     requireSuperAdmin,
     async (req: AuthedRequest, res) => {
-      const id = Number(req.params.id);
-      const { decision, reason } = req.body || {};
-      if (!["approved", "rejected"].includes(decision)) {
-        return res
-          .status(400)
-          .json({ error: "decision must be approved or rejected" });
-      }
-      if (decision === "rejected" && !reason) {
-        return res.status(400).json({ error: "Reason required for rejection" });
-      }
-      const [docs] = await pool.query<RowDataPacket[]>(
-        `SELECT d.id, d.doc_type, d.client_id, c.first_name, c.email, c.phone, c.preferred_language
-         FROM client_documents d JOIN clients c ON c.id = d.client_id
-         WHERE d.id = ? LIMIT 1`,
-        [id],
-      );
-      if (docs.length === 0)
-        return res.status(404).json({ error: "Not found" });
-      const d = docs[0];
-      await pool.query<ResultSetHeader>(
-        `UPDATE client_documents
-         SET review_status = ?, rejection_reason = ?, reviewed_by_admin_id = ?, reviewed_at = NOW()
-         WHERE id = ?`,
-        [decision, decision === "rejected" ? reason : null, req.auth!.id, id],
-      );
-
-      if (decision === "rejected") {
-        const portalUrl = `${APP_URL}/portal/documents`;
-        const tpl = tplDocumentRejected({
-          firstName: d.first_name,
-          docType: d.doc_type,
-          reason,
-          portalUrl,
-          lang: d.preferred_language || "en",
-        });
-        await sendEmail({
-          to: d.email,
-          subject: tpl.subject,
-          html: tpl.html,
-        }).catch(() => null);
-        if (d.phone) {
-          await sendClientSmsFromAdmin({
-            adminId: req.auth!.id,
-            to: d.phone,
-            body: `Optimum Credit: your ${DOC_TYPE_LABELS[d.doc_type] || d.doc_type} needs to be re-uploaded. Reason: ${reason}. Log in at: ${APP_URL}/portal/documents`,
-          }).catch(() => null);
-        }
-      }
-
-      const required = ["id_front", "id_back", "ssn_card", "proof_of_address"];
-      const [docStats] = await pool.query<RowDataPacket[]>(
-        `SELECT doc_type, MAX(review_status = 'approved') AS approved
-         FROM client_documents
-         WHERE client_id = ? AND doc_type IN ('id_front','id_back','ssn_card','proof_of_address')
-         GROUP BY doc_type`,
-        [d.client_id],
-      );
-      const approvedSet = new Set(
-        (docStats as any[])
-          .filter((r) => Number(r.approved) === 1)
-          .map((r) => r.doc_type),
-      );
-      const allApproved = required.every((r) => approvedSet.has(r));
-      if (allApproved) {
-        const [cur] = await pool.query<RowDataPacket[]>(
-          `SELECT pipeline_stage FROM clients WHERE id = ? LIMIT 1`,
-          [d.client_id],
-        );
-        if (cur[0]?.pipeline_stage === "new_client") {
-          // advanceCasePipeline also moves the client's active credit_repair_cases
-          // row to docs_ready — a plain UPDATE clients here would leave the case
-          // stuck at new_client and out of sync with the client.
-          await advanceCasePipeline(pool, {
-            clientId: d.client_id,
-            stage: "docs_ready",
-            adminId: req.auth!.id,
-            notes: "Auto-advanced: all documents approved",
-          });
-          await pool.query<ResultSetHeader>(
-            `UPDATE clients SET status='active' WHERE id = ? AND status <> 'active'`,
-            [d.client_id],
-          );
-          triggerReminderFlow("docs_ready", d.client_id).catch((e) =>
-            console.error("[flow:docs_ready]", e?.message),
-          );
-          // Notify client that all their documents have been approved
-          const portalUrl = `${APP_URL}/portal/documents`;
-          const approvedTpl = tplAllDocsApproved({
-            firstName: d.first_name,
-            portalUrl,
-            lang: d.preferred_language || "en",
-          });
-          await sendEmail({
-            to: d.email,
-            subject: approvedTpl.subject,
-            html: approvedTpl.html,
-          }).catch(() => null);
-          if (d.phone) {
-            await sendClientSmsFromAdmin({
-              adminId: req.auth!.id,
-              to: d.phone,
-              body: `Optimum Credit: great news! All your documents have been verified and your case is now being processed. Log in to track your progress: ${APP_URL}/portal`,
-            }).catch(() => null);
-          }
-        }
-      }
-
-      res.json({ ok: true, auto_advanced: allApproved });
-    },
+    const out = await reviewClientDocumentCore(Number(req.params.id), Number(req.auth!.id), String(req.body?.decision ?? ""), req.body?.reason != null ? String(req.body.reason) : null);
+    res.status(out.status).json(out.body);
+  },
   );
 
   app.post(
@@ -68425,69 +69264,9 @@ function buildApp() {
     requireAdmin,
     denyAffiliateAccess,
     async (req: AuthedRequest, res) => {
-      if (!(await requireConversationsAccess(req, res))) return;
-      const days = Math.min(90, Math.max(1, Number(req.query.days) || 30));
-      try {
-        const [rows] = await pool.query<RowDataPacket[]>(
-          `SELECT JSON_UNQUOTE(JSON_EXTRACT(metadata_json, '$.mode')) AS mode,
-                  JSON_UNQUOTE(JSON_EXTRACT(metadata_json, '$.reason')) AS reason,
-                  JSON_EXTRACT(metadata_json, '$.callback') = true AS callback,
-                  COUNT(*) AS n
-           FROM conversation_messages
-           WHERE direction = 'system'
-             AND JSON_EXTRACT(metadata_json, '$.inbound_ai') = true
-             AND created_at > NOW() - INTERVAL ? DAY
-           GROUP BY 1, 2, 3`,
-          [days],
-        );
-        // Answers = every AI text that wasn't a "teammate will follow up" hold — full and partial answers.
-        const [ans] = await pool.query<RowDataPacket[]>(
-          `SELECT COUNT(*) AS n FROM conversation_messages
-           WHERE direction = 'outbound'
-             AND JSON_EXTRACT(metadata_json, '$.inbound_ai') = true
-             AND COALESCE(JSON_EXTRACT(metadata_json, '$.inbound_ai_hold'), false) = false
-             AND body NOT IN (?, ?)
-             AND created_at > NOW() - INTERVAL ? DAY`,
-          // Older holds were saved without the flag — exclude them by their exact text.
-          [inboundAiEscalationHoldMessage("en"), inboundAiEscalationHoldMessage("es"), days],
-        );
-        const answered = Number(ans[0]?.n || 0);
-        let resolved = 0;
-        let escalated = 0;
-        let lookups = 0;
-        let callbacks = 0;
-        const byReason = new Map<string, number>();
-        for (const r of rows) {
-          const n = Number(r.n || 0);
-          if (r.mode === "resolved") resolved += n;
-          else if (r.mode === "escalated") {
-            escalated += n;
-            const k = String(r.reason || "unspecified").slice(0, 40);
-            byReason.set(k, (byReason.get(k) || 0) + n);
-          } else if (r.mode === "lookup") {
-            lookups += n;
-            if (Number(r.callback) === 1) callbacks += n;
-          }
-        }
-        const body: ConversationsAiStats = {
-          days,
-          resolved,
-          escalated,
-          answered,
-          resolve_rate: answered + escalated > 0 ? Math.round((answered / (answered + escalated)) * 100) : null,
-          lookups,
-          callbacks,
-          escalated_by_reason: [...byReason.entries()]
-            .map(([reason, count]) => ({ reason, count }))
-            .sort((a, b) => b.count - a.count)
-            .slice(0, 12),
-        };
-        res.json(body);
-      } catch (e: any) {
-        console.error("[conversations:ai-stats]", e?.message || e);
-        res.status(500).json({ error: "Failed to load AI stats" });
-      }
-    },
+    const out = await loadConversationsAiStatsCore(Number(req.auth!.id), Number(req.query.days) || 30);
+    res.status(out.status).json(out.body);
+  },
   );
 
   app.get(
@@ -69852,7 +70631,7 @@ function buildApp() {
 
       if (
         adminAiFeatureEnabled() &&
-        String(process.env.ANTHROPIC_API_KEY || "").trim() &&
+        reportsAnthropicKey() &&
         req.body?.include_ai !== false
       ) {
         try {
@@ -69876,11 +70655,7 @@ function buildApp() {
               messages: [{ role: "user", content: userMsg }],
             },
             {
-              headers: {
-                "x-api-key": String(process.env.ANTHROPIC_API_KEY || "").trim(),
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-              },
+              headers: anthropicJsonHeaders(reportsAnthropicKey()),
               timeout: 25_000,
               validateStatus: () => true,
             },
@@ -69933,45 +70708,9 @@ function buildApp() {
     requireAdmin,
     denyAffiliateAccess,
     async (req: AuthedRequest, res) => {
-      if (!(await requireConversationsAccess(req, res))) return;
-      const clientId = Number(req.params.id);
-      if (!(await adminCanMutateClientConversations(req.auth!.id, clientId))) {
-        return res.status(404).json({ error: "Not found" });
-      }
-      const assignee =
-        req.body?.assigned_admin_id === null
-          ? null
-          : Number(req.body?.assigned_admin_id ?? req.auth!.id);
-      const ofgIds = await adminAssignedPhoneNumberIds(req.auth!.id);
-      const scope = adminClientConversationScopeSql(
-        "conversations",
-        req.auth!.id,
-        ofgIds,
-      );
-      // Bootstrap: if no in-scope rows yet, still allow assign when client has zero threads
-      const [existing] = await pool.query<RowDataPacket[]>(
-        `SELECT id FROM conversations WHERE client_id = ? AND status = 'open' LIMIT 1`,
-        [clientId],
-      );
-      if (!existing[0]) {
-        // no open threads — nothing to assign; ok
-      } else {
-        await pool.query(
-          `UPDATE conversations SET assigned_admin_id = ?
-           WHERE client_id = ? AND status = 'open' AND ${scope.sql}`,
-          [assignee, clientId, ...scope.params],
-        );
-      }
-      await publishConversationRealtime({
-        type: "assign",
-        payload: { client_id: clientId, assigned_admin_id: assignee },
-        adminIds: await resolveConversationRealtimeAdminIds({
-          client_id: clientId,
-          assigned_admin_id: assignee,
-        }),
-      });
-      res.json({ ok: true });
-    },
+    const out = await assignClientConversationsCore(Number(req.params.id), Number(req.auth!.id), req.body?.assigned_admin_id === null ? null : req.body?.assigned_admin_id != null ? Number(req.body.assigned_admin_id) : undefined);
+    res.status(out.status).json(out.body);
+  },
   );
 
   app.post(
@@ -69979,28 +70718,9 @@ function buildApp() {
     requireAdmin,
     denyAffiliateAccess,
     async (req: AuthedRequest, res) => {
-      if (!(await requireConversationsAccess(req, res))) return;
-      const clientId = Number(req.params.id);
-      if (!clientId) return res.status(400).json({ error: "Invalid id" });
-      if (!(await adminCanMutateClientConversations(req.auth!.id, clientId))) {
-        return res.status(404).json({ error: "Not found" });
-      }
-      const status = String(req.body?.status || "").trim();
-      if (!["open", "snoozed", "closed", "archived"].includes(status)) {
-        return res.status(400).json({ error: "Invalid status" });
-      }
-      try {
-        const result = await setContactConversationStatus({
-          clientId,
-          status: status as "open" | "snoozed" | "closed" | "archived",
-          adminId: req.auth!.id,
-        });
-        res.json({ ok: true, ...result });
-      } catch (e: any) {
-        console.error("[conversations:status]", e?.message || e);
-        res.status(500).json({ error: "Failed to update status" });
-      }
-    },
+    const out = await setClientConversationStatusCore(Number(req.params.id), Number(req.auth!.id), String(req.body?.status ?? ""));
+    res.status(out.status).json(out.body);
+  },
   );
 
   app.post(
@@ -75451,7 +76171,7 @@ function buildApp() {
           let brief: MorningDigestClaudeBrief;
           let enhanced = false;
           let claudeErr: string | undefined;
-          if (remaining > 18_000 && process.env.ANTHROPIC_API_KEY) {
+          if (remaining > 18_000 && reportsAnthropicKey()) {
             const out = await runClaudeMorningDigestBrief(snapshot);
             brief = out.brief;
             enhanced = out.enhanced;
@@ -75549,7 +76269,7 @@ function buildApp() {
         (r) => r.status === "sent" && r.claude === false,
       ).length;
       const claudeOk = results.filter((r) => r.claude === true).length;
-      if (claudeFailed > 0 && claudeOk === 0 && process.env.ANTHROPIC_API_KEY) {
+      if (claudeFailed > 0 && claudeOk === 0 && reportsAnthropicKey()) {
         console.error(
           `[cron:morning-digest] ALL Claude enhances failed (${claudeFailed} sent with fallback). Check ANTHROPIC_API_KEY on this environment (401 = invalid/expired key).`,
         );
@@ -78757,7 +79477,7 @@ function buildApp() {
         meta.compare_mode = compareMode;
 
         let data = extracted;
-        if (options.enhance_with_claude && process.env.ANTHROPIC_API_KEY) {
+        if (options.enhance_with_claude && reportsAnthropicKey()) {
           let afterText = "";
           try {
             const pdfParse = await loadPdfParse();
@@ -78776,7 +79496,7 @@ function buildApp() {
           meta.claude_narrative_at = new Date().toISOString();
         } else {
           meta.claude_narrative = false;
-          if (options.enhance_with_claude && !process.env.ANTHROPIC_API_KEY) {
+          if (options.enhance_with_claude && !reportsAnthropicKey()) {
             meta.claude_narrative_error = "ANTHROPIC_API_KEY not set";
           }
         }
@@ -78905,7 +79625,7 @@ function buildApp() {
           .status(400)
           .json({ error: "Cannot enhance published session" });
       }
-      if (!process.env.ANTHROPIC_API_KEY) {
+      if (!reportsAnthropicKey()) {
         return res.status(503).json({
           error: "Claude narrative enhance unavailable (ANTHROPIC_API_KEY)",
           code: "claude_unavailable",
@@ -79502,7 +80222,7 @@ function buildApp() {
           });
 
         // Optional Claude QA enrichment (best-effort, never blocks publish)
-        if (!su && process.env.ANTHROPIC_API_KEY && afterPdfText.length > 200) {
+        if (!su && reportsAnthropicKey() && afterPdfText.length > 200) {
           try {
             const claudeAlerts = await runClaudeProgressReportQa({
               profile,
@@ -79814,12 +80534,6 @@ function buildApp() {
    * may override a failed self-check (every staff login is super_admin, so the
    * role alone would let the publisher wave their own report through).
    */
-  const roundReportApprover = async (adminId: number, locale: string) => {
-    const lang = locale === "es" ? "es" : "en";
-    const ownerId = await resolveLanguageOwnerAdminId(lang);
-    const isManager = reportReleaseManagerIds().includes(adminId);
-    return { canApprove: isManager || adminId === ownerId, isSuper: isManager, lang };
-  };
 
   /** Whole approval queue in one response (oldest first); `truncated` if ever larger. */
   const PENDING_APPROVAL_QUEUE_MAX = 1000;
@@ -79922,127 +80636,13 @@ function buildApp() {
    * rounds, no pipeline change. Same people as Approve (language owner, Cesar, Alex).
    */
   app.post("/api/admin/round-reports/:id/rebuild", requireAdmin, denyAffiliateAccess, async (req: AuthedRequest, res) => {
-    const reportId = Number(req.params.id);
-    const adminId = Number(req.auth!.id);
-    if (!reportId) return res.status(400).json({ error: "Invalid report id" });
-    try {
-      const [[r]] = await pool.query<RowDataPacket[]>(
-        `SELECT r.id, r.client_id, r.round_number, r.report_locale, r.delivery_status, r.wizard_session_id,
-                (SELECT MAX(x.round_number) FROM client_round_reports x WHERE x.client_id = r.client_id) AS last_round
-         FROM client_round_reports r WHERE r.id = ? LIMIT 1`,
-        [reportId],
-      );
-      if (!r) return res.status(404).json({ error: "Report not found" });
-      const status = String(r.delivery_status || "");
-      if (status !== "needs_review" && status !== "pending_approval") {
-        return res.status(409).json({ error: "Only a report that was never sent can be rebuilt", code: "not_rebuildable" });
-      }
-      if (Number(r.round_number) !== Number(r.last_round)) {
-        return res.status(409).json({ error: "Only the client's latest round can be rebuilt — later rounds depend on it", code: "not_latest_round" });
-      }
-      if (!r.wizard_session_id) return res.status(422).json({ error: "This report has no wizard session to rebuild from", code: "no_session" });
-      const who = await roundReportApprover(adminId, String(r.report_locale));
-      if (!who.canApprove) return res.status(403).json({ error: "Only the report's approver or Cesar can rebuild it" });
-
-      const back = await returnHeldReportToReview(reportId, adminId, "rebuild_button");
-      if (back.ok === false) return res.status(409).json({ error: "This report was already approved or rebuilt", code: "not_rebuildable" });
-      return res.json({ ok: true, client_id: back.clientId, round_number: back.roundNumber, session_id: back.sessionId });
-    } catch (e: any) {
-      console.error("[round-report:rebuild]", e?.message ?? e);
-      return res.status(500).json({ error: "Could not rebuild the report" });
-    }
+    const out = await rebuildRoundReportCore(Number(req.params.id), Number(req.auth!.id));
+    res.status(out.status).json(out.body);
   });
 
   app.post("/api/admin/round-reports/:id/approve", requireAdmin, denyAffiliateAccess, async (req: AuthedRequest, res) => {
-    const reportId = Number(req.params.id);
-    const adminId = Number(req.auth!.id);
-    try {
-      const [[r]] = await pool.query<RowDataPacket[]>(
-        `SELECT r.id, r.client_id, r.case_id, r.round_number, r.report_locale, r.delivery_status, r.delivery_options_json,
-                JSON_UNQUOTE(JSON_EXTRACT(r.engine_json, '$.engine')) AS engine_kind,
-                r.score_before, r.score_after, r.items_removed, c.first_name, c.last_name, c.email, c.phone, c.preferred_language,
-                (SELECT p.id FROM round_report_pdfs p WHERE p.round_report_id = r.id ORDER BY p.id DESC LIMIT 1) pdf_id
-         FROM client_round_reports r JOIN clients c ON c.id = r.client_id WHERE r.id = ? LIMIT 1`,
-        [reportId],
-      );
-      if (!r) return res.status(404).json({ error: "Report not found" });
-      const status = String(r.delivery_status || "");
-      if (status !== "pending_approval" && status !== "needs_review") {
-        return res.status(409).json({ error: status === "sent" || status === "silent" ? "Already approved" : "This report is not waiting for approval" });
-      }
-      const who = await roundReportApprover(adminId, String(r.report_locale));
-      if (!who.canApprove) {
-        return res.status(403).json({
-          error: who.lang === "es" ? "Spanish reports are approved by the Spanish owner or Cesar" : "English reports are approved by the English owner or Cesar",
-        });
-      }
-      const overrideReason = String(req.body?.override_reason || "").trim();
-      if (status === "needs_review" && !(who.isSuper && overrideReason.length >= 10)) {
-        return res.status(422).json({
-          error: "The self-check failed — fix the data and publish again. Cesar can override with a written reason.",
-          code: "self_check_failed",
-        });
-      }
-      if (!r.pdf_id) return res.status(422).json({ error: "No PDF stored for this report" });
-      const [claim] = await pool.query<ResultSetHeader>(
-        `UPDATE client_round_reports SET delivery_status = 'sending', approved_by_admin_id = ?, approved_at = NOW() WHERE id = ? AND delivery_status = ?`,
-        [adminId, reportId, status],
-      );
-      if (!claim.affectedRows) return res.status(409).json({ error: "Someone else is approving this report" });
-      const opts = parseWizardJsonField<{ notify_client?: boolean; notify_partners?: boolean }>(r.delivery_options_json) ?? {};
-      const notifyClient = opts.notify_client !== false;
-      let result: Awaited<ReturnType<typeof deliverRoundReportToClient>> | null = null;
-      try {
-        // Visible before the send so the links in the messages open.
-        await pool.query(`UPDATE client_round_reports SET delivery_status = ? WHERE id = ?`, [notifyClient ? "sent" : "silent", reportId]);
-        result = await deliverRoundReportToClient({
-          roundReportId: reportId,
-          outputPdfId: Number(r.pdf_id),
-          clientId: Number(r.client_id),
-          caseId: r.case_id != null ? Number(r.case_id) : null,
-          roundNumber: Number(r.round_number),
-          adminId,
-          notifyClient,
-          notifyPartners: notifyClient && opts.notify_partners !== false,
-          firstName: String(r.first_name || ""),
-          lastName: String(r.last_name || ""),
-          lang: String(r.preferred_language || "en"),
-          email: r.email ? String(r.email) : null,
-          phone: r.phone ? String(r.phone) : null,
-          scoreBefore: Number(r.score_before || 0),
-          scoreAfter: Number(r.score_after || 0),
-          itemsRemoved: Number(r.items_removed || 0),
-          scoreUpdate: r.engine_kind === "score_update",
-        });
-      } catch (e) {
-        await pool.query(`UPDATE client_round_reports SET delivery_status = ?, approved_by_admin_id = NULL, approved_at = NULL WHERE id = ?`, [status, reportId]);
-        throw e;
-      }
-      const deliveryResult = {
-        client_notify: result.clientNotify,
-        partners_emailed: result.partnersEmailed,
-        partners_pdf_load_failed: result.partnersPdfLoadFailed,
-        ...(status === "needs_review" ? { override_reason: overrideReason } : {}),
-      };
-      await pool.query(`UPDATE client_round_reports SET delivery_result_json = ? WHERE id = ?`, [JSON.stringify(deliveryResult), reportId]);
-      // Silent (backfilled) rounds never alert. Never fails the send.
-      if (notifyClient) {
-        await notifyRoundNoChangeAlert({
-          clientId: Number(r.client_id),
-          roundNumber: Number(r.round_number),
-          clientName: `${r.first_name || ""} ${r.last_name || ""}`.trim() || `Client #${r.client_id}`,
-        }).catch((e: any) => console.error("[round-no-change-alert]", reportId, e?.message ?? e));
-      }
-      await pool.query(
-        `INSERT INTO audit_logs (actor_type, actor_id, action, entity_type, entity_id, changes_json, status)
-         VALUES ('admin', ?, ?, 'client_round_report', ?, ?, 'success')`,
-        [adminId, status === "needs_review" ? "report_wizard.approved_override" : "report_wizard.approved_sent", reportId, JSON.stringify({ round_number: Number(r.round_number), ...deliveryResult })],
-      );
-      res.json({ ok: true, delivery_status: notifyClient ? "sent" : "silent", ...deliveryResult, secure_pdf_url: result.securePdfUrl || null });
-    } catch (e: any) {
-      console.error("[round-report:approve]", reportId, e?.message || e);
-      res.status(500).json({ error: e?.message || "Approval failed" });
-    }
+    const out = await approveRoundReportCore(Number(req.params.id), Number(req.auth!.id), req.body?.override_reason != null ? String(req.body.override_reason) : null);
+    res.status(out.status).json(out.body);
   });
 
   // GF-84: default for the publish step's "Notify client" switch.

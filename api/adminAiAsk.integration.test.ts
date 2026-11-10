@@ -123,6 +123,10 @@ describe("admin AI Ask", () => {
   it("returns 503 when enabled but API key missing", async () => {
     process.env.ADMIN_AI_ENABLED = "1";
     delete process.env.ANTHROPIC_API_KEY;
+    // Ask AI now falls back to the SMS key (Nov 10) — remove it too for this case.
+    const savedSms = process.env.ANTHROPIC_SMS_API_KEY;
+    delete process.env.ANTHROPIC_SMS_API_KEY;
+    try {
     const res = await request(app)
       .post("/api/admin/ai/chat")
       .set("Authorization", `Bearer ${adminToken}`)
@@ -130,6 +134,9 @@ describe("admin AI Ask", () => {
     expect(res.status).toBe(503);
     expect(String(res.body.error || "")).toMatch(/contact support/i);
     expect(String(res.body.error || "")).not.toMatch(/ANTHROPIC/i);
+    } finally {
+      if (savedSms !== undefined) process.env.ANTHROPIC_SMS_API_KEY = savedSms;
+    }
   }, 30_000);
 
   it("rejects agent role with 403", async () => {
