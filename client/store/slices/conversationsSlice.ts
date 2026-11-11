@@ -2,6 +2,7 @@ import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
 import api, { formatAxiosError } from "@/lib/api";
 import { decodeLiteralUnicodeEscapes } from "@/lib/decodeLiteralUnicodeEscapes";
 import type {
+  ConversationPhoneOwner,
   AdminPhoneNumber,
   AdminConversationsListResponse,
   ConversationContactHubItem,
@@ -350,6 +351,22 @@ export const sendHubMessage = createAsyncThunk(
         return rejectWithValue("conversation_closed");
       }
       return rejectWithValue(formatAxiosError(e, "Failed to send"));
+    }
+  },
+);
+
+/** Other client (if any) whose phone matches — used to label "Also send to" numbers. */
+export const lookupConversationPhoneOwner = createAsyncThunk(
+  "conversations/lookupPhoneOwner",
+  async (
+    args: { phone: string; client_id?: number },
+    { rejectWithValue },
+  ) => {
+    try {
+      const { data } = await api.post("/admin/conversations/phone-owner", args);
+      return (data.client ?? null) as ConversationPhoneOwner | null;
+    } catch (err: unknown) {
+      return rejectWithValue(formatAxiosError(err, "Failed to look up phone"));
     }
   },
 );

@@ -32516,6 +32516,24 @@ async function listClientReferrerLinks(
   return rows;
 }
 
+/** Client (other than `selfClientId`) whose phone matches a referrer's phone. */
+async function loadReferrerPhoneClient(
+  phone: string | null | undefined,
+  selfClientId: number,
+): Promise<{ id: number; first_name: string; last_name: string } | null> {
+  if (!phone || !normalizePhoneLast10(String(phone))) return null;
+  const id = await findClientIdByPhone(String(phone));
+  if (!id || id === selfClientId) return null;
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT id, first_name, last_name FROM clients WHERE id = ? LIMIT 1`,
+    [id],
+  );
+  const r = rows[0];
+  return r
+    ? { id: Number(r.id), first_name: String(r.first_name || ""), last_name: String(r.last_name || "") }
+    : null;
+}
+
 function mapClientReferrerLinkRow(row: RowDataPacket) {
   return {
     id: Number(row.id),
@@ -66389,7 +66407,15 @@ function buildApp() {
         return res.status(400).json({ error: "Invalid client id" });
       }
       const links = await listClientReferrerLinks(clientId);
-      res.json({ referrers: links.map(mapClientReferrerLinkRow) });
+      const mapped = links.map(mapClientReferrerLinkRow);
+      // "Also send to" copies land on whichever client owns that phone, so
+      // tell staff when a referrer's number belongs to another client.
+      const phoneClients = await Promise.all(
+        mapped.map((l) => loadReferrerPhoneClient(l.referrer.phone, clientId)),
+      );
+      res.json({
+        referrers: mapped.map((l, i) => ({ ...l, phone_client: phoneClients[i] })),
+      });
     },
   );
 
@@ -70900,6 +70926,27 @@ function buildApp() {
         }
         console.error("[conversations:send]", msg);
         return res.status(500).json({ error: "Send failed" });
+      }
+    },
+  );
+
+  /** Which other client owns a phone — "Also send to" copies land in that client's thread. */
+  app.post(
+    "/api/admin/conversations/phone-owner",
+    requireAdmin,
+    denyAffiliateAccess,
+    async (req: AuthedRequest, res) => {
+      if (!(await requireConversationsAccess(req, res))) return;
+      const phone = String(req.body?.phone || "").trim();
+      const selfClientId = Number(req.body?.client_id) || 0;
+      if (!normalizePhoneLast10(phone)) {
+        return res.status(400).json({ error: "phone must include at least 10 digits" });
+      }
+      try {
+        res.json({ client: await loadReferrerPhoneClient(phone, selfClientId) });
+      } catch (err) {
+        console.error("[conversations] phone-owner failed", err);
+        res.status(500).json({ error: "Failed to look up phone" });
       }
     },
   );

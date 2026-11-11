@@ -1050,6 +1050,14 @@
         "unspecified": "Not recorded",
         "other": "Other"
       }
+    },
+    "composeAlsoSharedPhone": "Same phone as client {{name}}: the copy will show up in their conversation.",
+    "alsoNameWarning": {
+      "title": "Check before sending the copy",
+      "body": "This message greets {{name}} by name. The people below will get it word for word, including the name.",
+      "theClient": "the client",
+      "cancel": "Go back and edit",
+      "confirm": "Send anyway"
     }
   },
   "onboarding": {

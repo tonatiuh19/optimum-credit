@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   dedupeAlsoRecipients,
   filterAlsoRecipientsForRetry,
+  messageAddressesClient,
   phoneDedupeKey,
 } from "./conversationAlsoSend";
 
@@ -33,5 +34,35 @@ describe("conversationAlsoSend", () => {
     expect(filterAlsoRecipientsForRetry(recipients, ["Bob"])).toEqual([
       recipients[1],
     ]);
+  });
+
+  it("messageAddressesClient flags name merge fields and the client's first name", () => {
+    expect(messageAddressesClient("Hi {{first_name}}, your report is ready", "Julianna")).toBe(true);
+    expect(messageAddressesClient("Hello! Julianna, this is Lecca", "Julianna")).toBe(true);
+    expect(messageAddressesClient("Hi Carlos, this is Lecca", "Carlos Jr")).toBe(true);
+    expect(messageAddressesClient("hola josé, ya quedó", "Jose")).toBe(true);
+    expect(messageAddressesClient("Hi Carlos, this is Lecca", "Carlos Jr")).toBe(true);
+  });
+
+  it("messageAddressesClient ignores general messages and partial matches", () => {
+    expect(messageAddressesClient("Reminder: office closed Friday", "Julianna")).toBe(false);
+    expect(messageAddressesClient("Carlson called", "Carl")).toBe(false);
+    expect(messageAddressesClient("Hi there", "")).toBe(false);
+  });
+
+  it("messageAddressesClient skips names that are everyday words or mid-sentence mentions", () => {
+    expect(messageAddressesClient("Will you send the documents today?", "Will")).toBe(false);
+    expect(messageAddressesClient("Wishing you joy this season!", "Joy")).toBe(false);
+    expect(messageAddressesClient("We spoke with Rosa about the file.", "Rosa")).toBe(false);
+    expect(messageAddressesClient("Hope this helps", "Hope")).toBe(false);
+  });
+
+  it("messageAddressesClient still catches greetings and direct address", () => {
+    expect(messageAddressesClient("Good morning Will, your report is ready", "Will")).toBe(true);
+    expect(messageAddressesClient("Joy, your report is ready", "Joy")).toBe(true);
+    expect(messageAddressesClient("Thanks for waiting. Rosa, please call us", "Rosa")).toBe(true);
+    expect(messageAddressesClient("Buenas tardes Ángel, ya quedó", "Angel")).toBe(true);
+    expect(messageAddressesClient("Hey, Ana! Quick update", "Ana")).toBe(true);
+    expect(messageAddressesClient("Hi (Mary) test", "M.ry")).toBe(false);
   });
 });

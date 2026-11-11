@@ -6729,10 +6729,39 @@ paths:
         "404":
           description: Not found
 
+  /admin/conversations/phone-owner:
+    post:
+      tags: [Admin]
+      summary: Which other client owns a phone number
+      description: >-
+        Used to label "Also send to" numbers, since a copy sent to a number lands in
+        the conversation of the client who owns it. `client_id` (the client being
+        texted) is excluded from the match.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone]
+              properties:
+                phone: { type: string }
+                client_id: { type: integer }
+      responses:
+        "200":
+          description: "{ client: { id, first_name, last_name } | null }"
+        "400":
+          description: Phone has fewer than 10 digits
   /admin/clients/{id}/referrers:
     get:
       tags: [Admin]
       summary: List up to 3 referral partners linked to a client
+      description: >-
+        Each link includes `phone_client` ({ id, first_name, last_name }) when the
+        referrer's phone belongs to another client (an "Also send to" copy lands in
+        that client's conversation), otherwise null.
       security:
         - BearerAuth: []
       parameters:

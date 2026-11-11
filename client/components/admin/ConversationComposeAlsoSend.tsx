@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { ChevronDown, ChevronUp, Plus, Users, X } from "lucide-react";
+import { AlertTriangle, ChevronDown, Loader2, ChevronUp, Plus, Users, X } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import type { ClientReferrerLink } from "@shared/api";
@@ -13,6 +13,8 @@ import {
   type AlsoRecipient,
 } from "@/lib/conversationAlsoSend";
 import { cn } from "@/lib/utils";
+import { useAppDispatch } from "@/store/hooks";
+import { lookupConversationPhoneOwner } from "@/store/slices/conversationsSlice";
 
 export type ComposeAlsoRecipient = AlsoRecipient;
 
@@ -39,6 +41,8 @@ export function ConversationComposeAlsoSend({
   const { t } = useTranslation();
   const [extraPhone, setExtraPhone] = useState("");
   const [expanded, setExpanded] = useState(defaultExpanded);
+  const [checkingPhone, setCheckingPhone] = useState(false);
+  const dispatch = useAppDispatch();
 
   const primaryPhone =
     composeTarget.kind === "client"
@@ -60,6 +64,9 @@ export function ConversationComposeAlsoSend({
           phone,
           label: label || t("conversations.composeAlsoReferrer"),
           role: link.role,
+          phoneClientName: link.phone_client
+            ? `${link.phone_client.first_name} ${link.phone_client.last_name}`.trim()
+            : undefined,
         };
       })
       .filter((r) => {
@@ -71,22 +78,23 @@ export function ConversationComposeAlsoSend({
 
   const selectedKeys = new Set(selected.map((s) => s.key));
 
-  const toggleReferrer = (opt: {
-    key: string;
-    phone: string;
-    label: string;
-  }) => {
+  const toggleReferrer = (opt: AlsoRecipient) => {
     if (selectedKeys.has(opt.key)) {
       onChange(selected.filter((s) => s.key !== opt.key));
       return;
     }
     onChange([
       ...selected,
-      { key: opt.key, phone: opt.phone, label: opt.label },
+      {
+        key: opt.key,
+        phone: opt.phone,
+        label: opt.label,
+        phoneClientName: opt.phoneClientName,
+      },
     ]);
   };
 
-  const addExtraPhone = () => {
+  const addExtraPhone = async () => {
     const parsed = parseComposePhoneInput(extraPhone);
     if (!parsed) return;
     const key = `phone-${phoneDedupeKey(parsed.phone)}`;
@@ -101,9 +109,26 @@ export function ConversationComposeAlsoSend({
       setExtraPhone("");
       return;
     }
+    setCheckingPhone(true);
+    let phoneClientName: string | undefined;
+    try {
+      const result = await dispatch(
+        lookupConversationPhoneOwner({
+          phone: parsed.phone,
+          client_id: composeTarget.kind === "client" ? composeTarget.client.id : undefined,
+        }),
+      );
+      if (lookupConversationPhoneOwner.fulfilled.match(result) && result.payload) {
+        phoneClientName =
+          `${result.payload.first_name} ${result.payload.last_name}`.trim() || undefined;
+      }
+    } finally {
+      setCheckingPhone(false);
+    }
+    // A failed lookup still adds the number; the label is a hint, not a gate.
     onChange([
       ...selected,
-      { key, phone: parsed.phone, label: parsed.label },
+      { key, phone: parsed.phone, label: parsed.label, phoneClientName },
     ]);
     setExtraPhone("");
   };
@@ -219,6 +244,17 @@ export function ConversationComposeAlsoSend({
                           })}`
                         : ""}
                     </span>
+                    {opt.phoneClientName && (
+                      <span
+                        className="mt-1 inline-flex items-start gap-1 text-[11px] leading-snug text-destructive"
+                        data-testid="compose-also-shared-phone"
+                      >
+                        <AlertTriangle className="w-3 h-3 mt-px shrink-0" />
+                        {t("conversations.composeAlsoSharedPhone", {
+                          name: opt.phoneClientName,
+                        })}
+                      </span>
+                    )}
                   </span>
                 </label>
               ))}
@@ -234,8 +270,20 @@ export function ConversationComposeAlsoSend({
               {selected.map((r) => (
                 <span
                   key={r.key}
-                  className="inline-flex items-center gap-1 text-[11px] px-2 py-1 rounded-lg border border-primary/20 bg-primary/5 text-primary"
+                  title={
+                    r.phoneClientName
+                      ? t("conversations.composeAlsoSharedPhone", { name: r.phoneClientName })
+                      : undefined
+                  }
+                  data-testid={r.phoneClientName ? "compose-also-chip-shared" : undefined}
+                  className={cn(
+                    "inline-flex items-center gap-1 text-[11px] px-2 py-1 rounded-lg border animate-in fade-in zoom-in-95",
+                    r.phoneClientName
+                      ? "border-destructive/30 bg-destructive/5 text-destructive"
+                      : "border-primary/20 bg-primary/5 text-primary",
+                  )}
                 >
+                  {r.phoneClientName && <AlertTriangle className="w-3 h-3 shrink-0" />}
                   <span className="truncate max-w-[140px]">{r.label}</span>
                   {!disabled && (
                     <button
@@ -264,17 +312,22 @@ export function ConversationComposeAlsoSend({
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();
-                  addExtraPhone();
+                  if (!checkingPhone) void addExtraPhone();
                 }
               }}
             />
             <button
               type="button"
-              onClick={addExtraPhone}
-              disabled={disabled || !parseComposePhoneInput(extraPhone)}
+              onClick={() => void addExtraPhone()}
+              disabled={disabled || checkingPhone || !parseComposePhoneInput(extraPhone)}
+              data-testid="compose-also-add-phone"
               className="h-9 px-2.5 rounded-lg border border-border hover:bg-muted disabled:opacity-50 shrink-0 inline-flex items-center gap-1 text-xs font-medium"
             >
-              <Plus className="w-3.5 h-3.5" />
+              {checkingPhone ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Plus className="w-3.5 h-3.5" />
+              )}
               {t("conversations.composeAlsoAdd")}
             </button>
           </div>

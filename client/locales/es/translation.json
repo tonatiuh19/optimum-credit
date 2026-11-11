@@ -1050,6 +1050,14 @@
         "unspecified": "Sin registrar",
         "other": "Otro"
       }
+    },
+    "composeAlsoSharedPhone": "Mismo teléfono que el cliente {{name}}: la copia aparecerá en su conversación.",
+    "alsoNameWarning": {
+      "title": "Revisa antes de enviar la copia",
+      "body": "Este mensaje saluda a {{name}} por su nombre. Las personas de abajo lo recibirán exactamente igual, con ese nombre.",
+      "theClient": "el cliente",
+      "cancel": "Regresar y editar",
+      "confirm": "Enviar de todos modos"
     }
   },
   "onboarding": {

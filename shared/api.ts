@@ -672,6 +672,15 @@ export interface ClientReferrerLink {
   sort_order: number;
   notify_on_round: boolean;
   referrer?: AdminReferrer;
+  /** Another client whose phone matches this referrer's (GET list only). */
+  phone_client?: ConversationPhoneOwner | null;
+}
+
+/** A client whose phone matches a number ("Also send to" copies land in their thread). */
+export interface ConversationPhoneOwner {
+  id: number;
+  first_name: string;
+  last_name: string;
 }
 
 export type ProgressReportAlertType =

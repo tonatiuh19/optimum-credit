@@ -98,6 +98,7 @@ import {
   type ConversationsView,
 } from "@/store/slices/conversationsSlice";
 import { fetchClientReferrers } from "@/store/slices/adminSlice";
+import { AlsoSendNameWarningDialog } from "@/components/admin/AlsoSendNameWarningDialog";
 import {
   applyConversationTemplateVars,
   buildConversationMergeVars,
@@ -112,6 +113,7 @@ import {
   dedupeAlsoRecipients,
   filterAlsoRecipientsForRetry,
   type AlsoRecipient,
+  messageAddressesClient,
 } from "@/lib/conversationAlsoSend";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -258,6 +260,11 @@ export default function AdminConversations() {
     "sms" | "internal" | "whatsapp"
   >("sms");
   const [composeBody, setComposeBody] = useState("");
+  const [alsoNameWarning, setAlsoNameWarning] = useState<{
+    clientName: string;
+    recipients: AlsoRecipient[];
+    proceed: () => void;
+  } | null>(null);
   const [composeAlsoRecipients, setComposeAlsoRecipients] = useState<
     ComposeAlsoRecipient[]
   >([]);
@@ -1160,7 +1167,7 @@ export default function AdminConversations() {
     }
   };
 
-  const send = async () => {
+  const send = async (alsoNameConfirmed = false) => {
     if (!activeKind || !activeId || threadSending) return;
     if (!body.trim() && !(channel === "sms" && attachment)) return;
     const vars = buildConversationMergeVars(mergeContext);
@@ -1180,6 +1187,18 @@ export default function AdminConversations() {
       activeKind === "client" && channel === "sms"
         ? dedupeAlsoRecipients(threadAlsoRecipients)
         : [];
+    if (
+      !alsoNameConfirmed &&
+      alsoList.length > 0 &&
+      messageAddressesClient(body, mergeContext.first_name)
+    ) {
+      setAlsoNameWarning({
+        clientName: String(mergeContext.first_name || "").trim(),
+        recipients: alsoList,
+        proceed: () => void send(true),
+      });
+      return;
+    }
     setThreadSending(true);
     try {
     const sendChannel =
@@ -1337,10 +1356,24 @@ export default function AdminConversations() {
     }
   };
 
-  const sendCompose = async () => {
+  const sendCompose = async (alsoNameConfirmed = false) => {
     if (!composeTarget || composeSending) return;
     const composeSms = composeChannel === "sms";
     if (!composeBody.trim() && !(composeSms && composeAttachment)) return;
+    if (!alsoNameConfirmed && composeSms && composeTarget.kind === "client") {
+      const alsoPending = dedupeAlsoRecipients(composeAlsoRecipients);
+      if (
+        alsoPending.length > 0 &&
+        messageAddressesClient(composeBody, composeTarget.client.first_name)
+      ) {
+        setAlsoNameWarning({
+          clientName: String(composeTarget.client.first_name || "").trim(),
+          recipients: alsoPending,
+          proceed: () => void sendCompose(true),
+        });
+        return;
+      }
+    }
     if (
       composeSms &&
       [...composeBody].length > SMS_MAX_BODY_CHARS
@@ -2832,6 +2865,15 @@ export default function AdminConversations() {
           )}
         </DialogContent>
       </Dialog>
+      <AlsoSendNameWarningDialog
+        warning={alsoNameWarning}
+        onCancel={() => setAlsoNameWarning(null)}
+        onConfirm={() => {
+          const next = alsoNameWarning;
+          setAlsoNameWarning(null);
+          next?.proceed();
+        }}
+      />
 
       <ClientPanelSheet
         open={
