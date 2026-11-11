@@ -4672,6 +4672,10 @@ paths:
             type: string
             enum: [all, mine, unassigned, open, closed, unread, unknown]
         - in: query
+          name: hub
+          description: "social = Facebook / Instagram threads only (social senders visible to their assignee and release managers); default hides social-only senders"
+          schema: { type: string, enum: [sms, social] }
+        - in: query
           name: q
           schema: { type: string }
         - in: query
@@ -4742,8 +4746,11 @@ paths:
                 contact_id:
                   type: integer
                   description: CRM contact id
-                channel: { type: string, enum: [sms, internal, whatsapp] }
-                body: { type: string, description: Text body (SMS max 1600; WhatsApp max 4096); optional when media_url is set for SMS/MMS }
+                channel:
+                  type: string
+                  enum: [sms, internal, whatsapp, messenger, instagram]
+                  description: "messenger / instagram: reply to a social sender (unknown_contact_id) or a client linked to one (client_id). Meta window: standard within 24h of their last message, HUMAN_AGENT tag up to 7 days, then 400."
+                body: { type: string, description: Text body (SMS max 1600; WhatsApp max 4096; Facebook / Instagram max 1000); optional when media_url is set for SMS/MMS }
                 is_internal_note: { type: boolean }
                 ofg_number_id: { type: integer, description: Required for SMS; ignored for WhatsApp }
                 media_url:
@@ -4782,6 +4789,35 @@ paths:
           description: "{ kind client|unknown|contact, client_id?, unknown_contact_id?, ... }"
         "409":
           description: Reserved (closed threads auto-reopen on staff send)
+
+  /webhooks/meta/messaging:
+    get:
+      tags: [Conversations]
+      summary: Meta webhook verification (hub.challenge) — SOCIAL_DM_INBOX_ENABLED + META_WEBHOOK_VERIFY_TOKEN
+      parameters:
+        - { in: query, name: hub.mode, schema: { type: string } }
+        - { in: query, name: hub.verify_token, schema: { type: string } }
+        - { in: query, name: hub.challenge, schema: { type: string } }
+      responses:
+        "200": { description: The challenge, as plain text }
+        "403": { description: Wrong token or feature off }
+    post:
+      tags: [Conversations]
+      summary: Facebook Page (Messenger) + Instagram DMs into Conversations
+      description: |
+        Requires X-Hub-Signature-256 = HMAC-SHA256(META_APP_SECRET, raw body).
+        object=page → channel messenger; object=instagram → channel instagram.
+        New sender → social unknown contact (link / create prospect from the
+        inbox), routed to the language owner (Spanish → ES owner, English → EN
+        owner; fallback Cesar). A sender linked to a client lands on the client's
+        thread. Duplicate message ids are ignored (Meta retries); Page echoes
+        (replies sent from Meta's own apps) are saved as outbound. Reads,
+        deliveries, reactions and deleted messages are ignored. No AI reply.
+      responses:
+        "200": { description: "{ ok, events, results[] } — saved | duplicate | echo_saved | echo_skipped | no_assignee" }
+        "401": { description: Missing / invalid signature }
+        "500": { description: Save failed — Meta retries; saved messages are skipped as duplicates }
+        "503": { description: Feature off or META_APP_SECRET missing }
 
   /webhooks/360dialog/whatsapp:
     get:

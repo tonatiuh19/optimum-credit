@@ -3213,9 +3213,10 @@ function socialDmFeatureStatus(): {
   const enabled =
     process.env.SOCIAL_DM_INBOX_ENABLED === "1" ||
     process.env.SOCIAL_DM_INBOX_ENABLED === "true";
+  // Live only with everything a working connection needs (verify, signature, send).
   const credentials_present = !!(
-    process.env.META_WEBHOOK_VERIFY_TOKEN ||
-    process.env.META_PAGE_ACCESS_TOKEN ||
+    process.env.META_WEBHOOK_VERIFY_TOKEN &&
+    process.env.META_PAGE_ACCESS_TOKEN &&
     process.env.META_APP_SECRET
   );
   let mode: "disabled" | "needs_credentials" | "ready" | "live" = "disabled";
@@ -3441,6 +3442,10 @@ const ADMIN_AI_MAX_TOOL_ROUNDS = 4;
 const ADMIN_AI_WALL_MS = 50_000;
 const ADMIN_AI_HTTP_TIMEOUT_MS = 40_000;
 const ADMIN_AI_TOOL_RESULT_MAX = 12_000;
+/** get_call_insights: one call returns up to this many transcript characters per piece (~2h of talk). */
+const CALL_TRANSCRIPT_PIECE_CHARS = 120_000;
+/** get_call_insights: per-call cap when several calls are listed at once. */
+const CALL_TRANSCRIPT_LIST_CHARS = 12_000;
 
 /** ATLAS spec aliases — canonical handlers are send_sms / list_sms / send_whatsapp. */
 function resolveAdminAiToolName(name: string): string {
@@ -4908,7 +4913,7 @@ export const ADMIN_AI_TOOLS: Array<{
   {
     name: "get_call_insights",
     description:
-      "Read the transcript of a call or voicemail with a client, a CRM contact, or an unknown caller. Returns transcript_full when status is ready, plus pending/failed status when it is not. Pass client_id (search_clients), contact_id (search_contacts), or just message_id (from list_sms / list_inbox). Without message_id returns the latest call rows.",
+      "Read the transcript of a call or voicemail with a client, a CRM contact, or an unknown caller. Returns transcript_full when status is ready, plus pending/failed status when it is not. Pass client_id (search_clients), contact_id (search_contacts), or just message_id (from list_sms / list_inbox). Without message_id returns the latest call rows. ONE call (message_id, or limit=1) returns the COMPLETE transcript (up to 120,000 characters per part; for longer calls use transcript_offset=transcript_next_offset). When several calls are listed each transcript is shortened — transcript_complete=false and transcript_note say how to get the full one. Always check transcript_complete before summarizing.",
     input_schema: {
       type: "object",
       properties: {
@@ -4928,6 +4933,10 @@ export const ADMIN_AI_TOOLS: Array<{
           type: "integer",
           description:
             "When message_id omitted: max recent call rows to return (1–10, default 3)",
+        },
+        transcript_offset: {
+          type: "integer",
+          description: "Only for one call: start reading the transcript at this character (use transcript_next_offset from the previous answer)",
         },
       },
       required: [],
@@ -25927,6 +25936,9 @@ async function executeAdminAiTool(
         params,
       );
 
+      // A single call (by message_id, or limit 1) returns its whole transcript.
+      const singleCall = !!messageIdArg || rows.length === 1;
+      const transcriptOffset = Math.max(0, Math.floor(Number(args.transcript_offset) || 0));
       const calls = rows.map((m) => {
         let insights: unknown = null;
         if (m.call_insights_json) {
@@ -25952,6 +25964,15 @@ async function executeAdminAiTool(
         const transcript = m.call_transcript
           ? decodeLiteralUnicodeEscapes(String(m.call_transcript))
           : null;
+        // Nov 10, 2026: one call → the complete transcript (in pieces past
+        // CALL_TRANSCRIPT_PIECE_CHARS); several calls → a capped copy each,
+        // clearly flagged, with how to read the rest. Never cut silently.
+        const total = transcript ? transcript.length : 0;
+        const pieceSize = singleCall ? CALL_TRANSCRIPT_PIECE_CHARS : CALL_TRANSCRIPT_LIST_CHARS;
+        const start = singleCall ? Math.min(transcriptOffset, total) : 0;
+        const piece = transcript ? transcript.slice(start, start + pieceSize) : null;
+        const end = start + (piece ? piece.length : 0);
+        const complete = !!transcript && start === 0 && end >= total;
         return {
           message_id: Number(m.id),
           conversation_id: Number(m.conversation_id),
@@ -25971,12 +25992,20 @@ async function executeAdminAiTool(
           transcript_preview: transcript
             ? transcript.slice(0, 800)
             : null,
-          transcript_full:
-            transcript && transcript.length <= 12000
-              ? transcript
-              : transcript
-                ? `${transcript.slice(0, 12000)}…`
-                : null,
+          transcript_full: piece,
+          transcript_total_chars: transcript ? total : null,
+          transcript_complete: transcript ? complete : null,
+          /** More text exists after this part (read it with transcript_next_offset / message_id). */
+          transcript_truncated: transcript ? end < total : null,
+          transcript_range: transcript ? { start, end } : null,
+          transcript_next_offset: transcript && end < total ? end : null,
+          ...(transcript && end < total
+            ? {
+                transcript_note: singleCall
+                  ? `Part of a long transcript (characters ${start}–${end} of ${total}). Call get_call_insights again with message_id=${Number(m.id)} and transcript_offset=${end} for the next part.`
+                  : `Shortened in this list (${end} of ${total} characters). Call get_call_insights with message_id=${Number(m.id)} for the complete transcript.`,
+              }
+            : {}),
           created_at: m.created_at,
         };
       });
@@ -25990,7 +26019,7 @@ async function executeAdminAiTool(
           call_insights_enabled: callInsightsFeatureEnabled(),
           href: clientId ? `/admin/conversations?client=${clientId}` : "/admin/conversations",
           guidance: callInsightsFeatureEnabled()
-            ? "When status is pending/processing, ask again after the next cron cycle. Answer from transcript_full only. Do not invent details that are not in the transcript."
+            ? "When status is pending/processing, ask again after the next cron cycle. Answer from transcript_full only. Do not invent details that are not in the transcript. If transcript_complete is false, read the rest first (see transcript_note) before summarizing the call."
             : "CALL_INSIGHTS_ENABLED is off on this environment — recordings still play in CRM but transcripts are not generated.",
         },
       };
@@ -43707,7 +43736,7 @@ export interface InboundAiToolCtx {
  * active), hard-escalate, or go to Claude — and with how many AI turns.
  */
 /** Shared DB pool + reply guard for local audit scripts (scripts/replay-inbound-ai.ts). */
-export { pool, checkInboundAiReply, adminAiInputSchemaToZod, laWallClockAsUtcDate, eventSqlDateTime, registerEventAttendee, runEventMarketingCronStep, promoteEventWaitlist, eventProfileMismatch, eventCheckInWindowOpen, eventLifecycleCopy, buildEventSessionIcs };
+export { pool, checkInboundAiReply, adminAiInputSchemaToZod, verifyMetaSignature, parseMetaMessagingWebhook, guessSocialMessageLang, metaReplyWindow, processMetaInboundEvent, laWallClockAsUtcDate, eventSqlDateTime, registerEventAttendee, runEventMarketingCronStep, promoteEventWaitlist, eventProfileMismatch, eventCheckInWindowOpen, eventLifecycleCopy, buildEventSessionIcs };
 
 export function replayInboundAiRules(
   recentNewestFirst: RowDataPacket[],
@@ -47785,6 +47814,14 @@ async function adminCanAccessUnknownContact(
     );
     if (rows.length > 0) return true;
   }
+  // Facebook / Instagram senders: a release manager (Cesar) can open every one.
+  if (reportReleaseManagerIds().includes(adminId)) {
+    const [social] = await pool.query<RowDataPacket[]>(
+      `SELECT id FROM conversation_unknown_contacts WHERE id = ? AND social_platform IS NOT NULL LIMIT 1`,
+      [unknownContactId],
+    );
+    if (social.length > 0) return true;
+  }
   // WhatsApp / assignee-only threads (no OFG line on the unknown contact)
   const [assigned] = await pool.query<RowDataPacket[]>(
     `SELECT id FROM conversations
@@ -48239,6 +48276,7 @@ async function unknownContactSnapshot(
   const [rows] = await pool.query<RowDataPacket[]>(
     `SELECT u.id, u.phone_e164, u.email, u.display_name, u.last_message_at,
             u.last_message_preview, u.unread_count, u.status AS contact_status,
+            u.social_platform, u.social_username,
             (
               SELECT cv.status FROM conversations cv
               WHERE cv.unknown_contact_id = u.id
@@ -48277,7 +48315,9 @@ async function unknownContactSnapshot(
     primary_conversation_id: u.primary_conversation_id
       ? Number(u.primary_conversation_id)
       : null,
-    channels: ["sms"],
+    channels: [u.social_platform ? String(u.social_platform) : "sms"],
+    social_platform: u.social_platform ? String(u.social_platform) : null,
+    social_username: u.social_username ? String(u.social_username) : null,
   };
 }
 
@@ -48689,11 +48729,11 @@ async function getOrCreateUnknownSmsConversation(opts: {
   ofgNumberId?: number | null;
   assignedAdminId?: number | null;
   reopenIfClosed?: boolean;
-  /** Default sms; use whatsapp for 360dialog threads. */
-  channel?: "sms" | "whatsapp";
+  /** Default sms; whatsapp for 360dialog, messenger / instagram for Meta DMs. */
+  channel?: "sms" | "whatsapp" | "messenger" | "instagram";
 }): Promise<number> {
   const reopenIfClosed = opts.reopenIfClosed !== false;
-  const channel = opts.channel === "whatsapp" ? "whatsapp" : "sms";
+  const channel = opts.channel && ["whatsapp", "messenger", "instagram"].includes(opts.channel) ? opts.channel : "sms";
   const [conv] = await pool.query<RowDataPacket[]>(
     `SELECT id, status FROM conversations
      WHERE unknown_contact_id = ? AND channel = ?
@@ -49135,6 +49175,442 @@ async function sendWhatsapp360Text(opts: {
   return { id, status: "accepted" };
 }
 
+// ============================================================================
+// FACEBOOK MESSENGER + INSTAGRAM DMs (Meta Messenger Platform) — Nov 10, 2026
+// One OFG Meta app: the Facebook Page + its linked Instagram business account.
+// Inbound DMs land in Conversations (unknown sender → link / prospect; linked
+// client → their record). Staff reply from the inbox; no AI yet (owner choice).
+// ============================================================================
+
+type SocialPlatform = "messenger" | "instagram";
+
+type MetaInboundEvent = {
+  platform: SocialPlatform;
+  /** Page id (Messenger) or Instagram account id that owns the conversation. */
+  accountId: string;
+  /** The person (PSID / IGSID). For echoes this is the recipient. */
+  userId: string;
+  mid: string;
+  text: string;
+  attachments: Array<{ type: string; url: string | null }>;
+  /** Sent by the Page itself (e.g. from Meta Business Suite) — not the customer. */
+  isEcho: boolean;
+  timestampMs: number;
+};
+
+function metaSocialConfig(env: NodeJS.ProcessEnv = process.env): {
+  enabled: boolean;
+  appSecret: string;
+  pageToken: string;
+  verifyToken: string;
+  pageId: string;
+  igAccountId: string;
+  graphVersion: string;
+} {
+  const flag = String(env.SOCIAL_DM_INBOX_ENABLED || "").trim().toLowerCase();
+  return {
+    enabled: flag === "1" || flag === "true",
+    appSecret: String(env.META_APP_SECRET || "").trim(),
+    pageToken: String(env.META_PAGE_ACCESS_TOKEN || "").trim(),
+    verifyToken: String(env.META_WEBHOOK_VERIFY_TOKEN || "").trim(),
+    pageId: String(env.META_PAGE_ID || "").trim(),
+    igAccountId: String(env.META_IG_ACCOUNT_ID || "").trim(),
+    graphVersion: String(env.META_GRAPH_VERSION || "").trim() || "v21.0",
+  };
+}
+
+/** X-Hub-Signature-256: "sha256=" + HMAC-SHA256(app secret, raw body). Constant-time compare. */
+function verifyMetaSignature(rawBody: string, header: string | undefined, appSecret: string): boolean {
+  if (!rawBody || !header || !appSecret) return false;
+  const m = /^sha256=([a-f0-9]{64})$/i.exec(String(header).trim());
+  if (!m) return false;
+  const expected = crypto.createHmac("sha256", appSecret).update(rawBody, "utf8").digest("hex");
+  const a = Buffer.from(expected, "hex");
+  const b = Buffer.from(m[1].toLowerCase(), "hex");
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+/**
+ * Messenger (object "page") and Instagram (object "instagram") webhooks share
+ * entry[].messaging[]. Only real messages are returned — reads, deliveries,
+ * reactions, postbacks without text and deleted messages are dropped.
+ */
+function parseMetaMessagingWebhook(body: unknown): MetaInboundEvent[] {
+  const b = (body && typeof body === "object" ? body : {}) as Record<string, any>;
+  const object = String(b.object || "");
+  if (object !== "page" && object !== "instagram") return [];
+  const platform: SocialPlatform = object === "instagram" ? "instagram" : "messenger";
+  const out: MetaInboundEvent[] = [];
+  for (const entry of Array.isArray(b.entry) ? b.entry : []) {
+    const accountId = String(entry?.id || "");
+    for (const ev of Array.isArray(entry?.messaging) ? entry.messaging : []) {
+      const msg = ev?.message;
+      if (!msg || typeof msg !== "object" || msg.is_deleted || msg.is_unsupported) continue;
+      const mid = String(msg.mid || "").trim();
+      if (!mid) continue;
+      const isEcho = msg.is_echo === true;
+      const userId = String(isEcho ? ev?.recipient?.id || "" : ev?.sender?.id || "").trim();
+      if (!userId || userId === accountId) continue;
+      const attachments = (Array.isArray(msg.attachments) ? msg.attachments : [])
+        .map((a: any) => ({ type: String(a?.type || "file"), url: a?.payload?.url ? String(a.payload.url) : null }))
+        .slice(0, 10);
+      const text = String(msg.text || "").slice(0, 4000);
+      if (!text && !attachments.length) continue;
+      out.push({
+        platform,
+        accountId,
+        userId,
+        mid,
+        text,
+        attachments,
+        isEcho,
+        timestampMs: Number(ev?.timestamp) || Date.now(),
+      });
+    }
+  }
+  return out;
+}
+
+/** First-message language guess for routing (Spanish → Spanish owner). */
+function guessSocialMessageLang(text: string): "en" | "es" {
+  const t = ` ${String(text || "").toLowerCase()} `;
+  if (/[ñ¿¡áéíóú]/.test(t)) return "es";
+  const es = [" hola ", " buenas ", " gracias ", " quiero ", " necesito ", " información ", " informacion ", " crédito ", " credito ", " cuánto ", " cuanto ", " cómo ", " como ", " por favor ", " mi ", " para ", " tengo ", " ayuda "];
+  const hits = es.filter((w) => t.includes(w)).length;
+  return hits >= 2 || /^\s*(hola|buenas|buenos)\b/.test(t.trim()) ? "es" : "en";
+}
+
+/**
+ * Meta reply window from the person's last message: standard reply within 24h,
+ * HUMAN_AGENT tag up to 7 days (needs the Human Agent permission), then closed.
+ */
+function metaReplyWindow(lastInboundAt: Date | string | null, nowMs = Date.now()): "standard" | "human_agent" | "closed" {
+  if (!lastInboundAt) return "closed";
+  const t = new Date(lastInboundAt).getTime();
+  if (Number.isNaN(t)) return "closed";
+  const age = nowMs - t;
+  if (age <= 24 * 3600_000) return "standard";
+  if (age <= 7 * 24 * 3600_000) return "human_agent";
+  return "closed";
+}
+
+function socialPlatformLabel(p: SocialPlatform): string {
+  return p === "instagram" ? "Instagram" : "Facebook";
+}
+
+/** Best-effort public profile name (Graph). Never blocks the webhook for long. */
+async function fetchMetaSocialProfile(
+  platform: SocialPlatform,
+  userId: string,
+): Promise<{ name: string | null; username: string | null }> {
+  const cfg = metaSocialConfig();
+  if (!cfg.pageToken || process.env.VITEST === "true") return { name: null, username: null };
+  try {
+    const fields = platform === "instagram" ? "name,username" : "first_name,last_name";
+    const r = await axios.get(`https://graph.facebook.com/${cfg.graphVersion}/${encodeURIComponent(userId)}`, {
+      params: { fields, access_token: cfg.pageToken },
+      timeout: 3000,
+      validateStatus: () => true,
+    });
+    if (r.status < 200 || r.status >= 300) return { name: null, username: null };
+    const d = r.data || {};
+    const name = platform === "instagram" ? String(d.name || "").trim() : `${d.first_name || ""} ${d.last_name || ""}`.trim();
+    return { name: name || null, username: d.username ? String(d.username) : null };
+  } catch {
+    return { name: null, username: null };
+  }
+}
+
+/** New social senders: language owner first (Spanish → Angel, English → Lecca), else Cesar → Lecca → Angel. */
+async function resolveSocialAssigneeAdminId(lang: "en" | "es"): Promise<number | null> {
+  const owner = await resolveLanguageOwnerAdminId(lang);
+  if (owner) return owner;
+  const staff = await resolveInboundAiFallbackStaffIds();
+  return staff.cesarId || staff.leccaId || staff.angelId || null;
+}
+
+/**
+ * Saves one Meta message. Returns what happened (for tests / logs).
+ * Unknown sender → unknown-contact thread (link / prospect from the inbox);
+ * a sender already linked to a client → that client's messenger/instagram thread.
+ */
+async function processMetaInboundEvent(ev: MetaInboundEvent): Promise<{
+  status: "saved" | "duplicate" | "echo_saved" | "echo_skipped" | "no_assignee";
+  conversationId?: number;
+  unknownContactId?: number;
+  clientId?: number;
+  assignedAdminId?: number | null;
+}> {
+  const [dup] = await pool.query<RowDataPacket[]>(
+    `SELECT id FROM conversation_messages WHERE provider_message_id = ? LIMIT 1`,
+    [ev.mid],
+  );
+  if (dup[0]) return { status: "duplicate" };
+
+  const [found] = await pool.query<RowDataPacket[]>(
+    `SELECT id, status, linked_client_id FROM conversation_unknown_contacts
+     WHERE social_platform = ? AND social_user_id = ? LIMIT 1`,
+    [ev.platform, ev.userId],
+  );
+  const known = found[0];
+  const preview = (ev.text || `[${ev.attachments[0]?.type || "attachment"}]`).slice(0, 200);
+  const label = socialPlatformLabel(ev.platform);
+
+  // Echo = the Page replied outside our inbox (Meta Business Suite / IG app): keep the thread complete.
+  if (ev.isEcho) {
+    if (!known) return { status: "echo_skipped" };
+    const [conv] = await pool.query<RowDataPacket[]>(
+      known.linked_client_id
+        ? `SELECT id FROM conversations WHERE client_id = ? AND channel = ? ORDER BY id DESC LIMIT 1`
+        : `SELECT id FROM conversations WHERE unknown_contact_id = ? AND channel = ? ORDER BY id DESC LIMIT 1`,
+      [known.linked_client_id ? Number(known.linked_client_id) : Number(known.id), ev.platform],
+    );
+    if (!conv[0]) return { status: "echo_skipped" };
+    await pool.query(
+      `INSERT INTO conversation_messages
+         (conversation_id, direction, channel, body, to_address, provider_message_id, provider_status, metadata_json)
+       VALUES (?, 'outbound', ?, ?, ?, ?, 'sent', ?)`,
+      [Number(conv[0].id), ev.platform, ev.text || null, ev.userId, ev.mid, JSON.stringify({ provider: "meta", echo: true, sent_outside_inbox: true, attachments: ev.attachments })],
+    );
+    await pool.query(`UPDATE conversations SET last_message_at = NOW(), last_message_preview = ? WHERE id = ?`, [preview, Number(conv[0].id)]);
+    return { status: "echo_saved", conversationId: Number(conv[0].id) };
+  }
+
+  let unknownId = known ? Number(known.id) : 0;
+  const linkedClientId = known?.linked_client_id && String(known.status) === "linked" ? Number(known.linked_client_id) : null;
+  let assigneeId: number | null = null;
+
+  if (!known) {
+    assigneeId = await resolveSocialAssigneeAdminId(guessSocialMessageLang(ev.text));
+    const profile = await fetchMetaSocialProfile(ev.platform, ev.userId);
+    const displayName = profile.name || (profile.username ? `@${profile.username}` : `${label} user`);
+    try {
+      const [ins] = await pool.query<ResultSetHeader>(
+        `INSERT INTO conversation_unknown_contacts
+           (phone_e164, display_name, status, social_platform, social_user_id, social_page_id, social_username, social_last_inbound_at)
+         VALUES (NULL, ?, 'open', ?, ?, ?, ?, NOW())`,
+        [displayName.slice(0, 200), ev.platform, ev.userId, ev.accountId || null, profile.username],
+      );
+      unknownId = ins.insertId;
+    } catch (e: any) {
+      // Two deliveries of a first message at once: the other one created the row.
+      if (String(e?.code) !== "ER_DUP_ENTRY") throw e;
+      const [again] = await pool.query<RowDataPacket[]>(
+        `SELECT id FROM conversation_unknown_contacts WHERE social_platform = ? AND social_user_id = ? LIMIT 1`,
+        [ev.platform, ev.userId],
+      );
+      unknownId = Number(again[0].id);
+    }
+  } else {
+    await pool.query(
+      `UPDATE conversation_unknown_contacts
+       SET social_last_inbound_at = NOW(),
+           status = IF(status = 'dismissed', 'open', status)
+       WHERE id = ?`,
+      [unknownId],
+    );
+  }
+
+  let conversationId: number;
+  let linkUrl: string;
+  let realtimeType: "message" | "inbound_unknown" = "message";
+  let realtimePayload: Record<string, unknown>;
+  if (linkedClientId) {
+    conversationId = await getOrCreateClientChannelConversation({
+      clientId: linkedClientId,
+      channel: ev.platform,
+      ofgNumberId: null,
+      assignedAdminId: null,
+      reopenIfClosed: true,
+    });
+    const [[cv]] = await pool.query<RowDataPacket[]>(`SELECT assigned_admin_id FROM conversations WHERE id = ?`, [conversationId]);
+    assigneeId = cv?.assigned_admin_id != null ? Number(cv.assigned_admin_id) : await resolveSocialAssigneeAdminId(guessSocialMessageLang(ev.text));
+    await pool.query(
+      `UPDATE conversations SET status = 'open', assigned_admin_id = COALESCE(assigned_admin_id, ?) WHERE id = ?`,
+      [assigneeId, conversationId],
+    );
+    linkUrl = `/admin/conversations?client=${linkedClientId}`;
+    realtimePayload = { client_id: linkedClientId, conversation_id: conversationId, contact: await conversationClientContactSnapshot(conversationId) };
+  } else {
+    if (assigneeId == null) {
+      const [[cv]] = await pool.query<RowDataPacket[]>(
+        `SELECT assigned_admin_id FROM conversations WHERE unknown_contact_id = ? AND channel = ? LIMIT 1`,
+        [unknownId, ev.platform],
+      );
+      assigneeId = cv?.assigned_admin_id != null ? Number(cv.assigned_admin_id) : await resolveSocialAssigneeAdminId(guessSocialMessageLang(ev.text));
+    }
+    conversationId = await getOrCreateUnknownSmsConversation({
+      unknownContactId: unknownId,
+      ofgNumberId: null,
+      assignedAdminId: assigneeId,
+      reopenIfClosed: true,
+      channel: ev.platform,
+    });
+    await pool.query(
+      `UPDATE conversation_unknown_contacts
+       SET last_message_at = NOW(), last_message_preview = ?, unread_count = unread_count + 1
+       WHERE id = ?`,
+      [preview, unknownId],
+    );
+    linkUrl = `/admin/conversations?unknown=${unknownId}&hub=social`;
+    realtimeType = "inbound_unknown";
+    realtimePayload = { unknown_contact_id: unknownId, conversation_id: conversationId, contact: await unknownContactSnapshot(unknownId) };
+  }
+
+  const firstImage = ev.attachments.find((a) => a.type === "image" && a.url);
+  await pool.query(
+    `INSERT INTO conversation_messages
+       (conversation_id, direction, channel, body, media_url, media_content_type,
+        from_address, provider_message_id, provider_status, metadata_json)
+     VALUES (?, 'inbound', ?, ?, ?, ?, ?, ?, 'received', ?)`,
+    [
+      conversationId,
+      ev.platform,
+      ev.text || null,
+      firstImage?.url ? firstImage.url.slice(0, 1000) : null,
+      firstImage?.url ? "image/jpeg" : null,
+      ev.userId,
+      ev.mid,
+      JSON.stringify({ provider: "meta", platform: ev.platform, account_id: ev.accountId, attachments: ev.attachments }),
+    ],
+  );
+  await pool.query(
+    `UPDATE conversations
+     SET last_message_at = NOW(), last_message_preview = ?, unread_count = unread_count + 1, status = 'open'
+     WHERE id = ?`,
+    [preview, conversationId],
+  );
+  if (!assigneeId) return { status: "no_assignee", conversationId, unknownContactId: unknownId };
+  await publishConversationRealtime({ type: realtimeType, adminIds: [assigneeId], payload: realtimePayload });
+  const [[nm]] = await pool.query<RowDataPacket[]>(`SELECT display_name FROM conversation_unknown_contacts WHERE id = ?`, [unknownId]);
+  await notifyAdminInboundSms({
+    adminId: assigneeId,
+    fromLabel: `${label} · ${String(nm?.display_name || `${label} user`)}`,
+    preview,
+    linkUrl,
+    providerMessageId: ev.mid,
+    clientId: linkedClientId,
+    unknownContactId: linkedClientId ? null : unknownId,
+  }).catch((e: any) => console.warn("[social-dm:notify]", e?.message ?? e));
+  return {
+    status: "saved",
+    conversationId,
+    unknownContactId: unknownId,
+    clientId: linkedClientId ?? undefined,
+    assignedAdminId: assigneeId,
+  };
+}
+
+/** Graph Send API (one Page token serves Messenger and the linked Instagram account). */
+async function sendMetaSocialText(opts: {
+  platform: SocialPlatform;
+  recipientId: string;
+  text: string;
+  window: "standard" | "human_agent";
+}): Promise<{ messageId: string }> {
+  const cfg = metaSocialConfig();
+  if (!cfg.pageToken) throw new Error("Facebook / Instagram messaging is not connected (META_PAGE_ACCESS_TOKEN)");
+  const sender = opts.platform === "instagram" ? cfg.igAccountId || cfg.pageId || "me" : cfg.pageId || "me";
+  const body: Record<string, unknown> = {
+    recipient: { id: opts.recipientId },
+    message: { text: opts.text },
+    ...(opts.window === "human_agent"
+      ? { messaging_type: "MESSAGE_TAG", tag: "HUMAN_AGENT" }
+      : { messaging_type: "RESPONSE" }),
+  };
+  const r = await axios.post(`https://graph.facebook.com/${cfg.graphVersion}/${encodeURIComponent(sender)}/messages`, body, {
+    params: { access_token: cfg.pageToken },
+    timeout: 15_000,
+    validateStatus: () => true,
+  });
+  if (r.status < 200 || r.status >= 300 || !r.data?.message_id) {
+    const err = r.data?.error;
+    throw new Error(`Meta send failed${err?.code ? ` (${err.code})` : ""}: ${String(err?.message || `HTTP ${r.status}`).slice(0, 200)}`);
+  }
+  return { messageId: String(r.data.message_id) };
+}
+
+const SOCIAL_MAX_BODY_CHARS = 1000;
+
+/** Inbox reply on Facebook / Instagram (unknown social sender or a client linked to one). */
+async function deliverSocialHubMessage(opts: {
+  adminId: number;
+  clientId?: number;
+  unknownContactId?: number;
+  channel: SocialPlatform;
+  textBody: string;
+}): Promise<{
+  ok: boolean;
+  conversation_id: number;
+  message_id: number;
+  provider_status: string | null;
+  error: string | null;
+  client_id?: number;
+  unknown_contact_id?: number;
+}> {
+  const text = opts.textBody.trim();
+  if (!text) throw new Error("Message is empty");
+  if ([...text].length > SOCIAL_MAX_BODY_CHARS) throw new Error(`Message exceeds ${SOCIAL_MAX_BODY_CHARS} characters`);
+  if (!metaSocialConfig().enabled) throw new Error("Facebook / Instagram messaging is not enabled");
+  const [rows] = await pool.query<RowDataPacket[]>(
+    opts.clientId
+      ? `SELECT id, social_user_id, social_last_inbound_at FROM conversation_unknown_contacts
+         WHERE linked_client_id = ? AND social_platform = ? AND status = 'linked' ORDER BY social_last_inbound_at DESC LIMIT 1`
+      : `SELECT id, social_user_id, social_last_inbound_at, social_platform FROM conversation_unknown_contacts WHERE id = ? LIMIT 1`,
+    opts.clientId ? [opts.clientId, opts.channel] : [opts.unknownContactId],
+  );
+  const who = rows[0];
+  if (!who?.social_user_id) {
+    throw new Error(opts.clientId ? `This client has no ${socialPlatformLabel(opts.channel)} conversation` : "Unknown contact not found");
+  }
+  if (!opts.clientId && String(who.social_platform) !== opts.channel) {
+    throw new Error(`This person messaged on ${socialPlatformLabel(String(who.social_platform) as SocialPlatform)}`);
+  }
+  const window = metaReplyWindow(who.social_last_inbound_at);
+  if (window === "closed") {
+    throw new Error(`${socialPlatformLabel(opts.channel)} only allows replies within 7 days of their last message — ask them to message again, or reach them by text`);
+  }
+  const conversationId = opts.clientId
+    ? await getOrCreateClientChannelConversation({ clientId: opts.clientId, channel: opts.channel, ofgNumberId: null, assignedAdminId: opts.adminId, reopenIfClosed: false })
+    : await getOrCreateUnknownSmsConversation({ unknownContactId: opts.unknownContactId!, ofgNumberId: null, assignedAdminId: opts.adminId, reopenIfClosed: false, channel: opts.channel });
+  const [[conv]] = await pool.query<RowDataPacket[]>(`SELECT status FROM conversations WHERE id = ?`, [conversationId]);
+  if (conv && (conv.status === "closed" || conv.status === "archived")) throw new Error("conversation_closed");
+
+  let providerId: string | null = null;
+  let errorMessage: string | null = null;
+  try {
+    providerId = (await sendMetaSocialText({ platform: opts.channel, recipientId: String(who.social_user_id), text, window })).messageId;
+  } catch (e: any) {
+    errorMessage = String(e?.message || e).slice(0, 500);
+  }
+  const [ins] = await pool.query<ResultSetHeader>(
+    `INSERT INTO conversation_messages
+       (conversation_id, direction, channel, body, to_address, sent_by_admin_id, provider_message_id, provider_status, error_message, metadata_json)
+     VALUES (?, 'outbound', ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [conversationId, opts.channel, text, String(who.social_user_id), opts.adminId, providerId, errorMessage ? "failed" : "sent", errorMessage, JSON.stringify({ provider: "meta", reply_window: window })],
+  );
+  await pool.query(
+    `UPDATE conversations SET last_message_at = NOW(), last_message_preview = ?, assigned_admin_id = COALESCE(assigned_admin_id, ?) WHERE id = ?`,
+    [text.slice(0, 200), opts.adminId, conversationId],
+  );
+  if (opts.unknownContactId) await bumpUnknownContactAfterOutbound(opts.unknownContactId, text, opts.adminId);
+  await publishConversationRealtime({
+    type: "message",
+    payload: opts.clientId
+      ? { client_id: opts.clientId, conversation_id: conversationId, message_id: ins.insertId, contact: await conversationClientContactSnapshot(conversationId) }
+      : { unknown_contact_id: opts.unknownContactId, conversation_id: conversationId, message_id: ins.insertId, contact: await unknownContactSnapshot(opts.unknownContactId!) },
+  });
+  return {
+    ok: !errorMessage,
+    conversation_id: conversationId,
+    message_id: ins.insertId,
+    provider_status: errorMessage ? "failed" : "sent",
+    error: errorMessage,
+    client_id: opts.clientId,
+    unknown_contact_id: opts.unknownContactId,
+  };
+}
+
 async function deliverHubConversationMessage(opts: {
   adminId: number;
   clientId?: number;
@@ -49171,6 +49647,17 @@ async function deliverHubConversationMessage(opts: {
     );
   }
   const ch = opts.isInternalNote ? "internal" : String(opts.channel || "sms");
+  if (ch === "messenger" || ch === "instagram") {
+    if (hasCrm) throw new Error("Facebook / Instagram replies go to the social sender or their linked client");
+    if (opts.mediaUrl) throw new Error("Attachments are not supported on Facebook / Instagram yet");
+    return deliverSocialHubMessage({
+      adminId: opts.adminId,
+      clientId: hasClient ? opts.clientId : undefined,
+      unknownContactId: hasUnknown ? opts.unknownContactId : undefined,
+      channel: ch,
+      textBody: opts.textBody,
+    });
+  }
   if (!["sms", "internal", "whatsapp"].includes(ch)) {
     throw new Error("Unsupported channel");
   }
@@ -67771,41 +68258,40 @@ function buildApp() {
   );
 
   /**
-   * Meta / social DM webhook (P2). Gated by SOCIAL_DM_INBOX_ENABLED.
-   * Accepts and acknowledges; does not yet create Conversations threads.
+   * Meta webhook — Facebook Page (Messenger) + Instagram DMs (Nov 10, 2026).
+   * Gated by SOCIAL_DM_INBOX_ENABLED; every POST must carry a valid
+   * X-Hub-Signature-256 (META_APP_SECRET). Duplicates are ignored by message id.
    */
   app.post("/api/webhooks/meta/messaging", async (req, res) => {
-    const enabled =
-      process.env.SOCIAL_DM_INBOX_ENABLED === "1" ||
-      process.env.SOCIAL_DM_INBOX_ENABLED === "true";
-    if (!enabled) {
-      return res.status(503).json({ error: "social_dm_disabled" });
+    const cfg = metaSocialConfig();
+    if (!cfg.enabled) return res.status(503).json({ error: "social_dm_disabled" });
+    if (!cfg.appSecret) return res.status(503).json({ error: "social_dm_not_configured" });
+    if (!verifyMetaSignature(String((req as any).rawBody || ""), req.get("x-hub-signature-256") || undefined, cfg.appSecret)) {
+      console.warn("[social-dm] invalid signature");
+      return res.status(401).json({ error: "invalid_signature" });
     }
-    console.log(
-      "[social-dm] webhook received (scaffold — not persisted)",
-      typeof req.body === "object"
-        ? Object.keys(req.body || {})
-        : typeof req.body,
-    );
-    res.json({ ok: true, persisted: false, scaffold: true });
+    const events = parseMetaMessagingWebhook(req.body);
+    const results: string[] = [];
+    try {
+      for (const ev of events) {
+        const r = await processMetaInboundEvent(ev);
+        results.push(r.status);
+      }
+      res.json({ ok: true, events: events.length, results });
+    } catch (e: any) {
+      // 5xx → Meta retries; already-saved messages are skipped as duplicates.
+      console.error("[social-dm:webhook]", e?.message ?? e);
+      res.status(500).json({ error: "webhook_failed" });
+    }
   });
 
   app.get("/api/webhooks/meta/messaging", (req, res) => {
-    const enabled =
-      process.env.SOCIAL_DM_INBOX_ENABLED === "1" ||
-      process.env.SOCIAL_DM_INBOX_ENABLED === "true";
+    const cfg = metaSocialConfig();
     const mode = String(req.query["hub.mode"] || "");
     const token = String(req.query["hub.verify_token"] || "");
     const challenge = String(req.query["hub.challenge"] || "");
-    const expected = process.env.META_WEBHOOK_VERIFY_TOKEN || "";
-    if (
-      enabled &&
-      mode === "subscribe" &&
-      expected &&
-      token === expected &&
-      challenge
-    ) {
-      return res.status(200).send(challenge);
+    if (cfg.enabled && mode === "subscribe" && cfg.verifyToken && timingSafeStringEqual(token, cfg.verifyToken) && challenge) {
+      return res.status(200).type("text/plain").send(challenge);
     }
     res.status(403).send("Forbidden");
   });
@@ -69507,6 +69993,8 @@ function buildApp() {
     async (req: AuthedRequest, res) => {
       if (!(await requireConversationsAccess(req, res))) return;
       const view = String(req.query.view || "all");
+      // Nov 10, 2026: Social tab = Facebook / Instagram threads only; SMS hub hides social-only senders.
+      const hub = String(req.query.hub || "") === "social" ? "social" : "sms";
       const q = String(req.query.q || "")
         .trim()
         .slice(0, 120);
@@ -69522,6 +70010,7 @@ function buildApp() {
       // Contact-centric: aggregate client threads visible on my OFG lines or assigned to me
       const where: string[] = ["cv.client_id IS NOT NULL", clientScope.sql];
       const args: any[] = [...clientScope.params];
+      if (hub === "social") where.push("cv.channel IN ('messenger','instagram')");
       if (view === "mine") {
         where.push("cv.assigned_admin_id = ?");
         where.push("cv.status NOT IN ('closed','archived')");
@@ -69647,11 +70136,17 @@ function buildApp() {
       ) {
         const phoneIds = await adminAssignedPhoneNumberIds(req.auth!.id);
         if (phoneIds.length) {
+          const seesAllSocial = reportReleaseManagerIds().includes(adminId);
           const unkWhere: string[] = [
             `u.status = 'open'`,
-            `u.ofg_number_id IN (${phoneIds.map(() => "?").join(",")})`,
+            hub === "social"
+              ? // Social senders: the assignee, or a release manager (Cesar) sees all.
+                `u.social_platform IS NOT NULL AND (${seesAllSocial ? "1=1" : "0=1"} OR EXISTS (
+                   SELECT 1 FROM conversations cvs WHERE cvs.unknown_contact_id = u.id AND cvs.assigned_admin_id = ?
+                 ))`
+              : `u.social_platform IS NULL AND u.ofg_number_id IN (${phoneIds.map(() => "?").join(",")})`,
           ];
-          const unkArgs: any[] = [...phoneIds];
+          const unkArgs: any[] = hub === "social" ? [adminId] : [...phoneIds];
           if (view === "closed") {
             unkWhere.push(
               `EXISTS (
@@ -69772,7 +70267,9 @@ function buildApp() {
             assigned_admin_id: u.thread_assigned_admin_id
               ? Number(u.thread_assigned_admin_id)
               : null,
-            channels: ["sms"],
+            channels: [u.social_platform ? String(u.social_platform) : "sms"],
+            social_platform: u.social_platform ? String(u.social_platform) : null,
+            social_username: u.social_username ? String(u.social_username) : null,
             primary_conversation_id: u.primary_conversation_id
               ? Number(u.primary_conversation_id)
               : null,
@@ -69780,10 +70277,10 @@ function buildApp() {
         }
       }
 
-      // CRM contacts with conversation threads (exclude unknown-only view)
+      // CRM contacts with conversation threads (exclude unknown-only view; no social channel)
       let crmContacts: any[] = [];
       let crmTotal = 0;
-      if (view !== "unknown") {
+      if (view !== "unknown" && hub !== "social") {
         const crmWhere: string[] = [
           "ct.deleted_at IS NULL",
           "cv.contact_id IS NOT NULL",
@@ -70395,7 +70892,7 @@ function buildApp() {
           return res.status(404).json({ error: msg });
         }
         if (
-          /required|unsupported|internal notes|invalid media|expired|exceeds|WhatsApp not enabled/i.test(
+          /required|unsupported|internal notes|invalid media|expired|exceeds|WhatsApp not enabled|Facebook|Instagram|Message is empty|Attachments are not supported/i.test(
             msg,
           )
         ) {

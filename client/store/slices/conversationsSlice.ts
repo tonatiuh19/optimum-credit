@@ -264,6 +264,8 @@ export const fetchConversationContacts = createAsyncThunk(
           limit?: number;
           /** Append page to existing list (Load more). */
           append?: boolean;
+          /** "social" = Facebook / Instagram threads only. */
+          hub?: "sms" | "social";
         }
       | undefined,
     { rejectWithValue },
@@ -271,6 +273,7 @@ export const fetchConversationContacts = createAsyncThunk(
     try {
       const { data } = await api.get("/admin/conversations", {
         params: {
+          hub: args?.hub === "social" ? "social" : undefined,
           view: args?.view || "all",
           q: args?.q || undefined,
           page: args?.page || 1,
@@ -317,7 +320,7 @@ export const sendHubMessage = createAsyncThunk(
       client_id?: number;
       unknown_contact_id?: number;
       contact_id?: number;
-      channel: "sms" | "internal" | "whatsapp";
+      channel: "sms" | "internal" | "whatsapp" | "messenger" | "instagram";
       body: string;
       subject?: string;
       is_internal_note?: boolean;

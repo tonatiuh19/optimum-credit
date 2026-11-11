@@ -761,7 +761,9 @@
       "sms": "SMS",
       "internal": "Nota",
       "call": "Llamada",
-      "whatsapp": "WhatsApp"
+      "whatsapp": "WhatsApp",
+      "messenger": "Facebook",
+      "instagram": "Instagram"
     },
     "hubChannels": {
       "sms": "SMS",
@@ -771,7 +773,7 @@
       "badgeSoon": "Próximamente",
       "badgeLive": "Activo",
       "soonTitle": "DMs sociales en Conversaciones",
-      "soonBody": "Los mensajes de Instagram y Facebook llegarán aquí junto al SMS — misma línea de tiempo, mismas respuestas, Claude opcional. Conecta Meta cuando estés listo.",
+      "soonBody": "Los mensajes de Instagram y Facebook llegarán aquí junto al SMS — misma línea de tiempo, el equipo responde desde aquí. Conecta Meta cuando estés listo.",
       "liveTitle": "Bandeja social lista",
       "liveBody": "Credenciales configuradas. Los hilos aparecerán aquí cuando Meta envíe los webhooks.",
       "chipSoonHint": "Próximamente — DMs de Instagram / Facebook. Abre esta pestaña para ver los pasos.",
@@ -780,7 +782,7 @@
       "listSoonEmpty": "Aún no hay hilos sociales. Abre el panel para ver qué falta para activar.",
       "listLiveEmpty": "Aún no hay hilos de Instagram o Facebook.",
       "stepFlag": "Activa SOCIAL_DM_INBOX_ENABLED en el entorno",
-      "stepMeta": "Agrega tokens de Meta (verify / page access)",
+      "stepMeta": "Agrega META_APP_SECRET, META_PAGE_ACCESS_TOKEN, META_WEBHOOK_VERIFY_TOKEN y META_PAGE_ID (+ META_IG_ACCOUNT_ID)",
       "stepWebhook": "Apunta webhooks de Meta a /api/webhooks/meta/messaging",
       "hintEnv": "El staff con Conversaciones verá Social desbloquearse automáticamente tras el deploy con llaves."
     },

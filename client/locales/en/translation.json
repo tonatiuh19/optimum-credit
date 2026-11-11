@@ -761,7 +761,9 @@
       "sms": "SMS",
       "internal": "Note",
       "call": "Call",
-      "whatsapp": "WhatsApp"
+      "whatsapp": "WhatsApp",
+      "messenger": "Facebook",
+      "instagram": "Instagram"
     },
     "hubChannels": {
       "sms": "SMS",
@@ -771,7 +773,7 @@
       "badgeSoon": "Coming soon",
       "badgeLive": "Live",
       "soonTitle": "Social DMs in Conversations",
-      "soonBody": "Instagram and Facebook messages will land here next to SMS — same timeline, same replies, optional Claude assist. Connect Meta when you’re ready.",
+      "soonBody": "Instagram and Facebook messages will land here next to SMS — same timeline, staff replies from here. Connect Meta when you’re ready.",
       "liveTitle": "Social inbox ready",
       "liveBody": "Credentials are configured. Threads will appear here as Meta webhooks deliver DMs.",
       "chipSoonHint": "Coming soon — Meta Instagram / Facebook DMs. Hover steps on the right when you open this tab.",
@@ -780,7 +782,7 @@
       "listSoonEmpty": "No social threads yet. Open the panel to see what’s needed to go live.",
       "listLiveEmpty": "No Instagram or Facebook threads yet.",
       "stepFlag": "Enable SOCIAL_DM_INBOX_ENABLED in env",
-      "stepMeta": "Add Meta app tokens (verify token / page access)",
+      "stepMeta": "Add META_APP_SECRET, META_PAGE_ACCESS_TOKEN, META_WEBHOOK_VERIFY_TOKEN and META_PAGE_ID (+ META_IG_ACCOUNT_ID)",
       "stepWebhook": "Point Meta webhooks at /api/webhooks/meta/messaging",
       "hintEnv": "Staff with Conversations access will see Social unlock automatically after deploy with keys."
     },

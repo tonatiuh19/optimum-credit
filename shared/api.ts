@@ -473,7 +473,10 @@ export interface ConversationContactHubItem {
   status: "open" | "snoozed" | "closed" | "archived";
   assigned_admin_id?: number | null;
   assigned_admin_name?: string | null;
-  channels: Array<"sms" | "email" | "call" | "internal" | "whatsapp">;
+  channels: Array<"sms" | "email" | "call" | "internal" | "whatsapp" | "messenger" | "instagram">;
+  /** Facebook / Instagram sender (unknown kind). */
+  social_platform?: "messenger" | "instagram" | null;
+  social_username?: string | null;
   /** Primary conversation id for deep links (latest active thread) */
   primary_conversation_id?: number | null;
   client_id?: number | null;
@@ -490,7 +493,7 @@ export interface Conversation {
   unknown_contact_id?: number | null;
   contact_id?: number | null;
   ofg_number_id?: number | null;
-  channel: "sms" | "call" | "email" | "internal" | "whatsapp";
+  channel: "sms" | "call" | "email" | "internal" | "whatsapp" | "messenger" | "instagram";
   status: "open" | "snoozed" | "closed" | "archived";
   last_message_at?: string | null;
   last_message_preview?: string | null;

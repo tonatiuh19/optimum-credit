@@ -235,9 +235,9 @@ export default function AdminConversations() {
     return `${m}:${String(s).padStart(2, "0")}`;
   };
 
-  const [channel, setChannel] = useState<"sms" | "internal" | "whatsapp">(
-    "sms",
-  );
+  const [channel, setChannel] = useState<
+    "sms" | "internal" | "whatsapp" | "messenger" | "instagram"
+  >("sms");
   const [body, setBody] = useState("");
   const [panelOpen, setPanelOpen] = useState(false);
   const [linkClient, setLinkClient] = useState<AdminClientListItem | null>(
@@ -308,6 +308,9 @@ export default function AdminConversations() {
   ).slice() as Array<"sms" | "internal" | "whatsapp">;
   const [contactsPage, setContactsPage] = useState(1);
   const [contactsLoadingMore, setContactsLoadingMore] = useState(false);
+  /** Current hub for realtime refreshes (kept in a ref, like the other refresh targets). */
+  const hubRef = useRef<"sms" | "social">("sms");
+  hubRef.current = hubChannel;
 
   const lastContactsFetchRef = useRef(0);
   const ablyRefreshRef = useRef({
@@ -327,10 +330,11 @@ export default function AdminConversations() {
           page: targetPage,
           limit: 25,
           append: !!opts?.append,
+          hub: hubChannel,
         }),
       );
     },
-    [dispatch, view, search],
+    [dispatch, view, search, hubChannel],
   );
 
   const refreshContacts = useCallback(() => {
@@ -347,6 +351,7 @@ export default function AdminConversations() {
         page: 1,
         limit: 25,
         append: false,
+        hub: hubRef.current,
       }),
     );
   }, [dispatch]);
@@ -365,6 +370,7 @@ export default function AdminConversations() {
           page: next,
           limit: 25,
           append: true,
+          hub: hubChannel,
         }),
       ).unwrap();
       setContactsPage(next);
@@ -466,6 +472,8 @@ export default function AdminConversations() {
     if (!accessEnabled) return;
     const clientId = Number(searchParams.get("client"));
     const unknownId = Number(searchParams.get("unknown"));
+    // Facebook / Instagram alert links open the Social tab.
+    if (searchParams.get("hub") === "social") setHubChannel("social");
     const contactId = Number(searchParams.get("contact"));
     if (clientId > 0) {
       dispatch(selectConversationContact({ kind: "client", id: clientId }));
@@ -548,7 +556,7 @@ export default function AdminConversations() {
       fetchContacts(1);
     }, search ? 280 : 0);
     return () => window.clearTimeout(handle);
-  }, [accessEnabled, view, search, fetchContacts]);
+  }, [accessEnabled, view, search, fetchContacts, hubChannel]);
 
   /** After mutations, reload from page 1 (append list stays coherent). */
   const reloadContactsFromStart = useCallback(() => {
@@ -910,6 +918,25 @@ export default function AdminConversations() {
     } as ConversationContactHubItem;
   }, [contacts, activeKind, activeId, timeline, activeHubStatus]);
 
+  /** Facebook / Instagram channels this contact has written on (social hub replies). */
+  const socialReplyChannels = useMemo(
+    () =>
+      ((activeContact?.channels || []) as string[]).filter(
+        (c): c is "messenger" | "instagram" => c === "messenger" || c === "instagram",
+      ),
+    [activeContact?.channels],
+  );
+  // Social tab replies on the thread's platform; the SMS tab never sends on a social channel.
+  useEffect(() => {
+    if (hubChannel === "social" && socialReplyChannels.length) {
+      if (!socialReplyChannels.includes(channel as "messenger" | "instagram") && channel !== "internal") {
+        setChannel(socialReplyChannels[0]);
+      }
+    } else if (channel === "messenger" || channel === "instagram") {
+      setChannel("sms");
+    }
+  }, [hubChannel, socialReplyChannels, channel]);
+
   const isThreadClosed =
     activeHubStatus === "closed" || activeHubStatus === "archived";
 
@@ -1158,8 +1185,8 @@ export default function AdminConversations() {
     const sendChannel =
       channel === "internal"
         ? ("internal" as const)
-        : channel === "whatsapp"
-          ? ("whatsapp" as const)
+        : channel === "whatsapp" || channel === "messenger" || channel === "instagram"
+          ? channel
           : ("sms" as const);
     const payload =
       activeKind === "client"
@@ -1850,7 +1877,7 @@ export default function AdminConversations() {
                 </Tooltip>
               </TooltipProvider>
             </div>
-            {hubChannel === "sms" && (
+            {(hubChannel === "sms" || socialDmLive) && (
             <div className="flex flex-wrap gap-1">
               {VIEWS.map((v) => (
               <button
@@ -1870,7 +1897,7 @@ export default function AdminConversations() {
             )}
           </div>
 
-          {hubChannel === "social" ? (
+          {hubChannel === "social" && !socialDmLive ? (
             <div className="flex-1 overflow-y-auto p-4">
               <p className="text-xs text-muted-foreground text-center leading-relaxed px-2">
                 {socialDmLive
@@ -2084,7 +2111,7 @@ export default function AdminConversations() {
         </div>
 
         {/* Timeline + composer (or Social coming-soon) */}
-        {hubChannel === "social" ? (
+        {hubChannel === "social" && !socialDmLive ? (
           <div
             className={`bg-card rounded-2xl border border-border flex flex-col min-h-[75vh] lg:min-h-0 lg:h-full overflow-hidden ${
               activeId || hubChannel === "social" ? "flex" : "hidden lg:flex"
@@ -2451,8 +2478,8 @@ export default function AdminConversations() {
                               ? t("conversations.channels.call")
                               : m.channel === "internal"
                                 ? t("conversations.channels.internal")
-                                : m.channel === "whatsapp"
-                                  ? t("conversations.channels.whatsapp")
+                                : m.channel === "whatsapp" || m.channel === "messenger" || m.channel === "instagram"
+                                  ? t(`conversations.channels.${m.channel}`)
                                   : t("conversations.channels.sms")}
                             {m.sent_by_admin_name
                               ? ` · ${m.sent_by_admin_name}`
@@ -2605,9 +2632,14 @@ export default function AdminConversations() {
                     onSuggestAi={loadAiSuggestions}
                     aiSuggestionsLoading={aiSuggestionsLoading}
                     allowedChannels={
-                      activeKind === "client"
-                        ? threadChannels
-                        : outboundChannels
+                      hubChannel === "social" && socialReplyChannels.length
+                        ? [
+                            ...socialReplyChannels,
+                            ...(activeKind === "client" ? (["internal"] as const) : []),
+                          ]
+                        : activeKind === "client"
+                          ? threadChannels
+                          : outboundChannels
                     }
                     onSend={() => void send()}
                   />
@@ -2706,7 +2738,10 @@ export default function AdminConversations() {
               )}
               <ConversationMessageComposer
                 channel={composeChannel}
-                onChannelChange={setComposeChannel}
+                onChannelChange={(ch) => {
+                  // New-message dialog starts SMS / WhatsApp only (social threads start from the customer).
+                  if (ch === "sms" || ch === "internal" || ch === "whatsapp") setComposeChannel(ch);
+                }}
                 allowedChannels={
                   composeTarget.kind === "client"
                     ? threadChannels
