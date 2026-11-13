@@ -296,11 +296,21 @@ export function pv2AccountKey(a: CreditAccount): string {
   return `${pv2NameKey(a.creditor)}|${pv2Last4(a)}`;
 }
 
-/** Same account: same creditor, and the same last 4 when both have one. */
+/**
+ * "TOYOTAMTR|0001|2019-3" — creditor + last 4 + open month, for the positives-vs-targets check
+ * (Nov 12, 2026 held-report audit: lenders number loans "…0001", so a clean loan and a different late
+ * loan of the same lender looked like one account and held the report).
+ */
+export function pv2AccountKeyOpened(a: CreditAccount): string {
+  const d = BUREAUS.map((b) => parseReportDate(a.bureaus[b]?.dateOpened)).find(Boolean);
+  return `${pv2AccountKey(a)}|${d ? `${d.getUTCFullYear()}-${d.getUTCMonth() + 1}` : ""}`;
+}
+
+/** Same account: same creditor, the same last 4 when both have one, and the same open month when both have one. */
 export function pv2SameAccountKey(x: string, y: string): boolean {
-  const [nx, lx] = x.split("|");
-  const [ny, ly] = y.split("|");
-  return nx === ny && (!lx || !ly || lx === ly);
+  const [nx, lx, ox] = x.split("|");
+  const [ny, ly, oy] = y.split("|");
+  return nx === ny && (!lx || !ly || lx === ly) && (!ox || !oy || ox === oy);
 }
 
 function pv2Last4(a: CreditAccount): string {
@@ -1151,8 +1161,8 @@ export function pv2Diff(rawBefore: CreditFile, rawAfter: CreditFile, lang: Pv2La
     utilizationNotes: [...new Set(utilizationNotes)],
     positives: positives.slice(0, 5),
     positivesFlags: { history: opens.length > 0, noCollections: !hasColl && after.publicRecordsReported !== true },
-    positiveAccountKeys: opens.length ? [pv2AccountKey(opens[0].a)] : [],
-    targetAccountKeys: targets.flatMap((t) => (targetSources.has(t) ? [pv2AccountKey(targetSources.get(t)!)] : [])),
+    positiveAccountKeys: opens.length ? [pv2AccountKeyOpened(opens[0].a)] : [],
+    targetAccountKeys: targets.flatMap((t) => (targetSources.has(t) ? [pv2AccountKeyOpened(targetSources.get(t)!)] : [])),
     internal,
     informational,
     byBureau,
@@ -2077,7 +2087,7 @@ export function pv2BuildPdfData(opts: {
 export type Pv2ReportFormat = "smartcredit" | "identityiq" | "mfsn" | "myfico" | "trimerge";
 
 /** Bump when a summary parser changes: cached summaries from an older parser are re-parsed. */
-export const PV2_SUMMARY_PARSER_VERSION = 3;
+export const PV2_SUMMARY_PARSER_VERSION = 4; // 4 (Nov 12, 2026): SmartCredit printed inquiries were never read ("TransUnion®"); re-parse cached summaries once.
 
 export interface Pv2PullSummary {
   /** Parser that produced this summary (cached copies older than PV2_SUMMARY_PARSER_VERSION are re-parsed). */
@@ -2607,7 +2617,20 @@ export function pv2ApplyPrintedLimits<F extends CreditFile>(file: F, summary: Pv
       // Both numbers sit inside one printed number of this creditor.
       return printed.some((p) => norm(p.creditor) === norm(a.creditor) && digits(p.mask).includes(own) && digits(p.mask).includes(digits(o.mask)));
     });
-  });
+  })
+    // Nov 12, 2026 (held-report audit: AMEX $9,000 and BANK OF AMERICA $15,000 read twice with the SAME
+    // number; the printed limits table lists each card once): identical copies beyond the number of
+    // printed blocks for that creditor + number are dropped — again only as a candidate (totals must match).
+    .filter((a, i, list) => {
+      // Twins = same creditor and identical data (the AI may misread the number: "9999" for "4999").
+      const twins = list.filter((o) => norm(o.creditor) === norm(a.creditor) && sameData(o, a));
+      if (twins.length < 2) return true;
+      // Printed blocks of that creditor carrying the same limit on every bureau the copy has.
+      const on = BUREAUS.filter((b) => a.bureaus[b]?.creditLimit != null);
+      if (!on.length) return true;
+      const printedBlocks = printed.filter((p) => norm(p.creditor) === norm(a.creditor) && on.every((b) => p.limits[b] === a.bureaus[b]!.creditLimit)).length;
+      return !printedBlocks || twins.indexOf(a) < printedBlocks;
+    });
   // Each base (as read / printed sections / without the duplicate / both), then limits PER BUREAU: a
   // bureau's limits change only when that makes the bureau match (Nov 7, 2026 — a client: a candidate that
   // fixed TransUnion also kept Experian changes that did not fix Experian). A base is used only when no
@@ -2819,6 +2842,8 @@ export interface Pv2Check {
   /** null = not applicable (the pull prints no summary for it). */
   pass: boolean | null;
   detail: string;
+  /** account_totals / balances: AI-read rows the text reader did not find, for staff to mark (Nov 12, 2026). */
+  suspects?: Array<{ bureau: Bureau; creditor: string; mask: string | null; balance: number | null; dateOpened: string | null; fragment: boolean; extraction_id: number; side: "before" | "after" }>;
 }
 
 /** Items in two conflicting states on one bureau (REMOVED + still a target). */

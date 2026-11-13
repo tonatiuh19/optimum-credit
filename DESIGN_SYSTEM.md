@@ -282,6 +282,7 @@ Surfaces: New Case schedule, Client panel Payment Schedule, Admin Payments split
 
 - Publish never sends. `ReportApprovalCard` (`client/components/admin/report-approval/`) shows the state: pending = `primary` tint + clock ("Waiting for approval — not sent yet"); self-check failed = `destructive` tint + shield-alert; sent / released = one `accent` line with who approved.
 - `SelfCheckList`: failed checks first (red X, check name + detail), passed checks collapsed behind "N of M checks passed"; n/a rows muted.
+- `SuspectedReadRows` (held reports only): rows the AI read that the text reader did not find, in a `muted` card under the checks — creditor, number, Before/After, bureau, balance, "partial row" tag. Approvers get an outline "Not a real account" button per row (full width on mobile); a marked row shows "Marked" and the report re-checks. Others see the list without buttons.
 - Approve & send = primary button; the release-manager override is a destructive button behind a required reason textarea (Formik + Yup, ≥ 10 chars).
 - Used in the wizard's last step, the case panel round card (above the delivery timeline) and the dashboard `ReportApprovalQueue` (hidden when empty, anchor `#report-approvals`, inbox item "reports_approval").
 - Wizard preview shows the same self-check above the PDF (accent when it passes, destructive when publishing would hold the report).

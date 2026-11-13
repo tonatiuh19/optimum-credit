@@ -18,10 +18,11 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
-import { approveRoundReport, fetchReportApproval, rebuildRoundReport } from "@/store/slices/reportApprovalSlice";
+import { approveRoundReport, fetchReportApproval, rebuildRoundReport, setApprovalAlias } from "@/store/slices/reportApprovalSlice";
 import { SelfCheckList } from "@/components/admin/report-approval/SelfCheckList";
 import { explainHeldChecks, type HeldReason } from "@shared/heldReport";
 import { NextStep } from "@/components/admin/report-approval/NextStep";
+import { SuspectedReadRows } from "@/components/admin/report-approval/SuspectedReadRows";
 
 /**
  * Spec v1.1 P0-1: a published progress report waits here. The language owner
@@ -132,6 +133,20 @@ export function ReportApprovalCard({ reportId, onApproved, onRebuilt }: { report
         </p>
       ) : null}
       <SelfCheckList checks={a.checks} />
+      {failed && (
+        <SuspectedReadRows
+          reportId={a.id ?? reportId}
+          checks={a.checks}
+          canEdit={a.can_approve}
+          onChanged={(newId) => {
+            if (!newId) return void dispatch(fetchReportApproval(reportId));
+            // Replaced by a report that passes: load it and show it in this card.
+            void dispatch(fetchReportApproval(newId)).then((r) => {
+              if (fetchReportApproval.fulfilled.match(r)) dispatch(setApprovalAlias({ fromId: reportId, approval: r.payload }));
+            });
+          }}
+        />
+      )}
       {!failed && a.can_approve && (
         <Button type="button" size="sm" onClick={() => void approve()} disabled={approving} className="gap-1.5 w-full sm:w-auto" data-testid="report-approve">
           {approving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : a.options?.notify_client === false ? <ShieldCheck className="w-3.5 h-3.5" /> : <Send className="w-3.5 h-3.5" />}

@@ -7016,11 +7016,12 @@ function parseSmartCredit(text: string): CreditFile {
       if (/^Creditor Contacts\b/.test(t)) break;
       if (/have matching accounts/i.test(t)) matched = true;
       if (/no matching account/i.test(t)) matched = false;
-      if (
-        /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(t) &&
-        /^(TransUnion|Experian|Equifax)$/.test((lines[i + 2] || "").trim())
-      ) {
-        const bureauName = lines[i + 2].trim();
+      // Nov 12, 2026: SmartCredit prints "TransUnion®" / "Experian®" / "Equifax®" here. The exact-name
+      // match read ZERO inquiries from every such PDF, so the printed-inquiries repair never had a list.
+      const bureauCell = /^(TransUnion|Experian|Equifax)\W*$/.exec((lines[i + 2] || "").trim());
+      // Dates print as "6/1/2026" or (newer layout) "Jun 01, 2026".
+      if ((/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(t) || /^[A-Z][a-z]{2,8}\.? \d{1,2}, \d{4}$/.test(t)) && bureauCell) {
+        const bureauName = bureauCell[1];
         inquiries.push({
           date: t,
           creditor: lines[i + 1].trim(),
@@ -7812,7 +7813,10 @@ function sameRowReadTwice(o: CreditAccount, a: CreditAccount): boolean {
   });
 }
 
-function consolidateSplitAccounts(accounts: CreditAccount[]): CreditAccount[] {
+function consolidateSplitAccounts(
+  accounts: CreditAccount[],
+  opts: { keepSameBureauTwins?: boolean } = {},
+): CreditAccount[] {
   const out: CreditAccount[] = [];
   const bal = (a: CreditAccount) => BUREAUS.map((b) => a.bureaus[b]?.balance).find((v) => v !== null && v !== undefined) ?? null;
   const last4 = (a: CreditAccount) => {
@@ -7828,13 +7832,14 @@ function consolidateSplitAccounts(accounts: CreditAccount[]): CreditAccount[] {
             if (last4(o) !== k || bal(o) !== b) return false;
             const shared = BUREAUS.filter((x) => o.bureaus[x] && a.bureaus[x]);
             if (!shared.length) return true;
+            if (opts.keepSameBureauTwins) return false;
             // Same bureau twice (MyFreeScoreNow, a client Oct 26): one collection listed under the collector's
             // name and again under its client's name — same last 4, same balance, collection on both.
             return shared.every(
               (x) => isCollectionTl(o.bureaus[x]!) && isCollectionTl(a.bureaus[x]!) && o.bureaus[x]!.balance === a.bureaus[x]!.balance,
             );
           })
-        : undefined) ?? out.find((o) => sameTradeline(o, a, last4) || sameRowReadTwice(o, a));
+        : undefined) ?? out.find((o) => sameTradeline(o, a, last4) || (!opts.keepSameBureauTwins && sameRowReadTwice(o, a)));
     if (!twin) {
       out.push(a);
       continue;
@@ -7856,9 +7861,213 @@ function consolidateSplitAccounts(accounts: CreditAccount[]): CreditAccount[] {
  * Stored reads get today's account merge rules too (reads saved before a rule existed keep
  * duplicates otherwise). Per-bureau layouts only; tri-merge rows are never merged.
  */
-function normalizeStoredRead<F extends CreditFile>(file: F): F {
+function normalizeStoredRead<F extends CreditFile>(
+  file: F,
+  summary?: PrintedBureauTotals | null,
+  skeleton?: Pick<CreditFile, "accounts"> | null,
+  exclusions?: ReadExclusion[] | null,
+): F {
   if (!file?.accounts || file.reportFormat === "merged") return file;
-  return { ...file, accounts: consolidateSplitAccounts(file.accounts.map((a) => ({ ...a, bureaus: { ...a.bureaus } }))) };
+  const base = exclusions?.length ? applyReadExclusions(file.accounts, exclusions) : file.accounts;
+  const copy = () => base.map((a) => ({ ...a, bureaus: { ...a.bureaus } }));
+  let accounts = consolidateSplitAccounts(copy());
+  if (summary) accounts = summaryAwareAccounts(accounts, () => consolidateSplitAccounts(copy(), { keepSameBureauTwins: true }), summary);
+  if (summary && skeleton?.accounts?.length) accounts = trimExtraReads(accounts, skeleton.accounts, summary).accounts;
+  return { ...file, accounts };
+}
+
+/** A row staff marked "not a real account" on one bureau of one pull. */
+interface ReadExclusion {
+  bureau: Bureau;
+  creditor: string;
+  mask: string | null;
+  balance: number | null;
+  dateOpened: string | null;
+}
+
+const sameAmount = (x: number | null | undefined, y: number | null | undefined) =>
+  (x ?? null) === null || (y ?? null) === null ? (x ?? null) === (y ?? null) : Math.abs(Number(x) - Number(y)) < 0.005;
+
+/**
+ * Removes each excluded row from its bureau — one row per exclusion, matched on creditor, number,
+ * balance and open date, so a twin that is a real account stays. An account left with no bureau
+ * is dropped. Rows that no longer match (a later re-read) are simply not found.
+ */
+const exclusionFits = (a: CreditAccount, x: ReadExclusion) =>
+  !!a.bureaus[x.bureau] &&
+  a.creditor === x.creditor &&
+  // The merge step may give a row its twin's number: fragments that agree count ("1" / "1234").
+  masksAgreeLoose(a.mask, x.mask) &&
+  sameAmount(a.bureaus[x.bureau]!.balance, x.balance) &&
+  (a.bureaus[x.bureau]!.dateOpened ?? null) === (x.dateOpened ?? null);
+
+function masksAgreeLoose(p: string | null | undefined, q: string | null | undefined): boolean {
+  const a = String(p ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const b = String(q ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return a === b || (!!a && !!b && (a.endsWith(b) || b.endsWith(a)));
+}
+
+/** How many stored rows one exclusion can match (the cap on how many times it may be saved). */
+function readExclusionMatches(accounts: CreditAccount[], x: ReadExclusion): number {
+  return accounts.filter((a) => exclusionFits(a, x)).length;
+}
+
+function applyReadExclusions(accounts: CreditAccount[], exclusions: ReadExclusion[]): CreditAccount[] {
+  let out = accounts.map((a) => ({ ...a, bureaus: { ...a.bureaus } }));
+  for (const x of exclusions) {
+    // Exact number first, then an agreeing fragment.
+    const hit = out.find((a) => exclusionFits(a, x) && (a.mask ?? null) === (x.mask ?? null)) ?? out.find((a) => exclusionFits(a, x));
+    if (hit) delete hit.bureaus[x.bureau];
+  }
+  out = out.filter((a) => BUREAUS.some((b) => a.bureaus[b]));
+  return out;
+}
+
+/** One account row on one bureau that the AI read but the text reader did not find. */
+interface SuspectedExtraRead {
+  bureau: Bureau;
+  creditor: string;
+  mask: string | null;
+  balance: number | null;
+  dateOpened: string | null;
+  /** Fragment = the row has no account or payment status (a piece of a page-broken block). */
+  fragment: boolean;
+}
+
+const creditorKey8 = (creditor: string) => String(creditor || "").toUpperCase().replace(/[^A-Z0-9]+/g, "").slice(0, 8);
+/** Visible account-number characters (the text reader prints leading digits, the AI the last ones). */
+const maskChars = (m: string | null | undefined) => String(m ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+const unreadableHeader = (a: CreditAccount) => /^\(unreadable/i.test(String(a.creditor || "").trim());
+/** The text reader sometimes folds the number into the creditor name ("AFFIRM INC C0YEQM*"). */
+const skeletonMask = (a: CreditAccount) => {
+  const m = maskChars(a.mask);
+  if (m) return m;
+  const tail = String(a.creditor || "").trim().split(/\s+/).pop() ?? "";
+  return /[0-9]/.test(tail) && /\*$/.test(tail) ? maskChars(tail) : "";
+};
+const masksAgree = (ai: string, sk: string) => !ai || !sk || sk.endsWith(ai) || ai.endsWith(sk) || sk.includes(ai);
+
+/**
+ * Nov 12, 2026 audit (109 held progress reports): on 176 of 182 bureau totals that missed the
+ * report's own summary, the AI read MORE accounts than the report lists — a loan read twice at a
+ * page break, a partial row with no status. The text reader, run on the same PDF, matched the
+ * summary on 120 of them. Existing merge rules can't catch these ($0 rows never merge, on purpose).
+ *
+ * Per bureau, only when the text reader's count equals the printed total and the AI's is higher:
+ * every text-reader row is paired with one AI row (same creditor, account numbers that agree; the
+ * best-read AI row first), and rows whose header the text reader could not read pair with any AI
+ * row left. AI rows still unpaired are the extras. They are removed only if that lands exactly on
+ * the printed total, no text-reader row went unpaired, and — when the report prints a balance
+ * total for that bureau — the balance gets no further from it. Otherwise nothing is removed and the
+ * rows come back as suspects for staff.
+ */
+function trimExtraReads(
+  accounts: CreditAccount[],
+  skeletonAccounts: CreditAccount[],
+  summary: PrintedBureauTotals & { perBureau?: Partial<Record<Bureau, { totalAccounts?: number | null; balances?: number | null } | null>> | null },
+): { accounts: CreditAccount[]; trimmed: SuspectedExtraRead[]; suspects: SuspectedExtraRead[] } {
+  let out = accounts;
+  const trimmed: SuspectedExtraRead[] = [];
+  const suspects: SuspectedExtraRead[] = [];
+  for (const b of BUREAUS) {
+    const want = summary.perBureau?.[b]?.totalAccounts;
+    if (typeof want !== "number") continue;
+    const onAi = out.filter((a) => a.bureaus[b]);
+    const onSk = skeletonAccounts.filter((a) => a.bureaus?.[b]);
+    if (onSk.length !== want || onAi.length <= want) continue;
+    const tl = (r: CreditAccount) => r.bureaus[b]!;
+    const isFragment = (r: CreditAccount) => !tl(r).accountStatus && !tl(r).paymentStatus;
+    // Best-read rows pair first, so the leftovers are the fragments / copies.
+    const ranked = [...onAi].sort((x, y) => Number(isFragment(x)) - Number(isFragment(y)) || maskChars(y.mask).length - maskChars(x.mask).length);
+    const free = new Set(ranked);
+    let skeletonUnpaired = 0;
+    const wildcards = onSk.filter(unreadableHeader).length;
+    // Pass 1: same creditor and agreeing account numbers. Pass 2: same creditor only, for the rows
+    // left on both sides (the AI misreads a digit: "5805" for "7805").
+    const namedSk = onSk.filter((x) => !unreadableHeader(x));
+    const skLeft = namedSk.filter((sk) => {
+      const g = creditorKey8(sk.creditor);
+      const m = skeletonMask(sk);
+      const hit = ranked.find((r) => free.has(r) && creditorKey8(r.creditor) === g && masksAgree(maskChars(r.mask), m));
+      if (hit) free.delete(hit);
+      return !hit;
+    });
+    for (const sk of skLeft) {
+      const hit = ranked.find((r) => free.has(r) && creditorKey8(r.creditor) === creditorKey8(sk.creditor));
+      if (hit) free.delete(hit);
+      else skeletonUnpaired++;
+    }
+    // Unreadable headers stand for creditors the text reader never named; those AI rows go first.
+    const named = new Set(namedSk.map((x) => creditorKey8(x.creditor)));
+    for (let n = 0; n < wildcards; n++) {
+      const hit = ranked.find((r) => free.has(r) && !named.has(creditorKey8(r.creditor))) ?? ranked.find((r) => free.has(r));
+      if (hit) free.delete(hit);
+    }
+    const extras = ranked.filter((r) => free.has(r));
+    const describe = (r: CreditAccount): SuspectedExtraRead => ({
+      bureau: b,
+      creditor: r.creditor,
+      mask: r.mask ?? null,
+      balance: r.bureaus[b]?.balance ?? null,
+      dateOpened: r.bureaus[b]?.dateOpened ?? null,
+      fragment: isFragment(r),
+    });
+    if (!extras.length) continue;
+    const printedBalance = summary.perBureau?.[b]?.balances;
+    const sum = (list: CreditAccount[]) => list.reduce((n, a) => n + Math.max(0, a.bureaus[b]?.balance ?? 0), 0);
+    const kept = onAi.filter((r) => !free.has(r));
+    const balanceOk =
+      typeof printedBalance !== "number" || Math.abs(sum(kept) - printedBalance) <= Math.abs(sum(onAi) - printedBalance);
+    if (skeletonUnpaired === 0 && onAi.length - extras.length === want && balanceOk) {
+      trimmed.push(...extras.map(describe));
+      const drop = new Set(extras);
+      out = out
+        .map((a) => {
+          if (!drop.has(a)) return a;
+          const bureaus = { ...a.bureaus };
+          delete bureaus[b];
+          return { ...a, bureaus };
+        })
+        .filter((a) => BUREAUS.some((x) => a.bureaus[x]));
+    } else {
+      suspects.push(...extras.map(describe));
+    }
+  }
+  return { accounts: out, trimmed, suspects };
+}
+
+/** The per-bureau account totals a pull prints about itself (the progress-report pull summary). */
+interface PrintedBureauTotals {
+  perBureau?: Partial<Record<Bureau, { totalAccounts?: number | null } | null>> | null;
+}
+
+/**
+ * Nov 12, 2026 (a client failed the self-check on six rounds in a row): a bureau can really list one
+ * account twice — Equifax printed an Ally card twice (same last 4, same $2,367) and counted both in
+ * its own summary (34 accounts, $34,939). The same-bureau merge rules (written for MyFreeScoreNow
+ * listing one collection under two names) folded them into one, so the read showed 33 and $32,572.
+ * The pull's own per-bureau totals decide: when merging leaves a bureau short of what the report
+ * prints, keep same-bureau twins — only if that is at least as close on every bureau and closer on
+ * a short one. Without a printed total nothing changes.
+ */
+function summaryAwareAccounts(
+  merged: CreditAccount[],
+  keepTwins: () => CreditAccount[],
+  summary: PrintedBureauTotals,
+): CreditAccount[] {
+  const targets: Array<[Bureau, number]> = [];
+  for (const b of BUREAUS) {
+    const want = summary.perBureau?.[b]?.totalAccounts;
+    if (typeof want === "number") targets.push([b, want]);
+  }
+  if (!targets.length) return merged;
+  const count = (list: CreditAccount[], b: Bureau) => list.filter((a) => a.bureaus[b]).length;
+  if (!targets.some(([b, want]) => count(merged, b) < want)) return merged;
+  const kept = keepTwins();
+  const gap = (list: CreditAccount[], b: Bureau, want: number) => Math.abs(count(list, b) - want);
+  const neverWorse = targets.every(([b, want]) => gap(kept, b, want) <= gap(merged, b, want));
+  const closer = targets.some(([b, want]) => count(merged, b) < want && gap(kept, b, want) < gap(merged, b, want));
+  return neverWorse && closer ? kept : merged;
 }
 
 function parseCreditFileExtraction(
@@ -8473,11 +8682,22 @@ function mergeCreditFileParts<F extends CreditFile & { scoreModel?: string | nul
     });
     previous = current.length ? current : previous;
   }
-  const seenQ = new Set<string>();
+  // Neighbouring parts share a page, so an inquiry can be read twice — but a lender can also pull twice
+  // the same day (Nov 12, 2026 audit: the read was one short of the printed total on every such bureau).
+  // Keep as many copies of a date + creditor + bureau as the part that lists it most often has.
+  const qKey = (q: CreditInquiry) => `${String(q.date).trim()}|${creditorKey(q.creditor)}|${q.bureau ?? ""}`;
+  const allowed = new Map<string, number>();
+  for (const p of parts) {
+    const inPart = new Map<string, number>();
+    for (const q of p.file.inquiries) inPart.set(qKey(q), (inPart.get(qKey(q)) ?? 0) + 1);
+    for (const [k, n] of inPart) allowed.set(k, Math.max(allowed.get(k) ?? 0, n));
+  }
+  const usedQ = new Map<string, number>();
   const inquiries = parts.flatMap((p) => p.file.inquiries).filter((q) => {
-    const k = `${String(q.date).trim()}|${creditorKey(q.creditor)}|${q.bureau ?? ""}`;
-    if (seenQ.has(k)) return false;
-    seenQ.add(k);
+    const k = qKey(q);
+    const n = usedQ.get(k) ?? 0;
+    if (n >= (allowed.get(k) ?? 1)) return false;
+    usedQ.set(k, n + 1);
     return true;
   });
   const seenI = new Set<string>();
@@ -12271,11 +12491,21 @@ function pv2AccountKey(a: CreditAccount): string {
   return `${pv2NameKey(a.creditor)}|${pv2Last4(a)}`;
 }
 
-/** Same account: same creditor, and the same last 4 when both have one. */
+/**
+ * "TOYOTAMTR|0001|2019-3" — creditor + last 4 + open month, for the positives-vs-targets check
+ * (Nov 12, 2026 held-report audit: lenders number loans "…0001", so a clean loan and a different late
+ * loan of the same lender looked like one account and held the report).
+ */
+function pv2AccountKeyOpened(a: CreditAccount): string {
+  const d = BUREAUS.map((b) => parseReportDate(a.bureaus[b]?.dateOpened)).find(Boolean);
+  return `${pv2AccountKey(a)}|${d ? `${d.getUTCFullYear()}-${d.getUTCMonth() + 1}` : ""}`;
+}
+
+/** Same account: same creditor, the same last 4 when both have one, and the same open month when both have one. */
 function pv2SameAccountKey(x: string, y: string): boolean {
-  const [nx, lx] = x.split("|");
-  const [ny, ly] = y.split("|");
-  return nx === ny && (!lx || !ly || lx === ly);
+  const [nx, lx, ox] = x.split("|");
+  const [ny, ly, oy] = y.split("|");
+  return nx === ny && (!lx || !ly || lx === ly) && (!ox || !oy || ox === oy);
 }
 
 function pv2Last4(a: CreditAccount): string {
@@ -13126,8 +13356,8 @@ function pv2Diff(rawBefore: CreditFile, rawAfter: CreditFile, lang: Pv2Lang = "e
     utilizationNotes: [...new Set(utilizationNotes)],
     positives: positives.slice(0, 5),
     positivesFlags: { history: opens.length > 0, noCollections: !hasColl && after.publicRecordsReported !== true },
-    positiveAccountKeys: opens.length ? [pv2AccountKey(opens[0].a)] : [],
-    targetAccountKeys: targets.flatMap((t) => (targetSources.has(t) ? [pv2AccountKey(targetSources.get(t)!)] : [])),
+    positiveAccountKeys: opens.length ? [pv2AccountKeyOpened(opens[0].a)] : [],
+    targetAccountKeys: targets.flatMap((t) => (targetSources.has(t) ? [pv2AccountKeyOpened(targetSources.get(t)!)] : [])),
     internal,
     informational,
     byBureau,
@@ -14052,7 +14282,7 @@ function pv2BuildPdfData(opts: {
 type Pv2ReportFormat = "smartcredit" | "identityiq" | "mfsn" | "myfico" | "trimerge";
 
 /** Bump when a summary parser changes: cached summaries from an older parser are re-parsed. */
-const PV2_SUMMARY_PARSER_VERSION = 3;
+const PV2_SUMMARY_PARSER_VERSION = 4; // 4 (Nov 12, 2026): SmartCredit printed inquiries were never read ("TransUnion®"); re-parse cached summaries once.
 
 interface Pv2PullSummary {
   /** Parser that produced this summary (cached copies older than PV2_SUMMARY_PARSER_VERSION are re-parsed). */
@@ -14582,7 +14812,20 @@ function pv2ApplyPrintedLimits<F extends CreditFile>(file: F, summary: Pv2PullSu
       // Both numbers sit inside one printed number of this creditor.
       return printed.some((p) => norm(p.creditor) === norm(a.creditor) && digits(p.mask).includes(own) && digits(p.mask).includes(digits(o.mask)));
     });
-  });
+  })
+    // Nov 12, 2026 (held-report audit: AMEX $9,000 and BANK OF AMERICA $15,000 read twice with the SAME
+    // number; the printed limits table lists each card once): identical copies beyond the number of
+    // printed blocks for that creditor + number are dropped — again only as a candidate (totals must match).
+    .filter((a, i, list) => {
+      // Twins = same creditor and identical data (the AI may misread the number: "9999" for "4999").
+      const twins = list.filter((o) => norm(o.creditor) === norm(a.creditor) && sameData(o, a));
+      if (twins.length < 2) return true;
+      // Printed blocks of that creditor carrying the same limit on every bureau the copy has.
+      const on = BUREAUS.filter((b) => a.bureaus[b]?.creditLimit != null);
+      if (!on.length) return true;
+      const printedBlocks = printed.filter((p) => norm(p.creditor) === norm(a.creditor) && on.every((b) => p.limits[b] === a.bureaus[b]!.creditLimit)).length;
+      return !printedBlocks || twins.indexOf(a) < printedBlocks;
+    });
   // Each base (as read / printed sections / without the duplicate / both), then limits PER BUREAU: a
   // bureau's limits change only when that makes the bureau match (Nov 7, 2026 — a client: a candidate that
   // fixed TransUnion also kept Experian changes that did not fix Experian). A base is used only when no
@@ -14794,6 +15037,8 @@ interface Pv2Check {
   /** null = not applicable (the pull prints no summary for it). */
   pass: boolean | null;
   detail: string;
+  /** account_totals / balances: AI-read rows the text reader did not find, for staff to mark (Nov 12, 2026). */
+  suspects?: Array<{ bureau: Bureau; creditor: string; mask: string | null; balance: number | null; dateOpened: string | null; fragment: boolean; extraction_id: number; side: "before" | "after" }>;
 }
 
 /** Items in two conflicting states on one bureau (REMOVED + still a target). */
@@ -17200,6 +17445,8 @@ async function ensureProgressReads(sessionId: number): Promise<{
   partial: { before: CreditFile | null; after: CreditFile | null };
   /** Round 1 starting point: Before mirrors the After read (one report, one read). */
   startingPoint: boolean;
+  /** Rows the AI read but the text reader did not find, which could not be trimmed safely: staff decide. */
+  suspects: { before: ProgressReadSuspect[]; after: ProgressReadSuspect[] };
 }> {
   const [[session]] = await pool.query<RowDataPacket[]>(
     `SELECT id, case_id, client_id, before_pdf_id, after_pdf_id, before_source, before_reused_from_session_id, created_by_admin_id, options_json
@@ -17218,7 +17465,9 @@ async function ensureProgressReads(sessionId: number): Promise<{
   );
   const parseJson = (v: unknown): CreditFile => (typeof v === "string" ? JSON.parse(v) : v) as CreditFile;
   // Rows read before the report-date fix still carry the print-header date.
-  const parse = (v: unknown, skel?: unknown): CreditFile => normalizeStoredRead(preferSkeletonReportDate(parseJson(v), skel ? parseJson(skel) : null));
+  const parse = (v: unknown, skel?: unknown, summary?: Pv2PullSummary | null, exclusions?: ReadExclusion[]): CreditFile =>
+    normalizeStoredRead(preferSkeletonReportDate(parseJson(v), skel ? parseJson(skel) : null), summary, skel ? parseJson(skel) : null, exclusions);
+  const suspects: { before: ProgressReadSuspect[]; after: ProgressReadSuspect[] } = { before: [], after: [] };
   const out: ProgressReadsStatus = {
     before: { status: "missing", error: null, reused: false },
     after: { status: "missing", error: null, reused: false },
@@ -17305,7 +17554,15 @@ async function ensureProgressReads(sessionId: number): Promise<{
     };
     if (st === "ready" && latest.extracted_json) {
       const summary = await progressPullSummary(latest);
-      const file = pv2ApplyPrintedFacts(withPrintedReportDate(parse(latest.extracted_json, latest.text_skeleton_json), summary), summary);
+      const exclusions = await loadReadExclusions(Number(latest.id));
+      const read = parse(latest.extracted_json, latest.text_skeleton_json, summary, exclusions);
+      const file = pv2ApplyPrintedFacts(withPrintedReportDate(read, summary), summary);
+      const skelFile = latest.text_skeleton_json ? parseJson(latest.text_skeleton_json) : null;
+      if (summary && skelFile?.accounts?.length) {
+        // From the read BEFORE printed-fact repairs: an exclusion is matched against the stored row's own
+        // values (a repaired balance would never match it and the click would silently do nothing).
+        suspects[side] = trimExtraReads(read.accounts, skelFile.accounts, summary).suspects.map((x) => ({ ...x, extraction_id: Number(latest.id), side }));
+      }
       const shortfall = pv2SummaryShortfall(file, summary);
       const incomplete =
         incompleteSmartCreditPrint(file, latest.text_skeleton_json ? parseJson(latest.text_skeleton_json) : null) ??
@@ -17327,7 +17584,25 @@ async function ensureProgressReads(sessionId: number): Promise<{
       confidence[side] = latest.confidence != null ? Number(latest.confidence) : null;
     }
   }
-  return { status: out, before: files.before, after: files.after, hashes, confidence, summaries, partial, startingPoint };
+  return { status: out, before: files.before, after: files.after, hashes, confidence, summaries, partial, startingPoint, suspects };
+}
+
+/** A suspected extra row, tied to the pull it came from (so staff can mark it). */
+type ProgressReadSuspect = SuspectedExtraRead & { extraction_id: number; side: "before" | "after" };
+
+/** Rows staff marked "not a real account" on this pull. */
+async function loadReadExclusions(extractionId: number): Promise<ReadExclusion[]> {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT bureau, creditor, mask, balance, date_opened FROM credit_file_read_exclusions WHERE extraction_id = ? ORDER BY id`,
+    [extractionId],
+  );
+  return rows.map((r) => ({
+    bureau: String(r.bureau) as Bureau,
+    creditor: String(r.creditor),
+    mask: r.mask != null ? String(r.mask) : null,
+    balance: r.balance != null ? Number(r.balance) : null,
+    dateOpened: r.date_opened != null ? String(r.date_opened) : null,
+  }));
 }
 
 /** The report date printed in the report body (any supported layout) wins over the AI read. */
@@ -17391,7 +17666,7 @@ async function loadProgressRoundContext(
     if (!r?.extracted_json) return null;
     const skel = r.text_skeleton_json ? (typeof r.text_skeleton_json === "string" ? JSON.parse(r.text_skeleton_json) : r.text_skeleton_json) : null;
     const summary = await progressPullSummary(r);
-    const file = pv2ApplyPrintedFacts(withPrintedReportDate(normalizeStoredRead(preferSkeletonReportDate(typeof r.extracted_json === "string" ? JSON.parse(r.extracted_json) : r.extracted_json, skel) as CreditFile), summary), summary);
+    const file = pv2ApplyPrintedFacts(withPrintedReportDate(normalizeStoredRead(preferSkeletonReportDate(typeof r.extracted_json === "string" ? JSON.parse(r.extracted_json) : r.extracted_json, skel) as CreditFile, summary, skel), summary), summary);
     // A half-loaded pull is never a comparison base.
     if (incompleteSmartCreditPrint(file, skel) || pv2SummaryShortfall(file, summary)) return null;
     return file;
@@ -17611,6 +17886,14 @@ async function renderProgressReportV2ForSession(
     recordTargets: diff.targets.length,
     startingPoint: reads.startingPoint,
   });
+  // Rows the AI read that the text reader did not find (not safe to trim): staff can mark them.
+  const flip = (x: ProgressReadSuspect): ProgressReadSuspect => (swapped ? { ...x, side: x.side === "before" ? "after" : "before" } : x);
+  const suspects = [...reads.suspects.before, ...reads.suspects.after].map(flip);
+  if (suspects.length) {
+    for (const c of selfCheck.checks) {
+      if ((c.key === "account_totals" || c.key === "balances") && c.pass === false) c.suspects = suspects.filter((x) => c.key === "account_totals" || x.balance);
+    }
+  }
   return {
     buffer,
     fileName: progressReportFileName(data.client.firstName, after.reportDate, roundNumber),
@@ -33036,7 +33319,7 @@ function progressReadVerdictForAi(r: RowDataPacket): { usable_for_progress_repor
     const skel = r.text_skeleton_json ? (typeof r.text_skeleton_json === "string" ? JSON.parse(r.text_skeleton_json) : r.text_skeleton_json) : null;
     const summary = skeletonPullSummary(skel);
     const file = withPrintedReportDate(
-      normalizeStoredRead(preferSkeletonReportDate(typeof r.extracted_json === "string" ? JSON.parse(r.extracted_json) : r.extracted_json, skel) as CreditFile),
+      normalizeStoredRead(preferSkeletonReportDate(typeof r.extracted_json === "string" ? JSON.parse(r.extracted_json) : r.extracted_json, skel) as CreditFile, summary, skel),
       summary,
     );
     const shortfall = pv2SummaryShortfall(file, summary);
@@ -39645,11 +39928,33 @@ async function notifyRoundNoChangeAlert(opts: { clientId: number; roundNumber: n
 // someone opens it): if it now passes it is rebuilt through the normal publish and waits for approval —
 // nobody resets, rebuilds or waits. Still failing → its reasons are refreshed. Nothing is ever sent.
 
+/** Internal-only request marker: a self-heal replacing an earlier held round in place. */
+const SELF_HEAL_IN_PLACE = Symbol("selfHealInPlace");
+
 let reportEngineVersionMemo: string | null = null;
 /** Fingerprint of the code that decides what a report contains: any change → held reports re-check. */
 export function reportEngineVersion(): string {
   reportEngineVersionMemo ??= fnv1a(
-    [pv2SelfCheck, pv2ApplyPrintedFacts, pv2ParsePullSummary, pv2Diff, parseSmartCreditPrintedLimits, parseMfsnPrintedAccounts, normalizeStoredRead, mergeCreditFileParts]
+    [
+      pv2SelfCheck,
+      pv2ApplyPrintedFacts,
+      pv2ParsePullSummary,
+      pv2Diff,
+      parseSmartCreditPrintedLimits,
+      parseMfsnPrintedAccounts,
+      normalizeStoredRead,
+      mergeCreditFileParts,
+      // Nov 12, 2026: the account merge / trim rules decide counts too — a change to them alone must
+      // re-check held reports (they were missing here, so merge-rule fixes never reached held reports).
+      consolidateSplitAccounts,
+      sameRowReadTwice,
+      sameTradeline,
+      summaryAwareAccounts,
+      trimExtraReads,
+      applyReadExclusions,
+      // The text reader feeds the printed facts (inquiries, limits) the repairs and checks rely on.
+      parseSmartCredit,
+    ]
       .map((f) => String(f))
       .join("\n"),
   );
@@ -39693,7 +39998,11 @@ export type SelfHealOutcome = "ready" | "still_held" | "current" | "skipped" | "
  * replaced once the read-only pre-check passes; if the publish then fails, the session is left in Review
  * (exactly where Rebuild leaves it) and the release managers are told.
  */
-export async function selfHealHeldReport(reportId: number, trigger: "deploy" | "opened"): Promise<{ outcome: SelfHealOutcome; reportId?: number; reason?: string }> {
+export async function selfHealHeldReport(
+  reportId: number,
+  trigger: "deploy" | "opened" | "staff_exclusion",
+  opts: { force?: boolean } = {},
+): Promise<{ outcome: SelfHealOutcome; reportId?: number; reason?: string }> {
   const [[r]] = await pool.query<RowDataPacket[]>(
     `SELECT r.id, r.client_id, r.round_number, r.delivery_status, r.wizard_session_id, r.delivery_options_json, r.created_by_admin_id,
             (SELECT MAX(x.round_number) FROM client_round_reports x WHERE x.client_id = r.client_id) AS last_round
@@ -39701,11 +40010,14 @@ export async function selfHealHeldReport(reportId: number, trigger: "deploy" | "
     [reportId],
   );
   if (!r || String(r.delivery_status) !== "needs_review" || !r.wizard_session_id) return { outcome: "skipped" };
-  // Later rounds depend on this one: only the latest round rebuilds itself.
-  if (Number(r.round_number) !== Number(r.last_round)) return { outcome: "skipped", reason: "not_latest_round" };
+  // Nov 12, 2026: an EARLIER round re-checks too (80% of held reports were earlier rounds that could
+  // never clear). It is replaced in place with its own two pulls: same round number, no pipeline move,
+  // no stage sync, no team alerts; later rounds are never touched. Nothing is sent either way.
+  const earlierRound = Number(r.round_number) !== Number(r.last_round);
   const options = parseWizardJsonField<{ notify_client?: boolean; notify_partners?: boolean; engine_version?: string; acknowledged_score_anomalies?: boolean }>(r.delivery_options_json) ?? {};
   const version = reportEngineVersion();
-  if (options.engine_version === version) return { outcome: "current" };
+  // Staff changed the reads themselves (marked a row "not a real account"): same engine, new input.
+  if (options.engine_version === version && !opts.force) return { outcome: "current" };
 
   const sessionId = Number(r.wizard_session_id);
   const session = await loadWizardSession(pool, sessionId);
@@ -39754,6 +40066,7 @@ export async function selfHealHeldReport(reportId: number, trigger: "deploy" | "
         notify_partners: options.notify_partners,
         acknowledge_score_anomalies: options.acknowledged_score_anomalies ?? true,
       },
+      [SELF_HEAL_IN_PLACE]: earlierRound,
     } as unknown as AuthedRequest,
     res,
   );
@@ -39773,15 +40086,27 @@ export async function selfHealHeldReport(reportId: number, trigger: "deploy" | "
   return { outcome: "ready", reportId: Number(out.body.round_report_id) };
 }
 
-/** Every held latest-round report built by an older engine (used right after a deploy). */
-export async function selfHealAllHeldReports(trigger: "deploy" | "opened" = "deploy"): Promise<Record<SelfHealOutcome, number>> {
+/**
+ * Every held report built by an older engine (used right after a deploy). Nov 12, 2026: earlier rounds
+ * re-check too (~5x more reports, each re-reading two PDFs), so the run stops at a time budget under the
+ * function limit and reports what is left; the deploy script calls again. Each report is stamped with the
+ * engine version as it is done, so a second call skips them ("current").
+ */
+export async function selfHealAllHeldReports(
+  trigger: "deploy" | "opened" = "deploy",
+  budgetMs = 600_000,
+): Promise<Record<SelfHealOutcome, number> & { remaining: number }> {
   const [rows] = await pool.query<RowDataPacket[]>(`SELECT id FROM client_round_reports WHERE delivery_status = 'needs_review' ORDER BY id`);
   const tally: Record<SelfHealOutcome, number> = { ready: 0, still_held: 0, current: 0, skipped: 0, failed: 0 };
+  const started = Date.now();
+  let done = 0;
   for (const row of rows) {
+    if (Date.now() - started > budgetMs) break;
     const { outcome } = await selfHealHeldReport(Number(row.id), trigger).catch(() => ({ outcome: "failed" as const }));
     tally[outcome]++;
+    done++;
   }
-  return tally;
+  return { ...tally, remaining: rows.length - done };
 }
 
 /** Who may approve / override / rebuild a round report (language owner or release manager). */
@@ -39790,6 +40115,66 @@ async function roundReportApprover(adminId: number, locale: string) {
   const ownerId = await resolveLanguageOwnerAdminId(lang);
   const isManager = reportReleaseManagerIds().includes(adminId);
   return { canApprove: isManager || adminId === ownerId, isSuper: isManager, lang };
+}
+
+async function excludeReadRowCore(reportId: number, adminId: number, body: Record<string, unknown>): Promise<{ status: number; body: any }> {
+  const extractionId = Number(body.extraction_id);
+  const bureau = String(body.bureau || "");
+  const creditor = String(body.creditor ?? "").trim();
+  if (!reportId || !extractionId || !["TU", "EX", "EQ"].includes(bureau) || !creditor || creditor.length > 255) {
+    return { status: 400, body: { error: "extraction_id, bureau (TU/EX/EQ) and creditor are required" } };
+  }
+  const num = (v: unknown) => (v === null || v === undefined || v === "" ? null : Number.isFinite(Number(v)) ? Number(v) : NaN);
+  const balance = num(body.balance);
+  if (Number.isNaN(balance)) return { status: 400, body: { error: "balance must be a number" } };
+  const mask = body.mask == null || body.mask === "" ? null : String(body.mask).slice(0, 64);
+  const dateOpened = body.date_opened == null || body.date_opened === "" ? null : String(body.date_opened).slice(0, 20);
+  try {
+    const [[r]] = await pool.query<RowDataPacket[]>(
+      `SELECT r.id, r.report_locale, r.delivery_status, r.wizard_session_id FROM client_round_reports r WHERE r.id = ? LIMIT 1`,
+      [reportId],
+    );
+    if (!r) return { status: 404, body: { error: "Report not found" } };
+    if (String(r.delivery_status) !== "needs_review") {
+      return { status: 409, body: { error: "Only a report held by the self-check can be corrected", code: "not_held" } };
+    }
+    const who = await roundReportApprover(adminId, String(r.report_locale));
+    if (!who.canApprove) return { status: 403, body: { error: "Only the report's approver or Cesar can correct it" } };
+    // The pull must belong to this report — never a row on someone else's file.
+    const [[x]] = await pool.query<RowDataPacket[]>(
+      `SELECT id, extracted_json FROM credit_file_extractions WHERE id = ? AND report_wizard_session_id = ? AND purpose IN ('progress_before','progress_after') LIMIT 1`,
+      [extractionId, r.wizard_session_id],
+    );
+    if (!x) return { status: 404, body: { error: "That pull does not belong to this report", code: "wrong_pull" } };
+    const read = typeof x.extracted_json === "string" ? JSON.parse(x.extracted_json) : x.extracted_json;
+    const target: ReadExclusion = { bureau: bureau as Bureau, creditor, mask, balance, dateOpened };
+    // How many stored rows this exclusion can match; never more exclusions than copies (two staff, or a
+    // double click, must not remove a twin that is a real account).
+    const copies = readExclusionMatches((read?.accounts ?? []) as CreditAccount[], target);
+    if (!copies) return { status: 422, body: { error: "That row is not on this pull", code: "row_not_found" } };
+    const [[already]] = await pool.query<RowDataPacket[]>(
+      `SELECT COUNT(*) AS n FROM credit_file_read_exclusions
+       WHERE extraction_id = ? AND bureau = ? AND creditor = ? AND mask <=> ? AND balance <=> ? AND date_opened <=> ?`,
+      [extractionId, bureau, creditor, mask, balance, dateOpened],
+    );
+    if (Number(already?.n ?? 0) >= copies) {
+      return { status: 409, body: { error: "That row is already marked", code: "already_marked" } };
+    }
+    await pool.query(
+      `INSERT INTO credit_file_read_exclusions (extraction_id, bureau, creditor, mask, balance, date_opened, round_report_id, created_by_admin_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [extractionId, bureau, creditor, mask, balance, dateOpened, reportId, adminId],
+    );
+    await pool.query(
+      `INSERT INTO audit_logs (actor_type, actor_id, action, entity_type, entity_id, changes_json, status) VALUES ('admin', ?, 'round_report.exclude_read', 'client_round_report', ?, ?, 'success')`,
+      [adminId, reportId, JSON.stringify({ extraction_id: extractionId, bureau, creditor, mask, balance, date_opened: dateOpened })],
+    ).catch((e) => console.warn("[exclude-read:audit]", e?.message ?? e));
+    const heal = await selfHealHeldReport(reportId, "staff_exclusion", { force: true });
+    return { status: 200, body: { ok: true, outcome: heal.outcome, reason: heal.reason ?? null, round_report_id: heal.reportId ?? reportId } };
+  } catch (e: any) {
+    console.error("[round-report:exclude-read]", e?.message ?? e);
+    return { status: 500, body: { error: "Could not save the correction" } };
+  }
 }
 
 async function rebuildRoundReportCore(reportIdIn: number, adminIdIn: number): Promise<{ status: number; body: any }> {
@@ -80482,6 +80867,9 @@ function buildApp() {
 
   // Named so the self-healing rebuild of held reports publishes through exactly this code (Nov 7, 2026).
   const finalizeWizardSession = async (req: AuthedRequest, res: Response) => {
+      // Set only by the server's own self-heal of an EARLIER held round (never from a request): the
+      // round is replaced in place — no pipeline move, no stage sync, no team alerts (Nov 12, 2026).
+      const inPlaceEarlierRound = (req as AuthedRequest & { [SELF_HEAL_IN_PLACE]?: boolean })[SELF_HEAL_IN_PLACE] === true;
       const sessionId = Number(req.params.id);
       const session = await loadWizardSession(pool, sessionId);
       if (!session) return res.status(404).json({ error: "Session not found" });
@@ -80920,7 +81308,7 @@ function buildApp() {
             [cdnUrl, fileName, iv, tag, roundReportId],
           );
 
-          await advanceCasePipeline(conn, {
+          if (!inPlaceEarlierRound) await advanceCasePipeline(conn, {
             clientId,
             caseId,
             stage: newStage,
@@ -80991,7 +81379,7 @@ function buildApp() {
           }).catch((e: any) => console.error("[report-held-alert]", e?.message ?? e));
         }
 
-        if (progressAlerts.length > 0) {
+        if (progressAlerts.length > 0 && !inPlaceEarlierRound) {
           const clientName =
             `${profile.first_name || ""} ${profile.last_name || ""}`.trim() ||
             `Client #${clientId}`;
@@ -81019,7 +81407,7 @@ function buildApp() {
           );
         }
 
-        notifyRoundAuditAlert({
+        if (!inPlaceEarlierRound) notifyRoundAuditAlert({
           clientId,
           caseId,
           roundNumber,
@@ -81029,7 +81417,7 @@ function buildApp() {
             `Client #${clientId}`,
         }).catch((e: any) => console.error("[round-audit-alert]", e?.message ?? e));
 
-        if (process.env.CRC_SYNC_STAGES !== "false") {
+        if (process.env.CRC_SYNC_STAGES !== "false" && !inPlaceEarlierRound) {
           crcSyncClient(clientId).catch((e) =>
             console.error("[crc:wizard-publish]", e?.message),
           );
@@ -81181,6 +81569,16 @@ function buildApp() {
    */
   app.post("/api/admin/round-reports/:id/rebuild", requireAdmin, denyAffiliateAccess, async (req: AuthedRequest, res) => {
     const out = await rebuildRoundReportCore(Number(req.params.id), Number(req.auth!.id));
+    res.status(out.status).json(out.body);
+  });
+
+  /**
+   * Nov 12, 2026: staff mark an AI-read row "not a real account" (a row read twice, a partial row)
+   * on a held report. Saved on that pull, so every rebuild keeps it; the report then re-checks at
+   * once. Same people as Approve. Nothing is ever sent from here.
+   */
+  app.post("/api/admin/round-reports/:id/exclude-read", requireAdmin, denyAffiliateAccess, async (req: AuthedRequest, res) => {
+    const out = await excludeReadRowCore(Number(req.params.id), Number(req.auth!.id), req.body ?? {});
     res.status(out.status).json(out.body);
   });
 

@@ -444,10 +444,14 @@ async function selfHealHeldReports(): Promise<void> {
     return;
   }
   try {
-    const r = await fetch(`${base}/api/internal/self-heal-held-reports`, { method: "POST", headers: { "x-cron-secret": secret }, signal: AbortSignal.timeout(15 * 60_000) });
-    const body: any = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(body?.error || `HTTP ${r.status}`);
-    console.log(`🩺 Held reports re-checked with the new engine: ${body.ready ?? 0} now pass (waiting for approval), ${body.still_held ?? 0} still held, ${body.skipped ?? 0} waiting on reads.`);
+    // The server stops at a time budget and says how many are left (Nov 12, 2026): call until none are.
+    for (let call = 1; call <= 6; call++) {
+      const r = await fetch(`${base}/api/internal/self-heal-held-reports`, { method: "POST", headers: { "x-cron-secret": secret }, signal: AbortSignal.timeout(15 * 60_000) });
+      const body: any = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body?.error || `HTTP ${r.status}`);
+      console.log(`🩺 Held reports re-checked with the new engine: ${body.ready ?? 0} now pass (waiting for approval), ${body.still_held ?? 0} still held, ${body.skipped ?? 0} waiting on reads${body.remaining ? `, ${body.remaining} left (continuing)` : ""}.`);
+      if (!body.remaining) break;
+    }
   } catch (e) {
     console.warn(`⚠️  Held reports not re-checked after the deploy (${e instanceof Error ? e.message : String(e)}); they re-check when opened.`);
   }

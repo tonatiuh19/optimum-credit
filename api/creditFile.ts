@@ -508,11 +508,12 @@ export function parseSmartCredit(text: string): CreditFile {
       if (/^Creditor Contacts\b/.test(t)) break;
       if (/have matching accounts/i.test(t)) matched = true;
       if (/no matching account/i.test(t)) matched = false;
-      if (
-        /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(t) &&
-        /^(TransUnion|Experian|Equifax)$/.test((lines[i + 2] || "").trim())
-      ) {
-        const bureauName = lines[i + 2].trim();
+      // Nov 12, 2026: SmartCredit prints "TransUnion®" / "Experian®" / "Equifax®" here. The exact-name
+      // match read ZERO inquiries from every such PDF, so the printed-inquiries repair never had a list.
+      const bureauCell = /^(TransUnion|Experian|Equifax)\W*$/.exec((lines[i + 2] || "").trim());
+      // Dates print as "6/1/2026" or (newer layout) "Jun 01, 2026".
+      if ((/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(t) || /^[A-Z][a-z]{2,8}\.? \d{1,2}, \d{4}$/.test(t)) && bureauCell) {
+        const bureauName = bureauCell[1];
         inquiries.push({
           date: t,
           creditor: lines[i + 1].trim(),

@@ -3939,7 +3939,24 @@
     "previewPass": "Self-check passed — after publishing, Approve & send delivers it.",
     "previewFail": "Self-check failed — publishing holds this report from the client.",
     "publishedTitle": "Published — waiting for approval",
-    "publishedBody": "Round {{round}} is saved and the pipeline moved. Nothing was sent: the client sees it once it is approved."
+    "publishedBody": "Round {{round}} is saved and the pipeline moved. Nothing was sent: the client sees it once it is approved.",
+    "suspects": {
+      "title": "{{count}} row(s) the reader may have picked up twice",
+      "hint": "The AI read these rows, but the text reader did not find them on the same PDF and the report's own total says there are fewer accounts. Mark the ones that are not real accounts (a row read twice, a partial row); the report re-checks right away.",
+      "notReal": "Not a real account",
+      "marked": "Marked",
+      "fragment": "partial row",
+      "opened": "opened {{date}}",
+      "side": {
+        "before": "Before report",
+        "after": "After report"
+      },
+      "passesNow": "Saved. The report passes now and is waiting for approval.",
+      "stillHeld": "Saved. The report still has other checks to fix.",
+      "saved": "Saved. The report will re-check shortly.",
+      "savedNotLatest": "Saved. This is not the client's latest round, so it is not rebuilt automatically yet.",
+      "error": "Could not save the correction"
+    }
   },
   "leadInsights": {
     "title": "Credit insights",

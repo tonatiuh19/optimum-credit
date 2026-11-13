@@ -2,7 +2,21 @@ import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
 import api, { formatAxiosError } from "@/lib/api";
 
 /** Spec v1.1 §9 self-check row (pass null = not applicable). */
-export type ReportSelfCheck = { key: string; pass: boolean | null; detail: string };
+export type ReportSelfCheck = { key: string; pass: boolean | null; detail: string; suspects?: SuspectedReadRow[] };
+
+/** An AI-read row the text reader did not find (a row read twice, a partial row): staff decide. */
+export type SuspectedReadRow = {
+  bureau: "TU" | "EX" | "EQ";
+  creditor: string;
+  mask: string | null;
+  balance: number | null;
+  dateOpened: string | null;
+  fragment: boolean;
+  extraction_id: number;
+  side: "before" | "after";
+};
+
+export type ExcludeReadOutcome = "ready" | "still_held" | "current" | "skipped" | "failed";
 
 export type ReportDeliveryStatus = "pending_approval" | "needs_review" | "sending" | "sent" | "silent";
 
@@ -96,10 +110,32 @@ export const rebuildRoundReport = createAsyncThunk("reportApproval/rebuild", asy
   }
 });
 
+/** Marks a suspected row "not a real account" on its pull; the report re-checks at once. */
+export const excludeReadRow = createAsyncThunk(
+  "reportApproval/excludeRead",
+  async ({ reportId, row }: { reportId: number; row: SuspectedReadRow }, { dispatch, rejectWithValue }) => {
+    try {
+      const { data } = await api.post<{ ok: boolean; outcome: ExcludeReadOutcome; reason: string | null; round_report_id: number }>(
+        `/admin/round-reports/${reportId}/exclude-read`,
+        { extraction_id: row.extraction_id, bureau: row.bureau, creditor: row.creditor, mask: row.mask, balance: row.balance, date_opened: row.dateOpened },
+      );
+      void dispatch(fetchPendingReportApprovals());
+      return data;
+    } catch (e) {
+      return rejectWithValue(formatAxiosError(e, "Could not save the correction"));
+    }
+  },
+);
+
 const reportApprovalSlice = createSlice({
   name: "reportApproval",
   initialState,
-  reducers: {},
+  reducers: {
+    /** A held report replaced by a new one (it passed after a correction): show the new one under the old id too. */
+    setApprovalAlias(s, a: { payload: { fromId: number; approval: ReportApproval } }) {
+      s.byId[a.payload.fromId] = a.payload.approval;
+    },
+  },
   extraReducers: (b) => {
     b.addCase(fetchPendingReportApprovals.fulfilled, (s, a) => {
       s.pending = a.payload;
@@ -141,4 +177,5 @@ const reportApprovalSlice = createSlice({
   },
 });
 
+export const { setApprovalAlias } = reportApprovalSlice.actions;
 export default reportApprovalSlice.reducer;

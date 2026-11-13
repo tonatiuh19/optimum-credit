@@ -34,7 +34,13 @@ describe("shared creditor name: clean card in Positives, late card in Targets", 
   const cases: Array<[string, CreditAccount[], boolean]> = [
     ["clean ...8030 oldest, late ...1884 target → no conflict", [clean("****8030"), late("****1884"), other], false],
     ["only the late card exists → never a positive", [late("****1884"), other], false],
-    ["no last 4 on either card → treated as the same account (conservative)", [clean(""), late(""), other], true],
+    // Nov 12, 2026: with no last 4 the PDF tells them apart by open month ("opened 02/2017"), so does the check.
+    ["no last 4 on either card, different open months → two accounts, no conflict", [clean(""), late(""), other], false],
+    [
+      "no last 4 and the same open month → treated as the same account (conservative)",
+      [clean(""), acct("STORE CARD BANK", "", all3(tl({ dateOpened: "02/01/2017", closedDate: "05/01/2025", late30: 3, late60: 1, late90: 1 }))), other],
+      true,
+    ],
   ];
   for (const [name, accounts, conflict] of cases) {
     it(name, () => {

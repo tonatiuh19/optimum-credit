@@ -1977,6 +1977,23 @@ CREATE TABLE IF NOT EXISTS `credit_file_extractions` (
   CONSTRAINT `fk_cfe_admin` FOREIGN KEY (`created_by_admin_id`) REFERENCES `admins`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Staff marked an AI-read row as "not a real account" on one pull + bureau (Nov 12, 2026).
+CREATE TABLE IF NOT EXISTS `credit_file_read_exclusions` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `extraction_id` BIGINT UNSIGNED NOT NULL,
+  `bureau` ENUM('TU','EX','EQ') NOT NULL,
+  `creditor` VARCHAR(255) NOT NULL,
+  `mask` VARCHAR(64) DEFAULT NULL,
+  `balance` DECIMAL(12,2) DEFAULT NULL,
+  `date_opened` VARCHAR(20) DEFAULT NULL,
+  `round_report_id` INT UNSIGNED DEFAULT NULL COMMENT 'Report the staff member was looking at',
+  `created_by_admin_id` INT UNSIGNED NOT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_cfre_extraction` (`extraction_id`),
+  CONSTRAINT `fk_cfre_extraction` FOREIGN KEY (`extraction_id`) REFERENCES `credit_file_extractions`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS `credit_analyses` (
   `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
   `client_id` INT UNSIGNED NOT NULL,

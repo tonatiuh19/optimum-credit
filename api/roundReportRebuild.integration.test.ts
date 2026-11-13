@@ -120,12 +120,19 @@ describe("self-healing held reports (guards — never touches what it must not)"
     await pool.query(`UPDATE client_round_reports SET delivery_options_json = JSON_OBJECT('engine_version', ?) WHERE id = ?`, [reportEngineVersion(), current.reportId]);
     expect((await selfHealHeldReport(current.reportId, "opened")).outcome).toBe("current");
 
+    // Nov 12, 2026: an earlier round is no longer skipped for being earlier — it re-checks in place.
     const later = await publishedRound(6, "silent");
+    expect((await selfHealHeldReport(current.reportId, "deploy")).outcome).toBe("current");
+    await pool.query(`UPDATE client_round_reports SET delivery_options_json = JSON_OBJECT('engine_version', 'old-engine') WHERE id = ?`, [current.reportId]);
+    const [[stageBefore]] = await pool.query<RowDataPacket[]>(`SELECT pipeline_stage FROM credit_repair_cases WHERE id = ?`, [caseId]);
     const r = await selfHealHeldReport(current.reportId, "deploy");
-    expect(r).toMatchObject({ outcome: "skipped" });
-    // Nothing was removed by any of these.
+    expect(r.reason).not.toBe("not_latest_round");
+    expect(r).toMatchObject({ outcome: "skipped", reason: "no_data" }); // fixture session has no report data
+    // Nothing was removed, and the case pipeline did not move.
     const [rows] = await pool.query<RowDataPacket[]>(`SELECT id FROM client_round_reports WHERE id IN (?)`, [[current.reportId, later.reportId]]);
     expect(rows).toHaveLength(2);
+    const [[stageAfter]] = await pool.query<RowDataPacket[]>(`SELECT pipeline_stage FROM credit_repair_cases WHERE id = ?`, [caseId]);
+    expect(stageAfter.pipeline_stage).toBe(stageBefore.pipeline_stage);
   }, 60_000);
 
   it("the engine version is a stable fingerprint of the engine code", async () => {

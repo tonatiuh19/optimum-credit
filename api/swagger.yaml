@@ -9187,6 +9187,43 @@ paths:
           description: Approval status
         "404":
           description: Not found
+  /admin/round-reports/{id}/exclude-read:
+    post:
+      tags: [Admin]
+      summary: Mark an AI-read row as not a real account on a held report
+      description: >-
+        For a report held by the self-check (needs_review). Saves the row on that pull
+        (credit_file_read_exclusions) so every rebuild keeps it, audits it, then re-checks the
+        report at once (self-heal, forced). Same people as Approve. Never sends anything.
+        Returns outcome ready | still_held | current | skipped | failed (reason, e.g. not_latest_round).
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [extraction_id, bureau, creditor]
+              properties:
+                extraction_id: { type: integer }
+                bureau: { type: string, enum: [TU, EX, EQ] }
+                creditor: { type: string }
+                mask: { type: string, nullable: true }
+                balance: { type: number, nullable: true }
+                date_opened: { type: string, nullable: true }
+      responses:
+        "200": { description: "{ ok, outcome, reason, round_report_id }" }
+        "400": { description: Missing or invalid fields }
+        "403": { description: Not the report's approver }
+        "404": { description: Report not found, or the pull does not belong to it (code wrong_pull) }
+        "409": { description: Report is not held (code not_held) }
+        "422": { description: That row is not on the pull (code row_not_found) }
   /admin/round-reports/{id}/rebuild:
     post:
       tags: [Report Wizard]

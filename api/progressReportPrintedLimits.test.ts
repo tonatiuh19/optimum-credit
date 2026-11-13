@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { parseSmartCreditPrintedLimits, type Bureau, type BureauTradeline, type CreditAccount, type CreditFile } from "./creditFile";
-import { pv2ApplyPrintedLimits, pv2ParsePullSummary, type Pv2PullSummary } from "./progressReportV2";
+import { PV2_SUMMARY_PARSER_VERSION, pv2ApplyPrintedLimits, pv2ParsePullSummary, type Pv2PullSummary } from "./progressReportV2";
 
 const row = (...c: string[]) => c.join(" \t");
 const GROUP = "TransUnion® \tExperian® \tEquifax®";
@@ -201,10 +201,11 @@ describe("pv2ApplyPrintedLimits", () => {
     expect(out.accounts.map((a) => a.bureaus.TU!.creditLimit)).toEqual([1000, 1000]);
   });
 
-  it("the summary parser stores printed limits for SmartCredit text (cached reads are re-parsed: v3)", () => {
+  it("the summary parser stores printed limits for SmartCredit text (cached reads from an older parser are re-parsed)", () => {
     const text = `Ultra 4K 3B Report\n${row("12/28/2025", "12/28/2025", "12/28/2025")}\n${report()}`;
     const s = pv2ParsePullSummary(text);
-    expect(s).toMatchObject({ parserVersion: 3, format: "smartcredit" });
+    expect(s).toMatchObject({ parserVersion: PV2_SUMMARY_PARSER_VERSION, format: "smartcredit" });
+    expect(PV2_SUMMARY_PARSER_VERSION).toBe(4); // 4: printed inquiries ("TransUnion®") — Nov 12, 2026
     expect(s!.printedLimits).toHaveLength(6);
   });
 });
@@ -673,5 +674,49 @@ describe("a client (Nov 7, 2026): repairs stay one-to-one and per bureau", () =>
     expect(storedReadIsShort({ accounts: [], printedRepairs: ["x"] }, null)).toBe(true);
     expect(storedReadIsShort({ accounts: [], printedRepairs: ["x"] }, summary({}))).toBe(true);
     expect(storedReadIsShort({ accounts: [] }, null)).toBe(false);
+  });
+});
+
+describe("a card read twice with the same (or a misread) number (Nov 12, 2026 held-report audit)", () => {
+  const amex = (mask: string, limit = 9000) => acct("AMEX", mask, { EQ: tl({ creditLimit: limit, balance: 0, dateOpened: "02/01/2018" }) });
+  const jp = acct("JPMCB CARD", "1111", { EQ: tl({ creditLimit: 23500, balance: 0, dateOpened: "01/01/2015" }) });
+
+  it("the printed table lists the card once → the extra identical copy is dropped (misread number too)", () => {
+    const printed = [
+      { creditor: "AMEX", mask: "-34999****", limits: { EQ: 9000 }, section: "revolving" as const },
+      { creditor: "JPMCB CARD", mask: "1111****", limits: { EQ: 23500 }, section: "revolving" as const },
+    ];
+    const out = pv2ApplyPrintedLimits(file([amex("4999"), amex("9999"), jp]), summary({ EQ: 32500 }, printed));
+    expect(out.accounts.filter((a) => a.creditor === "AMEX")).toHaveLength(1);
+  });
+
+  it("same number and data, no number at all (BANK OF AMERICA ****): one copy dropped on each bureau it shows", () => {
+    const boa = () => acct("BANK OF AMERICA", null, { TU: tl({ creditLimit: 15000, balance: 0, dateOpened: "02/01/2016" }), EX: tl({ creditLimit: 15000, balance: 0, dateOpened: "02/01/2016" }) });
+    const printed = [{ creditor: "BANK OF AMERICA", mask: "****", limits: { TU: 15000, EX: 15000 }, section: "revolving" as const }];
+    const out = pv2ApplyPrintedLimits(file([boa(), boa()]), summary({ TU: 15000, EX: 15000 }, printed));
+    expect(out.accounts).toHaveLength(1);
+  });
+
+  it("two printed blocks with that limit → both copies are real and stay", () => {
+    const printed = [
+      { creditor: "AMEX", mask: "4999****", limits: { EQ: 9000 }, section: "revolving" as const },
+      { creditor: "AMEX", mask: "7777****", limits: { EQ: 9000 }, section: "revolving" as const },
+    ];
+    const read = file([amex("4999"), amex("7777")]);
+    expect(pv2ApplyPrintedLimits(read, summary({ EQ: 9000 }, printed)).accounts).toHaveLength(2);
+  });
+
+  it("dropping the copy would not make the totals match → nothing changes", () => {
+    const printed = [{ creditor: "AMEX", mask: "-34999****", limits: { EQ: 9000 }, section: "revolving" as const }];
+    const read = file([amex("4999"), amex("9999")]);
+    expect(pv2ApplyPrintedLimits(read, summary({ EQ: 50000 }, printed))).toBe(read);
+  });
+
+  it("copies whose data differ (balance) are two accounts, never dropped", () => {
+    const printed = [{ creditor: "AMEX", mask: "-34999****", limits: { EQ: 9000 }, section: "revolving" as const }];
+    const a = amex("4999");
+    const b = acct("AMEX", "9999", { EQ: tl({ creditLimit: 9000, balance: 120, dateOpened: "02/01/2018" }) });
+    const read = file([a, b]);
+    expect(pv2ApplyPrintedLimits(read, summary({ EQ: 9000 }, printed))).toBe(read);
   });
 });

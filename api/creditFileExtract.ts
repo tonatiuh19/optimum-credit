@@ -486,7 +486,10 @@ function sameRowReadTwice(o: CreditAccount, a: CreditAccount): boolean {
   });
 }
 
-export function consolidateSplitAccounts(accounts: CreditAccount[]): CreditAccount[] {
+export function consolidateSplitAccounts(
+  accounts: CreditAccount[],
+  opts: { keepSameBureauTwins?: boolean } = {},
+): CreditAccount[] {
   const out: CreditAccount[] = [];
   const bal = (a: CreditAccount) => BUREAUS.map((b) => a.bureaus[b]?.balance).find((v) => v !== null && v !== undefined) ?? null;
   const last4 = (a: CreditAccount) => {
@@ -502,13 +505,14 @@ export function consolidateSplitAccounts(accounts: CreditAccount[]): CreditAccou
             if (last4(o) !== k || bal(o) !== b) return false;
             const shared = BUREAUS.filter((x) => o.bureaus[x] && a.bureaus[x]);
             if (!shared.length) return true;
+            if (opts.keepSameBureauTwins) return false;
             // Same bureau twice (MyFreeScoreNow, a client Oct 26): one collection listed under the collector's
             // name and again under its client's name — same last 4, same balance, collection on both.
             return shared.every(
               (x) => isCollectionTl(o.bureaus[x]!) && isCollectionTl(a.bureaus[x]!) && o.bureaus[x]!.balance === a.bureaus[x]!.balance,
             );
           })
-        : undefined) ?? out.find((o) => sameTradeline(o, a, last4) || sameRowReadTwice(o, a));
+        : undefined) ?? out.find((o) => sameTradeline(o, a, last4) || (!opts.keepSameBureauTwins && sameRowReadTwice(o, a)));
     if (!twin) {
       out.push(a);
       continue;
@@ -530,9 +534,213 @@ export function consolidateSplitAccounts(accounts: CreditAccount[]): CreditAccou
  * Stored reads get today's account merge rules too (reads saved before a rule existed keep
  * duplicates otherwise). Per-bureau layouts only; tri-merge rows are never merged.
  */
-export function normalizeStoredRead<F extends CreditFile>(file: F): F {
+export function normalizeStoredRead<F extends CreditFile>(
+  file: F,
+  summary?: PrintedBureauTotals | null,
+  skeleton?: Pick<CreditFile, "accounts"> | null,
+  exclusions?: ReadExclusion[] | null,
+): F {
   if (!file?.accounts || file.reportFormat === "merged") return file;
-  return { ...file, accounts: consolidateSplitAccounts(file.accounts.map((a) => ({ ...a, bureaus: { ...a.bureaus } }))) };
+  const base = exclusions?.length ? applyReadExclusions(file.accounts, exclusions) : file.accounts;
+  const copy = () => base.map((a) => ({ ...a, bureaus: { ...a.bureaus } }));
+  let accounts = consolidateSplitAccounts(copy());
+  if (summary) accounts = summaryAwareAccounts(accounts, () => consolidateSplitAccounts(copy(), { keepSameBureauTwins: true }), summary);
+  if (summary && skeleton?.accounts?.length) accounts = trimExtraReads(accounts, skeleton.accounts, summary).accounts;
+  return { ...file, accounts };
+}
+
+/** A row staff marked "not a real account" on one bureau of one pull. */
+export interface ReadExclusion {
+  bureau: Bureau;
+  creditor: string;
+  mask: string | null;
+  balance: number | null;
+  dateOpened: string | null;
+}
+
+const sameAmount = (x: number | null | undefined, y: number | null | undefined) =>
+  (x ?? null) === null || (y ?? null) === null ? (x ?? null) === (y ?? null) : Math.abs(Number(x) - Number(y)) < 0.005;
+
+/**
+ * Removes each excluded row from its bureau — one row per exclusion, matched on creditor, number,
+ * balance and open date, so a twin that is a real account stays. An account left with no bureau
+ * is dropped. Rows that no longer match (a later re-read) are simply not found.
+ */
+const exclusionFits = (a: CreditAccount, x: ReadExclusion) =>
+  !!a.bureaus[x.bureau] &&
+  a.creditor === x.creditor &&
+  // The merge step may give a row its twin's number: fragments that agree count ("1" / "1234").
+  masksAgreeLoose(a.mask, x.mask) &&
+  sameAmount(a.bureaus[x.bureau]!.balance, x.balance) &&
+  (a.bureaus[x.bureau]!.dateOpened ?? null) === (x.dateOpened ?? null);
+
+function masksAgreeLoose(p: string | null | undefined, q: string | null | undefined): boolean {
+  const a = String(p ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const b = String(q ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return a === b || (!!a && !!b && (a.endsWith(b) || b.endsWith(a)));
+}
+
+/** How many stored rows one exclusion can match (the cap on how many times it may be saved). */
+export function readExclusionMatches(accounts: CreditAccount[], x: ReadExclusion): number {
+  return accounts.filter((a) => exclusionFits(a, x)).length;
+}
+
+export function applyReadExclusions(accounts: CreditAccount[], exclusions: ReadExclusion[]): CreditAccount[] {
+  let out = accounts.map((a) => ({ ...a, bureaus: { ...a.bureaus } }));
+  for (const x of exclusions) {
+    // Exact number first, then an agreeing fragment.
+    const hit = out.find((a) => exclusionFits(a, x) && (a.mask ?? null) === (x.mask ?? null)) ?? out.find((a) => exclusionFits(a, x));
+    if (hit) delete hit.bureaus[x.bureau];
+  }
+  out = out.filter((a) => BUREAUS.some((b) => a.bureaus[b]));
+  return out;
+}
+
+/** One account row on one bureau that the AI read but the text reader did not find. */
+export interface SuspectedExtraRead {
+  bureau: Bureau;
+  creditor: string;
+  mask: string | null;
+  balance: number | null;
+  dateOpened: string | null;
+  /** Fragment = the row has no account or payment status (a piece of a page-broken block). */
+  fragment: boolean;
+}
+
+const creditorKey8 = (creditor: string) => String(creditor || "").toUpperCase().replace(/[^A-Z0-9]+/g, "").slice(0, 8);
+/** Visible account-number characters (the text reader prints leading digits, the AI the last ones). */
+const maskChars = (m: string | null | undefined) => String(m ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+const unreadableHeader = (a: CreditAccount) => /^\(unreadable/i.test(String(a.creditor || "").trim());
+/** The text reader sometimes folds the number into the creditor name ("AFFIRM INC C0YEQM*"). */
+const skeletonMask = (a: CreditAccount) => {
+  const m = maskChars(a.mask);
+  if (m) return m;
+  const tail = String(a.creditor || "").trim().split(/\s+/).pop() ?? "";
+  return /[0-9]/.test(tail) && /\*$/.test(tail) ? maskChars(tail) : "";
+};
+const masksAgree = (ai: string, sk: string) => !ai || !sk || sk.endsWith(ai) || ai.endsWith(sk) || sk.includes(ai);
+
+/**
+ * Nov 12, 2026 audit (109 held progress reports): on 176 of 182 bureau totals that missed the
+ * report's own summary, the AI read MORE accounts than the report lists — a loan read twice at a
+ * page break, a partial row with no status. The text reader, run on the same PDF, matched the
+ * summary on 120 of them. Existing merge rules can't catch these ($0 rows never merge, on purpose).
+ *
+ * Per bureau, only when the text reader's count equals the printed total and the AI's is higher:
+ * every text-reader row is paired with one AI row (same creditor, account numbers that agree; the
+ * best-read AI row first), and rows whose header the text reader could not read pair with any AI
+ * row left. AI rows still unpaired are the extras. They are removed only if that lands exactly on
+ * the printed total, no text-reader row went unpaired, and — when the report prints a balance
+ * total for that bureau — the balance gets no further from it. Otherwise nothing is removed and the
+ * rows come back as suspects for staff.
+ */
+export function trimExtraReads(
+  accounts: CreditAccount[],
+  skeletonAccounts: CreditAccount[],
+  summary: PrintedBureauTotals & { perBureau?: Partial<Record<Bureau, { totalAccounts?: number | null; balances?: number | null } | null>> | null },
+): { accounts: CreditAccount[]; trimmed: SuspectedExtraRead[]; suspects: SuspectedExtraRead[] } {
+  let out = accounts;
+  const trimmed: SuspectedExtraRead[] = [];
+  const suspects: SuspectedExtraRead[] = [];
+  for (const b of BUREAUS) {
+    const want = summary.perBureau?.[b]?.totalAccounts;
+    if (typeof want !== "number") continue;
+    const onAi = out.filter((a) => a.bureaus[b]);
+    const onSk = skeletonAccounts.filter((a) => a.bureaus?.[b]);
+    if (onSk.length !== want || onAi.length <= want) continue;
+    const tl = (r: CreditAccount) => r.bureaus[b]!;
+    const isFragment = (r: CreditAccount) => !tl(r).accountStatus && !tl(r).paymentStatus;
+    // Best-read rows pair first, so the leftovers are the fragments / copies.
+    const ranked = [...onAi].sort((x, y) => Number(isFragment(x)) - Number(isFragment(y)) || maskChars(y.mask).length - maskChars(x.mask).length);
+    const free = new Set(ranked);
+    let skeletonUnpaired = 0;
+    const wildcards = onSk.filter(unreadableHeader).length;
+    // Pass 1: same creditor and agreeing account numbers. Pass 2: same creditor only, for the rows
+    // left on both sides (the AI misreads a digit: "5805" for "7805").
+    const namedSk = onSk.filter((x) => !unreadableHeader(x));
+    const skLeft = namedSk.filter((sk) => {
+      const g = creditorKey8(sk.creditor);
+      const m = skeletonMask(sk);
+      const hit = ranked.find((r) => free.has(r) && creditorKey8(r.creditor) === g && masksAgree(maskChars(r.mask), m));
+      if (hit) free.delete(hit);
+      return !hit;
+    });
+    for (const sk of skLeft) {
+      const hit = ranked.find((r) => free.has(r) && creditorKey8(r.creditor) === creditorKey8(sk.creditor));
+      if (hit) free.delete(hit);
+      else skeletonUnpaired++;
+    }
+    // Unreadable headers stand for creditors the text reader never named; those AI rows go first.
+    const named = new Set(namedSk.map((x) => creditorKey8(x.creditor)));
+    for (let n = 0; n < wildcards; n++) {
+      const hit = ranked.find((r) => free.has(r) && !named.has(creditorKey8(r.creditor))) ?? ranked.find((r) => free.has(r));
+      if (hit) free.delete(hit);
+    }
+    const extras = ranked.filter((r) => free.has(r));
+    const describe = (r: CreditAccount): SuspectedExtraRead => ({
+      bureau: b,
+      creditor: r.creditor,
+      mask: r.mask ?? null,
+      balance: r.bureaus[b]?.balance ?? null,
+      dateOpened: r.bureaus[b]?.dateOpened ?? null,
+      fragment: isFragment(r),
+    });
+    if (!extras.length) continue;
+    const printedBalance = summary.perBureau?.[b]?.balances;
+    const sum = (list: CreditAccount[]) => list.reduce((n, a) => n + Math.max(0, a.bureaus[b]?.balance ?? 0), 0);
+    const kept = onAi.filter((r) => !free.has(r));
+    const balanceOk =
+      typeof printedBalance !== "number" || Math.abs(sum(kept) - printedBalance) <= Math.abs(sum(onAi) - printedBalance);
+    if (skeletonUnpaired === 0 && onAi.length - extras.length === want && balanceOk) {
+      trimmed.push(...extras.map(describe));
+      const drop = new Set(extras);
+      out = out
+        .map((a) => {
+          if (!drop.has(a)) return a;
+          const bureaus = { ...a.bureaus };
+          delete bureaus[b];
+          return { ...a, bureaus };
+        })
+        .filter((a) => BUREAUS.some((x) => a.bureaus[x]));
+    } else {
+      suspects.push(...extras.map(describe));
+    }
+  }
+  return { accounts: out, trimmed, suspects };
+}
+
+/** The per-bureau account totals a pull prints about itself (the progress-report pull summary). */
+export interface PrintedBureauTotals {
+  perBureau?: Partial<Record<Bureau, { totalAccounts?: number | null } | null>> | null;
+}
+
+/**
+ * Nov 12, 2026 (a client failed the self-check on six rounds in a row): a bureau can really list one
+ * account twice — Equifax printed an Ally card twice (same last 4, same $2,367) and counted both in
+ * its own summary (34 accounts, $34,939). The same-bureau merge rules (written for MyFreeScoreNow
+ * listing one collection under two names) folded them into one, so the read showed 33 and $32,572.
+ * The pull's own per-bureau totals decide: when merging leaves a bureau short of what the report
+ * prints, keep same-bureau twins — only if that is at least as close on every bureau and closer on
+ * a short one. Without a printed total nothing changes.
+ */
+export function summaryAwareAccounts(
+  merged: CreditAccount[],
+  keepTwins: () => CreditAccount[],
+  summary: PrintedBureauTotals,
+): CreditAccount[] {
+  const targets: Array<[Bureau, number]> = [];
+  for (const b of BUREAUS) {
+    const want = summary.perBureau?.[b]?.totalAccounts;
+    if (typeof want === "number") targets.push([b, want]);
+  }
+  if (!targets.length) return merged;
+  const count = (list: CreditAccount[], b: Bureau) => list.filter((a) => a.bureaus[b]).length;
+  if (!targets.some(([b, want]) => count(merged, b) < want)) return merged;
+  const kept = keepTwins();
+  const gap = (list: CreditAccount[], b: Bureau, want: number) => Math.abs(count(list, b) - want);
+  const neverWorse = targets.every(([b, want]) => gap(kept, b, want) <= gap(merged, b, want));
+  const closer = targets.some(([b, want]) => count(merged, b) < want && gap(kept, b, want) < gap(merged, b, want));
+  return neverWorse && closer ? kept : merged;
 }
 
 export function parseCreditFileExtraction(
@@ -1147,11 +1355,22 @@ export function mergeCreditFileParts<F extends CreditFile & { scoreModel?: strin
     });
     previous = current.length ? current : previous;
   }
-  const seenQ = new Set<string>();
+  // Neighbouring parts share a page, so an inquiry can be read twice — but a lender can also pull twice
+  // the same day (Nov 12, 2026 audit: the read was one short of the printed total on every such bureau).
+  // Keep as many copies of a date + creditor + bureau as the part that lists it most often has.
+  const qKey = (q: CreditInquiry) => `${String(q.date).trim()}|${creditorKey(q.creditor)}|${q.bureau ?? ""}`;
+  const allowed = new Map<string, number>();
+  for (const p of parts) {
+    const inPart = new Map<string, number>();
+    for (const q of p.file.inquiries) inPart.set(qKey(q), (inPart.get(qKey(q)) ?? 0) + 1);
+    for (const [k, n] of inPart) allowed.set(k, Math.max(allowed.get(k) ?? 0, n));
+  }
+  const usedQ = new Map<string, number>();
   const inquiries = parts.flatMap((p) => p.file.inquiries).filter((q) => {
-    const k = `${String(q.date).trim()}|${creditorKey(q.creditor)}|${q.bureau ?? ""}`;
-    if (seenQ.has(k)) return false;
-    seenQ.add(k);
+    const k = qKey(q);
+    const n = usedQ.get(k) ?? 0;
+    if (n >= (allowed.get(k) ?? 1)) return false;
+    usedQ.set(k, n + 1);
     return true;
   });
   const seenI = new Set<string>();

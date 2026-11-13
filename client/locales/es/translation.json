@@ -3908,7 +3908,24 @@
     "previewPass": "Revisión aprobada — después de publicar, Aprobar y enviar lo entrega.",
     "previewFail": "La revisión falló — al publicar, el informe queda retenido para el cliente.",
     "publishedTitle": "Publicado — esperando aprobación",
-    "publishedBody": "La ronda {{round}} quedó guardada y el pipeline avanzó. No se envió nada: el cliente lo verá cuando se apruebe."
+    "publishedBody": "La ronda {{round}} quedó guardada y el pipeline avanzó. No se envió nada: el cliente lo verá cuando se apruebe.",
+    "suspects": {
+      "title": "{{count}} fila(s) que el lector pudo haber leído dos veces",
+      "hint": "La IA leyó estas filas, pero el lector de texto no las encontró en el mismo PDF y el total del propio reporte indica menos cuentas. Marca las que no son cuentas reales (una fila leída dos veces, una fila incompleta); el reporte se revisa de nuevo al instante.",
+      "notReal": "No es una cuenta real",
+      "marked": "Marcada",
+      "fragment": "fila incompleta",
+      "opened": "abierta {{date}}",
+      "side": {
+        "before": "Reporte anterior",
+        "after": "Reporte nuevo"
+      },
+      "passesNow": "Guardado. El reporte ya pasa y está esperando aprobación.",
+      "stillHeld": "Guardado. El reporte aún tiene otras revisiones por corregir.",
+      "saved": "Guardado. El reporte se revisará de nuevo en breve.",
+      "savedNotLatest": "Guardado. Esta no es la ronda más reciente del cliente, así que todavía no se reconstruye automáticamente.",
+      "error": "No se pudo guardar la corrección"
+    }
   },
   "leadInsights": {
     "title": "Datos de credito",
