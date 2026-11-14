@@ -503,9 +503,20 @@ export function consolidateSplitAccounts(
       (k && b !== null && b > 0
         ? out.find((o) => {
             if (last4(o) !== k || bal(o) !== b) return false;
+            // Nov 13, 2026 (Cesar — Credit One + LVNV, both ...0730 / $732): an original creditor and the
+            // debt buyer that bought the debt are two tradelines (double reporting is a dispute point),
+            // never one account. A tradeline is creditor + section + last 4, not last 4 alone.
+            const sameName = sameCreditorName(o.creditor, a.creditor);
+            // One is the original credit account (a card / loan with its own limit or late history), the
+            // other a collection of that debt → two tradelines, whatever the bureaus print.
+            if (!sameName && originalCreditAccount(o) !== originalCreditAccount(a)) return false;
             const shared = BUREAUS.filter((x) => o.bureaus[x] && a.bureaus[x]);
-            if (!shared.length) return true;
+            // Split across bureau rows: same name, two collection listings of one item (MyFreeScoreNow lists
+            // a collection under the agency AND its client), or a bureau's own spelling in the same section.
+            if (!shared.length) return sameName || !originalCreditAccount(o) || o.section === a.section;
             if (opts.keepSameBureauTwins) return false;
+            // The same bureau twice under different names: only two collection listings of one item.
+            if (!sameName && originalCreditAccount(o)) return false;
             // Same bureau twice (MyFreeScoreNow, a client Oct 26): one collection listed under the collector's
             // name and again under its client's name — same last 4, same balance, collection on both.
             return shared.every(
@@ -520,14 +531,40 @@ export function consolidateSplitAccounts(
     for (const x of BUREAUS) if (a.bureaus[x] && !twin.bureaus[x]) twin.bureaus[x] = a.bureaus[x];
     // The row that has the account number keeps it.
     if (!last4(twin) && k) twin.mask = a.mask;
-    // Keep the collector's name and the collection section; remember the other name.
+    // Keep the collection section when either row is one.
     const aIsColl = a.section === "collection" || /collection/i.test(BUREAUS.map((x) => a.bureaus[x]?.accountStatus ?? "").join(" "));
     if (aIsColl && twin.section !== "collection") twin.section = a.section === "collection" ? "collection" : twin.section;
-    if (twin.creditor.toLowerCase() !== a.creditor.toLowerCase() && !twin.headerStatus) {
-      twin.headerStatus = `Original creditor: ${a.creditor}`;
-    }
+    // Nov 13, 2026: no "Original creditor: <other row's name>" is invented here any more — merged rows are
+    // the same furnisher (or the same section under a bureau's own spelling), so neither is the other's
+    // original creditor. That label came out backwards (Credit One "orig. Lvnv Funding").
   }
   return out;
+}
+
+/** Same furnisher name, allowing a bureau's shortened spelling ("ALLY CREDI" / "ALLY CREDIT CARD/CWS"). */
+export function sameCreditorName(x: string, y: string): boolean {
+  const a = creditorKey(x);
+  const b = creditorKey(y);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  return short.length >= 5 && long.startsWith(short);
+}
+
+/**
+ * The original credit account (a card or loan the consumer opened), as opposed to a collection listing:
+ * a revolving / mortgage section, a credit limit, or a 30-180 day late history. A debt buyer's row
+ * (limit $0, "CO" cells only, filed as Installment / Other) is not one.
+ */
+function originalCreditAccount(a: CreditAccount): boolean {
+  if (a.section === "collection") return false;
+  if (a.section === "revolving" || a.section === "mortgage") return true;
+  return BUREAUS.some((x) => {
+    const t = a.bureaus[x];
+    if (!t) return false;
+    if ((t.creditLimit ?? 0) > 0) return true;
+    return (t.gridMarks ?? []).some((m) => /:(30|60|90|120|150|180)$/.test(m)) || (t.late30 ?? 0) + (t.late60 ?? 0) + (t.late90 ?? 0) > 0;
+  });
 }
 
 /**

@@ -133,6 +133,7 @@ function analysisLabels(lang: "en" | "es") {
     issue: es ? "Estado / problema" : "Status / issue",
     legal: es ? "Base legal" : "Legal basis",
     noneOnFile: es ? "Nada en el archivo." : "None on file.",
+    escalateIfVerified: es ? "Escalar si la Ronda 3 se verifica." : "Escalate if Round 3 is verified.",
     inquiry: es ? "Consulta" : "Inquiry",
     moreInquiries: (n: number) => (es ? `${n} consultas mas (lista completa en el sistema)` : `${n} more inquiries (full list on file)`),
     inquiryDispute: es ? "Sin proposito permitido verificado" : "No verified permissible purpose",
@@ -867,12 +868,25 @@ async function renderAnalysisPdf(
   if (data.reportFormat === "merged") f.paragraph(L.lenderWindow, 7.2, OFG_PDF.muted);
   for (const r of [2, 3, 4] as const) {
     f.subhead(L.roundTitle(r));
+    // Compact (dense files): escalations are one line under the table instead of one row each.
+    const escalations = data.negatives.filter((n) => n.escalationRound === r && n.round !== r && !n.hold);
     const rows = data.negatives
-      .filter((n) => n.round === r && !n.hold)
+      // Nov 13, 2026: a Round 3 charge-off with Round 4 as its escalation shows in both tables.
+      .filter((n) => (n.round === r || (n.escalationRound === r && !compact)) && !n.hold)
       // v2.4 #5: Type = the account type from the source; the issue stays in Status / issue.
-      .map((n) => [`${n.creditor}${n.mask ? ` ...${n.mask}` : ""}`, n.accountType ? L.acctType(n.accountType) : L.kind(n.kind), bureauLabel(n.bureaus, n.bureausNotItemized, L), clip(issueText(n, L), 120), n.legalBasis]);
+      .map((n) => [
+        `${n.creditor}${n.mask ? ` ...${n.mask}` : ""}`,
+        n.accountType ? L.acctType(n.accountType) : L.kind(n.kind),
+        bureauLabel(n.bureaus, n.bureausNotItemized, L),
+        // The escalation row stays short (the issues are in its Round 3 row above): what escalates, how much.
+        n.round !== r ? `${L.escalateIfVerified} ${L.kind(n.kind)}${n.balance ? ` ${pdfMoney(n.balance)}` : ""}` : clip(issueText(n, L), 120),
+        n.round !== r ? "FCRA §611, §623" : n.legalBasis,
+      ]);
     if (rows.length) f.table(head, rows, widths, { size: T });
-    else f.paragraph(L.noneOnFile, 8, OFG_PDF.muted);
+    else if (!(compact && escalations.length)) f.paragraph(L.noneOnFile, 8, OFG_PDF.muted);
+    if (compact && escalations.length) {
+      f.paragraph(`${L.escalateIfVerified} ${escalations.map((n) => `${n.creditor}${n.mask ? ` ...${n.mask}` : ""}${n.balance ? ` (${pdfMoney(n.balance)})` : ""}`).join(", ")}`, 7.6, OFG_PDF.muted);
+    }
   }
   if ((data.informational ?? []).length) {
     f.subhead(L.informational);
@@ -900,7 +914,7 @@ async function renderAnalysisPdf(
         n.accountType ? L.acctType(n.accountType) : L.kind(n.kind),
         bureauLabel(n.bureaus, n.bureausNotItemized, L),
         pdfMoney(n.balance),
-        n.hold ? "--" : `R${n.round}`,
+        n.hold ? "--" : n.escalationRound ? `R${n.round} / R${n.escalationRound}` : `R${n.round}`,
       ]),
       [0.14, 0.3, 0.15, 0.15, 0.13, 0.13],
       { size: T },
@@ -1195,7 +1209,7 @@ export function actionPlan(data: CreditAnalysisData, es: boolean): string[] {
     });
   }
   for (const r of [2, 3, 4] as const) {
-    const items = data.negatives.filter((n) => n.round === r && !n.hold);
+    const items = data.negatives.filter((n) => (n.round === r || n.escalationRound === r) && !n.hold);
     if (items.length) rounds.push({ label: [r], what: [names(items)] });
   }
   // Spec v2.3 P0-7: no step tells the client to pay, pay down or pay off a balance — the last step is the AU line.
@@ -1374,7 +1388,7 @@ export async function generateProgressEnhancementPdf(
         `${n.creditor} - ${P.kind(n.kind)}`,
         n.bureaus.join(" / "),
         `${n.status}${n.balance !== null ? `, ${pdfMoney(n.balance)}` : ""}`,
-        n.hold ? `HOLD > R${n.round}` : `R${n.round}`,
+        n.hold ? `HOLD > R${n.round}` : n.escalationRound ? `R${n.round} / R${n.escalationRound}` : `R${n.round}`,
       ]),
       [0.36, 0.16, 0.36, 0.12],
     );

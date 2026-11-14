@@ -155,7 +155,9 @@ describe("format specifics (checked against each source PDF)", () => {
     expect(a.scores).toEqual({ TU: 510, EX: 545, EQ: 559 });
     expect(a.middleScore).toBe(545);
     expect(a.escrow.active).toBe(false);
-    expect(a.negatives.find((n) => n.kind === "charge_off")?.round).toBe(4);
+    // Nov 13, 2026: Round 4, or Round 3 with Round 4 as escalation when the bureaus conflict.
+    const co = a.negatives.find((n) => n.kind === "charge_off")!;
+    expect(co.round === 4 || (co.round === 3 && co.escalationRound === 4)).toBe(true);
     expect(a.negatives.some((n) => n.hold)).toBe(true);
     expect(a.programTier).toBe("standard");
   });

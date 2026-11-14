@@ -10,11 +10,14 @@ describe("buildCreditAnalysis (Ledesma-style file)", () => {
     expect(a.warnings.join(" ")).toMatch(/EQ returned no score/);
   });
 
-  it("assigns rounds by item type (Spec v2.1 §5): collections R2, charge-offs R4 (inconsistent or not)", () => {
+  // Nov 13, 2026 (Cesar): a charge-off with bureau conflicts is worked in Round 3 first, Round 4 as escalation.
+  it("assigns rounds by item type: collections R2; charge-offs R4, or R3 → R4 when the bureaus conflict", () => {
     const by = Object.fromEntries(a.negatives.map((n) => [n.creditor, n]));
     expect(by["LEAFY FINANCIAL"].round).toBe(2);
     expect(by["LEAFY FINANCIAL"].legalBasis).toMatch(/FDCPA §809/);
-    expect(by["OPPLOANS/FINWISE"].round).toBe(4);
+    expect(by["OPPLOANS/FINWISE"].round).toBe(3);
+    expect(by["OPPLOANS/FINWISE"].escalationRound).toBe(4);
+    expect(by["OPPLOANS/FINWISE"].legalBasis).not.toMatch(/FDCPA/);
     expect(by["OPPLOANS/FINWISE"].inconsistencies.join(" ")).toMatch(/Last activity/);
     expect(by["OPPLOANS/FINWISE"].inconsistencies.join(" ")).toMatch(/Late counts/);
     expect(by["EAGLE COMMUNITY CU"].round).toBe(4);

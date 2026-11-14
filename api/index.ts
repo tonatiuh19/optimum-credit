@@ -7830,9 +7830,20 @@ function consolidateSplitAccounts(
       (k && b !== null && b > 0
         ? out.find((o) => {
             if (last4(o) !== k || bal(o) !== b) return false;
+            // Nov 13, 2026 (Cesar — Credit One + LVNV, both ...0730 / $732): an original creditor and the
+            // debt buyer that bought the debt are two tradelines (double reporting is a dispute point),
+            // never one account. A tradeline is creditor + section + last 4, not last 4 alone.
+            const sameName = sameCreditorName(o.creditor, a.creditor);
+            // One is the original credit account (a card / loan with its own limit or late history), the
+            // other a collection of that debt → two tradelines, whatever the bureaus print.
+            if (!sameName && originalCreditAccount(o) !== originalCreditAccount(a)) return false;
             const shared = BUREAUS.filter((x) => o.bureaus[x] && a.bureaus[x]);
-            if (!shared.length) return true;
+            // Split across bureau rows: same name, two collection listings of one item (MyFreeScoreNow lists
+            // a collection under the agency AND its client), or a bureau's own spelling in the same section.
+            if (!shared.length) return sameName || !originalCreditAccount(o) || o.section === a.section;
             if (opts.keepSameBureauTwins) return false;
+            // The same bureau twice under different names: only two collection listings of one item.
+            if (!sameName && originalCreditAccount(o)) return false;
             // Same bureau twice (MyFreeScoreNow, a client Oct 26): one collection listed under the collector's
             // name and again under its client's name — same last 4, same balance, collection on both.
             return shared.every(
@@ -7847,14 +7858,40 @@ function consolidateSplitAccounts(
     for (const x of BUREAUS) if (a.bureaus[x] && !twin.bureaus[x]) twin.bureaus[x] = a.bureaus[x];
     // The row that has the account number keeps it.
     if (!last4(twin) && k) twin.mask = a.mask;
-    // Keep the collector's name and the collection section; remember the other name.
+    // Keep the collection section when either row is one.
     const aIsColl = a.section === "collection" || /collection/i.test(BUREAUS.map((x) => a.bureaus[x]?.accountStatus ?? "").join(" "));
     if (aIsColl && twin.section !== "collection") twin.section = a.section === "collection" ? "collection" : twin.section;
-    if (twin.creditor.toLowerCase() !== a.creditor.toLowerCase() && !twin.headerStatus) {
-      twin.headerStatus = `Original creditor: ${a.creditor}`;
-    }
+    // Nov 13, 2026: no "Original creditor: <other row's name>" is invented here any more — merged rows are
+    // the same furnisher (or the same section under a bureau's own spelling), so neither is the other's
+    // original creditor. That label came out backwards (Credit One "orig. Lvnv Funding").
   }
   return out;
+}
+
+/** Same furnisher name, allowing a bureau's shortened spelling ("ALLY CREDI" / "ALLY CREDIT CARD/CWS"). */
+function sameCreditorName(x: string, y: string): boolean {
+  const a = creditorKey(x);
+  const b = creditorKey(y);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  return short.length >= 5 && long.startsWith(short);
+}
+
+/**
+ * The original credit account (a card or loan the consumer opened), as opposed to a collection listing:
+ * a revolving / mortgage section, a credit limit, or a 30-180 day late history. A debt buyer's row
+ * (limit $0, "CO" cells only, filed as Installment / Other) is not one.
+ */
+function originalCreditAccount(a: CreditAccount): boolean {
+  if (a.section === "collection") return false;
+  if (a.section === "revolving" || a.section === "mortgage") return true;
+  return BUREAUS.some((x) => {
+    const t = a.bureaus[x];
+    if (!t) return false;
+    if ((t.creditLimit ?? 0) > 0) return true;
+    return (t.gridMarks ?? []).some((m) => /:(30|60|90|120|150|180)$/.test(m)) || (t.late30 ?? 0) + (t.late60 ?? 0) + (t.late90 ?? 0) > 0;
+  });
 }
 
 /**
@@ -8762,6 +8799,11 @@ interface AnalysisNegative {
   /** Cross-bureau reporting conflicts (Round 3 angles). */
   inconsistencies: string[];
   round: AnalysisRound;
+  /**
+   * Nov 13, 2026 (Cesar): an original-creditor charge-off with bureau conflicts is worked in Round 3 and
+   * escalated in Round 4 if Round 3 is verified — listed in both tables, counted once (its round).
+   */
+  escalationRound?: 4 | null;
   /** Consumer-dispute remark while Dispute Status says not disputed. */
   hold: boolean;
   holdReason: string | null;
@@ -8797,7 +8839,9 @@ type AccountTypeLabel = "auto" | "revolving" | "installment" | "mortgage" | "col
 /** v2.4 #5: what kind of account it is, from the section and the source's type text. */
 function accountTypeLabel(account: CreditAccount, tls: BureauTradeline[]): AccountTypeLabel {
   const text = `${account.creditor} ${tls.map((t) => `${t.accountType || ""} ${t.creditorType || ""} ${t.remarks || ""}`).join(" ")}`;
-  if (account.section === "collection") return "collection";
+  // A debt buyer / agency is a collection whatever section the bureau files it in (LVNV under
+  // Experian's "Installment" — Nov 13, 2026).
+  if (account.section === "collection" || isCollectorAccount(account, tls)) return "collection";
   if (account.section === "mortgage" || /mortgage|\bmtg\b|home equity|heloc/i.test(text)) return "mortgage";
   if (account.section === "revolving") return "revolving";
   if (/auto(mobile)?\b|vehicle|\blease\b/i.test(text)) return "auto";
@@ -9203,11 +9247,33 @@ function isNegativeTradeline(tl: BureauTradeline, account: CreditAccount): boole
 }
 
 
+/**
+ * Charge-off evidence (Nov 13, 2026 — Cesar, MyFreeScoreNow): the status can read "Collection Account"
+ * and the text summary "Charge Off 0" while the account IS charged off — read the remarks
+ * ("CHARGED OFF ACCOUNT", "CHARGED TO PROFIT AND LOSS", "REPORTED AS A LOSS") and the grid's "CO" cells.
+ */
+const CHARGE_OFF_TEXT = /charge.?off|charged off|written off|profit and loss|reported as a loss|\bP\s*&\s*L\b/i;
+function hasChargeOffEvidence(tls: BureauTradeline[]): boolean {
+  return tls.some((t) => CHARGE_OFF_TEXT.test(`${t.paymentStatus ?? ""} ${t.accountStatus ?? ""} ${t.remarks ?? ""}`) || (t.gridMarks ?? []).some((m) => /:CO$/i.test(m)));
+}
+
+/** The furnisher is a collection agency / debt buyer (not the creditor that issued the account). */
+function isCollectorAccount(account: CreditAccount, tls: BureauTradeline[]): boolean {
+  if (account.section === "collection") return true;
+  if (/^Original creditor:/i.test(account.headerStatus ?? "")) return true;
+  if (tls.some((t) => /ORIGINAL CREDITOR\s*:/i.test(t.remarks ?? "") || /factoring|collection agency|debt buyer/i.test(`${t.accountType ?? ""} ${t.creditorType ?? ""}`))) return true;
+  return COLLECTION_TEXT.test(account.creditor);
+}
+
 function negativeKind(account: CreditAccount, tls: BureauTradeline[]): NegativeKind {
   const hay = `${account.creditor} ${account.headerStatus || ""} ${tls.map(tradelineText).join(" ")}`;
   if (/bankrupt|judgment|lien/i.test(hay)) return "public_record";
   if (/repossess|foreclos/i.test(hay)) return "repossession";
-  if (account.section === "collection" || COLLECTION_TEXT.test(hay)) return "collection";
+  // A collector's account is a collection (FDCPA). The original creditor's charged-off account is a
+  // charge-off even when a bureau's status says "Collection Account" (Credit One, OpenSky — Nov 13, 2026).
+  if (isCollectorAccount(account, tls)) return "collection";
+  if (hasChargeOffEvidence(tls)) return "charge_off";
+  if (COLLECTION_TEXT.test(hay)) return "collection";
   if (/charge.?off|charged off|written off/i.test(hay)) return "charge_off";
   if (
     /late|delinquen|past due|\d{2,3}\s*days/i.test(hay) ||
@@ -9262,9 +9328,9 @@ function findInconsistencies(
     const db = parseReportDate(b as string);
     return da && db ? Math.abs(monthsBetween(da, db)) <= 1 : String(a).trim() === String(b).trim();
   });
-  diff("paymentStatus", "Payment status", (a, b) =>
-    String(a).toLowerCase() === String(b).toLowerCase(),
-  );
+  // "Collection" and "Collection Account" are the same status in two bureaus' wording (Nov 13, 2026).
+  const statusKey = (v: unknown) => String(v).toLowerCase().replace(/\baccount\b/g, "").replace(/\s+/g, " ").trim();
+  diff("paymentStatus", "Payment status", (a, b) => statusKey(a) === statusKey(b));
   // Open on one bureau, closed / paid on another.
   const openClosed = entries
     .filter(([, t]) => t.accountStatus)
@@ -9561,9 +9627,55 @@ function buildCreditAnalysis(
         (account.section === "collection" || !!original || COLLECTION_TEXT.test(account.creditor));
       const singleOrDup = dupGroup !== null || (!isMerged && !account.bureausNotItemized && reporting.length === 1 && missingBureausFor(reporting).length > 0);
       // Spec v2.1 §5 — classify by item type (Round 4 is NOT an escalation bucket).
+      // Round 3 points the source itself shows (Nov 13, 2026 — Cesar):
+      // a "B" (bankruptcy) grid code with no bankruptcy in Public Records;
+      if (!isMerged && file.publicRecordsReported !== true) {
+        for (const b of reporting) {
+          const bMonths = (account.bureaus[b]!.gridMarks ?? []).filter((m) => /:B$/i.test(m)).map((m) => m.split(":")[0]);
+          if (bMonths.length) inconsistencies.push(`${b} grid shows "B" (bankruptcy) ${bMonths.join(", ")} - no bankruptcy on file`);
+        }
+      }
+      // the same lates a month apart between bureaus (EQ 30-day 01/2025 vs EX 02/2025).
+      if (!isMerged) {
+        const firstLate = (b: Bureau) =>
+          (account.bureaus[b]?.gridMarks ?? [])
+            .filter((m) => /:30$/.test(m))
+            .map((m) => ({ w: m.split(":")[0], d: parseReportDate(m.split(":")[0]) }))
+            .filter((x): x is { w: string; d: Date } => !!x.d)
+            .sort((x, y) => x.d.getTime() - y.d.getTime())[0];
+        const firsts = reporting.map((b) => ({ b, f: firstLate(b) })).filter((x) => x.f);
+        for (let i = 0; i < firsts.length; i++) {
+          for (let j = i + 1; j < firsts.length; j++) {
+            const [x, y] = [firsts[i], firsts[j]];
+            const months = Math.abs((x.f!.d.getUTCFullYear() - y.f!.d.getUTCFullYear()) * 12 + x.f!.d.getUTCMonth() - y.f!.d.getUTCMonth());
+            if (months === 1) inconsistencies.push(`lates one month apart (${x.b} 30-day ${x.f!.w} vs ${y.b} ${y.f!.w})`);
+          }
+        }
+      }
+      // A bureau that prints "Pays as Agreed" / "Current" on an account it reports as charged off contradicts
+      // itself — an accuracy point (Affirm, OpenSky on Experian — Nov 13, 2026).
+      if (kind === "charge_off") {
+        for (const b of reporting) {
+          const t = account.bureaus[b]!;
+          const st = `${t.paymentStatus ?? ""}`.trim();
+          if (/^(pays as agreed|as agreed|current|paid as agreed|never late)\b/i.test(st) && hasChargeOffEvidence([t])) {
+            inconsistencies.push(`${b} status "${st}" on a charged-off account`);
+          }
+        }
+      }
       let round: AnalysisRound;
+      let escalationRound: 4 | null = null;
+      // Real cross-bureau conflicts (a bureau that simply does not carry the account is not one).
+      const conflicts = inconsistencies.filter((x) => !/^Not reported to /.test(x));
       if (kind === "collection") round = thirdParty ? 2 : 3;
-      else if (kind === "charge_off" || kind === "repossession" || kind === "public_record") round = 4;
+      else if (kind === "charge_off") {
+        // Original-creditor charge-off: FCRA 611/623 in Round 4; with bureau conflicts, Round 3 first and
+        // Round 4 as the escalation (never Round 2 — FDCPA 809 is for collectors only).
+        if (conflicts.length) {
+          round = 3;
+          escalationRound = 4;
+        } else round = 4;
+      } else if (kind === "repossession" || kind === "public_record") round = 4;
       else if (studentLoan) round = 4;
       else if (kind === "late") round = 3;
       else if (singleOrDup) round = 3;
@@ -9589,8 +9701,10 @@ function buildCreditAnalysis(
       // (c) Re-aging: activity or lates reported after the account closed. A collection's "closed"
       // date is its placement / payment, so later activity there is normal — never flagged.
       if (kind !== "collection" && closedD) {
+        // Only real lates (30-180) count: a charged-off card keeps printing "CO" every month after it
+        // closes, which is the charge-off itself, not re-aging (Nov 13, 2026 — OpenSky).
         const lateAfter = tls
-          .flatMap((t) => (t.gridMarks ?? []).map((m) => parseReportDate(m.split(":")[0])))
+          .flatMap((t) => (t.gridMarks ?? []).filter((m) => /:(30|60|90|120|150|180)$/.test(m)).map((m) => parseReportDate(m.split(":")[0])))
           .filter((d): d is Date => !!d && daysBetween(closedD, d) > 31)
           .sort((a, b) => b.getTime() - a.getTime())[0];
         if (lastD && daysBetween(closedD, lastD) > 60) {
@@ -9666,6 +9780,7 @@ function buildCreditAnalysis(
         status: detail,
         inconsistencies,
         round,
+        escalationRound,
         hold: activeDispute || resolvedDispute,
         holdReason: activeDispute
           ? "Active dispute on file — do not re-dispute until it closes"
@@ -9764,6 +9879,34 @@ function buildCreditAnalysis(
         closed: !open || undefined,
         derogatory: negBureaus.length > 0 || undefined,
       });
+    }
+  }
+
+  // Double reporting (Nov 13, 2026 — Cesar): the original creditor still reports the balance after the
+  // debt was sold — a Round 3 point on the original creditor and a validation point on the collector.
+  {
+    const key8 = (x: string) => x.toUpperCase().replace(/[^A-Z0-9]+/g, "").slice(0, 8);
+    for (const coll of negatives) {
+      if (coll.kind !== "collection" || !coll.originalCreditor || !(coll.balance ?? 0)) continue;
+      const oc = negatives.find(
+        (m) =>
+          m !== coll &&
+          m.kind !== "collection" &&
+          key8(m.creditor).length >= 6 &&
+          key8(m.creditor) === key8(coll.originalCreditor!) &&
+          (m.balance ?? 0) > 0 &&
+          ((!!m.mask && m.mask === coll.mask) || m.balance === coll.balance),
+      );
+      if (!oc) continue;
+      const soldOn = parseReportDate(coll.opened);
+      const sold = soldOn ? ` (${fmtMonth(soldOn)})` : "";
+      oc.inconsistencies.push(`still reports ${fmtMoney(oc.balance!)} after sale to ${coll.creditor}${sold} - double reporting`);
+      coll.inconsistencies.push(`same ${fmtMoney(coll.balance!)} still reported by ${oc.creditor} (double reporting)`);
+      if (oc.kind === "charge_off" && oc.round === 4) {
+        oc.round = 3;
+        oc.escalationRound = 4;
+        oc.legalBasis = LEGAL_BASIS[3];
+      }
     }
   }
 
@@ -10113,8 +10256,10 @@ function buildCreditAnalysis(
   }
 
   // File strength: 5 categories × 20, counted data only (unknown = 0).
+  // A collector's account is never installment mix, whatever section it is filed under.
+  const tlsOf = (a: CreditAccount) => BUREAUS.map((b) => a.bureaus[b]).filter((t): t is BureauTradeline => !!t);
   const openInstallments = file.accounts.filter(
-    (a) => a.section === "installment" && BUREAUS.some((b) => a.bureaus[b] && !isClosedTradeline(a.bureaus[b]!, a)),
+    (a) => a.section === "installment" && !isCollectorAccount(a, tlsOf(a)) && BUREAUS.some((b) => a.bureaus[b] && !isClosedTradeline(a.bureaus[b]!, a)),
   );
   const installmentClean = openInstallments.every((a) => !negatives.some((n) => n.creditor === a.creditor));
   const mortgageOpen = file.accounts.some(
@@ -10849,6 +10994,7 @@ function analysisLabels(lang: "en" | "es") {
     issue: es ? "Estado / problema" : "Status / issue",
     legal: es ? "Base legal" : "Legal basis",
     noneOnFile: es ? "Nada en el archivo." : "None on file.",
+    escalateIfVerified: es ? "Escalar si la Ronda 3 se verifica." : "Escalate if Round 3 is verified.",
     inquiry: es ? "Consulta" : "Inquiry",
     moreInquiries: (n: number) => (es ? `${n} consultas mas (lista completa en el sistema)` : `${n} more inquiries (full list on file)`),
     inquiryDispute: es ? "Sin proposito permitido verificado" : "No verified permissible purpose",
@@ -11583,12 +11729,25 @@ async function renderAnalysisPdf(
   if (data.reportFormat === "merged") f.paragraph(L.lenderWindow, 7.2, OFG_PDF.muted);
   for (const r of [2, 3, 4] as const) {
     f.subhead(L.roundTitle(r));
+    // Compact (dense files): escalations are one line under the table instead of one row each.
+    const escalations = data.negatives.filter((n) => n.escalationRound === r && n.round !== r && !n.hold);
     const rows = data.negatives
-      .filter((n) => n.round === r && !n.hold)
+      // Nov 13, 2026: a Round 3 charge-off with Round 4 as its escalation shows in both tables.
+      .filter((n) => (n.round === r || (n.escalationRound === r && !compact)) && !n.hold)
       // v2.4 #5: Type = the account type from the source; the issue stays in Status / issue.
-      .map((n) => [`${n.creditor}${n.mask ? ` ...${n.mask}` : ""}`, n.accountType ? L.acctType(n.accountType) : L.kind(n.kind), bureauLabel(n.bureaus, n.bureausNotItemized, L), clip(issueText(n, L), 120), n.legalBasis]);
+      .map((n) => [
+        `${n.creditor}${n.mask ? ` ...${n.mask}` : ""}`,
+        n.accountType ? L.acctType(n.accountType) : L.kind(n.kind),
+        bureauLabel(n.bureaus, n.bureausNotItemized, L),
+        // The escalation row stays short (the issues are in its Round 3 row above): what escalates, how much.
+        n.round !== r ? `${L.escalateIfVerified} ${L.kind(n.kind)}${n.balance ? ` ${pdfMoney(n.balance)}` : ""}` : clip(issueText(n, L), 120),
+        n.round !== r ? "FCRA §611, §623" : n.legalBasis,
+      ]);
     if (rows.length) f.table(head, rows, widths, { size: T });
-    else f.paragraph(L.noneOnFile, 8, OFG_PDF.muted);
+    else if (!(compact && escalations.length)) f.paragraph(L.noneOnFile, 8, OFG_PDF.muted);
+    if (compact && escalations.length) {
+      f.paragraph(`${L.escalateIfVerified} ${escalations.map((n) => `${n.creditor}${n.mask ? ` ...${n.mask}` : ""}${n.balance ? ` (${pdfMoney(n.balance)})` : ""}`).join(", ")}`, 7.6, OFG_PDF.muted);
+    }
   }
   if ((data.informational ?? []).length) {
     f.subhead(L.informational);
@@ -11616,7 +11775,7 @@ async function renderAnalysisPdf(
         n.accountType ? L.acctType(n.accountType) : L.kind(n.kind),
         bureauLabel(n.bureaus, n.bureausNotItemized, L),
         pdfMoney(n.balance),
-        n.hold ? "--" : `R${n.round}`,
+        n.hold ? "--" : n.escalationRound ? `R${n.round} / R${n.escalationRound}` : `R${n.round}`,
       ]),
       [0.14, 0.3, 0.15, 0.15, 0.13, 0.13],
       { size: T },
@@ -11911,7 +12070,7 @@ function actionPlan(data: CreditAnalysisData, es: boolean): string[] {
     });
   }
   for (const r of [2, 3, 4] as const) {
-    const items = data.negatives.filter((n) => n.round === r && !n.hold);
+    const items = data.negatives.filter((n) => (n.round === r || n.escalationRound === r) && !n.hold);
     if (items.length) rounds.push({ label: [r], what: [names(items)] });
   }
   // Spec v2.3 P0-7: no step tells the client to pay, pay down or pay off a balance — the last step is the AU line.
@@ -12090,7 +12249,7 @@ async function generateProgressEnhancementPdf(
         `${n.creditor} - ${P.kind(n.kind)}`,
         n.bureaus.join(" / "),
         `${n.status}${n.balance !== null ? `, ${pdfMoney(n.balance)}` : ""}`,
-        n.hold ? `HOLD > R${n.round}` : `R${n.round}`,
+        n.hold ? `HOLD > R${n.round}` : n.escalationRound ? `R${n.round} / R${n.escalationRound}` : `R${n.round}`,
       ]),
       [0.36, 0.16, 0.36, 0.12],
     );
