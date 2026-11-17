@@ -40336,6 +40336,54 @@ async function excludeReadRowCore(reportId: number, adminId: number, body: Recor
   }
 }
 
+type VoiceClientEventRow = {
+  call_sid: string | null;
+  direction: "incoming" | "outgoing" | "device";
+  event: "error" | "rejected_busy";
+  error_code: number | null;
+  error_message: string | null;
+  seconds_since_answer: number | null;
+  is_mobile: 0 | 1 | null;
+  platform: string | null;
+  browser: string | null;
+  network_type: string | null;
+  visibility: string | null;
+  online: 0 | 1 | null;
+  mic_permission: string | null;
+};
+
+/** Validates a softphone event from the browser (every field optional except direction + event). */
+export function normalizeVoiceClientEvent(body: unknown): VoiceClientEventRow | { error: string } {
+  const b = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+  const direction = String(b.direction ?? "");
+  const event = String(b.event ?? "");
+  if (!["incoming", "outgoing", "device"].includes(direction)) return { error: "direction must be incoming, outgoing or device" };
+  if (!["error", "rejected_busy"].includes(event)) return { error: "event must be error or rejected_busy" };
+  const text = (v: unknown, max: number) => {
+    const t = v == null ? "" : String(v).trim();
+    return t ? t.slice(0, max) : null;
+  };
+  const int = (v: unknown) => (v == null || v === "" || !Number.isFinite(Number(v)) ? null : Math.trunc(Number(v)));
+  const bool = (v: unknown): 0 | 1 | null => (typeof v === "boolean" ? (v ? 1 : 0) : null);
+  const secs = b.seconds_since_answer == null || !Number.isFinite(Number(b.seconds_since_answer)) ? null : Math.min(999999, Math.max(0, Number(b.seconds_since_answer)));
+  const sid = text(b.call_sid, 64);
+  return {
+    call_sid: sid && /^CA[0-9a-f]{32}$/i.test(sid) ? sid : null,
+    direction: direction as VoiceClientEventRow["direction"],
+    event: event as VoiceClientEventRow["event"],
+    error_code: int(b.error_code),
+    error_message: text(b.error_message, 500),
+    seconds_since_answer: secs == null ? null : Math.round(secs * 100) / 100,
+    is_mobile: bool(b.is_mobile),
+    platform: text(b.platform, 40),
+    browser: text(b.browser, 40),
+    network_type: text(b.network_type, 30),
+    visibility: text(b.visibility, 20),
+    online: bool(b.online),
+    mic_permission: text(b.mic_permission, 20),
+  };
+}
+
 async function rebuildRoundReportCore(reportIdIn: number, adminIdIn: number): Promise<{ status: number; body: any }> {
   const __R = (status: number, body: any) => ({ status, body });
   const req = { params: { id: String(reportIdIn) }, auth: { id: adminIdIn }, body: {} } as const;
@@ -85077,6 +85125,37 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
   );
 
   // ── POST /api/voice/log ─────────────────────────────────────────────────
+  /**
+   * Nov 17, 2026: a browser softphone error (Twilio SDK code, e.g. 53405 media failed when answering on
+   * a phone) or an incoming call the app rejected as busy — saved with the device context so failures
+   * can be explained later. Never blocks the call flow; capped per staff member.
+   */
+  app.post("/api/voice/client-event", ...withConvAccess, async (req, res) => {
+    try {
+      const adminId = Number((req as AuthedRequest).auth!.id);
+      if (hitRateLimit(`voice-client-event:${adminId}`, 60, 15 * 60 * 1000)) {
+        return res.status(429).json({ error: "Too many events" });
+      }
+      const row = normalizeVoiceClientEvent(req.body);
+      if ("error" in row) return res.status(400).json({ error: row.error });
+      await pool.query(
+        `INSERT INTO voice_client_events
+           (admin_id, call_sid, direction, event, error_code, error_message, seconds_since_answer, is_mobile, platform,
+            browser, network_type, visibility, online, mic_permission, user_agent)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          adminId, row.call_sid, row.direction, row.event, row.error_code, row.error_message, row.seconds_since_answer,
+          row.is_mobile, row.platform, row.browser, row.network_type, row.visibility, row.online, row.mic_permission,
+          String(req.headers["user-agent"] ?? "").slice(0, 400) || null,
+        ],
+      );
+      res.status(201).json({ ok: true });
+    } catch (e: any) {
+      console.error("[voice:client-event]", e?.message ?? e);
+      res.status(500).json({ error: "Could not save the event" });
+    }
+  });
+
   app.post("/api/voice/log", ...withConvAccess, async (req, res) => {
     try {
       const adminId = (req as AuthedRequest).auth!.id;

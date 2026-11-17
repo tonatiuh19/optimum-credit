@@ -3250,6 +3250,41 @@ paths:
         "403":
           description: Admin access required
 
+  /voice/client-event:
+    post:
+      tags: [Voice]
+      summary: Record a browser softphone error or busy rejection
+      description: >-
+        Saves a Twilio Voice SDK error (e.g. 53405 media connection failed) or an incoming call the app
+        rejected as busy, with device context (platform, browser, network type, tab visibility, mic
+        permission, seconds since Answer). Conversations access; 60 per 15 minutes per staff member.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [direction, event]
+              properties:
+                direction: { type: string, enum: [incoming, outgoing, device] }
+                event: { type: string, enum: [error, rejected_busy] }
+                call_sid: { type: string, nullable: true }
+                error_code: { type: integer, nullable: true }
+                error_message: { type: string, nullable: true }
+                seconds_since_answer: { type: number, nullable: true }
+                is_mobile: { type: boolean, nullable: true }
+                platform: { type: string, nullable: true }
+                browser: { type: string, nullable: true }
+                network_type: { type: string, nullable: true }
+                visibility: { type: string, nullable: true }
+                online: { type: boolean, nullable: true }
+                mic_permission: { type: string, nullable: true }
+      responses:
+        "201": { description: Saved }
+        "400": { description: Invalid direction or event }
+        "429": { description: Too many events }
   /voice/log:
     post:
       tags: [Conversations]

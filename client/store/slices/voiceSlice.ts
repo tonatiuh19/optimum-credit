@@ -63,6 +63,34 @@ export const logVoiceCall = createAsyncThunk(
   },
 );
 
+/** A softphone error or busy-rejection, with device context (Nov 17, 2026). Never throws into the call flow. */
+export interface VoiceClientEventPayload {
+  direction: "incoming" | "outgoing" | "device";
+  event: "error" | "rejected_busy";
+  call_sid?: string | null;
+  error_code?: number | null;
+  error_message?: string | null;
+  seconds_since_answer?: number | null;
+}
+
+export const reportVoiceClientEvent = createAsyncThunk(
+  "voice/reportClientEvent",
+  async (payload: VoiceClientEventPayload, { getState, rejectWithValue }) => {
+    try {
+      const { readVoiceDeviceContext, readMicPermission } = await import("@/lib/voiceDiagnostics");
+      const mic_permission = await readMicPermission();
+      await api.post(
+        "/voice/client-event",
+        { ...payload, ...readVoiceDeviceContext(), mic_permission },
+        { headers: authHeaders(getState) },
+      );
+      return true;
+    } catch (error: unknown) {
+      return rejectWithValue(formatAxiosError(error, "Failed to report the call event"));
+    }
+  },
+);
+
 export const fetchAblyToken = createAsyncThunk(
   "voice/fetchAblyToken",
   async (_, { getState, rejectWithValue }) => {

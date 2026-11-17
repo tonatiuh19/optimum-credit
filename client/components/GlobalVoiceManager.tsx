@@ -14,7 +14,9 @@ import {
   fetchVoiceToken,
   updateVoiceAvailability,
   lookupContact,
+  reportVoiceClientEvent,
 } from "@/store/slices/voiceSlice";
+import { twilioErrorCode } from "@/lib/voiceDiagnostics";
 import VoiceCallPanel from "@/components/VoiceCallPanel";
 import { VoiceDeviceProvider } from "@/contexts/VoiceDeviceContext";
 import { logger } from "@/utils/logger";
@@ -35,6 +37,8 @@ const GlobalVoiceManager: React.FC = () => {
   const ringingCallRef = useRef<Call | null>(null);
   const ringingCallSidRef = useRef<string | null>(null);
   const busyRef = useRef(false);
+  /** When staff tapped Answer, per call — how long until a media error (Nov 17, 2026: 53405 on phones). */
+  const answeredAtRef = useRef<Map<string, number>>(new Map());
 
   const [ringingCall, setRingingCall] = useState<Call | null>(null);
   const [ringingPhone, setRingingPhone] = useState<string>("");
@@ -127,6 +131,7 @@ const GlobalVoiceManager: React.FC = () => {
       device.on("error", (err) => {
         logger.error("[GlobalVoiceManager] Device error:", err);
         dispatch(setDeviceStatus("error"));
+        void dispatch(reportVoiceClientEvent({ direction: "device", event: "error", error_code: twilioErrorCode(err), error_message: err?.message ?? String(err) }));
       });
 
       device.on("tokenAboutToExpire", async () => {
@@ -172,6 +177,15 @@ const GlobalVoiceManager: React.FC = () => {
           logger.warn(
             "[GlobalVoiceManager] Busy — rejecting incoming call for voicemail/fallback",
           );
+          // Twilio records this as "busy", like a failed answer — record which one it was.
+          void dispatch(
+            reportVoiceClientEvent({
+              direction: "incoming",
+              event: "rejected_busy",
+              call_sid: call.parameters?.CallSid ?? null,
+              error_message: ringingCallRef.current ? "another call was already ringing" : "staff member already on a call",
+            }),
+          );
           call.reject();
           return;
         }
@@ -212,9 +226,26 @@ const GlobalVoiceManager: React.FC = () => {
 
         call.on("cancel", clearRinging);
         call.on("reject", clearRinging);
+        // Every error on an incoming call (while ringing or after Answer), recorded once, here.
+        call.on("error", (err: Error) => {
+          const sid = call.parameters?.CallSid ?? null;
+          const answeredAt = sid ? answeredAtRef.current.get(sid) : undefined;
+          void dispatch(
+            reportVoiceClientEvent({
+              direction: "incoming",
+              event: "error",
+              call_sid: sid,
+              error_code: twilioErrorCode(err),
+              error_message: err?.message ?? String(err),
+              seconds_since_answer: answeredAt ? (Date.now() - answeredAt) / 1000 : null,
+            }),
+          );
+        });
         call.on("disconnect", () => {
           ringingCallRef.current = null;
           setActiveIncomingCall(null);
+          const sid = call.parameters?.CallSid;
+          if (sid) answeredAtRef.current.delete(sid);
         });
       });
 
@@ -308,6 +339,7 @@ const GlobalVoiceManager: React.FC = () => {
   const handleAccept = () => {
     if (!ringingCall) return;
     const sid = ringingCallSidRef.current;
+    if (sid) answeredAtRef.current.set(sid, Date.now());
     ringingCall.accept({
       rtcConstraints: {
         audio: {

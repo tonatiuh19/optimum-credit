@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Device, Call } from "@twilio/voice-sdk";
 import { useAppDispatch } from "@/store/hooks";
-import { logVoiceCall } from "@/store/slices/voiceSlice";
+import { logVoiceCall, reportVoiceClientEvent } from "@/store/slices/voiceSlice";
+import { twilioErrorCode } from "@/lib/voiceDiagnostics";
 import {
   Phone,
   PhoneOff,
@@ -591,6 +592,16 @@ const VoiceCallPanel: React.FC<VoiceCallPanelProps> = ({
 
       call.on("error", (err: Error) => {
         logger.error("[VoiceCallPanel] Call error:", err);
+        // Outgoing calls only (incoming errors are recorded by GlobalVoiceManager).
+        void dispatch(
+          reportVoiceClientEvent({
+            direction: "outgoing",
+            event: "error",
+            call_sid: call.parameters?.CallSid ?? null,
+            error_code: twilioErrorCode(err),
+            error_message: err?.message ?? String(err),
+          }),
+        );
         setErrorMsg(err.message || "Call error");
         stopTimer();
         setCallState("error");
