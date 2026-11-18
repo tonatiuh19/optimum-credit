@@ -128,6 +128,13 @@ describe("MCP gap tools", () => {
     expect(schema("approve_round_report").safeParse({ report_id: "7", override_reason: "x" }).success).toBe(true);
     expect(schema("set_conversation_status").safeParse({ client_id: 1, status: "deleted" }).success).toBe(false);
     expect(schema("review_client_document").safeParse({ document_id: 1, decision: "maybe" }).success).toBe(false);
+    // Optional fields sent as null mean "not given" (Nov 18, 2026: set_out_of_office / update_holiday_greeting failed on note_en / media_url: null).
+    const ooo = schema("set_out_of_office").safeParse({ starts_on: "2026-11-19", returns_on: "2026-11-25", note_en: null, auto_reply_es: null, backup_en_admin_id: null, confirm: false });
+    expect(ooo.success).toBe(true);
+    if (ooo.success) expect(ooo.data).not.toHaveProperty("note_en", null);
+    expect(schema("update_holiday_greeting").safeParse({ greeting_id: 2, body_en: "x", media_url: null, send_time: null }).success).toBe(true);
+    // Required fields still refuse null.
+    expect(schema("set_out_of_office").safeParse({ starts_on: null, returns_on: "2026-11-25" }).success).toBe(false);
     // Every tool schema still converts.
     for (const t of ADMIN_AI_TOOLS) expect(() => adminAiInputSchemaToZod(t.input_schema as Record<string, unknown>), t.name).not.toThrow();
   });

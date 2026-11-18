@@ -5608,7 +5608,7 @@ export const ADMIN_AI_TOOLS: Array<{
   },
   {
     name: "set_out_of_office",
-    description: "Set out of office for yourself (or anyone, if you are an out-of-office manager — Settings → Permissions): starts_on and returns_on (YYYY-MM-DD, Pacific, up to 60 days; returns_on = first day back), backup_en_admin_id / backup_es_admin_id (search_admins), optional note_en / note_es. Replaces an overlapping period. ALWAYS dry-run first (confirm=false), then confirm=true + confirm_phrase=\"CONFIRM\".",
+    description: "Set out of office for yourself (or anyone, if you are an out-of-office manager — Settings → Permissions): starts_on and returns_on (YYYY-MM-DD, Pacific, up to 60 days; returns_on = first day back), backup_en_admin_id / backup_es_admin_id (search_admins), optional note_en / note_es, optional auto_reply_en / auto_reply_es (the exact text clients on their line get while away, by the client's language, up to 320 chars — replaces the client care template; leave out to use the template). Replaces an overlapping period. ALWAYS dry-run first (confirm=false), then confirm=true + confirm_phrase=\"CONFIRM\".",
     input_schema: {
       type: "object",
       properties: {
@@ -5619,6 +5619,8 @@ export const ADMIN_AI_TOOLS: Array<{
         backup_es_admin_id: { type: "integer" },
         note_en: { type: "string" },
         note_es: { type: "string" },
+        auto_reply_en: { type: "string", description: "Exact auto-reply for English clients on their line while away (max 320)" },
+        auto_reply_es: { type: "string", description: "Exact auto-reply for Spanish clients on their line while away (max 320)" },
         confirm: { type: "boolean" },
         confirm_phrase: { type: "string" },
       },
@@ -5879,8 +5881,23 @@ function adminAiInboxSender(r: RowDataPacket): Record<string, unknown> {
   };
 }
 
+/**
+ * What an MCP / tools-API caller gets back from a successful tool: `data`, or for a dry-run the
+ * preview + message (Nov 18, 2026: dry-runs have no `data`; reading it crashed every write tool's
+ * first step on MCP with "Cannot read properties of undefined (reading 'length')").
+ */
+export function adminAiToolPayload(result: AdminAiToolResult): unknown {
+  if (result.ok === false) return { error: result.error, message: result.message };
+  if ("dry_run" in result && result.dry_run) {
+    const { ok: _ok, ...rest } = result;
+    return rest;
+  }
+  return result.data ?? null;
+}
+
 function adminAiTruncateJson(value: unknown): string {
-  const s = JSON.stringify(value);
+  // JSON.stringify(undefined) is undefined, not a string.
+  const s = JSON.stringify(value) ?? "null";
   if (s.length <= ADMIN_AI_TOOL_RESULT_MAX) return s;
   return `${s.slice(0, ADMIN_AI_TOOL_RESULT_MAX)}…[truncated]`;
 }
@@ -16477,12 +16494,15 @@ interface ClientCareTextInput {
   topic?: string | null;
   owner: { name: string; phone?: string | null };
   /** The line's owner is out of office (and is not the one answering). */
-  away?: { name: string; returnsLabel: string; note?: string | null } | null;
+  away?: { name: string; returnsLabel: string; note?: string | null; autoReply?: string | null } | null;
   when: string;
 }
 
 /** The auto-reply / AI hold / missed-call text from the settings' template. */
 function clientCareText(i: ClientCareTextInput, settings: ClientCareSettings = CLIENT_CARE_DEFAULT_SETTINGS): string {
+  // The away line owner wrote their own out-of-office text: send it exactly as written.
+  const own = String(i.away?.autoReply ?? "").trim();
+  if (own) return own;
   const first = String(i.firstName ?? "").trim().split(/\s+/)[0] ?? "";
   return renderClientCareTemplate(settings.templates[i.lang][i.kind], {
     first_name: first ? first.charAt(0).toUpperCase() + first.slice(1).toLowerCase() : "",
@@ -41650,6 +41670,8 @@ async function resolveClientCareRouting(lang: "en" | "es", lineAdminId: number |
           name: lineAdmin.first_name,
           returnsLabel: returnDayLabel(String(lineOoo.returns_on instanceof Date ? lineOoo.returns_on.toISOString().slice(0, 10) : lineOoo.returns_on).slice(0, 10), lang),
           note: (lang === "es" ? lineOoo.note_es ?? lineOoo.note_en : lineOoo.note_en ?? lineOoo.note_es) ?? null,
+          // Their own words, in the client's language only (never English text to a Spanish client).
+          autoReply: (lang === "es" ? lineOoo.auto_reply_es : lineOoo.auto_reply_en) ?? null,
         }
       : null,
   };
@@ -42044,8 +42066,11 @@ export async function runClientCareCronStep(nowLa: Date = laWallClockAsUtcDate()
   return out;
 }
 
+/** Longest custom out-of-office auto-reply (2 SMS segments; same cap as client care templates). */
+const OUT_OF_OFFICE_AUTO_REPLY_MAX = 320;
+
 /** Validate an out-of-office request (dates in Pacific, up to 60 days; backups must be other active staff). */
-export function validateOutOfOffice(b: Record<string, unknown>, todayYmd: string): { ok: true; v: { starts_on: string; returns_on: string; backup_en_admin_id: number | null; backup_es_admin_id: number | null; note_en: string | null; note_es: string | null } } | { ok: false; error: string } {
+export function validateOutOfOffice(b: Record<string, unknown>, todayYmd: string): { ok: true; v: { starts_on: string; returns_on: string; backup_en_admin_id: number | null; backup_es_admin_id: number | null; note_en: string | null; note_es: string | null; auto_reply_en: string | null; auto_reply_es: string | null } } | { ok: false; error: string } {
   const ymd = (x: unknown) => (typeof x === "string" && /^\d{4}-\d{2}-\d{2}$/.test(x) && !Number.isNaN(new Date(`${x}T12:00:00Z`).getTime()) ? x : null);
   const starts = ymd(b.starts_on);
   const returns = ymd(b.returns_on);
@@ -42060,7 +42085,13 @@ export function validateOutOfOffice(b: Record<string, unknown>, todayYmd: string
   if (Number.isNaN(en) || Number.isNaN(es)) return { ok: false, error: "Backups must be staff ids" };
   if (!en && !es) return { ok: false, error: "Choose at least one backup" };
   const note = (x: unknown) => (x == null ? null : String(x).trim().slice(0, 200) || null);
-  return { ok: true, v: { starts_on: starts, returns_on: returns, backup_en_admin_id: en, backup_es_admin_id: es, note_en: note(b.note_en), note_es: note(b.note_es) } };
+  const reply = (x: unknown) => (x == null ? null : String(x).replace(/\s+/g, " ").trim() || null);
+  const autoEn = reply(b.auto_reply_en);
+  const autoEs = reply(b.auto_reply_es);
+  if ((autoEn && autoEn.length > OUT_OF_OFFICE_AUTO_REPLY_MAX) || (autoEs && autoEs.length > OUT_OF_OFFICE_AUTO_REPLY_MAX)) {
+    return { ok: false, error: `Auto-reply can be at most ${OUT_OF_OFFICE_AUTO_REPLY_MAX} characters` };
+  }
+  return { ok: true, v: { starts_on: starts, returns_on: returns, backup_en_admin_id: en, backup_es_admin_id: es, note_en: note(b.note_en), note_es: note(b.note_es), auto_reply_en: autoEn, auto_reply_es: autoEs } };
 }
 
 async function listOutOfOffice(opts: { adminId?: number; activeOnly?: boolean } = {}) {
@@ -42095,6 +42126,8 @@ async function listOutOfOffice(opts: { adminId?: number; activeOnly?: boolean } 
     backup_es: r.backup_es_admin_id ? { id: Number(r.backup_es_admin_id), name: String(r.backup_es_name ?? "") } : null,
     note_en: r.note_en ?? null,
     note_es: r.note_es ?? null,
+    auto_reply_en: r.auto_reply_en ?? null,
+    auto_reply_es: r.auto_reply_es ?? null,
   }));
 }
 
@@ -42120,9 +42153,9 @@ async function setOutOfOfficeCore(actorId: number, body: Record<string, unknown>
     [target, v.v.returns_on, v.v.starts_on],
   );
   const [r] = await pool.query<ResultSetHeader>(
-    `INSERT INTO admin_out_of_office (admin_id, starts_on, returns_on, backup_en_admin_id, backup_es_admin_id, note_en, note_es, created_by_admin_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [target, v.v.starts_on, v.v.returns_on, v.v.backup_en_admin_id, v.v.backup_es_admin_id, v.v.note_en, v.v.note_es, actorId],
+    `INSERT INTO admin_out_of_office (admin_id, starts_on, returns_on, backup_en_admin_id, backup_es_admin_id, note_en, note_es, auto_reply_en, auto_reply_es, created_by_admin_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [target, v.v.starts_on, v.v.returns_on, v.v.backup_en_admin_id, v.v.backup_es_admin_id, v.v.note_en, v.v.note_es, v.v.auto_reply_en, v.v.auto_reply_es, actorId],
   );
   await pool.query(
     `INSERT INTO audit_logs (actor_type, actor_id, action, entity_type, entity_id, changes_json, status) VALUES ('admin', ?, 'out_of_office.set', 'admin', ?, ?, 'success')`,
@@ -55519,7 +55552,11 @@ function adminAiInputSchemaToZod(
     if (typeof p.description === "string" && p.description) {
       base = base.describe(p.description);
     }
-    shape[key] = required.has(key) ? base : base.optional();
+    // Claude often sends null for fields it leaves empty ("note_en": null): on optional fields
+    // null means "not given" — rejecting it failed the call before it ever reached the tool.
+    shape[key] = required.has(key)
+      ? base
+      : z.preprocess((v) => (v === null ? undefined : v), base.optional());
   }
   return z.object(shape).passthrough();
 }
@@ -56344,7 +56381,7 @@ function mountOptimumMcpRoutes(opts: MountOptimumMcpOpts): void {
             question: `[mcp/remote] ${t.name}`,
             contextJson: { source: "mcp_remote", args: cleaned },
             toolsJson: [t.name],
-            replyExcerpt: adminAiTruncateJson(result.data).slice(0, 500),
+            replyExcerpt: adminAiTruncateJson(adminAiToolPayload(result)).slice(0, 500),
             status: "success",
             durationMs: Date.now() - started,
             ipAddress: ip,
@@ -56353,7 +56390,7 @@ function mountOptimumMcpRoutes(opts: MountOptimumMcpOpts): void {
             content: [
               {
                 type: "text" as const,
-                text: JSON.stringify(result.data, null, 2),
+                text: JSON.stringify(adminAiToolPayload(result), null, 2),
               },
             ],
             isError: false,
@@ -57465,12 +57502,12 @@ function buildApp() {
         question: `[mcp/tool] ${toolName}`,
         contextJson: { source: "tools_api", args },
         toolsJson: [toolName],
-        replyExcerpt: adminAiTruncateJson(result.data).slice(0, 500),
+        replyExcerpt: adminAiTruncateJson(adminAiToolPayload(result)).slice(0, 500),
         status: "success",
         durationMs: Date.now() - started,
         ipAddress: ip,
       });
-      return res.json({ ok: true, tool: toolName, data: result.data });
+      return res.json({ ok: true, tool: toolName, data: adminAiToolPayload(result) });
     },
   );
 

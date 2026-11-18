@@ -50,6 +50,16 @@ describe("clientCareText", () => {
   });
 });
 
+describe("clientCareText with the away person's own message", () => {
+  it("sends it exactly as written for messages and missed calls; template otherwise", () => {
+    const away = { name: "Cesar", returnsLabel: "Wednesday 11/25", autoReply: "Hi, it's Cesar. I'm away until Wednesday, Nov 25." };
+    for (const kind of ["message", "missed_call"] as const) {
+      expect(clientCareText({ kind, lang: "en", firstName: "Maria", owner: { name: "Lecca" }, away, when: "today" })).toBe(away.autoReply);
+    }
+    expect(clientCareText({ kind: "message", lang: "en", owner: { name: "Lecca" }, away: { ...away, autoReply: "  " }, when: "today" })).toContain("Cesar is out of the office until Wednesday 11/25");
+  });
+});
+
 describe("helpers", () => {
   it("prettyUsPhone / returnDayLabel", () => {
     expect(prettyUsPhone("+19497365644")).toBe("949-736-5644");
@@ -64,8 +74,14 @@ describe("validateOutOfOffice", () => {
   it("accepts Cesar's trip (Thu-Tue, back Wed 25) with both backups", () => {
     expect(validateOutOfOffice({ starts_on: "2026-11-19", returns_on: "2026-11-25", backup_en_admin_id: 150002, backup_es_admin_id: 120001, note_en: " Mexico " }, today)).toEqual({
       ok: true,
-      v: { starts_on: "2026-11-19", returns_on: "2026-11-25", backup_en_admin_id: 150002, backup_es_admin_id: 120001, note_en: "Mexico", note_es: null },
+      v: { starts_on: "2026-11-19", returns_on: "2026-11-25", backup_en_admin_id: 150002, backup_es_admin_id: 120001, note_en: "Mexico", note_es: null, auto_reply_en: null, auto_reply_es: null },
     });
+  });
+  it("keeps the away person's own auto-reply (trimmed, max 320)", () => {
+    const r = validateOutOfOffice({ starts_on: "2026-11-19", returns_on: "2026-11-25", backup_en_admin_id: 150002, auto_reply_en: "  Hi, it's Cesar.\n Back Nov 25. ", auto_reply_es: "" }, today);
+    expect(r.ok && r.v).toMatchObject({ auto_reply_en: "Hi, it's Cesar. Back Nov 25.", auto_reply_es: null });
+    const long = validateOutOfOffice({ starts_on: "2026-11-19", returns_on: "2026-11-25", backup_en_admin_id: 1, auto_reply_es: "x".repeat(321) }, today);
+    expect(long.ok === false && long.error).toMatch(/320/);
   });
   it.each([
     [{ starts_on: "2026-11-25", returns_on: "2026-11-19", backup_en_admin_id: 1 }, /after/],

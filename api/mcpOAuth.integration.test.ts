@@ -504,6 +504,32 @@ describe("MCP OAuth + remote endpoint", () => {
     }
   }, 60_000);
 
+  it("write-tool dry-runs come back as previews over MCP (no 'reading length' crash)", async () => {
+    // Nov 18, 2026 (Cesar): dry-runs carry { dry_run, preview, message } and no `data`; the MCP
+    // wrapper read result.data and failed set_out_of_office / approve_holiday_greeting / approve_round_report.
+    const t = await issueTokens("dry");
+    const [[rep]] = await pool.query<RowDataPacket[]>(`SELECT id FROM client_round_reports WHERE COALESCE(pdf_storage_key, '') NOT LIKE 'vitest://%' ORDER BY id ASC LIMIT 1`);
+    const [[hol]] = await pool.query<RowDataPacket[]>(`SELECT id FROM holiday_greetings ORDER BY id DESC LIMIT 1`);
+    const calls: Array<[string, Record<string, unknown>]> = [
+      ["set_out_of_office", { starts_on: "2099-01-05", returns_on: "2099-01-07", backup_en_admin_id: 150002, note_en: null, confirm: false }],
+    ];
+    if (hol) calls.push(["approve_holiday_greeting", { greeting_id: Number(hol.id), confirm: false }]);
+    if (rep) calls.push(["approve_round_report", { report_id: Number(rep.id), override_reason: "Reviewed by hand", confirm: false }]);
+    const [[mark]] = await pool.query<RowDataPacket[]>(`SELECT COALESCE(MAX(id), 0) m FROM admin_ai_audit_logs`);
+    try {
+      for (const [name, args] of calls) {
+        const call = await mcpCall(t.access, "tools/call", { name, arguments: args });
+        expect(call.status, name).toBe(200);
+        const text = String(call.body?.result?.content?.[0]?.text);
+        expect(text, name).not.toMatch(/reading 'length'/);
+        expect(call.body?.result?.isError, `${name}: ${text}`).toBe(false);
+        expect(JSON.parse(text), name).toMatchObject({ dry_run: true });
+      }
+    } finally {
+      await pool.query(`DELETE FROM admin_ai_audit_logs WHERE id > ? AND admin_id = ? AND question LIKE '[mcp/remote] %'`, [mark.m, adminId]);
+    }
+  }, 60_000);
+
   it("per-admin hourly MCP ceiling returns rate_limited and audits it", async () => {
     const t = await issueTokens("rl");
     const [[me]] = await pool.query<RowDataPacket[]>(`SELECT role FROM admins WHERE id = ?`, [adminId]);

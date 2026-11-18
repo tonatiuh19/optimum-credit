@@ -6,10 +6,14 @@ import { CalendarRange, Loader2, MessageSquareQuote, Palmtree, Trash2 } from "lu
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { cancelOutOfOffice, fetchOutOfOffice, saveOutOfOffice } from "@/store/slices/outOfOfficeSlice";
 import { formatReturnDay, outOfOfficePreview } from "@/components/admin/out-of-office/outOfOfficeFormat";
+
+/** Same cap as the server (2 SMS segments). */
+const AUTO_REPLY_MAX = 320;
 
 const todayPacific = () => new Date(new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles" })).toISOString().slice(0, 10);
 
@@ -35,7 +39,7 @@ export function OutOfOfficeCard() {
 
   const formik = useFormik({
     enableReinitialize: true,
-    initialValues: { admin_id: me?.id ?? 0, starts_on: todayPacific(), returns_on: "", backup_en_admin_id: String(defaultEn), backup_es_admin_id: String(defaultEs), note_en: "", note_es: "" },
+    initialValues: { admin_id: me?.id ?? 0, starts_on: todayPacific(), returns_on: "", backup_en_admin_id: String(defaultEn), backup_es_admin_id: String(defaultEs), note_en: "", note_es: "", auto_reply_en: "", auto_reply_es: "" },
     validationSchema: Yup.object({
       starts_on: Yup.string().required(t("outOfOffice.required")),
       returns_on: Yup.string()
@@ -43,6 +47,8 @@ export function OutOfOfficeCard() {
         .test("after", t("outOfOffice.returnAfter"), function (v) {
           return !!v && v > this.parent.starts_on;
         }),
+      auto_reply_en: Yup.string().max(AUTO_REPLY_MAX, t("outOfOffice.ownMessageMax", { max: AUTO_REPLY_MAX })),
+      auto_reply_es: Yup.string().max(AUTO_REPLY_MAX, t("outOfOffice.ownMessageMax", { max: AUTO_REPLY_MAX })),
       backup_en_admin_id: Yup.string().test("one", t("outOfOffice.oneBackup"), function (v) {
         return !!v || !!this.parent.backup_es_admin_id;
       }),
@@ -57,6 +63,8 @@ export function OutOfOfficeCard() {
           backup_es_admin_id: v.backup_es_admin_id ? Number(v.backup_es_admin_id) : null,
           note_en: v.note_en || null,
           note_es: v.note_es || null,
+          auto_reply_en: v.auto_reply_en.trim() || null,
+          auto_reply_es: v.auto_reply_es.trim() || null,
         }),
       );
       if (saveOutOfOffice.rejected.match(r)) toast({ variant: "destructive", title: String(r.payload) });
@@ -70,9 +78,11 @@ export function OutOfOfficeCard() {
   const preview = useMemo(() => {
     if (!formik.values.returns_on) return null;
     const lang: "en" | "es" = es && backupEs ? "es" : backupEn ? "en" : "es";
+    const own = (lang === "es" ? formik.values.auto_reply_es : formik.values.auto_reply_en).trim();
+    if (own) return own;
     const backupName = lang === "es" ? backupEs : backupEn;
     return backupName ? outOfOfficePreview({ lang, awayName: who, returnsLabel: formatReturnDay(formik.values.returns_on, lang === "es"), backupName }) : null;
-  }, [formik.values.returns_on, who, backupEn, backupEs, es]);
+  }, [formik.values.returns_on, formik.values.auto_reply_en, formik.values.auto_reply_es, who, backupEn, backupEs, es]);
 
   const visible = data?.can_manage_others ? data.everyone : data?.mine ?? [];
 
@@ -147,6 +157,22 @@ export function OutOfOfficeCard() {
           ))}
         </div>
         {formik.errors.backup_en_admin_id && <p className="text-xs text-destructive">{formik.errors.backup_en_admin_id}</p>}
+        <div className="space-y-2 rounded-xl border border-dashed border-border p-3">
+          <p className="text-xs text-muted-foreground">{t("outOfOffice.ownMessageHint")}</p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {(["auto_reply_en", "auto_reply_es"] as const).map((k) => {
+              const len = formik.values[k].length;
+              return (
+                <div key={k} className="space-y-1.5">
+                  <Label htmlFor={`ooo-${k}`}>{t(k === "auto_reply_en" ? "outOfOffice.ownMessageEn" : "outOfOffice.ownMessageEs")}</Label>
+                  <Textarea id={`ooo-${k}`} rows={3} maxLength={AUTO_REPLY_MAX} placeholder={t("outOfOffice.ownMessagePlaceholder")} className="resize-none text-sm" {...formik.getFieldProps(k)} />
+                  <p className={`text-right text-[11px] transition-colors ${len > AUTO_REPLY_MAX - 20 ? "text-destructive" : "text-muted-foreground"}`}>{len}/{AUTO_REPLY_MAX}</p>
+                  {formik.errors[k] && <p className="text-xs text-destructive">{formik.errors[k]}</p>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
         {preview && (
           <div className="rounded-xl border border-primary/20 bg-primary/5 p-3 text-xs" data-testid="ooo-preview">
             <p className="mb-1 flex items-center gap-1.5 font-semibold text-foreground">

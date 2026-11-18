@@ -269,12 +269,15 @@ export interface ClientCareTextInput {
   topic?: string | null;
   owner: { name: string; phone?: string | null };
   /** The line's owner is out of office (and is not the one answering). */
-  away?: { name: string; returnsLabel: string; note?: string | null } | null;
+  away?: { name: string; returnsLabel: string; note?: string | null; autoReply?: string | null } | null;
   when: string;
 }
 
 /** The auto-reply / AI hold / missed-call text from the settings' template. */
 export function clientCareText(i: ClientCareTextInput, settings: ClientCareSettings = CLIENT_CARE_DEFAULT_SETTINGS): string {
+  // The away line owner wrote their own out-of-office text: send it exactly as written.
+  const own = String(i.away?.autoReply ?? "").trim();
+  if (own) return own;
   const first = String(i.firstName ?? "").trim().split(/\s+/)[0] ?? "";
   return renderClientCareTemplate(settings.templates[i.lang][i.kind], {
     first_name: first ? first.charAt(0).toUpperCase() + first.slice(1).toLowerCase() : "",

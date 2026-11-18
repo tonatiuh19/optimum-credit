@@ -3139,6 +3139,9 @@ export interface OutOfOfficePeriod {
   backup_es: { id: number; name: string } | null;
   note_en: string | null;
   note_es: string | null;
+  /** Exact auto-reply for English / Spanish clients on their line while away (null = template). */
+  auto_reply_en: string | null;
+  auto_reply_es: string | null;
 }
 
 export interface OutOfOfficeResponse {
@@ -3156,6 +3159,8 @@ export interface OutOfOfficeInput {
   backup_es_admin_id: number | null;
   note_en?: string | null;
   note_es?: string | null;
+  auto_reply_en?: string | null;
+  auto_reply_es?: string | null;
 }
 
 

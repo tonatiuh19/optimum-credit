@@ -155,7 +155,8 @@ describe("out of office routes", () => {
     expect((await request(app).get("/api/admin/out-of-office")).status).toBe(401);
     const mine = await as(CESAR).post(body);
     expect(mine.status).toBe(201);
-    expect(mine.body.periods[0]).toMatchObject({ admin_id: CESAR, starts_on: "2099-01-01", returns_on: "2099-01-05", backup_en: { id: LECCA }, backup_es: { id: ANGEL }, active: false });
+    // Real periods (e.g. Cesar's Nov 19-25) sort first: pick this run's 2099 one.
+    expect(mine.body.periods.find((p: { starts_on: string }) => p.starts_on.startsWith("2099"))).toMatchObject({ admin_id: CESAR, starts_on: "2099-01-01", returns_on: "2099-01-05", backup_en: { id: LECCA }, backup_es: { id: ANGEL }, active: false });
     expect((await as(LECCA).post({ ...body, admin_id: ANGEL, backup_en_admin_id: CESAR })).status).toBe(403);
     expect((await as(CESAR).post({ ...body, admin_id: ANGEL, backup_es_admin_id: LECCA })).status).toBe(201);
   });

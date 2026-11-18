@@ -4149,7 +4149,12 @@
     "saved": "Out of office saved",
     "required": "Required",
     "returnAfter": "The first day back must be after the first day away",
-    "oneBackup": "Choose at least one backup"
+    "oneBackup": "Choose at least one backup",
+    "ownMessageHint": "Optional: write your own message. Clients who text or call your line get it exactly as written (by their language) instead of the automatic one.",
+    "ownMessageEn": "Your message for English clients",
+    "ownMessageEs": "Your message for Spanish clients",
+    "ownMessagePlaceholder": "Leave empty to use the automatic message",
+    "ownMessageMax": "At most {{max}} characters"
   },
   "clientCareSettings": {
     "title": "Client care settings",

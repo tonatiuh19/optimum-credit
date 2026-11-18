@@ -4344,7 +4344,8 @@ paths:
         `admin_ai_audit_logs` with question prefix `[mcp/tool]` (file contents such as
         `file_base64` / `attachment_base64` / data: URLs are stored only as size + sha256).
         Rate-limited per admin: 120/hour (super_admin 3,000/hour). Write tools are refused
-        for affiliate-scoped accounts.
+        for affiliate-scoped accounts. `data` is the tool result; for a write tool's dry-run
+        (confirm=false) it is `{ dry_run: true, preview, message }`.
       security: [{ BearerAuth: [] }]
       parameters:
         - name: name
@@ -9325,6 +9326,8 @@ paths:
                 backup_es_admin_id: { type: integer, nullable: true }
                 note_en: { type: string, nullable: true }
                 note_es: { type: string, nullable: true }
+                auto_reply_en: { type: string, nullable: true, maxLength: 320, description: "Exact auto-reply for English clients on their line while away (replaces the client care template)" }
+                auto_reply_es: { type: string, nullable: true, maxLength: 320, description: "Exact auto-reply for Spanish clients on their line while away" }
       responses:
         "201": { description: "{ ok, id, periods[] }" }
         "400": { description: Invalid dates / backups }

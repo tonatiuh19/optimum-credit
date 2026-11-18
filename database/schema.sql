@@ -2507,6 +2507,8 @@ CREATE TABLE IF NOT EXISTS `admin_out_of_office` (
   `backup_es_admin_id` INT UNSIGNED DEFAULT NULL,
   `note_en` VARCHAR(200) DEFAULT NULL COMMENT 'Optional, e.g. "I am in Mexico"',
   `note_es` VARCHAR(200) DEFAULT NULL,
+  `auto_reply_en` VARCHAR(320) DEFAULT NULL COMMENT 'Exact auto-reply for English clients on this person''s line while away',
+  `auto_reply_es` VARCHAR(320) DEFAULT NULL COMMENT 'Exact auto-reply for Spanish clients on this person''s line while away',
   `cancelled_at` DATETIME DEFAULT NULL,
   `created_by_admin_id` INT UNSIGNED DEFAULT NULL,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -2531,7 +2533,7 @@ CREATE TABLE IF NOT EXISTS `client_care_items` (
   `topic` VARCHAR(120) DEFAULT NULL,
   `message_count` SMALLINT UNSIGNED NOT NULL DEFAULT 1,
   `status` ENUM('open','done') NOT NULL DEFAULT 'open',
-  `done_how` VARCHAR(30) DEFAULT NULL COMMENT 'ofg_reply | ai_answered | slack_check',
+  `done_how` VARCHAR(30) DEFAULT NULL COMMENT 'ofg_reply | ai_answered | slack_check | expired | removed',
   `done_by_admin_id` INT UNSIGNED DEFAULT NULL,
   `slack_channel` VARCHAR(40) DEFAULT NULL,
   `slack_ts` VARCHAR(40) DEFAULT NULL,
@@ -2543,5 +2545,6 @@ CREATE TABLE IF NOT EXISTS `client_care_items` (
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_cci_conversation_status` (`conversation_id`, `status`),
-  KEY `idx_cci_status_opened` (`status`, `opened_at`)
+  KEY `idx_cci_status_opened` (`status`, `opened_at`),
+  CONSTRAINT `fk_cci_conversation` FOREIGN KEY (`conversation_id`) REFERENCES `conversations`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

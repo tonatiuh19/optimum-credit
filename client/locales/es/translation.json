@@ -4149,7 +4149,12 @@
     "saved": "Fuera de la oficina guardado",
     "required": "Obligatorio",
     "returnAfter": "El día de regreso debe ser después del primer día fuera",
-    "oneBackup": "Elige al menos un suplente"
+    "oneBackup": "Elige al menos un suplente",
+    "ownMessageHint": "Opcional: escribe tu propio mensaje. Los clientes que escriban o llamen a tu línea lo reciben tal cual (según su idioma) en lugar del automático.",
+    "ownMessageEn": "Tu mensaje para clientes en inglés",
+    "ownMessageEs": "Tu mensaje para clientes en español",
+    "ownMessagePlaceholder": "Déjalo vacío para usar el mensaje automático",
+    "ownMessageMax": "Máximo {{max}} caracteres"
   },
   "clientCareSettings": {
     "title": "Ajustes de atención a clientes",
