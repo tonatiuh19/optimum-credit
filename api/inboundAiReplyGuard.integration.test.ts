@@ -138,7 +138,7 @@ describe("SMS AI reply guard (end-to-end)", () => {
     const rows = await textIn("Where do I log in?", `SM2${RUN}`);
     const out = rows.filter((r) => r.direction === "outbound");
     expect(out.some((r) => String(r.body).includes("phishy"))).toBe(false);
-    expect(out[out.length - 1]?.body).toMatch(/teammate/i);
+    expect(out[out.length - 1]?.body).toMatch(/teammate|will reply/i);
     const note = rows.find((r) => String(r.body).includes("reply_guard:unapproved_link"));
     expect(note).toBeTruthy();
   });

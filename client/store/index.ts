@@ -5,6 +5,10 @@ import packages from "./slices/packagesSlice";
 import portal from "./slices/portalSlice";
 import admin from "./slices/adminSlice";
 import reminderFlows from "./slices/reminderFlowsSlice";
+import holidayGreetings from "./slices/holidayGreetingsSlice";
+import outOfOffice from "./slices/outOfOfficeSlice";
+import clientCareSettings from "./slices/clientCareSettingsSlice";
+import staffPermissions from "./slices/staffPermissionsSlice";
 import adminTasks from "./slices/adminTasksSlice";
 import reportWizard from "./slices/reportWizardSlice";
 import legal from "./slices/legalSlice";
@@ -37,6 +41,10 @@ export const store = configureStore({
     portal,
     admin,
     reminderFlows,
+    holidayGreetings,
+    outOfOffice,
+    clientCareSettings,
+    staffPermissions,
     adminTasks,
     reportWizard,
     legal,

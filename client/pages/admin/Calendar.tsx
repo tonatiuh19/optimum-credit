@@ -14,6 +14,7 @@ import {
   Ban,
   Target,
   CheckSquare,
+  Gift,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
@@ -93,11 +94,12 @@ type DaySelection = {
 export default function AdminCalendar() {
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const {
     calendarSplits,
     calendarRoundEvents,
     calendarWorkTasks,
+    calendarHolidayGreetings,
     calendarLoading,
   } = useAppSelector((s) => s.admin);
   const adminId = useAppSelector((s) => s.adminAuth.user?.id ?? null);
@@ -158,6 +160,17 @@ export default function AdminCalendar() {
     }
     return map;
   }, [calendarSplits]);
+
+  // Holiday greetings (Nov 17, 2026): a chip on the holiday's day linking to its approval card.
+  const holidaysByDay = useMemo(() => {
+    const map = new Map<number, typeof calendarHolidayGreetings>();
+    for (const h of calendarHolidayGreetings ?? []) {
+      const d = parseInt(String(h.date).slice(8, 10), 10);
+      if (!map.has(d)) map.set(d, []);
+      map.get(d)!.push(h);
+    }
+    return map;
+  }, [calendarHolidayGreetings]);
 
   const roundsByDay = useMemo(() => {
     const map = new Map<number, CalendarRoundEvent[]>();
@@ -383,6 +396,25 @@ export default function AdminCalendar() {
                       {day}
                     </div>
                     <div className="space-y-0.5">
+                      {(holidaysByDay.get(day) ?? []).map((h) => (
+                        <Link
+                          key={`holiday-${h.id}`}
+                          to="/admin/holiday-greetings"
+                          onClick={(e) => e.stopPropagation()}
+                          className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-md border truncate flex items-center gap-1 ${
+                            h.status === "approved" || h.status === "sent" || h.status === "sending"
+                              ? "bg-accent/10 text-accent border-accent/30"
+                              : h.status === "skipped"
+                                ? "bg-destructive/10 text-destructive border-destructive/30"
+                                : "bg-secondary text-foreground border-border"
+                          }`}
+                          title={`${i18n.language?.startsWith("es") ? h.label.es : h.label.en} · ${t(`holidayGreetings.status.${h.status}`)}`}
+                          data-testid="calendar-holiday-chip"
+                        >
+                          <Gift className="h-3 w-3 shrink-0" />
+                          <span className="truncate">{i18n.language?.startsWith("es") ? h.label.es : h.label.en}</span>
+                        </Link>
+                      ))}
                       {chips.map((chip) =>
                         chip.kind === "round" ? (
                           <div

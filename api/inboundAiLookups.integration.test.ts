@@ -324,7 +324,7 @@ describe("SMS AI lookups are locked to the sender", () => {
     await textIn(phones.b, "I want to change my card", `SMe${RUN}`);
     const out = (await outbound(ids.b)).filter((r) => r.direction === "outbound");
     expect(out.some((r) => String(r.body).includes("evil.example"))).toBe(false);
-    expect(out[out.length - 1]?.body).toMatch(/teammate/i);
+    expect(out[out.length - 1]?.body).toMatch(/teammate|will reply/i);
   });
 
   it("end to end: a staff text in the last 24h keeps the AI out", async () => {

@@ -275,7 +275,7 @@ describe("inbound AI SMS webhook", () => {
         String(JSON.stringify(m.metadata_json || "")).includes("inbound_ai"),
     );
     expect(hold).toBeTruthy();
-    expect(String(hold?.body || "")).toMatch(/teammate|equipo/i);
+    expect(String(hold?.body || "")).toMatch(/teammate|equipo|will reply|te responder/i);
     // Unknown numbers are no longer hard-escalated — they reach the AI step
     // (FAQ-only identity); here it falls back only because Claude is off.
     const note = msgs.find(

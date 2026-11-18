@@ -27,6 +27,7 @@ import type {
   CalendarSplit,
   CalendarRoundEvent,
   CalendarWorkTaskEvent,
+  CalendarHolidayGreetingEvent,
   AdminPaymentsResponse,
   AdminPipelineResponse,
   AdminPipelineQuery,
@@ -195,6 +196,7 @@ interface AdminState {
   calendarSplits: CalendarSplit[];
   calendarRoundEvents: CalendarRoundEvent[];
   calendarWorkTasks: CalendarWorkTaskEvent[];
+  calendarHolidayGreetings: CalendarHolidayGreetingEvent[];
   calendarLoading: boolean;
   clientSearchResults: AdminClientListItem[];
   clientSearchLoading: boolean;
@@ -294,6 +296,7 @@ const initialState: AdminState = {
   calendarSplits: [],
   calendarRoundEvents: [],
   calendarWorkTasks: [],
+  calendarHolidayGreetings: [],
   calendarLoading: false,
   clientSearchResults: [],
   clientSearchLoading: false,
@@ -2270,6 +2273,7 @@ const slice = createSlice({
       s.calendarSplits = a.payload.splits;
       s.calendarRoundEvents = a.payload.round_events ?? [];
       s.calendarWorkTasks = a.payload.work_tasks ?? [];
+      s.calendarHolidayGreetings = a.payload.holiday_greetings ?? [];
     });
     b.addCase(fetchAdminTradelineProducts.fulfilled, (s, a) => {
       s.tradelineProducts = a.payload;

@@ -75,7 +75,8 @@
     "kicker": "Admin",
     "quickNav": "Navegación rápida",
     "more": "Más",
-    "productivity": "Calificación"
+    "productivity": "Calificación",
+    "holidayGreetings": "Saludos festivos"
   },
   "adminAsk": {
     "title": "Preguntar",
@@ -224,6 +225,10 @@
       "morning_digest": {
         "label": "Resumen matutino (días hábiles)",
         "hint": "Correo con Claude cada mañana laboral (tareas, conversaciones, prospectos y frase motivadora)"
+      },
+      "holiday_greetings": {
+        "label": "Saludos de días festivos",
+        "hint": "Recordatorios de aprobación y resultados de los mensajes de días festivos."
       }
     },
     "soundTitle": "Sonidos de notificación",
@@ -287,7 +292,24 @@
     "gcrFreeHint": "La página del QR de eventos (ofgllc.com/get-credit-report). Encendido: quien se registra recibe el enlace del reporte gratis de MyFreeScoreNow en pantalla, por correo y SMS. Apagado: solo registro — reciben una confirmación y un especialista da seguimiento.",
     "gcrFreeToggleAria": "Ofrecer el reporte de crédito gratis en /get-credit-report",
     "gcrFreeOn": "Encendido — se ofrece el enlace del reporte gratis al registrarse.",
-    "gcrFreeOff": "Apagado — solo formulario de registro; confirmación por correo y SMS sin enlace. Los enlaces ya enviados siguen funcionando."
+    "gcrFreeOff": "Apagado — solo formulario de registro; confirmación por correo y SMS sin enlace. Los enlaces ya enviados siguen funcionando.",
+    "staffPermissions": {
+      "title": "Permisos",
+      "subtitle": "Elige quién puede hacer estas tareas de gerente. Los cambios aplican en menos de un minuto.",
+      "needOne": "Deja al menos una persona en cada lista.",
+      "max": "Máximo 10 personas por lista.",
+      "saved": "Permisos guardados",
+      "saveFailed": "No se pudieron guardar los permisos",
+      "loadFailed": "No se pudieron cargar los permisos",
+      "out_of_office_manager_ids": {
+        "label": "Gerentes de fuera de oficina y atención al cliente",
+        "hint": "Pueden poner fuera de oficina a cualquiera y editar la configuración de atención al cliente."
+      },
+      "holiday_greeting_approver_ids": {
+        "label": "Aprobadores de felicitaciones",
+        "hint": "Pueden aprobar, omitir o restaurar los textos de felicitación y reciben la alerta de aprobación."
+      }
+    }
   },
   "adminReminderFlows": {
     "alsoSmsLabel": "También SMS tras el email",
@@ -1189,30 +1211,61 @@
   "support": {
     "heading": "Soporte",
     "categories": {
-      "billing": "Facturación y Pagos",
-      "billingHint": "Incluye tu número de factura o fecha de pago. Nuestro equipo resuelve preguntas de facturación en 1 día hábil.",
-      "documents": "Documentos y Archivos",
-      "documentsHint": "Menciona el tipo de documento (reporte de crédito, ID, etc.) y cuándo intentaste subirlo. ¡Las capturas de pantalla ayudan!",
-      "creditRepair": "Proceso de Reparación Crediticia",
-      "creditRepairHint": "Dinos qué ronda de disputas o buró está afectado. Incluye tu puntuación Smart Credit si la tienes.",
-      "technical": "Problema Técnico",
-      "technicalHint": "Dinos qué página o función usabas y exactamente qué mensaje de error apareció (si hubo alguno).",
-      "other": "Otro / General",
-      "otherHint": "Describe tu pregunta o problema con el mayor detalle posible para que podamos dirigirte al miembro correcto del equipo."
+      "billing": {
+        "label": "Facturación y Pagos",
+        "hint": "Incluye tu número de factura o fecha de pago. Nuestro equipo resuelve preguntas de facturación en 1 día hábil.",
+        "placeholder": "p. ej. Veo un cargo del 12 de mayo por $99 que no reconozco. Mi plan es el paquete Standard."
+      },
+      "documents": {
+        "label": "Documentos y Archivos",
+        "hint": "Menciona el tipo de documento (reporte de crédito, ID, etc.) y cuándo intentaste subirlo. ¡Las capturas de pantalla ayudan!",
+        "placeholder": "p. ej. Intenté subir mi reporte de crédito de Experian en PDF (marzo 2026) pero la carga se queda girando y nunca termina."
+      },
+      "process": {
+        "label": "Proceso de Reparación Crediticia",
+        "hint": "Dinos qué ronda de disputas o buró está afectado. Incluye tu puntuación Smart Credit si la tienes.",
+        "placeholder": "p. ej. La ronda 2 terminó hace 3 semanas pero no he recibido ninguna actualización. Mi puntaje de Experian era 582."
+      },
+      "technical": {
+        "label": "Problema Técnico",
+        "hint": "Dinos qué página o función usabas y exactamente qué mensaje de error apareció (si hubo alguno).",
+        "placeholder": "p. ej. Cuando hago clic en Firmar contrato me aparece una pantalla blanca con el mensaje 'Algo salió mal'. Uso Chrome en iPhone."
+      },
+      "other": {
+        "label": "Otro / General",
+        "hint": "Describe tu pregunta o problema con el mayor detalle posible para que podamos dirigirte al miembro correcto del equipo.",
+        "placeholder": "Describe cómo podemos ayudarte…"
+      }
     },
     "status": {
       "open": "Abierto",
       "in_progress": "En Progreso",
-      "awaiting_client": "Esperando respuesta",
       "resolved": "Resuelto",
-      "closed": "Cerrado"
+      "closed": "Cerrado",
+      "waiting_client": "Esperando respuesta"
     },
     "validation": {
-      "subjectShort": "Por favor escribe un asunto más descriptivo",
       "subjectRequired": "El asunto es requerido",
-      "bodyShort": "Por favor agrega al menos 20 caracteres para poder ayudarte mejor",
-      "bodyRequired": "La descripción es requerida"
-    }
+      "bodyRequired": "La descripción es requerida",
+      "subjectMin": "Por favor escribe un asunto más descriptivo",
+      "bodyMin": "Por favor agrega al menos 20 caracteres para poder ayudarte mejor"
+    },
+    "createTicket": "Crear un ticket de soporte",
+    "createTicketDesc": "Selecciona el tipo de problema para dirigirlo al equipo correcto.",
+    "description": "Normalmente respondemos en 24 horas.",
+    "descriptionLabel": "Descripción",
+    "faqCta": "¿No encontraste tu respuesta?",
+    "faqCtaEnd": "y te responderemos en 24 horas.",
+    "faqHeading": "Preguntas frecuentes",
+    "noTickets": "Aún no tienes tickets de soporte.",
+    "openTicket": "Abrir un ticket de soporte",
+    "priorityLabel": "Prioridad",
+    "subjectLabel": "Asunto",
+    "subjectPlaceholder": "Título breve — p. ej. \"Cargo no reconocido del 12 de mayo\"",
+    "submitTicket": "Enviar ticket",
+    "submitting": "Enviando…",
+    "title": "Soporte",
+    "typeOfIssue": "Tipo de problema"
   },
   "profile": {
     "heading": "Mi Perfil",
@@ -4028,5 +4081,107 @@
       "backfilling": "Generando…",
       "backfillDone": "Generados {{built}} de {{scanned}} reportes"
     }
+  },
+  "holidayGreetings": {
+    "title": "Saludos de días festivos",
+    "description": "Un mensaje por día festivo de parte de la familia OFG, enviado desde la línea de cada cliente. Nada sale sin aprobación.",
+    "rules": "Se envía a los clientes actuales que nos escribieron en los últimos 12 meses (inglés o español según su idioma). Los números que respondieron STOP siempre se omiten y cada mensaje termina con la línea para darse de baja. Las respuestas llegan a Conversaciones; los saludos cortos y las fotos no los escala la IA. Si no se aprueba antes de la hora de envío, no se envía.",
+    "pacific": "Pacífico",
+    "status": {
+      "draft": "Falta aprobar",
+      "approved": "Aprobado",
+      "sending": "Enviando",
+      "sent": "Enviado",
+      "skipped": "Omitido",
+      "cancelled": "Cancelado"
+    },
+    "textEn": "Texto (inglés)",
+    "textEs": "Texto (español)",
+    "footerNote": "Se agrega automáticamente: \"{{footer}}\"",
+    "nameHint": "Usa {{token}} para el nombre del cliente; si no tiene nombre, se omite sin dejar huecos.",
+    "sendTime": "Hora de envío (Pacífico, 8 AM-8 PM)",
+    "timeRange": "Elige una hora entre 08:00 y 19:59",
+    "required": "Obligatorio",
+    "tooLong": "Máximo 600 caracteres",
+    "addImage": "Agregar imagen",
+    "imageAttached": "Imagen adjunta",
+    "removeImage": "Quitar imagen",
+    "audience": "Quién lo recibe",
+    "willReceive": "clientes lo recibirán ({{en}} en inglés, {{es}} en español).",
+    "notIncluded": "No incluidos: {{opted}} dados de baja (STOP), {{old}} sin mensajes en 12 meses, {{phone}} sin teléfono, {{line}} sin línea OFG.",
+    "results": "Enviado a {{sent}} clientes · {{failed}} fallaron · {{skipped}} omitidos (STOP).",
+    "save": "Guardar cambios",
+    "saved": "Guardado",
+    "savedNeedsApproval": "Guardado — necesita aprobarse de nuevo",
+    "sendTest": "Enviarme una prueba",
+    "testSent": "Prueba enviada a tu teléfono",
+    "approve": "Aprobar",
+    "unapprove": "Quitar aprobación",
+    "skip": "Omitir este año",
+    "restore": "Restaurar",
+    "approvedBy": "Aprobado por {{name}} — sale a la hora de envío. Si lo editas, necesita aprobarse de nuevo.",
+    "saveFirst": "Guarda tus cambios antes de aprobar.",
+    "onlyApprovers": "Solo Cesar o Alex pueden aprobar los saludos.",
+    "done": {
+      "approve": "Aprobado — saldrá a la hora de envío",
+      "unapprove": "De vuelta a borrador — no se enviará nada",
+      "skip": "Omitido este año",
+      "restore": "Restaurado a borrador"
+    }
+  },
+  "outOfOffice": {
+    "title": "Fuera de la oficina",
+    "description": "Mientras no estás, los clientes que escriben o llaman reciben una respuesta automática que dice cuándo regresas y quién les responde, y Slack #client-care manda sus mensajes a tus suplentes.",
+    "bannerAway": "{{name}} está fuera de la oficina hasta el {{day}}",
+    "bannerEn": "Inglés: {{name}}",
+    "bannerEs": "Español: {{name}}",
+    "period": "Desde {{from}} · regresa el {{day}}",
+    "awayNow": "Fuera ahora",
+    "cancel": "Cancelar",
+    "who": "Quién no está",
+    "startsOn": "Primer día fuera",
+    "returnsOn": "Primer día de regreso",
+    "backupEn": "Clientes en inglés los atiende",
+    "backupEs": "Clientes en español los atiende",
+    "none": "Nadie",
+    "previewTitle": "Lo que recibirán los clientes",
+    "save": "Guardar fuera de la oficina",
+    "saved": "Fuera de la oficina guardado",
+    "required": "Obligatorio",
+    "returnAfter": "El día de regreso debe ser después del primer día fuera",
+    "oneBackup": "Elige al menos un suplente"
+  },
+  "clientCareSettings": {
+    "title": "Ajustes de atención a clientes",
+    "description": "Lo que reciben los clientes cuando escriben o llaman, el horario, y cuándo se le recuerda al equipo y se avisa a Cesar. Los cambios aplican al instante.",
+    "readOnly": "Solo Cesar o Alex pueden cambiar estos ajustes.",
+    "auto_reply_enabled": "Respuestas automáticas a clientes",
+    "slack_enabled": "Publicar en Slack #client-care",
+    "hours": "Horario (Pacífico)",
+    "days": "Días hábiles",
+    "business_start": "Abre",
+    "business_end": "Cierra",
+    "reply_today_until": "Prometer \"hoy\" hasta",
+    "follow": "Seguimiento",
+    "remindAfter": "Recordar después de (min hábiles)",
+    "escalateAfter": "Escalar después de (min hábiles)",
+    "gapHours": "Horas entre respuestas automáticas",
+    "staffQuiet": "Omitir si el equipo escribió (min)",
+    "escalateTo": "Las escalaciones van a (su suplente si está fuera)",
+    "texts": "Mensajes que reciben los clientes",
+    "syntax": "Los marcadores como {first_name} se rellenan. Pon las partes opcionales entre [[ ]]: desaparecen cuando un marcador dentro está vacío, p. ej. \"¡Hola[[ {first_name}]]!\". {owner} y {when} son obligatorios.",
+    "insert": "Insertar marcador",
+    "simulateAway": "Vista previa con alguien fuera de la oficina",
+    "tpl": {
+      "en_message": "Inglés — mensaje",
+      "en_missed_call": "Inglés — llamada perdida",
+      "es_message": "Español — mensaje",
+      "es_missed_call": "Español — llamada perdida"
+    },
+    "chars": "{{n}} caracteres",
+    "save": "Guardar ajustes",
+    "saved": "Ajustes guardados",
+    "reset": "Restaurar valores predeterminados",
+    "resetDone": "Ajustes predeterminados restaurados"
   }
 }

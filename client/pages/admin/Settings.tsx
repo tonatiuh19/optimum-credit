@@ -26,6 +26,7 @@ import { LEGAL_PATHS } from "@/lib/legal";
 import FieldHint from "@/components/admin/FieldHint";
 import NotifyExtraEmailsPanel from "@/components/admin/NotifyExtraEmailsPanel";
 import OfgPhoneNumbersPanel from "@/components/admin/OfgPhoneNumbersPanel";
+import StaffPermissionsPanel from "@/components/admin/settings/StaffPermissionsPanel";
 
 const FUNDING_SMS_SETTING_KEY = "funding_sms_from_phone_number_id";
 const SIGNUP_SMS_SETTING_KEY = "signup_notify_sms_from_phone_number_id";
@@ -219,6 +220,8 @@ export default function AdminSettings() {
         title="Settings"
         description="Global app configuration."
       />
+
+      <StaffPermissionsPanel />
 
       <NotifyExtraEmailsPanel />
 

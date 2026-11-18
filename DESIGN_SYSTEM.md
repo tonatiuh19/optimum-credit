@@ -320,3 +320,19 @@ A report the self-check holds (`needs_review`) is explained from its actual chec
 - **Composer**: in the Social tab the reply channel is the thread's platform, picked automatically (plus Note for clients). The SMS tab never offers social channels. Templates written for SMS are reused on social. Attachments are SMS-only for now. Meta's reply-window errors show inline in the usual send-error spot.
 - **Alerts** read "Facebook · Name" / "Instagram · Name" and deep-link to `?unknown=ID&hub=social`, which opens the Social tab.
 - Setup and behaviour: `docs/META_MESSAGING_SETUP.md`.
+
+## Holiday Greetings (Nov 17, 2026)
+
+- Page `/admin/holiday-greetings` (Content menu, `Gift` icon): one collapsible `HolidayGreetingCard` per holiday (`client/components/admin/holiday-greetings/`), the next unsent one open by default; a `primary/5` rules banner on top.
+- Card header: icon tile (`primary/10`), holiday + year, date + send time (Pacific), status pill — draft `muted`, approved / sent `accent`, sending `primary`, skipped `destructive`.
+- Body: EN / ES textareas side by side on desktop, stacked on mobile, each with the fixed STOP footer note and a character count; time input (08:00-19:59); image thumbnail with remove, or "Add image"; a `muted/30` audience box (count, EN/ES split, skipped reasons, rendered preview).
+- Actions: full-width buttons on mobile — Save (outline), Send me a test (outline), Approve (primary, approvers only, disabled while there are unsaved edits), Unapprove, Skip (ghost destructive), Restore.
+- Calendar: holidays show as a small `Gift` chip at the top of the day cell, toned by status, linking to the page.
+
+## Out of office (Nov 17, 2026)
+
+- `OutOfOfficeCard` (Profile, anchor `#out-of-office`, `client/components/admin/out-of-office/`): `Palmtree` icon tile in `accent/10`; current/upcoming periods as `muted/30` rows with an "Away now" `accent` pill and a ghost destructive Cancel; form grid (2 columns on desktop, 1 on mobile): first day away, first day back, English / Spanish backups; a `primary/5` "What clients will get" preview of the auto-reply; full-width save on mobile.
+- `OutOfOfficeBanner` (top of every admin page while anyone is away): one `accent/10` row per person — "Cesar is out of the office until Wednesday 11/25 · English: Lecca · Spanish: Ángel", linking to the card; fades in.
+- `StaffPermissionsPanel` (Settings, super admin): `ShieldCheck` tile in `primary/10`; two list cards side by side on `md` (stacked on mobile), each with a `primary` icon, count and hint; staff as toggle chips (selected = `primary/10` + check, `active:scale-95`); saves on each tap with a toast; the last person on a list cannot be removed.
+- `ClientCareSettingsCard` (Profile, anchor `#client-care-settings`): `Settings2` tile in `primary/10`; two `Switch` rows (auto-replies, Slack); business-day chips (selected = `primary`), time inputs; follow-up numbers in a 2/4-column grid; escalation people as toggle chips (selected = `accent`); four monospace template textareas (2 columns on large screens) with placeholder chips that insert at the cursor, a red error line or a `primary/5` live preview + character count under each; "Preview with someone out of office" switch; Save (disabled until valid and changed) + Reset to defaults. Read-only (disabled inputs, no buttons) for staff who cannot edit.
+

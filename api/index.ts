@@ -3285,6 +3285,10 @@ export const ADMIN_AI_WRITE_TOOLS: ReadonlySet<string> = new Set([
   "event_check_in",
   "approve_round_report",
   "rebuild_round_report",
+  "update_holiday_greeting",
+  "approve_holiday_greeting",
+  "set_holiday_greeting_status",
+  "set_out_of_office",
   "set_conversation_status",
   "assign_conversation",
   "review_client_document",
@@ -3303,6 +3307,8 @@ export const ADMIN_AI_SEND_TOOLS: ReadonlySet<string> = new Set([
   "send_whatsapp",
   "send_wa",
   // Reach the client too: approving sends the report; rejecting a document texts + emails them.
+  // Approving a holiday greeting texts every eligible client at its send time.
+  "approve_holiday_greeting",
   "approve_round_report",
   "review_client_document",
 ]);
@@ -4790,7 +4796,16 @@ export const ADMIN_AI_TOOLS: Array<{
     name: "list_reports_pending_approval",
     description:
       "Progress reports published but NOT sent (Spec v1.1 approval gate): pending_approval = waiting for Approve & send; needs_review = self-check failed (failed checks listed). Hidden from the client until approved. Approve with approve_round_report (or in the CRM case panel / dashboard) — only the language owner (EN Lecca, ES Angel) or Cesar; rebuild with rebuild_round_report. Read-only.",
-    input_schema: { type: "object", properties: { limit: { type: "integer", description: "1–50, default 20 (oldest first; total = how many are really waiting)" }, client_id: { type: "integer", description: "Only this client" } } },
+    input_schema: {
+      type: "object",
+      properties: {
+        limit: { type: "integer", description: "1–50, default 20 (oldest first; total = how many match)" },
+        offset: { type: "integer", description: "Skip this many (paging: pass next_offset from the previous page until has_more is false)" },
+        client_id: { type: "integer", description: "Only this client" },
+        status: { type: "string", enum: ["pending_approval", "needs_review"], description: "Only reports waiting for approval, or only reports held by the self-check" },
+        latest_round_only: { type: "boolean", description: "Only each client's latest round (clients whose most recent report never reached them)" },
+      },
+    },
   },
   {
     name: "get_lead_credit_insights",
@@ -5584,6 +5599,95 @@ export const ADMIN_AI_TOOLS: Array<{
         confirm_phrase: { type: "string" },
       },
       required: ["report_id"],
+    },
+  },
+  {
+    name: "list_out_of_office",
+    description: "Staff out of office: who is away now or soon, the days (Pacific), the return day, and the backups by language (English / Spanish). While someone is away, client auto-replies and Slack #client-care route to their backup. Read-only.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "set_out_of_office",
+    description: "Set out of office for yourself (or anyone, if you are an out-of-office manager — Settings → Permissions): starts_on and returns_on (YYYY-MM-DD, Pacific, up to 60 days; returns_on = first day back), backup_en_admin_id / backup_es_admin_id (search_admins), optional note_en / note_es. Replaces an overlapping period. ALWAYS dry-run first (confirm=false), then confirm=true + confirm_phrase=\"CONFIRM\".",
+    input_schema: {
+      type: "object",
+      properties: {
+        admin_id: { type: "integer" },
+        starts_on: { type: "string" },
+        returns_on: { type: "string" },
+        backup_en_admin_id: { type: "integer" },
+        backup_es_admin_id: { type: "integer" },
+        note_en: { type: "string" },
+        note_es: { type: "string" },
+        confirm: { type: "boolean" },
+        confirm_phrase: { type: "string" },
+      },
+      required: ["starts_on", "returns_on"],
+    },
+  },
+  {
+    name: "get_client_care_settings",
+    description: "Client care rules in force: auto-replies and Slack on/off, business days and hours (Pacific), when 'today' is promised until, reminder / escalation thresholds (business minutes), hours between auto-replies, who gets escalations, and the English / Spanish message and missed-call templates (with {placeholders} and [[optional parts]]). Edited in the CRM (Profile → Client care settings) by out-of-office managers (Settings → Permissions). Read-only.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "list_client_care_open",
+    description: "Client care queue (Slack #client-care): client texts / missed calls not answered yet — who, language, what they said, who answers, how long it has been open (business minutes, Mon-Fri 8 AM-6 PM Pacific), whether the 2-hour reminder or the 4-hour escalation went out. Read-only.",
+    input_schema: { type: "object", properties: { limit: { type: "integer", description: "1-50, default 20" } } },
+  },
+  {
+    name: "list_holiday_greetings",
+    description:
+      "Holiday greetings (Thanksgiving, Christmas, New Year's, 4th of July, Mother's Day, Father's Day, Valentine's Day): one approved SMS per holiday per year to current clients who texted OFG in the last 12 months, from each client's own OFG line, EN/ES by the client's language, optional image. Lists upcoming / recent holidays with date, send time (Pacific), status (draft / approved / sending / sent / skipped), texts and results. Read-only.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "get_holiday_greeting",
+    description:
+      "One holiday greeting: its texts, image, status, the audience it would go to now (count, EN/ES split, skipped reasons: no phone, opted out (STOP), no text in 12 months, no sending line) and a rendered preview — or, once sent, who got it. Read-only.",
+    input_schema: { type: "object", properties: { greeting_id: { type: "integer" } }, required: ["greeting_id"] },
+  },
+  {
+    name: "update_holiday_greeting",
+    description:
+      "Edit a holiday greeting draft: body_en / body_es (use {{first_name}}; the 'Reply STOP' line is added automatically), media_url (https image) or send_time (HH:MM Pacific, 08:00-19:59, on the holiday's date). Any edit after approval returns it to draft (needs approval again). ALWAYS dry-run first (confirm=false), then confirm=true + confirm_phrase=\"CONFIRM\" after the user agrees.",
+    input_schema: {
+      type: "object",
+      properties: {
+        greeting_id: { type: "integer" },
+        body_en: { type: "string" },
+        body_es: { type: "string" },
+        media_url: { type: "string" },
+        send_time: { type: "string", description: "HH:MM Pacific" },
+        confirm: { type: "boolean" },
+        confirm_phrase: { type: "string" },
+      },
+      required: ["greeting_id"],
+    },
+  },
+  {
+    name: "approve_holiday_greeting",
+    description:
+      "Approve a holiday greeting so it goes out at its send time to every eligible client (texts reach clients). Only holiday greeting approvers (Settings → Permissions) may approve. ALWAYS dry-run first (confirm=false) to show the recipient count and preview, then confirm=true + confirm_phrase=\"CONFIRM\" — and only after the user explicitly approves sending.",
+    input_schema: {
+      type: "object",
+      properties: { greeting_id: { type: "integer" }, confirm: { type: "boolean" }, confirm_phrase: { type: "string" } },
+      required: ["greeting_id"],
+    },
+  },
+  {
+    name: "set_holiday_greeting_status",
+    description:
+      "Unapprove (back to draft, nothing sends), skip this year's holiday, or restore a skipped one to draft. Only holiday greeting approvers (Settings → Permissions). Dry-run first (confirm=false), then confirm=true + confirm_phrase=\"CONFIRM\".",
+    input_schema: {
+      type: "object",
+      properties: {
+        greeting_id: { type: "integer" },
+        action: { type: "string", enum: ["unapprove", "skip", "restore"] },
+        confirm: { type: "boolean" },
+        confirm_phrase: { type: "string" },
+      },
+      required: ["greeting_id", "action"],
     },
   },
   {
@@ -16101,6 +16205,292 @@ function leadInsightAlertText(alert: LeadInsightAlert, name: string): string {
       return `${name}: card utilization dropped under 30% (${alert.from}% → ${alert.to}%).`;
   }
 }
+
+/**
+ * Client care settings + message templates (Nov 17, 2026). Shared by the server (inlined into
+ * api/index.ts by scripts/inline-credit-file-engine.mjs) and the settings screen's live preview, so
+ * what staff preview is exactly what clients get. No imports — pure functions only.
+ *
+ * Template syntax: {token} placeholders; [[ ... ]] is an optional part, dropped when any token inside
+ * it is empty ("Hi[[ {first_name}]]!" → "Hi!" when there is no first name).
+ */
+
+type ClientCareLang = "en" | "es";
+type ClientCareKind = "message" | "missed_call";
+
+interface ClientCareWhenLabels {
+  today: string;
+  this_morning: string;
+  tomorrow_morning: string;
+  /** "{weekday} morning" — the next business day by name. */
+  day_morning: string;
+}
+
+interface ClientCareSettings {
+  auto_reply_enabled: boolean;
+  slack_enabled: boolean;
+  /** 0 = Sunday … 6 = Saturday, Pacific. */
+  business_days: number[];
+  business_start: string;
+  business_end: string;
+  /** After this time on a business day, the answer is promised for the next business morning. */
+  reply_today_until: string;
+  remind_after_min: number;
+  escalate_after_min: number;
+  auto_reply_gap_hours: number;
+  /** No auto-reply when staff wrote in this conversation within this many minutes. */
+  staff_quiet_min: number;
+  escalate_admin_ids: number[];
+  templates: Record<ClientCareLang, Record<ClientCareKind, string>>;
+  when_labels: Record<ClientCareLang, ClientCareWhenLabels>;
+}
+
+const CLIENT_CARE_TOKENS = ["first_name", "topic", "owner", "owner_phone", "when", "away_name", "return_day", "away_note"] as const;
+type ClientCareToken = (typeof CLIENT_CARE_TOKENS)[number];
+const CLIENT_CARE_REQUIRED_TOKENS: ClientCareToken[] = ["owner", "when"];
+const CLIENT_CARE_TEMPLATE_MAX = 320;
+
+const CLIENT_CARE_DEFAULT_SETTINGS: ClientCareSettings = {
+  auto_reply_enabled: true,
+  slack_enabled: true,
+  business_days: [1, 2, 3, 4, 5],
+  business_start: "08:00",
+  business_end: "18:00",
+  reply_today_until: "17:00",
+  remind_after_min: 120,
+  escalate_after_min: 240,
+  auto_reply_gap_hours: 12,
+  staff_quiet_min: 60,
+  escalate_admin_ids: [90001],
+  templates: {
+    en: {
+      message:
+        "Hi[[ {first_name}]]! We got your message[[ about {topic}]].[[ {away_name} is out of the office until {return_day};]] {owner}[[ (English, {owner_phone})]] will reply {when}. - Optimum Financial Group",
+      missed_call:
+        "Hi[[ {first_name}]]! We missed your call.[[ {away_name} is out of the office until {return_day};]] {owner}[[ (English, {owner_phone})]] will call you back {when}. - Optimum Financial Group",
+    },
+    es: {
+      message:
+        "¡Hola[[ {first_name}]]! Recibimos tu mensaje[[ sobre {topic}]].[[ {away_name} está fuera de la oficina hasta el {return_day};]] {owner}[[ (español, {owner_phone})]] te responderá {when}. - Optimum Financial Group",
+      missed_call:
+        "¡Hola[[ {first_name}]]! Vimos tu llamada.[[ {away_name} está fuera de la oficina hasta el {return_day};]] {owner}[[ (español, {owner_phone})]] te devolverá la llamada {when}. - Optimum Financial Group",
+    },
+  },
+  when_labels: {
+    en: { today: "today", this_morning: "this morning", tomorrow_morning: "tomorrow morning", day_morning: "{weekday} morning" },
+    es: { today: "hoy", this_morning: "hoy en la mañana", tomorrow_morning: "mañana en la mañana", day_morning: "el {weekday} en la mañana" },
+  },
+};
+
+const TOKEN_RE = /\{([a-z_]+)\}/g;
+
+/** Fills a template: optional [[ ]] parts drop when any token inside is empty; spaces tidied. */
+function renderClientCareTemplate(template: string, vars: Partial<Record<ClientCareToken, string | null | undefined>>): string {
+  const val = (k: string) => String((vars as Record<string, string | null | undefined>)[k] ?? "").trim();
+  const withOptional = String(template ?? "").replace(/\[\[([\s\S]*?)\]\]/g, (_m, inner: string) => {
+    const tokens = [...inner.matchAll(TOKEN_RE)].map((m) => m[1]);
+    return tokens.length && tokens.some((k) => !val(k)) ? "" : inner;
+  });
+  return withOptional
+    .replace(TOKEN_RE, (_m, k: string) => val(k))
+    .replace(/[ \t]+/g, " ")
+    .replace(/ ([.,;!?])/g, "$1")
+    .trim();
+}
+
+/** null when valid, else the problem in plain words. */
+function validateClientCareTemplate(template: string): string | null {
+  const t = String(template ?? "");
+  if (!t.trim()) return "Template cannot be empty";
+  if (t.length > CLIENT_CARE_TEMPLATE_MAX) return `Template is too long (${CLIENT_CARE_TEMPLATE_MAX} characters max)`;
+  let depth = 0;
+  for (let i = 0; i < t.length - 1; i++) {
+    const two = t.slice(i, i + 2);
+    if (two === "[[") {
+      if (depth) return "Optional parts [[ ]] cannot be nested";
+      depth++;
+      i++;
+    } else if (two === "]]") {
+      if (!depth) return "A ]] has no matching [[";
+      depth--;
+      i++;
+    }
+  }
+  if (depth) return "A [[ is not closed";
+  for (const m of t.matchAll(TOKEN_RE)) {
+    if (!(CLIENT_CARE_TOKENS as readonly string[]).includes(m[1])) return `Unknown placeholder {${m[1]}}`;
+  }
+  if (/\{[^}]*$|^[^{]*\}/.test(t.replace(TOKEN_RE, ""))) return "A { or } is not part of a placeholder";
+  // The required ones must be outside optional parts, so they always show.
+  const outside = t.replace(/\[\[[\s\S]*?\]\]/g, "");
+  for (const k of CLIENT_CARE_REQUIRED_TOKENS) if (!outside.includes(`{${k}}`)) return `{${k}} is required (outside [[ ]])`;
+  return null;
+}
+
+const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/;
+const minutesOf = (hhmm: string) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5));
+
+/** Merge a partial update into a full, valid settings object. */
+function normalizeClientCareSettings(
+  input: unknown,
+  base: ClientCareSettings = CLIENT_CARE_DEFAULT_SETTINGS,
+): { ok: true; settings: ClientCareSettings } | { ok: false; error: string } {
+  const b = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+  const s: ClientCareSettings = JSON.parse(JSON.stringify(base));
+  const bool = (k: "auto_reply_enabled" | "slack_enabled") => {
+    if (b[k] === undefined) return null;
+    if (typeof b[k] !== "boolean") return `${k} must be true or false`;
+    s[k] = b[k] as boolean;
+    return null;
+  };
+  const int = (k: "remind_after_min" | "escalate_after_min" | "auto_reply_gap_hours" | "staff_quiet_min", min: number, max: number) => {
+    if (b[k] === undefined) return null;
+    const n = Number(b[k]);
+    if (!Number.isInteger(n) || n < min || n > max) return `${k} must be a whole number from ${min} to ${max}`;
+    s[k] = n;
+    return null;
+  };
+  const errors = [
+    bool("auto_reply_enabled"),
+    bool("slack_enabled"),
+    int("remind_after_min", 15, 1440),
+    int("escalate_after_min", 30, 2880),
+    int("auto_reply_gap_hours", 1, 72),
+    int("staff_quiet_min", 0, 240),
+  ];
+  const first = errors.find(Boolean);
+  if (first) return { ok: false, error: first };
+  if (b.business_days !== undefined) {
+    const days = Array.isArray(b.business_days) ? [...new Set(b.business_days.map(Number))] : [];
+    if (!days.length || days.some((d) => !Number.isInteger(d) || d < 0 || d > 6)) return { ok: false, error: "business_days must be days 0-6 (at least one)" };
+    s.business_days = days.sort((x, y) => x - y);
+  }
+  for (const k of ["business_start", "business_end", "reply_today_until"] as const) {
+    if (b[k] === undefined) continue;
+    if (typeof b[k] !== "string" || !HHMM.test(b[k] as string)) return { ok: false, error: `${k} must be HH:MM (24h)` };
+    s[k] = b[k] as string;
+  }
+  if (minutesOf(s.business_start) >= minutesOf(s.business_end)) return { ok: false, error: "Business hours must end after they start" };
+  if (minutesOf(s.reply_today_until) <= minutesOf(s.business_start) || minutesOf(s.reply_today_until) > minutesOf(s.business_end)) {
+    return { ok: false, error: "The 'reply today until' time must be within business hours" };
+  }
+  if (s.escalate_after_min <= s.remind_after_min) return { ok: false, error: "Escalation must come after the reminder" };
+  if (b.escalate_admin_ids !== undefined) {
+    const ids = Array.isArray(b.escalate_admin_ids) ? [...new Set(b.escalate_admin_ids.map(Number))] : [];
+    if (!ids.length || ids.length > 5 || ids.some((n) => !Number.isInteger(n) || n <= 0)) return { ok: false, error: "escalate_admin_ids: 1 to 5 staff ids" };
+    s.escalate_admin_ids = ids;
+  }
+  const t = b.templates as Record<string, Record<string, unknown>> | undefined;
+  if (t !== undefined) {
+    for (const lang of ["en", "es"] as const) {
+      for (const kind of ["message", "missed_call"] as const) {
+        const v = t?.[lang]?.[kind];
+        if (v === undefined) continue;
+        const err = validateClientCareTemplate(String(v));
+        if (err) return { ok: false, error: `${lang} ${kind === "message" ? "message" : "missed call"}: ${err}` };
+        s.templates[lang][kind] = String(v).trim();
+      }
+    }
+  }
+  const w = b.when_labels as Record<string, Record<string, unknown>> | undefined;
+  if (w !== undefined) {
+    for (const lang of ["en", "es"] as const) {
+      for (const k of ["today", "this_morning", "tomorrow_morning", "day_morning"] as const) {
+        const v = w?.[lang]?.[k];
+        if (v === undefined) continue;
+        const text = String(v).trim();
+        if (!text || text.length > 40) return { ok: false, error: `${lang} "${k}" must be 1-40 characters` };
+        if (k === "day_morning" && !text.includes("{weekday}")) return { ok: false, error: `${lang} "${k}" must include {weekday}` };
+        s.when_labels[lang][k] = text;
+      }
+    }
+  }
+  return { ok: true, settings: s };
+}
+
+/** Business minutes between two LA wall-clock instants (stored as UTC fields). */
+function businessMinutesBetween(fromLa: Date, toLa: Date, settings: ClientCareSettings = CLIENT_CARE_DEFAULT_SETTINGS): number {
+  if (!(toLa.getTime() > fromLa.getTime())) return 0;
+  const startMin = minutesOf(settings.business_start);
+  const endMin = minutesOf(settings.business_end);
+  let total = 0;
+  const day = new Date(Date.UTC(fromLa.getUTCFullYear(), fromLa.getUTCMonth(), fromLa.getUTCDate()));
+  for (let i = 0; i < 400 && day.getTime() <= toLa.getTime(); i++, day.setUTCDate(day.getUTCDate() + 1)) {
+    if (!settings.business_days.includes(day.getUTCDay())) continue;
+    const open = day.getTime() + startMin * 60_000;
+    const close = day.getTime() + endMin * 60_000;
+    const a = Math.max(open, fromLa.getTime());
+    const b = Math.min(close, toLa.getTime());
+    if (b > a) total += (b - a) / 60_000;
+  }
+  return Math.floor(total);
+}
+
+const WEEKDAYS: Record<ClientCareLang, string[]> = {
+  en: ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"],
+  es: ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"],
+};
+
+/** When the owner will answer, from the business hours: today / this morning / tomorrow morning / {weekday} morning. */
+function clientCareWhen(nowLa: Date, lang: ClientCareLang, settings: ClientCareSettings = CLIENT_CARE_DEFAULT_SETTINGS): string {
+  const L = settings.when_labels[lang];
+  const mins = nowLa.getUTCHours() * 60 + nowLa.getUTCMinutes();
+  const isBizDay = (d: Date) => settings.business_days.includes(d.getUTCDay());
+  if (isBizDay(nowLa) && mins < minutesOf(settings.business_start)) return L.this_morning;
+  if (isBizDay(nowLa) && mins < minutesOf(settings.reply_today_until)) return L.today;
+  const next = new Date(nowLa);
+  let guard = 0;
+  do next.setUTCDate(next.getUTCDate() + 1);
+  while (!isBizDay(next) && ++guard < 8);
+  const startOfToday = Date.UTC(nowLa.getUTCFullYear(), nowLa.getUTCMonth(), nowLa.getUTCDate());
+  const startOfNext = Date.UTC(next.getUTCFullYear(), next.getUTCMonth(), next.getUTCDate());
+  if ((startOfNext - startOfToday) / 86_400_000 === 1) return L.tomorrow_morning;
+  return L.day_morning.replace("{weekday}", WEEKDAYS[lang][next.getUTCDay()]);
+}
+
+/** "949-736-5644" for a US number; international (+52 …) stays as given. */
+function prettyUsPhone(e164: string | null | undefined): string {
+  const raw = String(e164 ?? "").trim();
+  if (raw.startsWith("+") && !raw.startsWith("+1")) return raw;
+  const d = raw.replace(/\D/g, "");
+  const ten = d.length === 11 && d.startsWith("1") ? d.slice(1) : d;
+  return ten.length === 10 ? `${ten.slice(0, 3)}-${ten.slice(3, 6)}-${ten.slice(6)}` : String(e164 ?? "");
+}
+
+/** "Wednesday 11/25" / "miércoles, 25 de noviembre" for a YYYY-MM-DD. */
+function returnDayLabel(ymd: string, lang: ClientCareLang): string {
+  const d = new Date(`${ymd}T12:00:00Z`);
+  if (Number.isNaN(d.getTime())) return ymd;
+  return lang === "es"
+    ? d.toLocaleDateString("es-MX", { weekday: "long", day: "numeric", month: "long", timeZone: "UTC" })
+    : `${d.toLocaleDateString("en-US", { weekday: "long", timeZone: "UTC" })} ${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
+}
+
+interface ClientCareTextInput {
+  kind: ClientCareKind;
+  lang: ClientCareLang;
+  firstName?: string | null;
+  topic?: string | null;
+  owner: { name: string; phone?: string | null };
+  /** The line's owner is out of office (and is not the one answering). */
+  away?: { name: string; returnsLabel: string; note?: string | null } | null;
+  when: string;
+}
+
+/** The auto-reply / AI hold / missed-call text from the settings' template. */
+function clientCareText(i: ClientCareTextInput, settings: ClientCareSettings = CLIENT_CARE_DEFAULT_SETTINGS): string {
+  const first = String(i.firstName ?? "").trim().split(/\s+/)[0] ?? "";
+  return renderClientCareTemplate(settings.templates[i.lang][i.kind], {
+    first_name: first ? first.charAt(0).toUpperCase() + first.slice(1).toLowerCase() : "",
+    topic: String(i.topic ?? "").trim().replace(/[.!?]+$/, ""),
+    owner: i.owner.name,
+    owner_phone: i.owner.phone ? prettyUsPhone(i.owner.phone) : "",
+    when: i.when,
+    away_name: i.away?.name ?? "",
+    return_day: i.away?.returnsLabel ?? "",
+    away_note: i.away?.note ?? "",
+  });
+}
 // ── END inlined credit file engine ──
 
 // ── Credit file extraction jobs (runtime I/O) ───────────────────────────────
@@ -18089,8 +18479,10 @@ async function deliverRoundReportToClient(o: {
   itemsRemoved: number;
   /** Score update (incomplete SmartCredit print): no "items removed" count in messages. */
   scoreUpdate?: boolean;
+  /** Silent because staff turned "notify" off on a round the app would have notified (Nov 17, 2026). */
+  silentByStaff?: boolean;
 }): Promise<{
-  clientNotify: "reminder_flow" | "safety_fallback" | "skipped_old_round" | "on_hold";
+  clientNotify: "reminder_flow" | "safety_fallback" | "skipped_old_round" | "silent_staff_choice" | "on_hold";
   securePdfUrl: string;
   partnersEmailed: number;
   partnersLinked: number;
@@ -18208,13 +18600,14 @@ async function deliverRoundReportToClient(o: {
       activeFlowRows[0]?.id != null
         ? Number(activeFlowRows[0].id)
         : null;
-    let clientNotify: "reminder_flow" | "safety_fallback" | "skipped_old_round" | "on_hold" =
+    let clientNotify: "reminder_flow" | "safety_fallback" | "skipped_old_round" | "silent_staff_choice" | "on_hold" =
       "reminder_flow";
     // What the flow actually did — a skipped flow must never mean a silent publish.
     let flowOutcome: ReminderFlowOutcome | "error" | null = null;
     if (!o.notifyClient) {
-      // GF-84: backfilled / old round — report is on the portal, no email/SMS.
-      clientNotify = "skipped_old_round";
+      // GF-84: backfilled / old round — report is on the portal, no email/SMS. When the app would
+      // have notified and staff turned it off, say so (it is not an old round).
+      clientNotify = o.silentByStaff ? "silent_staff_choice" : "skipped_old_round";
     } else if (activeFlowId) {
       flowOutcome = await triggerReminderFlow(
         flowTrigger,
@@ -18872,6 +19265,147 @@ async function executeAdminAiTool(
       return { ok: true, data: { registration_id: regId, checked_in: !undo } };
     }
 
+    if (name === "list_out_of_office") {
+      return { ok: true, data: { periods: await listOutOfOffice(), href: "/admin/profile#out-of-office" } };
+    }
+
+    if (name === "set_out_of_office") {
+      const target = args.admin_id != null ? Number(args.admin_id) : ctx.adminId;
+      const v = validateOutOfOffice(args as Record<string, unknown>, laWallClockAsUtcDate().toISOString().slice(0, 10));
+      if (v.ok === false) return { ok: false, error: "invalid_args", message: v.error };
+      const confirmed = adminAiWriteConfirmed(args);
+      if (!confirmed.ok) {
+        const [[a]] = await pool.query<RowDataPacket[]>(`SELECT first_name, last_name FROM admins WHERE id = ? LIMIT 1`, [target]);
+        return {
+          ok: true,
+          dry_run: true,
+          preview: {
+            who: a ? `${a.first_name} ${a.last_name}` : `admin ${target}`,
+            ...v.v,
+            effect: "Client auto-replies and Slack #client-care route to the backups on these days; texts say when they return.",
+          },
+          message: (confirmed as { message?: string }).message,
+        };
+      }
+      return coreResult(await setOutOfOfficeCore(ctx.adminId, args as Record<string, unknown>));
+    }
+
+    if (name === "get_client_care_settings") {
+      return { ok: true, data: { settings: await loadClientCareSettings(), placeholders: CLIENT_CARE_TOKENS, href: "/admin/profile#client-care-settings" } };
+    }
+
+    if (name === "list_client_care_open") {
+      const limit = adminAiClampLimitMax(args.limit, 20, 50);
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT i.*, a.first_name AS owner_name FROM client_care_items i LEFT JOIN admins a ON a.id = i.owner_admin_id
+         WHERE i.status = 'open' ORDER BY i.opened_at ASC LIMIT ?`,
+        [limit],
+      );
+      const nowLa = laWallClockAsUtcDate();
+      const ccSettings = await loadClientCareSettings();
+      return {
+        ok: true,
+        data: {
+          open: rows.map((r) => ({
+            id: Number(r.id),
+            who: String(r.display_name ?? ""),
+            channel: String(r.channel),
+            language: String(r.lang),
+            said: r.last_text ? String(r.last_text).slice(0, 300) : null,
+            topic: r.topic ?? null,
+            messages: Number(r.message_count),
+            answers: r.owner_name ?? null,
+            open_business_minutes: businessMinutesBetween(laWallClockAsUtcDate(new Date(r.opened_at)), nowLa, ccSettings),
+            reminded_at: r.reminded_at ?? null,
+            escalated_at: r.escalated_at ?? null,
+            href: r.client_id ? `/admin/conversations?client=${r.client_id}` : r.contact_id ? `/admin/conversations?contact=${r.contact_id}` : `/admin/conversations?unknown=${r.unknown_contact_id}`,
+          })),
+        },
+      };
+    }
+
+    if (name === "list_holiday_greetings") {
+      await ensureHolidayGreetingDrafts();
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT g.*, CONCAT(a.first_name, ' ', a.last_name) AS approved_by_name FROM holiday_greetings g
+         LEFT JOIN admins a ON a.id = g.approved_by_admin_id WHERE g.send_at >= DATE_SUB(NOW(), INTERVAL 60 DAY) ORDER BY g.send_at LIMIT 20`,
+      );
+      return {
+        ok: true,
+        data: {
+          greetings: rows.map(mapHolidayGreetingRow),
+          you_can_approve: (await holidayGreetingApproverIds()).includes(ctx.adminId),
+          href: "/admin/holiday-greetings",
+        },
+      };
+    }
+
+    if (name === "get_holiday_greeting") {
+      const g = await loadHolidayGreeting(Number(args.greeting_id) || 0);
+      if (!g) return { ok: false, error: "not_found", message: "Holiday greeting not found (see list_holiday_greetings)" };
+      if (["sending", "sent"].includes(g.status)) return { ok: true, data: { greeting: g, results: await holidayGreetingStats(g.id) } };
+      const a = await buildHolidayAudience();
+      return {
+        ok: true,
+        data: {
+          greeting: g,
+          audience: { count: a.members.length, en: a.members.filter((m) => m.lang === "en").length, es: a.members.filter((m) => m.lang === "es").length, skipped: a.skipped },
+          preview: { en: renderHolidayGreeting(g.body_en, "Maria", "en"), es: renderHolidayGreeting(g.body_es, "Maria", "es") },
+          href: "/admin/holiday-greetings",
+        },
+      };
+    }
+
+    if (name === "update_holiday_greeting" || name === "approve_holiday_greeting" || name === "set_holiday_greeting_status") {
+      const id = Number(args.greeting_id) || 0;
+      const g = await loadHolidayGreeting(id);
+      if (!g) return { ok: false, error: "not_found", message: "Holiday greeting not found (see list_holiday_greetings)" };
+      const action = String(args.action ?? "");
+      if (name === "set_holiday_greeting_status" && !["unapprove", "skip", "restore"].includes(action)) {
+        return { ok: false, error: "invalid_args", message: "action must be unapprove, skip or restore" };
+      }
+      const edit = { body_en: args.body_en, body_es: args.body_es, media_url: args.media_url, send_time: args.send_time } as Record<string, unknown>;
+      for (const k of Object.keys(edit)) if (edit[k] === undefined) delete edit[k];
+      if (name === "update_holiday_greeting") {
+        const v = validateHolidayGreetingEdit(edit, g.date);
+        if (v.ok === false) return { ok: false, error: "invalid_args", message: v.error };
+      }
+      const confirmed = adminAiWriteConfirmed(args);
+      if (!confirmed.ok) {
+        const a = name === "approve_holiday_greeting" ? await buildHolidayAudience() : null;
+        return {
+          ok: true,
+          dry_run: true,
+          preview: {
+            holiday: g.label.en,
+            date: g.date,
+            send_at_pacific: g.send_at,
+            status: g.status,
+            ...(name === "approve_holiday_greeting"
+              ? {
+                  recipients: a!.members.length,
+                  skipped: a!.skipped,
+                  text_en: renderHolidayGreeting(g.body_en, "Maria", "en"),
+                  text_es: renderHolidayGreeting(g.body_es, "Maria", "es"),
+                  you_can: (await holidayGreetingApproverIds()).includes(ctx.adminId) ? "approve" : "not approve (approvers are set in Settings)",
+                }
+              : name === "update_holiday_greeting"
+                ? { changes: edit, note: g.status === "approved" ? "Editing returns it to draft — it needs approval again" : undefined }
+                : { action }),
+            href: "/admin/holiday-greetings",
+          },
+          message: (confirmed as { message?: string }).message,
+        };
+      }
+      return coreResult(
+        name === "approve_holiday_greeting"
+          ? await approveHolidayGreetingCore(id, ctx.adminId)
+          : name === "update_holiday_greeting"
+            ? await updateHolidayGreetingCore(id, ctx.adminId, edit)
+            : await setHolidayGreetingStatusCore(id, ctx.adminId, action as "unapprove" | "skip" | "restore"),
+      );
+    }
+
     if (name === "approve_round_report" || name === "rebuild_round_report") {
       const reportId = Number(args.report_id) || 0;
       if (!reportId) return { ok: false, error: "invalid_args", message: "report_id is required (see list_reports_pending_approval)" };
@@ -19051,11 +19585,21 @@ async function executeAdminAiTool(
 
     if (name === "list_reports_pending_approval") {
       const limit = adminAiClampLimitMax(args.limit, 20, 50);
-      const where = ["r.delivery_status IN ('pending_approval', 'needs_review')"];
+      // Nov 17, 2026 (Cesar): 511 waiting and only the first 50 were readable — page with offset.
+      const offset = Math.max(0, Math.min(100_000, Math.floor(Number(args.offset) || 0)));
+      const status = String(args.status ?? "");
+      const where = [
+        status === "pending_approval" || status === "needs_review"
+          ? `r.delivery_status = '${status}'`
+          : "r.delivery_status IN ('pending_approval', 'needs_review')",
+      ];
       const params: unknown[] = [];
       if (Number(args.client_id) > 0) {
         where.push("r.client_id = ?");
         params.push(Number(args.client_id));
+      }
+      if (args.latest_round_only === true) {
+        where.push("r.round_number = (SELECT MAX(x.round_number) FROM client_round_reports x WHERE x.client_id = r.client_id)");
       }
       if (scopedIds && scopedIds.length > 0) {
         where.push("c.affiliate_id IN (?)");
@@ -19066,18 +19610,25 @@ async function executeAdminAiTool(
         `SELECT COUNT(*) n FROM client_round_reports r JOIN clients c ON c.id = r.client_id WHERE ${where.join(" AND ")}`,
         params,
       );
-      params.push(limit);
+      params.push(limit, offset);
       const [rows] = await pool.query<RowDataPacket[]>(
         `SELECT r.id, r.client_id, r.case_id, r.round_number, r.report_locale, r.delivery_status, r.self_check_json, r.created_at,
-                CONCAT(c.first_name, ' ', c.last_name) client_name, CONCAT(a.first_name, ' ', a.last_name) published_by
+                CONCAT(c.first_name, ' ', c.last_name) client_name, CONCAT(a.first_name, ' ', a.last_name) published_by,
+                (SELECT MAX(x.round_number) FROM client_round_reports x WHERE x.client_id = r.client_id) AS latest_round
          FROM client_round_reports r JOIN clients c ON c.id = r.client_id LEFT JOIN admins a ON a.id = r.created_by_admin_id
-         WHERE ${where.join(" AND ")} ORDER BY r.created_at ASC LIMIT ?`,
+         WHERE ${where.join(" AND ")} ORDER BY r.created_at ASC, r.id ASC LIMIT ? OFFSET ?`,
         params,
       );
+      const total = Number(countRow.n);
+      const hasMore = offset + rows.length < total;
       return {
         ok: true,
         data: {
-          total: Number(countRow.n),
+          total,
+          offset,
+          returned: rows.length,
+          has_more: hasMore,
+          next_offset: hasMore ? offset + rows.length : null,
           reports: rows.map((r) => ({
             round_report_id: Number(r.id),
             client_id: Number(r.client_id),
@@ -19085,6 +19636,7 @@ async function executeAdminAiTool(
             client_name: String(r.client_name || ""),
             round: Number(r.round_number),
             locale: String(r.report_locale),
+            is_latest_round: Number(r.round_number) === Number(r.latest_round),
             published_by: r.published_by ? String(r.published_by) : null,
             published_at: r.created_at,
             ...roundReportApprovalForAi(r),
@@ -38858,6 +39410,7 @@ const ADMIN_NOTIFY_EVENT_KEYS: AdminNotifyEventKey[] = [
   "progress_report_alerts",
   "credit_analysis_review",
   "morning_digest",
+  "holiday_greetings",
 ];
 
 function allAdminNotifyEventsOn(): AdminNotifyEventToggles {
@@ -38883,6 +39436,7 @@ function allAdminNotifyEventsOn(): AdminNotifyEventToggles {
     progress_report_alerts: true,
     credit_analysis_review: true,
     morning_digest: true,
+    holiday_greetings: true,
   };
 }
 
@@ -40384,6 +40938,1105 @@ export function normalizeVoiceClientEvent(body: unknown): VoiceClientEventRow | 
   };
 }
 
+// ── Holiday greetings (Nov 17, 2026 — Cesar) ─────────────────────────────────
+// One SMS per holiday per year to current clients who texted us in the last 12 months, from each
+// client's own OFG line, EN/ES, optional image. Approved each year by Cesar (or Alex); unapproved =
+// skipped. Paced by the 5-minute cron, 8 AM-8 PM Pacific only. STOP numbers are always skipped.
+
+export type HolidayKey = "new_year" | "valentines" | "mothers_day" | "fathers_day" | "independence_day" | "thanksgiving" | "christmas";
+export const HOLIDAY_KEYS: HolidayKey[] = ["new_year", "valentines", "mothers_day", "fathers_day", "independence_day", "thanksgiving", "christmas"];
+export const HOLIDAY_GREETING_CLIENT_STATUSES = ["active", "onboarding", "paused", "funding", "prospect", "pending_payment"] as const;
+/** Clients must have texted us within this many months (compliance: existing two-way relationship). */
+export const HOLIDAY_GREETING_RECENT_TEXT_MONTHS = 12;
+const HOLIDAY_GREETING_BATCH = 30;
+const HOLIDAY_GREETING_DEFAULT_TIME = "09:00:00";
+
+/** "YYYY-MM-DD" of a holiday in a given year (US). */
+export function holidayDate(key: HolidayKey, year: number): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const fixed = (m: number, d: number) => `${year}-${pad(m)}-${pad(d)}`;
+  // nth weekday (0=Sun) of a month.
+  const nth = (month: number, weekday: number, n: number) => {
+    const first = new Date(Date.UTC(year, month - 1, 1)).getUTCDay();
+    const day = 1 + ((weekday - first + 7) % 7) + (n - 1) * 7;
+    return fixed(month, day);
+  };
+  switch (key) {
+    case "new_year": return fixed(1, 1);
+    case "valentines": return fixed(2, 14);
+    case "mothers_day": return nth(5, 0, 2);
+    case "fathers_day": return nth(6, 0, 3);
+    case "independence_day": return fixed(7, 4);
+    case "thanksgiving": return nth(11, 4, 4);
+    case "christmas": return fixed(12, 25);
+  }
+}
+
+export const HOLIDAY_LABELS: Record<HolidayKey, { en: string; es: string }> = {
+  new_year: { en: "New Year's Day", es: "Año Nuevo" },
+  valentines: { en: "Valentine's Day", es: "Día de San Valentín" },
+  mothers_day: { en: "Mother's Day", es: "Día de las Madres" },
+  fathers_day: { en: "Father's Day", es: "Día del Padre" },
+  independence_day: { en: "4th of July", es: "4 de Julio" },
+  thanksgiving: { en: "Thanksgiving", es: "Día de Acción de Gracias" },
+  christmas: { en: "Christmas", es: "Navidad" },
+};
+
+/** First drafts (staff edit + approve each year; last year's approved text is reused as the next draft). */
+export const HOLIDAY_DEFAULT_TEXTS: Record<HolidayKey, { en: string; es: string }> = {
+  thanksgiving: {
+    en: "Happy Thanksgiving, {{first_name}}! 🦃🍂 We're grateful for your trust and for the chance to be part of your financial journey. Wishing you and your loved ones a day full of love, laughter and great memories. From the OFG family to yours ❤️",
+    es: "¡Feliz Día de Acción de Gracias, {{first_name}}! 🦃🍂 Agradecemos tu confianza y la oportunidad de ser parte de tu camino financiero. Te deseamos a ti y a tus seres queridos un día lleno de amor, risas y grandes recuerdos. De la familia OFG para la tuya ❤️",
+  },
+  christmas: {
+    en: "Merry Christmas, {{first_name}}! 🎄 Thank you for letting us be part of your year. Wishing you and your family peace, joy and a wonderful holiday season. From the OFG family to yours ❤️",
+    es: "¡Feliz Navidad, {{first_name}}! 🎄 Gracias por permitirnos ser parte de tu año. Te deseamos a ti y a tu familia paz, alegría y unas fiestas maravillosas. De la familia OFG para la tuya ❤️",
+  },
+  new_year: {
+    en: "Happy New Year, {{first_name}}! 🎉 Here's to a year of new goals and financial wins. We're proud to be on this journey with you. From the OFG family to yours ❤️",
+    es: "¡Feliz Año Nuevo, {{first_name}}! 🎉 Por un año de nuevas metas y logros financieros. Nos enorgullece acompañarte en este camino. De la familia OFG para la tuya ❤️",
+  },
+  independence_day: {
+    en: "Happy 4th of July, {{first_name}}! 🇺🇸 Wishing you a safe and fun Independence Day with your loved ones. From the OFG family to yours ❤️",
+    es: "¡Feliz 4 de Julio, {{first_name}}! 🇺🇸 Te deseamos un Día de la Independencia seguro y divertido con tus seres queridos. De la familia OFG para la tuya ❤️",
+  },
+  mothers_day: {
+    en: "Happy Mother's Day, {{first_name}}! 💐 Today we celebrate all the moms and the amazing women who take care of us. Wishing you a beautiful day. From the OFG family to yours ❤️",
+    es: "¡Feliz Día de las Madres, {{first_name}}! 💐 Hoy celebramos a todas las mamás y a las mujeres increíbles que nos cuidan. Te deseamos un día hermoso. De la familia OFG para la tuya ❤️",
+  },
+  fathers_day: {
+    en: "Happy Father's Day, {{first_name}}! 👔 Today we celebrate all the dads and the special men in our lives. Wishing you a great day. From the OFG family to yours ❤️",
+    es: "¡Feliz Día del Padre, {{first_name}}! 👔 Hoy celebramos a todos los papás y a los hombres especiales en nuestras vidas. Te deseamos un gran día. De la familia OFG para la tuya ❤️",
+  },
+  valentines: {
+    en: "Happy Valentine's Day, {{first_name}}! 💝 Thank you for being part of the OFG family. Wishing you a day full of love. From the OFG family to yours ❤️",
+    es: "¡Feliz Día de San Valentín, {{first_name}}! 💝 Gracias por ser parte de la familia OFG. Te deseamos un día lleno de amor. De la familia OFG para la tuya ❤️",
+  },
+};
+
+/** Opt-out line added to every holiday text (not editable — compliance). */
+export const HOLIDAY_STOP_FOOTER = { en: "Reply STOP to opt out.", es: "Responde STOP para no recibir mensajes." } as const;
+
+/** Holiday text for one client: first name (title case), or the token removed cleanly when unknown. */
+export function renderHolidayGreeting(template: string, firstName: string | null | undefined, lang: "en" | "es"): string {
+  const name = String(firstName ?? "").trim().split(/\s+/)[0] ?? "";
+  const pretty = name ? name.charAt(0).toUpperCase() + name.slice(1).toLowerCase() : "";
+  let text = String(template || "");
+  text = pretty
+    ? text.replace(/\{\{\s*first_name\s*\}\}/g, pretty)
+    : text.replace(/,?\s*\{\{\s*first_name\s*\}\}/g, "");
+  text = text.replace(/[ \t]+/g, " ").trim();
+  return `${text}\n${HOLIDAY_STOP_FOOTER[lang]}`;
+}
+
+// ── Staff permission lists (super admin edits them in Settings, Nov 17, 2026) ──
+type StaffPermissionKey = "holiday_greeting_approver_ids" | "out_of_office_manager_ids";
+const STAFF_PERMISSION_KEYS: StaffPermissionKey[] = ["holiday_greeting_approver_ids", "out_of_office_manager_ids"];
+const STAFF_PERMISSION_ENV: Record<StaffPermissionKey, string> = {
+  holiday_greeting_approver_ids: "HOLIDAY_GREETING_APPROVER_IDS",
+  out_of_office_manager_ids: "OUT_OF_OFFICE_MANAGER_IDS",
+};
+const STAFF_PERMISSION_DEFAULT_IDS = [90001, 30001];
+const STAFF_PERMISSION_MAX = 10;
+let staffPermissionCache: { at: number; value: Record<StaffPermissionKey, number[]> } | null = null;
+
+/** Clean list of positive, unique admin ids (max 10). Returns null when the input is not a list. */
+export function normalizeStaffPermissionIds(raw: unknown): number[] | null {
+  if (!Array.isArray(raw)) return null;
+  const out: number[] = [];
+  for (const x of raw) {
+    const n = Number(x);
+    if (!Number.isInteger(n) || n <= 0) return null;
+    if (!out.includes(n)) out.push(n);
+  }
+  return out.slice(0, STAFF_PERMISSION_MAX);
+}
+
+function staffPermissionFallback(key: StaffPermissionKey): number[] {
+  const env = String(process.env[STAFF_PERMISSION_ENV[key]] || "").split(",").map((x) => Number(x.trim())).filter((n) => Number.isInteger(n) && n > 0);
+  return env.length ? env : STAFF_PERMISSION_DEFAULT_IDS;
+}
+
+/** DB value first, then the old env var, then Cesar + Alex. Cached 60s. */
+async function loadStaffPermissions(): Promise<Record<StaffPermissionKey, number[]>> {
+  if (staffPermissionCache && Date.now() - staffPermissionCache.at < 60_000) return staffPermissionCache.value;
+  const value = {} as Record<StaffPermissionKey, number[]>;
+  for (const k of STAFF_PERMISSION_KEYS) value[k] = staffPermissionFallback(k);
+  try {
+    const [rows] = await pool.query<RowDataPacket[]>(`SELECT setting_key, setting_value FROM system_settings WHERE setting_key IN (?)`, [STAFF_PERMISSION_KEYS]);
+    for (const r of rows) {
+      try {
+        const ids = normalizeStaffPermissionIds(JSON.parse(String(r.setting_value)));
+        if (ids && ids.length) value[r.setting_key as StaffPermissionKey] = ids;
+      } catch {
+        console.warn("[staff-permissions] bad stored value for", r.setting_key);
+      }
+    }
+  } catch (e: any) {
+    console.warn("[staff-permissions]", e?.message ?? e);
+  }
+  staffPermissionCache = { at: Date.now(), value };
+  return value;
+}
+
+/** Super admin only (route guard). Each list needs 1-10 active staff. */
+async function saveStaffPermissionsCore(actorId: number, body: Record<string, unknown>): Promise<{ status: number; body: any }> {
+  const updates: Partial<Record<StaffPermissionKey, number[]>> = {};
+  for (const k of STAFF_PERMISSION_KEYS) {
+    if (body[k] === undefined) continue;
+    const ids = normalizeStaffPermissionIds(body[k]);
+    if (!ids) return { status: 400, body: { error: `${k} must be a list of staff ids` } };
+    if (!ids.length) return { status: 400, body: { error: `${k} needs at least one person` } };
+    if (Array.isArray(body[k]) && (body[k] as unknown[]).length > STAFF_PERMISSION_MAX) return { status: 400, body: { error: `${k}: at most ${STAFF_PERMISSION_MAX} people` } };
+    const [active] = await pool.query<RowDataPacket[]>(`SELECT id FROM admins WHERE id IN (?) AND status = 'active' AND role IN ('super_admin','admin','agent')`, [ids]);
+    const ok = new Set(active.map((a) => Number(a.id)));
+    const bad = ids.find((id) => !ok.has(id));
+    if (bad) return { status: 400, body: { error: `Staff ${bad} is not active` } };
+    updates[k] = ids;
+  }
+  if (!Object.keys(updates).length) return { status: 400, body: { error: "Nothing to save" } };
+  const before = await loadStaffPermissions();
+  for (const [k, ids] of Object.entries(updates)) {
+    await pool.query(
+      `INSERT INTO system_settings (setting_key, setting_value, description) VALUES (?, ?, 'Staff permission list (super admin, Settings)')
+       ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)`,
+      [k, JSON.stringify(ids)],
+    );
+  }
+  staffPermissionCache = null;
+  try {
+    await pool.query(`INSERT INTO audit_logs (actor_type, actor_id, action, entity_type, entity_id, changes_json, status) VALUES ('admin', ?, 'settings.staff_permissions_saved', 'system_settings', NULL, ?, 'success')`, [
+      actorId,
+      JSON.stringify({ before, after: updates }),
+    ]);
+  } catch (e: any) {
+    console.warn("[staff-permissions:audit]", e?.message ?? e);
+  }
+  return { status: 200, body: { permissions: await loadStaffPermissions() } };
+}
+
+/** Approvers for holiday greetings (Settings → Permissions). */
+async function holidayGreetingApproverIds(): Promise<number[]> {
+  return (await loadStaffPermissions()).holiday_greeting_approver_ids;
+}
+
+const phoneLast10 = (raw: string) => String(raw || "").replace(/\D/g, "").slice(-10);
+
+/** STOP / START from any inbound SMS (TCPA): keep the opt-out list current. Never throws. */
+export async function recordSmsOptKeyword(fromRaw: string, body: string): Promise<"stop" | "start" | null> {
+  const t = String(body || "").trim().toUpperCase();
+  const last10 = phoneLast10(fromRaw);
+  if (last10.length !== 10) return null;
+  if (/^(STOP|STOPALL|UNSUBSCRIBE|END|QUIT|CANCELAR|BAJA)$/.test(t)) {
+    await pool.query(
+      `INSERT INTO sms_opt_outs (phone_last10, phone, keyword, source) VALUES (?, ?, ?, 'inbound_keyword')
+       ON DUPLICATE KEY UPDATE keyword = VALUES(keyword), created_at = NOW()`,
+      [last10, String(fromRaw).slice(0, 20), t],
+    ).catch((e) => console.warn("[sms-opt-out]", e?.message ?? e));
+    return "stop";
+  }
+  if (/^(START|YES|UNSTOP)$/.test(t)) {
+    await pool.query(`DELETE FROM sms_opt_outs WHERE phone_last10 = ?`, [last10]).catch((e) => console.warn("[sms-opt-in]", e?.message ?? e));
+    return "start";
+  }
+  return null;
+}
+
+export async function isSmsOptedOut(phoneRaw: string): Promise<boolean> {
+  const last10 = phoneLast10(phoneRaw);
+  if (last10.length !== 10) return false;
+  const [[r]] = await pool.query<RowDataPacket[]>(`SELECT id FROM sms_opt_outs WHERE phone_last10 = ? LIMIT 1`, [last10]);
+  return !!r;
+}
+
+export type HolidaySkipReason = "no_phone" | "opted_out" | "no_recent_text" | "no_sender_line";
+export interface HolidayAudienceMember {
+  client_id: number;
+  first_name: string;
+  last_name: string;
+  phone: string;
+  lang: "en" | "es";
+  sender_admin_id: number;
+}
+
+/**
+ * Who would receive a holiday text right now, and why the others would not. Test clients
+ * (@example.test) are never included.
+ */
+async function buildHolidayAudience(): Promise<{ members: HolidayAudienceMember[]; skipped: Record<HolidaySkipReason, number>; total: number }> {
+  const statuses = [...HOLIDAY_GREETING_CLIENT_STATUSES];
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT c.id, c.first_name, c.last_name, c.phone, c.preferred_language, c.assigned_admin_id,
+            (SELECT MAX(m.created_at) FROM conversation_messages m JOIN conversations cv ON cv.id = m.conversation_id
+              WHERE cv.client_id = c.id AND m.direction = 'inbound' AND m.channel = 'sms') AS last_inbound_sms,
+            (SELECT p.assigned_admin_id FROM conversations cv2 JOIN admin_phone_numbers p ON p.id = cv2.ofg_number_id AND p.is_active = 1
+              WHERE cv2.client_id = c.id AND cv2.channel = 'sms' AND p.assigned_admin_id IS NOT NULL ORDER BY cv2.id DESC LIMIT 1) AS thread_line_admin_id
+     FROM clients c
+     WHERE c.status IN (${statuses.map(() => "?").join(",")}) AND (c.email IS NULL OR c.email NOT LIKE '%@example.test')
+     ORDER BY c.id`,
+    statuses,
+  );
+  const [lineRows] = await pool.query<RowDataPacket[]>(
+    `SELECT DISTINCT assigned_admin_id FROM admin_phone_numbers WHERE is_active = 1 AND assigned_admin_id IS NOT NULL`,
+  );
+  const hasLine = new Set(lineRows.map((r) => Number(r.assigned_admin_id)));
+  const [optRows] = await pool.query<RowDataPacket[]>(`SELECT phone_last10 FROM sms_opt_outs`);
+  const optedOut = new Set(optRows.map((r) => String(r.phone_last10)));
+  const cutoff = new Date();
+  cutoff.setMonth(cutoff.getMonth() - HOLIDAY_GREETING_RECENT_TEXT_MONTHS);
+  const skipped: Record<HolidaySkipReason, number> = { no_phone: 0, opted_out: 0, no_recent_text: 0, no_sender_line: 0 };
+  const members: HolidayAudienceMember[] = [];
+  for (const r of rows) {
+    const phone = String(r.phone ?? "").trim();
+    if (phoneLast10(phone).length !== 10) { skipped.no_phone++; continue; }
+    if (optedOut.has(phoneLast10(phone))) { skipped.opted_out++; continue; }
+    const last = r.last_inbound_sms ? new Date(r.last_inbound_sms) : null;
+    if (!last || last < cutoff) { skipped.no_recent_text++; continue; }
+    // The client's own line: their owner's number, else the line their SMS thread uses.
+    const owner = r.assigned_admin_id != null ? Number(r.assigned_admin_id) : null;
+    const sender = owner && hasLine.has(owner) ? owner : r.thread_line_admin_id != null ? Number(r.thread_line_admin_id) : null;
+    if (!sender) { skipped.no_sender_line++; continue; }
+    members.push({
+      client_id: Number(r.id),
+      first_name: String(r.first_name ?? ""),
+      last_name: String(r.last_name ?? ""),
+      phone,
+      lang: r.preferred_language === "es" ? "es" : "en",
+      sender_admin_id: sender,
+    });
+  }
+  return { members, skipped, total: rows.length };
+}
+
+/** Make sure every holiday in the coming window has a row (draft from last year's text, else the default). */
+async function ensureHolidayGreetingDrafts(now: Date = laWallClockAsUtcDate(), windowDays = 400): Promise<number> {
+  let created = 0;
+  const today = now.toISOString().slice(0, 10);
+  const until = new Date(now.getTime() + windowDays * 86_400_000).toISOString().slice(0, 10);
+  const years = [now.getUTCFullYear(), now.getUTCFullYear() + 1];
+  const wanted = years.flatMap((year) => HOLIDAY_KEYS.map((key) => ({ key, year, date: holidayDate(key, year) }))).filter((h) => h.date >= today && h.date <= until);
+  // Resources (runs every 5 minutes): one query when every draft already exists — the usual case.
+  const [have] = await pool.query<RowDataPacket[]>(`SELECT holiday_key, year FROM holiday_greetings WHERE year IN (?, ?)`, years);
+  const existing = new Set(have.map((r) => `${r.holiday_key}|${r.year}`));
+  for (const { key, year, date } of wanted) {
+    {
+      if (existing.has(`${key}|${year}`)) continue;
+      const [[prev]] = await pool.query<RowDataPacket[]>(
+        `SELECT body_en, body_es, media_url, media_content_type FROM holiday_greetings
+         WHERE holiday_key = ? AND year < ? AND status IN ('approved','sending','sent') ORDER BY year DESC LIMIT 1`,
+        [key, year],
+      );
+      const [r] = await pool.query<ResultSetHeader>(
+        `INSERT IGNORE INTO holiday_greetings (holiday_key, year, send_at, status, body_en, body_es, media_url, media_content_type, audience_json)
+         VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?)`,
+        [
+          key, year, `${date} ${HOLIDAY_GREETING_DEFAULT_TIME}`,
+          prev?.body_en ?? HOLIDAY_DEFAULT_TEXTS[key].en, prev?.body_es ?? HOLIDAY_DEFAULT_TEXTS[key].es,
+          prev?.media_url ?? null, prev?.media_content_type ?? null,
+          JSON.stringify({ statuses: HOLIDAY_GREETING_CLIENT_STATUSES, recent_text_months: HOLIDAY_GREETING_RECENT_TEXT_MONTHS }),
+        ],
+      );
+      created += r.affectedRows;
+    }
+  }
+  return created;
+}
+
+function mapHolidayGreetingRow(r: RowDataPacket) {
+  const key = String(r.holiday_key) as HolidayKey;
+  const parse = (v: unknown) => (v == null ? null : typeof v === "string" ? JSON.parse(v) : v);
+  return {
+    id: Number(r.id),
+    holiday_key: key,
+    label: HOLIDAY_LABELS[key] ?? { en: key, es: key },
+    year: Number(r.year),
+    date: holidayDate(key, Number(r.year)),
+    send_at: r.send_at instanceof Date ? eventSqlDateTime(r.send_at) : String(r.send_at),
+    status: String(r.status) as "draft" | "approved" | "sending" | "sent" | "skipped" | "cancelled",
+    body_en: String(r.body_en ?? ""),
+    body_es: String(r.body_es ?? ""),
+    media_url: r.media_url ? String(r.media_url) : null,
+    media_content_type: r.media_content_type ? String(r.media_content_type) : null,
+    approved_by: r.approved_by_name ? String(r.approved_by_name) : null,
+    approved_at: r.approved_at ?? null,
+    sent_at: r.sent_at ?? null,
+    stats: parse(r.stats_json) as { queued?: number; sent?: number; failed?: number; skipped?: number } | null,
+  };
+}
+
+async function loadHolidayGreeting(id: number) {
+  const [[r]] = await pool.query<RowDataPacket[]>(
+    `SELECT g.*, CONCAT(a.first_name, ' ', a.last_name) AS approved_by_name
+     FROM holiday_greetings g LEFT JOIN admins a ON a.id = g.approved_by_admin_id WHERE g.id = ? LIMIT 1`,
+    [id],
+  );
+  return r ? mapHolidayGreetingRow(r) : null;
+}
+
+/** Validate an edit: texts, image, send time (on the holiday's date, 8 AM-8 PM Pacific). */
+export function validateHolidayGreetingEdit(
+  body: Record<string, unknown>,
+  holidayDateYmd: string,
+): { ok: true; set: { body_en?: string; body_es?: string; media_url?: string | null; media_content_type?: string | null; send_at?: string } } | { ok: false; error: string } {
+  const set: { body_en?: string; body_es?: string; media_url?: string | null; media_content_type?: string | null; send_at?: string } = {};
+  for (const k of ["body_en", "body_es"] as const) {
+    if (body[k] === undefined) continue;
+    const t = String(body[k] ?? "").trim();
+    if (!t) return { ok: false, error: `${k} cannot be empty` };
+    // SMS segments: keep holiday texts short (footer is added on top).
+    if (t.length > 600) return { ok: false, error: `${k} is too long (600 characters max)` };
+    set[k] = t;
+  }
+  if (body.media_url !== undefined) {
+    const u = body.media_url == null ? "" : String(body.media_url).trim();
+    if (u && !/^https:\/\//i.test(u)) return { ok: false, error: "media_url must be an https URL" };
+    set.media_url = u || null;
+    set.media_content_type = u ? (body.media_content_type ? String(body.media_content_type).slice(0, 120) : null) : null;
+  }
+  if (body.send_time !== undefined) {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(body.send_time ?? "").trim());
+    if (!m) return { ok: false, error: "send_time must be HH:MM (Pacific)" };
+    const h = Number(m[1]);
+    const min = Number(m[2]);
+    if (h < 8 || h > 19 || min > 59) return { ok: false, error: "send_time must be between 08:00 and 19:59 Pacific" };
+    set.send_at = `${holidayDateYmd} ${String(h).padStart(2, "0")}:${m[2]}:00`;
+  }
+  return { ok: true, set };
+}
+
+async function notifyHolidayApprovers(title: { en: string; es: string }, body: { en: string; es: string }, payload: Record<string, unknown>): Promise<number> {
+  const ids = await holidayGreetingApproverIds();
+  const recipients = (await listActiveTeamAdmins()).filter((a) => ids.includes(a.id));
+  let sent = 0;
+  for (const admin of recipients) {
+    const es = admin.preferred_language === "es";
+    const id = await insertAdminInAppNotification({
+      adminId: admin.id,
+      eventKey: "holiday_greetings",
+      title: es ? title.es : title.en,
+      body: es ? body.es : body.en,
+      linkUrl: `${APP_URL}/admin/holiday-greetings`,
+      payload,
+    }).catch((e: any) => {
+      console.error("[holiday-greetings:notify]", admin.id, e?.message ?? e);
+      return null;
+    });
+    if (id) sent++;
+  }
+  return sent;
+}
+
+/** Sends one queued recipient (re-checking STOP). Never throws. */
+async function sendHolidayGreetingToRecipient(g: ReturnType<typeof mapHolidayGreetingRow>, rec: RowDataPacket): Promise<"sent" | "failed" | "skipped"> {
+  const recId = Number(rec.id);
+  try {
+    if (await isSmsOptedOut(String(rec.phone))) {
+      await pool.query(`UPDATE holiday_greeting_recipients SET status = 'skipped', skip_reason = 'opted_out' WHERE id = ?`, [recId]);
+      return "skipped";
+    }
+    const lang = String(rec.lang) === "es" ? "es" : "en";
+    const [[client]] = await pool.query<RowDataPacket[]>(`SELECT first_name FROM clients WHERE id = ? LIMIT 1`, [rec.client_id]);
+    const text = renderHolidayGreeting(lang === "es" ? g.body_es : g.body_en, client?.first_name ?? null, lang);
+    const result = await deliverHubConversationMessage({
+      adminId: Number(rec.sender_admin_id),
+      clientId: Number(rec.client_id),
+      channel: "sms",
+      textBody: text,
+      mediaUrl: g.media_url,
+      mediaContentType: g.media_content_type,
+    });
+    await pool.query(
+      `UPDATE conversation_messages SET metadata_json = JSON_SET(COALESCE(metadata_json, JSON_OBJECT()), '$.holiday_greeting_id', ?, '$.holiday_key', ?) WHERE id = ?`,
+      [g.id, g.holiday_key, result.message_id],
+    );
+    const failed = !result.ok || !!result.error;
+    if (failed && /21610|unsubscribed|opted out/i.test(String(result.error ?? ""))) await recordSmsOptKeyword(String(rec.phone), "STOP");
+    await pool.query(
+      `UPDATE holiday_greeting_recipients SET status = ?, conversation_id = ?, message_id = ?, error_message = ?, sent_at = NOW() WHERE id = ?`,
+      [failed ? "failed" : "sent", result.conversation_id, result.message_id, failed ? String(result.error ?? "send failed").slice(0, 500) : null, recId],
+    );
+    return failed ? "failed" : "sent";
+  } catch (e: any) {
+    await pool.query(`UPDATE holiday_greeting_recipients SET status = 'failed', error_message = ? WHERE id = ?`, [String(e?.message ?? e).slice(0, 500), recId]).catch(() => undefined);
+    return "failed";
+  }
+}
+
+async function holidayGreetingStats(id: number) {
+  const [rows] = await pool.query<RowDataPacket[]>(`SELECT status, COUNT(*) n FROM holiday_greeting_recipients WHERE greeting_id = ? GROUP BY status`, [id]);
+  const out = { queued: 0, sent: 0, failed: 0, skipped: 0 } as Record<string, number>;
+  for (const r of rows) out[String(r.status)] = Number(r.n);
+  return out as { queued: number; sent: number; failed: number; skipped: number };
+}
+
+/**
+ * The cron step: drafts for upcoming holidays, approval reminders (7 and 2 days before), skip-and-tell
+ * when unapproved at send time, and the paced send of approved holidays (8 AM-8 PM Pacific).
+ */
+export async function runHolidayGreetingsCronStep(nowLa: Date = laWallClockAsUtcDate()): Promise<{ drafts: number; reminders: number; skipped: number; sent: number; failed: number }> {
+  const out = { drafts: 0, reminders: 0, skipped: 0, sent: 0, failed: 0 };
+  out.drafts = await ensureHolidayGreetingDrafts(nowLa);
+  const nowSql = eventSqlDateTime(nowLa);
+  const hour = nowLa.getUTCHours();
+
+  // Reminders + skips for drafts.
+  const [drafts] = await pool.query<RowDataPacket[]>(
+    `SELECT * FROM holiday_greetings WHERE status = 'draft' AND send_at <= DATE_ADD(?, INTERVAL 7 DAY)`,
+    [nowSql],
+  );
+  for (const r of drafts) {
+    const g = mapHolidayGreetingRow(r);
+    const sent = (typeof r.reminders_json === "string" ? JSON.parse(r.reminders_json) : r.reminders_json) ?? {};
+    const label = g.label;
+    if (g.send_at <= nowSql) {
+      await pool.query(`UPDATE holiday_greetings SET status = 'skipped' WHERE id = ? AND status = 'draft'`, [g.id]);
+      await notifyHolidayApprovers(
+        { en: `${label.en} greeting skipped`, es: `Saludo de ${label.es} no enviado` },
+        { en: `The ${label.en} text was not approved by its send time, so nothing was sent.`, es: `El mensaje de ${label.es} no se aprobó a tiempo, así que no se envió nada.` },
+        { holiday_greeting_id: g.id, kind: "skipped" },
+      );
+      out.skipped++;
+      continue;
+    }
+    const daysLeft = (new Date(g.send_at.replace(" ", "T") + "Z").getTime() - nowLa.getTime()) / 86_400_000;
+    const due = daysLeft <= 2 ? "d2" : "d7";
+    if (sent[due]) continue;
+    const audience = await buildHolidayAudience();
+    await notifyHolidayApprovers(
+      { en: `Approve the ${label.en} greeting`, es: `Aprueba el saludo de ${label.es}` },
+      {
+        en: `It goes to ${audience.members.length} clients on ${g.date} at ${g.send_at.slice(11, 16)} Pacific — only once you approve it. Not approved = not sent.`,
+        es: `Se enviará a ${audience.members.length} clientes el ${g.date} a las ${g.send_at.slice(11, 16)} (Pacífico), solo si lo apruebas. Sin aprobación no se envía.`,
+      },
+      { holiday_greeting_id: g.id, kind: due },
+    );
+    await pool.query(`UPDATE holiday_greetings SET reminders_json = JSON_SET(COALESCE(reminders_json, JSON_OBJECT()), ?, NOW()) WHERE id = ?`, [`$.${due}`, g.id]);
+    out.reminders++;
+  }
+
+  // Approved and due: snapshot recipients once, then send in batches during the day.
+  if (hour < 8 || hour >= 20) return out;
+  const [due] = await pool.query<RowDataPacket[]>(
+    `SELECT * FROM holiday_greetings WHERE status IN ('approved','sending') AND send_at <= ? ORDER BY send_at LIMIT 3`,
+    [nowSql],
+  );
+  for (const r of due) {
+    const g = mapHolidayGreetingRow(r);
+    if (g.status === "approved") {
+      // Claim it (one cron run only), then freeze the audience.
+      const [claim] = await pool.query<ResultSetHeader>(`UPDATE holiday_greetings SET status = 'sending' WHERE id = ? AND status = 'approved'`, [g.id]);
+      if (!claim.affectedRows) continue;
+      const audience = await buildHolidayAudience();
+      for (const m of audience.members) {
+        await pool.query(
+          `INSERT IGNORE INTO holiday_greeting_recipients (greeting_id, client_id, phone, lang, sender_admin_id) VALUES (?, ?, ?, ?, ?)`,
+          [g.id, m.client_id, m.phone, m.lang, m.sender_admin_id],
+        );
+      }
+    }
+    const [queued] = await pool.query<RowDataPacket[]>(
+      `SELECT * FROM holiday_greeting_recipients WHERE greeting_id = ? AND status = 'queued' ORDER BY id LIMIT ?`,
+      [g.id, HOLIDAY_GREETING_BATCH],
+    );
+    for (const rec of queued) {
+      const res = await sendHolidayGreetingToRecipient(g, rec);
+      if (res === "sent") out.sent++;
+      else if (res === "failed") out.failed++;
+    }
+    const stats = await holidayGreetingStats(g.id);
+    if (stats.queued === 0) {
+      const [fin] = await pool.query<ResultSetHeader>(
+        `UPDATE holiday_greetings SET status = 'sent', sent_at = NOW(), stats_json = ? WHERE id = ? AND status = 'sending'`,
+        [JSON.stringify(stats), g.id],
+      );
+      if (fin.affectedRows) {
+        await notifyHolidayApprovers(
+          { en: `${g.label.en} greeting sent`, es: `Saludo de ${g.label.es} enviado` },
+          {
+            en: `Sent to ${stats.sent} clients${stats.failed ? `, ${stats.failed} failed` : ""}${stats.skipped ? `, ${stats.skipped} skipped (opted out)` : ""}. Replies are in Conversations.`,
+            es: `Enviado a ${stats.sent} clientes${stats.failed ? `, ${stats.failed} fallaron` : ""}${stats.skipped ? `, ${stats.skipped} omitidos (STOP)` : ""}. Las respuestas están en Conversaciones.`,
+          },
+          { holiday_greeting_id: g.id, kind: "sent", ...stats },
+        );
+      }
+    } else {
+      await pool.query(`UPDATE holiday_greetings SET stats_json = ? WHERE id = ?`, [JSON.stringify(stats), g.id]);
+    }
+  }
+  return out;
+}
+
+/** Shared by the CRM routes and the MCP tools. */
+async function approveHolidayGreetingCore(id: number, adminId: number): Promise<{ status: number; body: any }> {
+  if (!(await holidayGreetingApproverIds()).includes(adminId)) return { status: 403, body: { error: "Only holiday greeting approvers (Settings → Permissions) can approve" } };
+  const g = await loadHolidayGreeting(id);
+  if (!g) return { status: 404, body: { error: "Holiday greeting not found" } };
+  if (g.status !== "draft") return { status: 409, body: { error: `It is already ${g.status}`, code: "not_draft" } };
+  if (g.send_at <= eventSqlDateTime(laWallClockAsUtcDate())) return { status: 409, body: { error: "Its send time has passed", code: "send_time_passed" } };
+  const [r] = await pool.query<ResultSetHeader>(
+    `UPDATE holiday_greetings SET status = 'approved', approved_by_admin_id = ?, approved_at = NOW() WHERE id = ? AND status = 'draft'`,
+    [adminId, id],
+  );
+  if (!r.affectedRows) return { status: 409, body: { error: "It changed — reload", code: "not_draft" } };
+  await pool.query(
+    `INSERT INTO audit_logs (actor_type, actor_id, action, entity_type, entity_id, changes_json, status) VALUES ('admin', ?, 'holiday_greeting.approved', 'holiday_greeting', ?, ?, 'success')`,
+    [adminId, id, JSON.stringify({ holiday: g.holiday_key, year: g.year, send_at: g.send_at })],
+  ).catch(() => undefined);
+  return { status: 200, body: { ok: true, greeting: await loadHolidayGreeting(id) } };
+}
+
+async function updateHolidayGreetingCore(id: number, adminId: number, body: Record<string, unknown>): Promise<{ status: number; body: any }> {
+  const g = await loadHolidayGreeting(id);
+  if (!g) return { status: 404, body: { error: "Holiday greeting not found" } };
+  if (!["draft", "approved"].includes(g.status)) return { status: 409, body: { error: `It is already ${g.status}`, code: "locked" } };
+  const v = validateHolidayGreetingEdit(body, g.date);
+  if (v.ok === false) return { status: 400, body: { error: v.error } };
+  const entries = Object.entries(v.set);
+  if (!entries.length) return { status: 400, body: { error: "Nothing to change" } };
+  // Any edit after approval needs a new approval.
+  await pool.query(
+    `UPDATE holiday_greetings SET ${entries.map(([k]) => `${k} = ?`).join(", ")}, updated_by_admin_id = ?, status = 'draft', approved_by_admin_id = NULL, approved_at = NULL
+     WHERE id = ? AND status IN ('draft','approved')`,
+    [...entries.map(([, val]) => val), adminId, id],
+  );
+  return { status: 200, body: { ok: true, greeting: await loadHolidayGreeting(id), needs_approval: true } };
+}
+
+async function setHolidayGreetingStatusCore(id: number, adminId: number, action: "unapprove" | "skip" | "restore"): Promise<{ status: number; body: any }> {
+  if (!(await holidayGreetingApproverIds()).includes(adminId)) return { status: 403, body: { error: "Only holiday greeting approvers (Settings → Permissions) can change this" } };
+  const from = action === "unapprove" ? ["approved"] : action === "skip" ? ["draft", "approved"] : ["skipped"];
+  const to = action === "skip" ? "skipped" : "draft";
+  const [r] = await pool.query<ResultSetHeader>(
+    `UPDATE holiday_greetings SET status = ?, approved_by_admin_id = NULL, approved_at = NULL WHERE id = ? AND status IN (${from.map(() => "?").join(",")})`,
+    [to, id, ...from],
+  );
+  if (!r.affectedRows) return { status: 409, body: { error: "Not possible in its current state" } };
+  return { status: 200, body: { ok: true, greeting: await loadHolidayGreeting(id) } };
+}
+
+/** Short greeting / thanks / emoji / photo reply to a holiday text sent in the last 7 days. */
+export function isHolidayReplyText(body: string): boolean {
+  const t = String(body || "").trim();
+  if (!t) return true; // photo / sticker only
+  if (/\?|¿/.test(t)) return false;
+  const words = t.toLowerCase().replace(/[^\p{L}\p{N}\s']/gu, " ").replace(/\s+/g, " ").trim();
+  if (!words) return true; // emoji only
+  if (words.split(" ").length > 25) return false;
+  // Account words → a real question even without "?".
+  if (/\b(balance|pay|payment|report|score|dispute|account|call me|ll[aá]mame|pago|reporte|cuenta|ayuda|help|when|cu[aá]ndo)\b/.test(words)) return false;
+  return /(happy|merry|feliz|felices|thank|thanks|gracias|igualmente|same to you|you too|tambi[eé]n|love|bless|bendicion|bendiciones|holiday|thanksgiving|christmas|navidad|new year|a[nñ]o nuevo|valentine|mother|father|madre|padre|4th|july|julio|amen|hugs|abrazo|feliz)/.test(words);
+}
+
+async function recentHolidayGreetingToConversation(conversationId: number, days = 7): Promise<boolean> {
+  const [[r]] = await pool.query<RowDataPacket[]>(
+    `SELECT id FROM holiday_greeting_recipients WHERE conversation_id = ? AND status = 'sent' AND sent_at >= DATE_SUB(NOW(), INTERVAL ? DAY) LIMIT 1`,
+    [conversationId, days],
+  );
+  return !!r;
+}
+
+// ── Out of office + client care (Nov 17, 2026 — Cesar) ───────────────────────
+// Every client text / missed call: an auto-reply naming who answers (the language owner, or their backup
+// when out of office), a Slack #client-care post routed by language, ✅ when answered (an OFG reply marks
+// it), a reminder after 2 business hours (Mon-Fri 8 AM-6 PM Pacific) and Cesar after 4. No new cron.
+
+/** Client-care Slack writes go out only where real messages do (Vercel), never from tests / a local server. */
+async function clientCareSlackWrite(method: string, params: Record<string, unknown>): Promise<SlackResp> {
+  const blocked = realMessagingBlocked();
+  if (blocked) {
+    console.log("[client-care:slack:dry-run]", blocked, method, String(params.text ?? "").slice(0, 120));
+    return { ok: true, ts: `dry-${Date.now()}`, dry_run: true };
+  }
+  return slackApi(method, params, true);
+}
+
+async function clientCareSlackDm(slackUserId: string, text: string): Promise<boolean> {
+  if (realMessagingBlocked()) {
+    console.log("[client-care:slack-dm:dry-run]", slackUserId, text.slice(0, 120));
+    return true;
+  }
+  return slackDm(slackUserId, text);
+}
+
+// Settings, templates, business hours and wording: shared/clientCareTemplate.ts (inlined above).
+
+const CLIENT_CARE_SETTINGS_KEY = "client_care_settings";
+let clientCareSettingsCache: { at: number; value: ClientCareSettings } | null = null;
+
+/** Saved settings merged over the defaults (cached 60 s; a save clears it). Never throws. */
+export async function loadClientCareSettings(): Promise<ClientCareSettings> {
+  if (clientCareSettingsCache && Date.now() - clientCareSettingsCache.at < 60_000) return clientCareSettingsCache.value;
+  let value = CLIENT_CARE_DEFAULT_SETTINGS;
+  try {
+    const [[r]] = await pool.query<RowDataPacket[]>(`SELECT setting_value FROM system_settings WHERE setting_key = ? LIMIT 1`, [CLIENT_CARE_SETTINGS_KEY]);
+    if (r?.setting_value) {
+      // Saved values are re-validated; anything broken falls back to the defaults.
+      const n = normalizeClientCareSettings(JSON.parse(String(r.setting_value)), CLIENT_CARE_DEFAULT_SETTINGS);
+      if (n.ok) value = n.settings;
+      else console.warn("[client-care:settings] stored settings invalid, using defaults:", (n as { error: string }).error);
+    }
+  } catch (e: any) {
+    console.warn("[client-care:settings]", e?.message ?? e);
+  }
+  clientCareSettingsCache = { at: Date.now(), value };
+  return value;
+}
+
+async function saveClientCareSettingsCore(actorId: number, body: unknown): Promise<{ status: number; body: any }> {
+  if (!(await outOfOfficeManagerIds()).includes(actorId)) return { status: 403, body: { error: "Only out-of-office managers (Settings → Permissions) can change client care settings" } };
+  const current = await loadClientCareSettings();
+  const reset = (body as { reset?: unknown })?.reset === true;
+  const n = reset ? { ok: true as const, settings: CLIENT_CARE_DEFAULT_SETTINGS } : normalizeClientCareSettings(body, current);
+  if (n.ok === false) return { status: 400, body: { error: n.error } };
+  for (const id of n.settings.escalate_admin_ids) {
+    const [[a]] = await pool.query<RowDataPacket[]>(`SELECT id FROM admins WHERE id = ? AND status = 'active' LIMIT 1`, [id]);
+    if (!a) return { status: 400, body: { error: `Staff ${id} is not active` } };
+  }
+  await pool.query(
+    `INSERT INTO system_settings (setting_key, setting_value, description) VALUES (?, ?, 'Client care: auto-replies, Slack #client-care, business hours, escalation (Nov 2026)')
+     ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)`,
+    [CLIENT_CARE_SETTINGS_KEY, JSON.stringify(n.settings)],
+  );
+  clientCareSettingsCache = null;
+  await pool.query(
+    `INSERT INTO audit_logs (actor_type, actor_id, action, entity_type, entity_id, changes_json, status) VALUES ('admin', ?, 'client_care.settings_saved', 'system_settings', NULL, ?, 'success')`,
+    [actorId, JSON.stringify({ reset, settings: n.settings })],
+  ).catch(() => undefined);
+  return { status: 200, body: { ok: true, settings: n.settings } };
+}
+
+/** Out-of-office row covering a day (YYYY-MM-DD), or null. */
+async function outOfOfficeOn(adminId: number, ymd: string): Promise<RowDataPacket | null> {
+  const [[r]] = await pool.query<RowDataPacket[]>(
+    `SELECT * FROM admin_out_of_office WHERE admin_id = ? AND cancelled_at IS NULL AND starts_on <= ? AND returns_on > ? ORDER BY id DESC LIMIT 1`,
+    [adminId, ymd, ymd],
+  );
+  return r ?? null;
+}
+
+async function adminCard(adminId: number | null): Promise<{ id: number; first_name: string; email: string; slack_user_id: string | null; phone: string | null } | null> {
+  if (!adminId) return null;
+  const [[a]] = await pool.query<RowDataPacket[]>(
+    `SELECT a.id, a.first_name, a.email, a.slack_user_id,
+            (SELECT p.e164 FROM admin_phone_numbers p WHERE p.assigned_admin_id = a.id AND p.is_active = 1 ORDER BY p.id LIMIT 1) AS line
+     FROM admins a WHERE a.id = ? LIMIT 1`,
+    [adminId],
+  );
+  return a ? { id: Number(a.id), first_name: String(a.first_name || ""), email: String(a.email || ""), slack_user_id: a.slack_user_id ? String(a.slack_user_id) : null, phone: a.line ? String(a.line) : null } : null;
+}
+
+/**
+ * Who answers a client in this language today: the language owner (EN Lecca, ES Angel), or the backup
+ * their out-of-office names; plus the line owner's absence (for "Cesar is back Wed 11/25").
+ */
+async function resolveClientCareRouting(lang: "en" | "es", lineAdminId: number | null, nowLa: Date = laWallClockAsUtcDate()) {
+  const ymd = nowLa.toISOString().slice(0, 10);
+  let ownerId = await resolveLanguageOwnerAdminId(lang);
+  const ownerOoo = ownerId ? await outOfOfficeOn(ownerId, ymd) : null;
+  if (ownerOoo) {
+    const backup = lang === "es" ? ownerOoo.backup_es_admin_id ?? ownerOoo.backup_en_admin_id : ownerOoo.backup_en_admin_id ?? ownerOoo.backup_es_admin_id;
+    if (backup) ownerId = Number(backup);
+  }
+  const lineOoo = lineAdminId && lineAdminId !== ownerId ? await outOfOfficeOn(lineAdminId, ymd) : null;
+  const [owner, lineAdmin] = await Promise.all([adminCard(ownerId), lineOoo ? adminCard(lineAdminId) : Promise.resolve(null)]);
+  return {
+    owner,
+    away: lineOoo && lineAdmin
+      ? {
+          name: lineAdmin.first_name,
+          returnsLabel: returnDayLabel(String(lineOoo.returns_on instanceof Date ? lineOoo.returns_on.toISOString().slice(0, 10) : lineOoo.returns_on).slice(0, 10), lang),
+          note: (lang === "es" ? lineOoo.note_es ?? lineOoo.note_en : lineOoo.note_en ?? lineOoo.note_es) ?? null,
+        }
+      : null,
+  };
+}
+
+/** 3-8 word topic in the client's language ("your progress report"), or null. Never throws. */
+async function clientCareTopic(body: string, lang: "en" | "es"): Promise<string | null> {
+  if (process.env.VITEST === "true") return null; // no Claude calls from tests
+  const text = String(body || "").trim();
+  if (text.split(/\s+/).length < 4) return null;
+  const key = inboundAiAnthropicKey("sms");
+  if (!key) return null;
+  try {
+    const { data } = await axios.post(
+      "https://api.anthropic.com/v1/messages",
+      {
+        model: String(process.env.ANTHROPIC_MODEL || "").trim() || "claude-sonnet-4-6",
+        max_tokens: 30,
+        system:
+          lang === "es"
+            ? "Escribe en español una frase de 3 a 8 palabras que complete 'Recibimos tu mensaje sobre ___', describiendo de qué trata el mensaje del cliente (ej. 'tu reporte de progreso', 'tu pago de noviembre'). Solo la frase, sin comillas ni punto. Si no está claro o es un saludo, responde NONE. Nunca repitas números de cuenta, montos ni datos personales."
+            : "Write a 3-8 word phrase that completes 'We got your message about ___', describing what the client's text is about (e.g. 'your progress report', 'your November payment'). Only the phrase, no quotes or period. If unclear or just a greeting, reply NONE. Never repeat account numbers, amounts or personal data.",
+        messages: [{ role: "user", content: text.slice(0, 800) }],
+      },
+      {
+        headers: { "x-api-key": key.apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json", ...(key.workspaceId ? { "anthropic-workspace-id": key.workspaceId } : {}) },
+        timeout: 6000,
+        validateStatus: () => true,
+      },
+    );
+    void meterAnthropic("client_care_topic", data).catch(() => undefined);
+    const out = String(data?.content?.[0]?.text ?? "").trim().replace(/^["'“]|["'”.]$/g, "");
+    if (!out || /^none$/i.test(out) || out.length > 80 || /\d{4,}/.test(out)) return null;
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+let clientCareChannelCache: { at: number; id: string | null } | null = null;
+/** #client-care channel id (CLIENT_CARE_SLACK_CHANNEL: id or name; the bot must be in it). */
+async function clientCareSlackChannel(): Promise<string | null> {
+  const raw = String(process.env.CLIENT_CARE_SLACK_CHANNEL || "client-care").trim().replace(/^#/, "");
+  if (/^[CG][A-Z0-9]{6,}$/.test(raw)) return raw;
+  if (clientCareChannelCache && Date.now() - clientCareChannelCache.at < 30 * 60_000) return clientCareChannelCache.id;
+  const r = await slackApi("users.conversations", { types: "public_channel,private_channel", limit: 200, exclude_archived: true });
+  const id = r.ok ? ((r.channels as Array<{ id: string; name: string }>) ?? []).find((c) => c.name === raw)?.id ?? null : null;
+  clientCareChannelCache = { at: Date.now(), id };
+  return id;
+}
+
+async function slackMention(admin: { id: number; email: string; slack_user_id: string | null; first_name: string } | null): Promise<string> {
+  if (!admin) return "unassigned";
+  const sid = await slackUserIdFor(admin).catch(() => null);
+  return sid ? `<@${sid}>` : admin.first_name;
+}
+
+const CLIENT_CARE_SKIP = /^(STOP|STOPALL|UNSUBSCRIBE|END|QUIT|CANCELAR|BAJA|START|YES|UNSTOP|HELP|INFO|AYUDA)$/i;
+
+export interface ClientCareInbound {
+  conversationId: number;
+  channel: "sms" | "call";
+  clientId?: number | null;
+  contactId?: number | null;
+  unknownContactId?: number | null;
+  fromE164: string;
+  toE164: string;
+  body: string;
+  displayName: string;
+  linkPath: string;
+  lineAdminId: number | null;
+  ofgNumberId?: number | null;
+  /** The texting AI already answered (reply / resolve) or sent its hold: no auto-reply from here. */
+  aiReplied?: boolean;
+  aiAnswered?: boolean;
+}
+
+async function clientCareLang(i: ClientCareInbound): Promise<"en" | "es"> {
+  const fromRow = async (sql: string, id: number) => {
+    const [[r]] = await pool.query<RowDataPacket[]>(sql, [id]);
+    return r?.preferred_language === "es" ? "es" : r?.preferred_language === "en" ? "en" : null;
+  };
+  const known =
+    (i.clientId ? await fromRow(`SELECT preferred_language FROM clients WHERE id = ?`, i.clientId) : null) ??
+    (i.contactId ? await fromRow(`SELECT preferred_language FROM contacts WHERE id = ?`, i.contactId).catch(() => null) : null);
+  return known ?? (i.body ? guessSocialMessageLang(i.body) : "en");
+}
+
+/**
+ * After an inbound client text / missed call: auto-reply (where the AI did not answer), and the Slack
+ * #client-care post (new, or added to the open thread for this conversation). Never throws.
+ */
+export async function clientCareAfterInbound(i: ClientCareInbound): Promise<{ posted: boolean; autoReplied: boolean; itemId: number | null }> {
+  const out = { posted: false, autoReplied: false, itemId: null as number | null };
+  try {
+    const body = String(i.body || "").trim();
+    if (i.channel === "sms" && (CLIENT_CARE_SKIP.test(body) || inboundAiIsAckOnly(body))) return out;
+    if (i.channel === "sms" && isHolidayReplyText(body) && (await recentHolidayGreetingToConversation(i.conversationId))) return out;
+    const settings = await loadClientCareSettings();
+    const lang = await clientCareLang(i);
+    const nowLa = laWallClockAsUtcDate();
+    const routing = await resolveClientCareRouting(lang, i.lineAdminId, nowLa);
+    const [[open]] = await pool.query<RowDataPacket[]>(
+      `SELECT * FROM client_care_items WHERE conversation_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1`,
+      [i.conversationId],
+    );
+    const topic = i.channel === "sms" && body ? await clientCareTopic(body, lang) : null;
+
+    // 1) Auto-reply: not when the AI answered, staff wrote in the last hour, or we replied in the last 12h.
+    let autoReply = settings.auto_reply_enabled && !i.aiReplied && !(await isSmsOptedOut(i.fromE164));
+    if (autoReply) {
+      const [[recent]] = await pool.query<RowDataPacket[]>(
+        `SELECT
+           (SELECT MAX(created_at) FROM conversation_messages WHERE conversation_id = ? AND direction = 'outbound' AND sent_by_admin_id IS NOT NULL
+              AND COALESCE(JSON_EXTRACT(metadata_json, '$.client_care_auto'), false) = false) AS staff_at,
+           (SELECT MAX(created_at) FROM conversation_messages WHERE conversation_id = ? AND direction = 'outbound'
+              AND JSON_EXTRACT(metadata_json, '$.client_care_auto') = true) AS auto_at`,
+        [i.conversationId, i.conversationId],
+      );
+      const hoursSince = (v: unknown) => (v ? (Date.now() - new Date(v as string).getTime()) / 3_600_000 : Infinity);
+      if (hoursSince(recent?.staff_at) < settings.staff_quiet_min / 60 || hoursSince(recent?.auto_at) < settings.auto_reply_gap_hours) autoReply = false;
+    }
+    if (autoReply && routing.owner && i.lineAdminId) {
+      let firstName: string | null = null;
+      if (i.clientId) {
+        const [[c]] = await pool.query<RowDataPacket[]>(`SELECT first_name FROM clients WHERE id = ?`, [i.clientId]);
+        firstName = c?.first_name ?? null;
+      }
+      const text = clientCareText({
+        kind: i.channel === "call" ? "missed_call" : "message",
+        lang,
+        firstName,
+        topic,
+        owner: { name: routing.owner.first_name, phone: routing.owner.phone },
+        away: routing.away,
+        when: clientCareWhen(nowLa, lang, settings),
+      }, settings);
+      const from = await resolveAssignedSmsFrom(i.lineAdminId);
+      if (from) {
+        const sent = await sendInboundAiSmsReply({
+          conversationId: i.conversationId,
+          toE164: i.fromE164,
+          fromE164: from,
+          body: text,
+          ofgNumberId: i.ofgNumberId ?? null,
+          // A hold, not an AI answer: keeps the "AI answered" stats honest and stops a second hold.
+          hold: true,
+        }).then(() => true).catch((e: any) => {
+          console.warn("[client-care:auto-reply]", e?.message ?? e);
+          return false;
+        });
+        if (sent) {
+          await pool.query(
+            `UPDATE conversation_messages SET metadata_json = JSON_SET(COALESCE(metadata_json, JSON_OBJECT()), '$.client_care_auto', true)
+             WHERE conversation_id = ? AND direction = 'outbound' ORDER BY id DESC LIMIT 1`,
+            [i.conversationId],
+          );
+          out.autoReplied = true;
+        }
+      }
+    }
+
+    // 2) Slack #client-care (the item is tracked even when Slack is off, for the queue / MCP).
+    const channel = settings.slack_enabled ? await clientCareSlackChannel() : null;
+    const owner = routing.owner;
+    const mention = await slackMention(owner ? { ...owner } : null);
+    const flag = lang === "es" ? "🇲🇽 Español" : "🇺🇸 English";
+    const what = i.channel === "call" ? "📞 Missed call" : `💬 "${body.slice(0, 400) || "[photo / media]"}"`;
+    const link = `${APP_URL}${i.linkPath}`;
+    const aiNote = i.aiAnswered ? "\n🤖 The AI answered — check it." : out.autoReplied ? "\n↩️ Auto-reply sent (who answers + when)." : "";
+    if (open) {
+      await pool.query(
+        `UPDATE client_care_items SET last_text = ?, message_count = message_count + 1, topic = COALESCE(?, topic), owner_admin_id = ? WHERE id = ?`,
+        [body.slice(0, 600) || null, topic, owner?.id ?? open.owner_admin_id, open.id],
+      );
+      out.itemId = Number(open.id);
+      if (channel && open.slack_ts) {
+        const r = await clientCareSlackWrite("chat.postMessage", { channel, thread_ts: open.slack_ts, text: `${what}${aiNote}`, unfurl_links: false });
+        out.posted = !!r.ok;
+      }
+    } else {
+      const [ins] = await pool.query<ResultSetHeader>(
+        `INSERT INTO client_care_items (conversation_id, client_id, contact_id, unknown_contact_id, channel, lang, owner_admin_id, line_admin_id, display_name, last_text, topic, auto_reply_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [i.conversationId, i.clientId ?? null, i.contactId ?? null, i.unknownContactId ?? null, i.channel, lang, owner?.id ?? null, i.lineAdminId, i.displayName.slice(0, 200), body.slice(0, 600) || null, topic, out.autoReplied ? new Date() : null],
+      );
+      out.itemId = ins.insertId;
+      if (channel) {
+        const lines = [
+          `*${i.displayName}* · ${flag} · ${i.clientId ? "client" : i.contactId ? "contact" : "new number"}`,
+          what,
+          `${topic ? `Topic: _${topic}_ · ` : ""}Answers: ${mention}${routing.away ? ` (covering for ${routing.away.name})` : ""}`,
+          `<${link}|Open in OFG> · reply there (or react ✅ here when done)${aiNote}`,
+        ];
+        const r = await clientCareSlackWrite("chat.postMessage", { channel, text: lines.join("\n"), unfurl_links: false, unfurl_media: false });
+        if (r.ok) {
+          await pool.query(`UPDATE client_care_items SET slack_channel = ?, slack_ts = ? WHERE id = ?`, [channel, String(r.ts), ins.insertId]);
+          out.posted = true;
+        } else console.warn("[client-care:slack]", r.error);
+      }
+      if (i.aiAnswered) await clientCareMarkDone(i.conversationId, "ai_answered", null);
+    }
+  } catch (e: any) {
+    console.warn("[client-care]", e?.message ?? e);
+  }
+  return out;
+}
+
+/** The personalized text the texting AI sends as its hold (same tags as before). */
+export async function clientCareHoldText(conversationId: number, lang: "en" | "es", body: string, lineAdminId: number | null, clientId?: number | null): Promise<string | null> {
+  try {
+    const settings = await loadClientCareSettings();
+    if (!settings.auto_reply_enabled) return null; // the AI keeps its standard hold
+    const routing = await resolveClientCareRouting(lang, lineAdminId);
+    if (!routing.owner) return null;
+    let firstName: string | null = null;
+    if (clientId) {
+      const [[c]] = await pool.query<RowDataPacket[]>(`SELECT first_name FROM clients WHERE id = ?`, [clientId]);
+      firstName = c?.first_name ?? null;
+    }
+    return clientCareText({
+      kind: "message",
+      lang,
+      firstName,
+      topic: await clientCareTopic(body, lang),
+      owner: { name: routing.owner.first_name, phone: routing.owner.phone },
+      away: routing.away,
+      when: clientCareWhen(laWallClockAsUtcDate(), lang, settings),
+    }, settings);
+  } catch {
+    return null;
+  }
+}
+
+/** A staff reply in OFG (or the AI answering) closes the open item and marks the Slack post ✅. */
+export async function clientCareMarkDone(conversationId: number, how: "ofg_reply" | "ai_answered" | "slack_check", adminId: number | null): Promise<number> {
+  const [items] = await pool.query<RowDataPacket[]>(`SELECT * FROM client_care_items WHERE conversation_id = ? AND status = 'open'`, [conversationId]);
+  for (const it of items) {
+    await pool.query(`UPDATE client_care_items SET status = 'done', done_how = ?, done_by_admin_id = ?, done_at = NOW() WHERE id = ? AND status = 'open'`, [how, adminId, it.id]);
+    if (it.slack_channel && it.slack_ts && how !== "slack_check") {
+      await clientCareSlackWrite("reactions.add", { channel: it.slack_channel, timestamp: it.slack_ts, name: "white_check_mark" });
+      const who = adminId ? (await adminCard(adminId))?.first_name : null;
+      await clientCareSlackWrite("chat.postMessage", { channel: it.slack_channel, thread_ts: it.slack_ts, text: how === "ai_answered" ? "✅ AI answered" : `✅ Answered in OFG${who ? ` by ${who}` : ""}` });
+    }
+  }
+  return items.length;
+}
+
+/** ✅ on the post, or a ✅ in a thread reply. */
+async function clientCareSlackChecked(channel: string, ts: string): Promise<boolean> {
+  const r = await slackApi("reactions.get", { channel, timestamp: ts });
+  if (r.ok && ((r.message?.reactions as Array<{ name: string }>) ?? []).some((x) => /^(white_check_mark|heavy_check_mark|ballot_box_with_check)$/.test(x.name))) return true;
+  const rep = await slackApi("conversations.replies", { channel, ts, limit: 50 });
+  return !!rep.ok && ((rep.messages as Array<{ text?: string; bot_id?: string; ts: string }>) ?? []).some((m) => m.ts !== ts && !m.bot_id && /✅|:white_check_mark:|:heavy_check_mark:/.test(m.text ?? ""));
+}
+
+/** Cron step: ✅ from Slack, then reminder (2 business hours) and Cesar (4) for what is still open. */
+export async function runClientCareCronStep(nowLa: Date = laWallClockAsUtcDate()): Promise<{ checked: number; done: number; reminded: number; escalated: number }> {
+  const out = { checked: 0, done: 0, reminded: 0, escalated: 0 };
+  const [items] = await pool.query<RowDataPacket[]>(`SELECT * FROM client_care_items WHERE status = 'open' ORDER BY id LIMIT 60`);
+  if (!items.length) return out;
+  const settings = await loadClientCareSettings();
+  const escalateTo = settings.escalate_admin_ids;
+  for (const it of items) {
+    out.checked++;
+    if (it.slack_channel && it.slack_ts && (await clientCareSlackChecked(String(it.slack_channel), String(it.slack_ts)))) {
+      await pool.query(`UPDATE client_care_items SET status = 'done', done_how = 'slack_check', done_at = NOW() WHERE id = ? AND status = 'open'`, [it.id]);
+      out.done++;
+      continue;
+    }
+    const openedLa = laWallClockAsUtcDate(new Date(it.opened_at));
+    const mins = businessMinutesBetween(openedLa, nowLa, settings);
+    if (mins >= settings.remind_after_min && !it.reminded_at) {
+      const owner = await adminCard(it.owner_admin_id ? Number(it.owner_admin_id) : null);
+      if (it.slack_channel && it.slack_ts) {
+        await clientCareSlackWrite("chat.postMessage", { channel: it.slack_channel, thread_ts: it.slack_ts, reply_broadcast: true, text: `⏰ ${Math.round(settings.remind_after_min / 60 * 10) / 10}h without ✅ — ${await slackMention(owner)} please answer ${it.display_name} (<${APP_URL}/admin/conversations?${it.client_id ? `client=${it.client_id}` : it.contact_id ? `contact=${it.contact_id}` : `unknown=${it.unknown_contact_id}`}|open in OFG>).` });
+      }
+      await pool.query(`UPDATE client_care_items SET reminded_at = NOW() WHERE id = ?`, [it.id]);
+      out.reminded++;
+    } else if (mins >= settings.escalate_after_min && !it.escalated_at) {
+      const ymd = nowLa.toISOString().slice(0, 10);
+      for (const id of escalateTo) {
+        // Cesar out of office → his backup for that language gets it instead.
+        const ooo = await outOfOfficeOn(id, ymd);
+        const target = ooo ? Number((it.lang === "es" ? ooo.backup_es_admin_id : ooo.backup_en_admin_id) ?? ooo.backup_en_admin_id ?? id) : id;
+        const a = await adminCard(target);
+        const sid = a ? await slackUserIdFor(a).catch(() => null) : null;
+        if (sid) await clientCareSlackDm(sid, `🚨 Still open after ${Math.round(settings.escalate_after_min / 60 * 10) / 10} business hours: *${it.display_name}* (${it.lang === "es" ? "Spanish" : "English"}) — "${String(it.last_text ?? "").slice(0, 200)}" ${it.slack_channel && it.slack_ts ? `<https://slack.com/app_redirect?channel=${it.slack_channel}&message_ts=${it.slack_ts}|thread>` : ""}`);
+      }
+      await pool.query(`UPDATE client_care_items SET escalated_at = NOW() WHERE id = ?`, [it.id]);
+      out.escalated++;
+    }
+  }
+  return out;
+}
+
+/** Validate an out-of-office request (dates in Pacific, up to 60 days; backups must be other active staff). */
+export function validateOutOfOffice(b: Record<string, unknown>, todayYmd: string): { ok: true; v: { starts_on: string; returns_on: string; backup_en_admin_id: number | null; backup_es_admin_id: number | null; note_en: string | null; note_es: string | null } } | { ok: false; error: string } {
+  const ymd = (x: unknown) => (typeof x === "string" && /^\d{4}-\d{2}-\d{2}$/.test(x) && !Number.isNaN(new Date(`${x}T12:00:00Z`).getTime()) ? x : null);
+  const starts = ymd(b.starts_on);
+  const returns = ymd(b.returns_on);
+  if (!starts || !returns) return { ok: false, error: "starts_on and returns_on must be YYYY-MM-DD" };
+  if (returns <= starts) return { ok: false, error: "returns_on must be after starts_on" };
+  if (returns <= todayYmd) return { ok: false, error: "That period is already over" };
+  const days = (new Date(`${returns}T12:00:00Z`).getTime() - new Date(`${starts}T12:00:00Z`).getTime()) / 86_400_000;
+  if (days > 60) return { ok: false, error: "Out of office can be at most 60 days" };
+  const id = (x: unknown) => (x == null || x === "" ? null : Number.isInteger(Number(x)) && Number(x) > 0 ? Number(x) : NaN);
+  const en = id(b.backup_en_admin_id);
+  const es = id(b.backup_es_admin_id);
+  if (Number.isNaN(en) || Number.isNaN(es)) return { ok: false, error: "Backups must be staff ids" };
+  if (!en && !es) return { ok: false, error: "Choose at least one backup" };
+  const note = (x: unknown) => (x == null ? null : String(x).trim().slice(0, 200) || null);
+  return { ok: true, v: { starts_on: starts, returns_on: returns, backup_en_admin_id: en, backup_es_admin_id: es, note_en: note(b.note_en), note_es: note(b.note_es) } };
+}
+
+async function listOutOfOffice(opts: { adminId?: number; activeOnly?: boolean } = {}) {
+  const today = laWallClockAsUtcDate().toISOString().slice(0, 10);
+  const where = ["o.cancelled_at IS NULL", "o.returns_on > ?"];
+  const params: unknown[] = [today];
+  if (opts.adminId) {
+    where.push("o.admin_id = ?");
+    params.push(opts.adminId);
+  }
+  if (opts.activeOnly) {
+    where.push("o.starts_on <= ?");
+    params.push(today);
+  }
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT o.*, a.first_name, a.last_name, en.first_name AS backup_en_name, es.first_name AS backup_es_name
+     FROM admin_out_of_office o JOIN admins a ON a.id = o.admin_id
+     LEFT JOIN admins en ON en.id = o.backup_en_admin_id LEFT JOIN admins es ON es.id = o.backup_es_admin_id
+     WHERE ${where.join(" AND ")} ORDER BY o.starts_on`,
+    params,
+  );
+  const ymd = (v: unknown) => (v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10));
+  return rows.map((r) => ({
+    id: Number(r.id),
+    admin_id: Number(r.admin_id),
+    name: `${r.first_name ?? ""} ${r.last_name ?? ""}`.trim(),
+    first_name: String(r.first_name ?? ""),
+    starts_on: ymd(r.starts_on),
+    returns_on: ymd(r.returns_on),
+    active: ymd(r.starts_on) <= today,
+    backup_en: r.backup_en_admin_id ? { id: Number(r.backup_en_admin_id), name: String(r.backup_en_name ?? "") } : null,
+    backup_es: r.backup_es_admin_id ? { id: Number(r.backup_es_admin_id), name: String(r.backup_es_name ?? "") } : null,
+    note_en: r.note_en ?? null,
+    note_es: r.note_es ?? null,
+  }));
+}
+
+/** Who may set someone else's out of office and edit client care (Settings → Permissions). */
+async function outOfOfficeManagerIds(): Promise<number[]> {
+  return (await loadStaffPermissions()).out_of_office_manager_ids;
+}
+
+async function setOutOfOfficeCore(actorId: number, body: Record<string, unknown>): Promise<{ status: number; body: any }> {
+  const target = body.admin_id != null ? Number(body.admin_id) : actorId;
+  if (target !== actorId && !(await outOfOfficeManagerIds()).includes(actorId)) return { status: 403, body: { error: "You can only set your own out of office" } };
+  const v = validateOutOfOffice(body, laWallClockAsUtcDate().toISOString().slice(0, 10));
+  if (v.ok === false) return { status: 400, body: { error: v.error } };
+  for (const b of [v.v.backup_en_admin_id, v.v.backup_es_admin_id]) {
+    if (!b) continue;
+    if (b === target) return { status: 400, body: { error: "A backup cannot be the person who is away" } };
+    const [[a]] = await pool.query<RowDataPacket[]>(`SELECT id FROM admins WHERE id = ? AND status = 'active' LIMIT 1`, [b]);
+    if (!a) return { status: 400, body: { error: "Backup must be active staff" } };
+  }
+  // One period at a time per person: a new one replaces an overlapping one.
+  await pool.query(
+    `UPDATE admin_out_of_office SET cancelled_at = NOW() WHERE admin_id = ? AND cancelled_at IS NULL AND starts_on < ? AND returns_on > ?`,
+    [target, v.v.returns_on, v.v.starts_on],
+  );
+  const [r] = await pool.query<ResultSetHeader>(
+    `INSERT INTO admin_out_of_office (admin_id, starts_on, returns_on, backup_en_admin_id, backup_es_admin_id, note_en, note_es, created_by_admin_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [target, v.v.starts_on, v.v.returns_on, v.v.backup_en_admin_id, v.v.backup_es_admin_id, v.v.note_en, v.v.note_es, actorId],
+  );
+  await pool.query(
+    `INSERT INTO audit_logs (actor_type, actor_id, action, entity_type, entity_id, changes_json, status) VALUES ('admin', ?, 'out_of_office.set', 'admin', ?, ?, 'success')`,
+    [actorId, target, JSON.stringify(v.v)],
+  ).catch(() => undefined);
+  return { status: 201, body: { ok: true, id: r.insertId, periods: await listOutOfOffice({ adminId: target }) } };
+}
+
+async function cancelOutOfOfficeCore(actorId: number, id: number): Promise<{ status: number; body: any }> {
+  const [[o]] = await pool.query<RowDataPacket[]>(`SELECT admin_id FROM admin_out_of_office WHERE id = ? AND cancelled_at IS NULL LIMIT 1`, [id]);
+  if (!o) return { status: 404, body: { error: "Not found" } };
+  if (Number(o.admin_id) !== actorId && !(await outOfOfficeManagerIds()).includes(actorId)) return { status: 403, body: { error: "You can only cancel your own out of office" } };
+  await pool.query(`UPDATE admin_out_of_office SET cancelled_at = NOW() WHERE id = ?`, [id]);
+  return { status: 200, body: { ok: true } };
+}
+
 async function rebuildRoundReportCore(reportIdIn: number, adminIdIn: number): Promise<{ status: number; body: any }> {
   const __R = (status: number, body: any) => ({ status, body });
   const req = { params: { id: String(reportIdIn) }, auth: { id: adminIdIn }, body: {} } as const;
@@ -40459,7 +42112,7 @@ async function approveRoundReportCore(reportIdIn: number, adminIdIn: number, ove
         [adminId, reportId, status],
       );
       if (!claim.affectedRows) return __R(409, { error: "Someone else is approving this report" });
-      const opts = parseWizardJsonField<{ notify_client?: boolean; notify_partners?: boolean }>(r.delivery_options_json) ?? {};
+      const opts = parseWizardJsonField<{ notify_client?: boolean; notify_partners?: boolean; notify_default?: boolean }>(r.delivery_options_json) ?? {};
       const notifyClient = opts.notify_client !== false;
       let result: Awaited<ReturnType<typeof deliverRoundReportToClient>> | null = null;
       try {
@@ -40474,6 +42127,7 @@ async function approveRoundReportCore(reportIdIn: number, adminIdIn: number, ove
           adminId,
           notifyClient,
           notifyPartners: notifyClient && opts.notify_partners !== false,
+          silentByStaff: !notifyClient && opts.notify_default === true,
           firstName: String(r.first_name || ""),
           lastName: String(r.last_name || ""),
           lang: String(r.preferred_language || "en"),
@@ -45434,6 +47088,11 @@ async function tryProcessInboundAiSms(opts: {
   if (inboundAiIsAckOnly(opts.inboundBody) && !inboundAiLastAiTextAskedQuestion(recent)) {
     return { tookOver: false, mode: "skip" };
   }
+  // Nov 17, 2026 (Cesar): a short greeting / thanks / emoji / photo answering our holiday text is not
+  // escalated ("empty/media") or answered by the AI — it waits in the inbox for the team.
+  if (isHolidayReplyText(opts.inboundBody) && (await recentHolidayGreetingToConversation(opts.conversationId).catch(() => false))) {
+    return { tookOver: false, mode: "skip" };
+  }
   const aiTurnCount = countAiOutboundTurnsFromRows(recent);
   const hard = inboundAiHardEscalateReason(opts.inboundBody, {
     isUnknown,
@@ -45741,11 +47400,13 @@ async function tryProcessInboundAiSms(opts: {
       skipRepeatHold = inboundAiHoldAlreadySent(latest);
     }
     if (hold && !skipRepeatHold) {
+      // Nov 17, 2026 (Cesar): the hold names what they asked, who answers and when (out of office aware).
+      const personal = await clientCareHoldText(opts.conversationId, lang, opts.inboundBody, opts.assignedAdminId ?? null, opts.clientId ?? null);
       await sendInboundAiSmsReply({
         conversationId: opts.conversationId,
         toE164: toPeer,
         fromE164,
-        body: hold,
+        body: personal ?? hold,
         ofgNumberId: opts.ofgNumberId,
         failureHold,
         hold: true,
@@ -65530,6 +67191,172 @@ function buildApp() {
   );
 
   // ── Admin calendar: splits in date range ──────────────────────────────────
+  // ── Staff permission lists (super admin, Nov 17, 2026) ──────────────────
+  app.get("/api/admin/settings/staff-permissions", requireSuperAdmin, async (_req: AuthedRequest, res) => {
+    try {
+      const [staff] = await pool.query<RowDataPacket[]>(
+        `SELECT id, first_name, last_name, role FROM admins WHERE status = 'active' AND role IN ('super_admin','admin','agent') ORDER BY first_name, last_name`,
+      );
+      res.json({
+        permissions: await loadStaffPermissions(),
+        staff: staff.map((a) => ({ id: Number(a.id), name: `${a.first_name ?? ""} ${a.last_name ?? ""}`.trim(), role: String(a.role) })),
+      });
+    } catch (e: any) {
+      console.error("[staff-permissions:get]", e?.message ?? e);
+      res.status(500).json({ error: "Could not load permissions" });
+    }
+  });
+
+  app.put("/api/admin/settings/staff-permissions", requireSuperAdmin, async (req: AuthedRequest, res) => {
+    try {
+      const out = await saveStaffPermissionsCore(Number(req.auth!.id), (req.body ?? {}) as Record<string, unknown>);
+      res.status(out.status).json(out.body);
+    } catch (e: any) {
+      console.error("[staff-permissions:put]", e?.message ?? e);
+      res.status(500).json({ error: "Could not save permissions" });
+    }
+  });
+
+  // ── Client care settings (Nov 17, 2026) ─────────────────────────────────
+  app.get("/api/admin/client-care/settings", requireAdmin, denyAffiliateAccess, async (req: AuthedRequest, res) => {
+    res.json({
+      settings: await loadClientCareSettings(),
+      defaults: CLIENT_CARE_DEFAULT_SETTINGS,
+      tokens: CLIENT_CARE_TOKENS,
+      can_edit: (await outOfOfficeManagerIds()).includes(Number(req.auth!.id)),
+    });
+  });
+
+  app.put("/api/admin/client-care/settings", requireAdmin, denyAffiliateAccess, async (req: AuthedRequest, res) => {
+    const out = await saveClientCareSettingsCore(Number(req.auth!.id), req.body ?? {});
+    res.status(out.status).json(out.body);
+  });
+
+  // ── Out of office (Nov 17, 2026) ─────────────────────────────────────────
+  app.get("/api/admin/out-of-office", requireAdmin, denyAffiliateAccess, async (req: AuthedRequest, res) => {
+    try {
+      const [staff] = await pool.query<RowDataPacket[]>(
+        `SELECT a.id, a.first_name, a.last_name, a.language_owner_for FROM admins a
+         WHERE a.status = 'active' AND a.role IN ('super_admin','admin','agent')
+           AND EXISTS (SELECT 1 FROM admin_phone_numbers p WHERE p.assigned_admin_id = a.id AND p.is_active = 1)
+         ORDER BY a.first_name`,
+      );
+      res.json({
+        mine: await listOutOfOffice({ adminId: Number(req.auth!.id) }),
+        everyone: await listOutOfOffice(),
+        can_manage_others: (await outOfOfficeManagerIds()).includes(Number(req.auth!.id)),
+        staff: staff.map((a) => ({ id: Number(a.id), name: `${a.first_name ?? ""} ${a.last_name ?? ""}`.trim(), language_owner_for: a.language_owner_for ?? null })),
+      });
+    } catch (e: any) {
+      console.error("[out-of-office:list]", e?.message ?? e);
+      res.status(500).json({ error: "Could not load out of office" });
+    }
+  });
+
+  app.post("/api/admin/out-of-office", requireAdmin, denyAffiliateAccess, async (req: AuthedRequest, res) => {
+    const out = await setOutOfOfficeCore(Number(req.auth!.id), req.body ?? {});
+    res.status(out.status).json(out.body);
+  });
+
+  app.delete("/api/admin/out-of-office/:id", requireAdmin, denyAffiliateAccess, async (req: AuthedRequest, res) => {
+    const out = await cancelOutOfOfficeCore(Number(req.auth!.id), Number(req.params.id));
+    res.status(out.status).json(out.body);
+  });
+
+  // ── Holiday greetings (Nov 17, 2026) ────────────────────────────────────
+  app.get("/api/admin/holiday-greetings", requireAdmin, denyAffiliateAccess, async (req: AuthedRequest, res) => {
+    try {
+      await ensureHolidayGreetingDrafts();
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT g.*, CONCAT(a.first_name, ' ', a.last_name) AS approved_by_name FROM holiday_greetings g
+         LEFT JOIN admins a ON a.id = g.approved_by_admin_id
+         WHERE g.send_at >= DATE_SUB(NOW(), INTERVAL 60 DAY) ORDER BY g.send_at ASC LIMIT 20`,
+      );
+      res.json({
+        greetings: rows.map(mapHolidayGreetingRow),
+        can_approve: (await holidayGreetingApproverIds()).includes(Number(req.auth!.id)),
+        stop_footer: HOLIDAY_STOP_FOOTER,
+      });
+    } catch (e: any) {
+      console.error("[holiday-greetings:list]", e?.message ?? e);
+      res.status(500).json({ error: "Could not load holiday greetings" });
+    }
+  });
+
+  app.get("/api/admin/holiday-greetings/:id/audience", requireAdmin, denyAffiliateAccess, async (req: AuthedRequest, res) => {
+    try {
+      const g = await loadHolidayGreeting(Number(req.params.id));
+      if (!g) return res.status(404).json({ error: "Holiday greeting not found" });
+      // After the send: who actually got it. Before: who would get it now.
+      if (["sending", "sent"].includes(g.status)) {
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT r.client_id, r.status, r.skip_reason, r.lang, r.error_message, c.first_name, c.last_name
+           FROM holiday_greeting_recipients r JOIN clients c ON c.id = r.client_id WHERE r.greeting_id = ? ORDER BY r.id LIMIT 500`,
+          [g.id],
+        );
+        return res.json({ mode: "sent", stats: await holidayGreetingStats(g.id), recipients: rows });
+      }
+      const a = await buildHolidayAudience();
+      const sample = a.members[0];
+      res.json({
+        mode: "preview",
+        count: a.members.length,
+        by_language: { en: a.members.filter((m) => m.lang === "en").length, es: a.members.filter((m) => m.lang === "es").length },
+        skipped: a.skipped,
+        total_current_clients: a.total,
+        preview: {
+          en: renderHolidayGreeting(g.body_en, sample?.first_name ?? "Maria", "en"),
+          es: renderHolidayGreeting(g.body_es, sample?.first_name ?? "Maria", "es"),
+        },
+        recipients: a.members.slice(0, 500).map((m) => ({ client_id: m.client_id, first_name: m.first_name, last_name: m.last_name, lang: m.lang })),
+      });
+    } catch (e: any) {
+      console.error("[holiday-greetings:audience]", e?.message ?? e);
+      res.status(500).json({ error: "Could not load the audience" });
+    }
+  });
+
+  app.put("/api/admin/holiday-greetings/:id", requireAdmin, denyAffiliateAccess, async (req: AuthedRequest, res) => {
+    const out = await updateHolidayGreetingCore(Number(req.params.id), Number(req.auth!.id), req.body ?? {});
+    res.status(out.status).json(out.body);
+  });
+
+  app.post("/api/admin/holiday-greetings/:id/approve", requireAdmin, denyAffiliateAccess, async (req: AuthedRequest, res) => {
+    const out = await approveHolidayGreetingCore(Number(req.params.id), Number(req.auth!.id));
+    res.status(out.status).json(out.body);
+  });
+
+  // Express 5: no regex in paths — one route per action.
+  for (const action of ["unapprove", "skip", "restore"] as const) {
+    app.post(`/api/admin/holiday-greetings/:id/${action}`, requireAdmin, denyAffiliateAccess, async (req: AuthedRequest, res) => {
+      const out = await setHolidayGreetingStatusCore(Number(req.params.id), Number(req.auth!.id), action);
+      res.status(out.status).json(out.body);
+    });
+  }
+
+  /** Sends the text to the staff member's own phone (their name, their language) from their line. */
+  app.post("/api/admin/holiday-greetings/:id/test", requireAdmin, denyAffiliateAccess, async (req: AuthedRequest, res) => {
+    try {
+      const g = await loadHolidayGreeting(Number(req.params.id));
+      if (!g) return res.status(404).json({ error: "Holiday greeting not found" });
+      const [[me]] = await pool.query<RowDataPacket[]>(`SELECT first_name, phone, preferred_language FROM admins WHERE id = ? LIMIT 1`, [req.auth!.id]);
+      if (!me?.phone) return res.status(422).json({ error: "Add your mobile number in your profile first", code: "no_phone" });
+      const lang = req.body?.lang === "es" || (req.body?.lang == null && me.preferred_language === "es") ? "es" : "en";
+      const from = await resolveAssignedSmsFrom(Number(req.auth!.id));
+      if (!from) return res.status(422).json({ error: "You have no OFG line to send from", code: "no_line" });
+      await sendSms({
+        to: String(me.phone),
+        body: `[TEST] ${renderHolidayGreeting(lang === "es" ? g.body_es : g.body_en, me.first_name, lang)}`,
+        from,
+        mediaUrls: g.media_url ? [g.media_url] : undefined,
+      });
+      res.json({ ok: true, lang });
+    } catch (e: any) {
+      console.error("[holiday-greetings:test]", e?.message ?? e);
+      res.status(500).json({ error: "Could not send the test" });
+    }
+  });
+
   app.get(
     "/api/admin/calendar",
     requireAdmin,
@@ -65614,7 +67441,19 @@ function buildApp() {
       );
 
       const appUrl = APP_URL;
+      // Holiday greetings on the calendar (status chip per holiday).
+      await ensureHolidayGreetingDrafts().catch((e: any) => console.warn("[calendar:holiday-drafts]", e?.message ?? e));
+      const [holidayRows] = await pool.query<RowDataPacket[]>(
+        `SELECT g.*, CONCAT(a.first_name, ' ', a.last_name) AS approved_by_name FROM holiday_greetings g
+         LEFT JOIN admins a ON a.id = g.approved_by_admin_id
+         WHERE DATE(g.send_at) BETWEEN ? AND ? ORDER BY g.send_at`,
+        [String(from).slice(0, 10), String(to).slice(0, 10)],
+      );
       res.json({
+        holiday_greetings: holidayRows.map((r) => {
+          const g = mapHolidayGreetingRow(r);
+          return { id: g.id, holiday_key: g.holiday_key, label: g.label, date: g.date, send_at: g.send_at, status: g.status };
+        }),
         splits: splits.map((s) => ({
           ...s,
           send_payment_link: !!s.send_payment_link,
@@ -71497,6 +73336,10 @@ function buildApp() {
           mediaUrl,
           mediaContentType: media_content_type,
         });
+        // Client care: a staff reply answers the open Slack #client-care item (✅).
+        if (result.ok && !is_internal_note && result.conversation_id) {
+          void clientCareMarkDone(result.conversation_id, "ofg_reply", Number(req.auth!.id)).catch((e: any) => console.warn("[client-care:done]", e?.message ?? e));
+        }
         return res.json(result);
       } catch (e: any) {
         const msg = String(e?.message || e);
@@ -75855,6 +77698,8 @@ function buildApp() {
         return res.send("<Response/>");
       }
     }
+    // TCPA: keep our own STOP list (bulk / automated texts skip it); START removes.
+    await recordSmsOptKeyword(from, body);
 
     const ofgNumber = await resolveOfgNumberByToAddress(to);
     const ofgNumberId = ofgNumber ? Number(ofgNumber.id) : null;
@@ -75955,6 +77800,11 @@ function buildApp() {
               providerMessageId: sid || null,
             });
           }
+          await clientCareAfterInbound({
+            conversationId, channel: "sms", contactId: crmContactId, fromE164: from, toE164: to, body,
+            displayName: contactFromLabel, linkPath: `/admin/conversations?contact=${crmContactId}`, lineAdminId: assigneeId, ofgNumberId,
+            aiReplied: aiContact.tookOver, aiAnswered: aiContact.mode === "reply" || aiContact.mode === "resolve",
+          });
         });
         return res.type("text/xml").send("<Response></Response>");
       }
@@ -76072,6 +77922,11 @@ function buildApp() {
             unknownContactId: unknownId,
           });
         }
+        await clientCareAfterInbound({
+          conversationId, channel: "sms", unknownContactId: unknownId, fromE164: from, toE164: to, body,
+          displayName: prettyUsPhone(from), linkPath: `/admin/conversations?unknown=${unknownId}`, lineAdminId: assigneeId, ofgNumberId,
+          aiReplied: aiUnknown.tookOver, aiAnswered: aiUnknown.mode === "reply" || aiUnknown.mode === "resolve",
+        });
       });
 
       res.set("Content-Type", "text/xml");
@@ -76193,6 +78048,11 @@ function buildApp() {
           clientId,
         });
       }
+      await clientCareAfterInbound({
+        conversationId, channel: "sms", clientId, fromE164: from, toE164: to, body,
+        displayName: fromLabel, linkPath: `/admin/conversations?client=${clientId}`, lineAdminId: assigneeId, ofgNumberId,
+        aiReplied: aiClient.tookOver, aiAnswered: aiClient.mode === "reply" || aiClient.mode === "resolve",
+      });
     });
 
     res.set("Content-Type", "text/xml");
@@ -77110,6 +78970,21 @@ function buildApp() {
         console.error("[cron:event-marketing]", e?.message ?? e);
       }
 
+      let clientCare = { checked: 0, done: 0, reminded: 0, escalated: 0 };
+      try {
+        if (process.env.VITEST !== "true") clientCare = await runClientCareCronStep();
+      } catch (e: any) {
+        console.error("[cron:client-care]", e?.message ?? e);
+      }
+
+      let holidayGreetings = { drafts: 0, reminders: 0, skipped: 0, sent: 0, failed: 0 };
+      try {
+        // Tests share the live DB: never send real holiday texts from cron tests.
+        if (process.env.VITEST !== "true") holidayGreetings = await runHolidayGreetingsCronStep();
+      } catch (e: any) {
+        console.error("[cron:holiday-greetings]", e?.message ?? e);
+      }
+
       let prospectTemperature = { checked: 0, changed: 0, alerts: 0 };
       try {
         // Tests share the live DB: never rescore every real prospect (slow, and
@@ -77134,6 +79009,8 @@ function buildApp() {
         prospect_temperature: prospectTemperature,
         credit_reviews: creditReviews,
         event_marketing: eventMarketing,
+        holiday_greetings: holidayGreetings,
+        client_care: clientCare,
       });
     } catch (e: any) {
       console.error("[cron:process-queue]", e?.message ?? e);
@@ -81570,7 +83447,9 @@ function buildApp() {
             JSON.stringify(rendered.selfCheck.checks),
             // engine_version: a held report re-checks itself when the engine changes; the acknowledgment is
             // replayed by that automatic rebuild (same data, same publisher).
-            JSON.stringify({ notify_client: notifyClient, notify_partners: notifyPartners, engine_version: reportEngineVersion(), acknowledged_score_anomalies: !!req.body?.acknowledge_score_anomalies }),
+            // notify_default / notify_reasons (Nov 17, 2026): what the app suggested, so a silent report
+            // says whether it was an old round or a staff choice.
+            JSON.stringify({ notify_client: notifyClient, notify_partners: notifyPartners, notify_default: !oldRound.old, notify_reasons: oldRound.reasons, engine_version: reportEngineVersion(), acknowledged_score_anomalies: !!req.body?.acknowledge_score_anomalies }),
             roundReportId,
           ],
         );
@@ -85835,6 +87714,29 @@ function registerVoiceRoutes(app: Express, deps: VoiceRouteDeps): void {
           }).catch((e) =>
             console.warn("[voice:dial-status] missed_call notify:", e),
           );
+          // Client care: text back who will call and when, and post to #client-care (once per call).
+          if (callerFrom) {
+            scheduleInboundAiWork(async () => {
+              const [[m]] = await pool.query<RowDataPacket[]>(
+                `SELECT c.id AS conversation_id, c.client_id, c.unknown_contact_id, c.ofg_number_id FROM conversation_messages m
+                 JOIN conversations c ON c.id = m.conversation_id WHERE m.provider_message_id = ? LIMIT 1`,
+                [callSid],
+              );
+              if (!m) return;
+              let name = prettyUsPhone(callerFrom);
+              if (m.client_id) {
+                const [[c]] = await pool.query<RowDataPacket[]>(`SELECT first_name, last_name FROM clients WHERE id = ?`, [m.client_id]);
+                if (c) name = `${c.first_name ?? ""} ${c.last_name ?? ""}`.trim() || name;
+              }
+              await clientCareAfterInbound({
+                conversationId: Number(m.conversation_id), channel: "call",
+                clientId: m.client_id ? Number(m.client_id) : null, unknownContactId: m.unknown_contact_id ? Number(m.unknown_contact_id) : null,
+                fromE164: callerFrom, toE164: calledNumber || "", body: "", displayName: name,
+                linkPath: m.client_id ? `/admin/conversations?client=${m.client_id}` : `/admin/conversations?unknown=${m.unknown_contact_id}`,
+                lineAdminId: assignedAdminId, ofgNumberId: m.ofg_number_id ? Number(m.ofg_number_id) : null,
+              });
+            });
+          }
         }
       }
 

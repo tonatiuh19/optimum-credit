@@ -66,6 +66,7 @@ import AdminProfile from "./pages/admin/Profile";
 import AdminMcpConsent from "./pages/admin/McpConsent";
 import AdminPeople from "./pages/admin/People";
 import AdminReminderFlows from "./pages/admin/ReminderFlows";
+import AdminHolidayGreetings from "./pages/admin/HolidayGreetings";
 import AdminPayments from "./pages/admin/Payments";
 import AdminCalendar from "./pages/admin/Calendar";
 import AdminTasks from "./pages/admin/Tasks";
@@ -375,6 +376,12 @@ function AppShell() {
           path="/admin/reminder-flows"
           element={
             <RequireStaff>{wrap(AdminLayout, AdminReminderFlows)}</RequireStaff>
+          }
+        />
+        <Route
+          path="/admin/holiday-greetings"
+          element={
+            <RequireStaff>{wrap(AdminLayout, AdminHolidayGreetings)}</RequireStaff>
           }
         />
         <Route

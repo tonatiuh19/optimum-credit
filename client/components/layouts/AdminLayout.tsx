@@ -38,6 +38,7 @@ import {
   Handshake,
   Banknote,
   Megaphone,
+  Gift,
 } from "lucide-react";
 import AdminThemeToggle from "@/components/AdminThemeToggle";
 import AdminNotificationBell from "@/components/admin/AdminNotificationBell";
@@ -67,6 +68,7 @@ import {
   shouldPlayInboundSmsChime,
 } from "@/lib/inboundSmsNotification";
 import type { RealtimeChannel } from "ably";
+import { OutOfOfficeBanner } from "@/components/admin/out-of-office/OutOfOfficeBanner";
 import { useTranslation } from "react-i18next";
 import { logger } from "@/utils/logger";
 
@@ -205,6 +207,12 @@ const NAV_GROUPS = [
         labelKey: "adminNav.reminderFlows",
         icon: Zap,
         sectionKey: "reminder-flows",
+      },
+      {
+        to: "/admin/holiday-greetings",
+        labelKey: "adminNav.holidayGreetings",
+        icon: Gift,
+        sectionKey: "holiday-greetings",
       },
       {
         to: "/admin/event-marketing",
@@ -911,6 +919,7 @@ export default function AdminLayout({ children }: Props) {
             </div>
           ) : (
             <div className="app-page px-4 sm:px-6 lg:px-10 pt-5 sm:pt-6 md:py-8 pb-[calc(5.5rem+env(safe-area-inset-bottom))] md:pb-8">
+              <OutOfOfficeBanner />
               {children}
             </div>
           )}

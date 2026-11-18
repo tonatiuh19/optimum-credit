@@ -28,6 +28,7 @@ export const ADMIN_NOTIFY_EVENT_KEYS: AdminNotifyEventKey[] = [
   "progress_report_alerts",
   "credit_analysis_review",
   "morning_digest",
+  "holiday_greetings",
 ];
 
 export type AdminNotifyPrefsPatch = {

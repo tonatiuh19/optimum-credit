@@ -2438,3 +2438,110 @@ CREATE TABLE IF NOT EXISTS `voice_client_events` (
   KEY `idx_vce_admin_created` (`admin_id`, `created_at`),
   KEY `idx_vce_call` (`call_sid`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Holiday greetings (Nov 17, 2026): one approved SMS per holiday per year; nothing sends unapproved.
+CREATE TABLE IF NOT EXISTS `holiday_greetings` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `holiday_key` VARCHAR(32) NOT NULL COMMENT 'thanksgiving | christmas | new_year | independence_day | mothers_day | fathers_day | valentines',
+  `year` SMALLINT UNSIGNED NOT NULL,
+  `send_at` DATETIME NOT NULL COMMENT 'Wall time America/Los_Angeles',
+  `status` ENUM('draft','approved','sending','sent','skipped','cancelled') NOT NULL DEFAULT 'draft',
+  `body_en` TEXT NOT NULL,
+  `body_es` TEXT NOT NULL,
+  `media_url` VARCHAR(1000) DEFAULT NULL,
+  `media_content_type` VARCHAR(120) DEFAULT NULL,
+  `audience_json` JSON DEFAULT NULL COMMENT 'Client statuses + recent-texter window used to pick recipients',
+  `approved_by_admin_id` INT UNSIGNED DEFAULT NULL,
+  `approved_at` DATETIME DEFAULT NULL,
+  `sent_at` DATETIME DEFAULT NULL,
+  `stats_json` JSON DEFAULT NULL COMMENT 'queued / sent / failed / skipped counts',
+  `reminders_json` JSON DEFAULT NULL COMMENT 'Approval reminders already sent (7d / 2d / skipped)',
+  `updated_by_admin_id` INT UNSIGNED DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_holiday_year` (`holiday_key`, `year`),
+  KEY `idx_hg_status_send` (`status`, `send_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `holiday_greeting_recipients` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `greeting_id` INT UNSIGNED NOT NULL,
+  `client_id` INT UNSIGNED NOT NULL,
+  `phone` VARCHAR(20) NOT NULL,
+  `lang` ENUM('en','es') NOT NULL DEFAULT 'en',
+  `sender_admin_id` INT UNSIGNED DEFAULT NULL COMMENT 'Client owner whose OFG line sends it',
+  `status` ENUM('queued','sent','failed','skipped') NOT NULL DEFAULT 'queued',
+  `skip_reason` VARCHAR(80) DEFAULT NULL,
+  `conversation_id` INT UNSIGNED DEFAULT NULL,
+  `message_id` INT UNSIGNED DEFAULT NULL,
+  `error_message` VARCHAR(500) DEFAULT NULL,
+  `sent_at` DATETIME DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_hgr_greeting_client` (`greeting_id`, `client_id`),
+  KEY `idx_hgr_status` (`greeting_id`, `status`),
+  KEY `idx_hgr_conversation` (`conversation_id`, `sent_at`),
+  CONSTRAINT `fk_hgr_greeting` FOREIGN KEY (`greeting_id`) REFERENCES `holiday_greetings`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Numbers that texted STOP (TCPA). START removes. Every bulk / automated SMS skips them.
+CREATE TABLE IF NOT EXISTS `sms_opt_outs` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `phone_last10` CHAR(10) NOT NULL,
+  `phone` VARCHAR(20) NOT NULL,
+  `keyword` VARCHAR(20) DEFAULT NULL,
+  `source` VARCHAR(40) NOT NULL DEFAULT 'inbound_keyword',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_sms_opt_out_last10` (`phone_last10`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Out of office (Nov 17, 2026): backups by language and a return date; auto-replies and client care use it.
+CREATE TABLE IF NOT EXISTS `admin_out_of_office` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `admin_id` INT UNSIGNED NOT NULL,
+  `starts_on` DATE NOT NULL COMMENT 'First day away (Pacific)',
+  `returns_on` DATE NOT NULL COMMENT 'First day back (Pacific)',
+  `backup_en_admin_id` INT UNSIGNED DEFAULT NULL,
+  `backup_es_admin_id` INT UNSIGNED DEFAULT NULL,
+  `note_en` VARCHAR(200) DEFAULT NULL COMMENT 'Optional, e.g. "I am in Mexico"',
+  `note_es` VARCHAR(200) DEFAULT NULL,
+  `cancelled_at` DATETIME DEFAULT NULL,
+  `created_by_admin_id` INT UNSIGNED DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_ooo_admin_dates` (`admin_id`, `starts_on`, `returns_on`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Client care (Nov 17, 2026): one tracked Slack #client-care post per open conversation.
+CREATE TABLE IF NOT EXISTS `client_care_items` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `conversation_id` INT UNSIGNED NOT NULL,
+  `client_id` INT UNSIGNED DEFAULT NULL,
+  `contact_id` INT UNSIGNED DEFAULT NULL,
+  `unknown_contact_id` INT UNSIGNED DEFAULT NULL,
+  `channel` ENUM('sms','call') NOT NULL DEFAULT 'sms',
+  `lang` ENUM('en','es') NOT NULL DEFAULT 'en',
+  `owner_admin_id` INT UNSIGNED DEFAULT NULL COMMENT 'Who answers (language owner, or their backup when out of office)',
+  `line_admin_id` INT UNSIGNED DEFAULT NULL COMMENT 'Owner of the OFG line the client used',
+  `display_name` VARCHAR(200) DEFAULT NULL,
+  `last_text` VARCHAR(600) DEFAULT NULL,
+  `topic` VARCHAR(120) DEFAULT NULL,
+  `message_count` SMALLINT UNSIGNED NOT NULL DEFAULT 1,
+  `status` ENUM('open','done') NOT NULL DEFAULT 'open',
+  `done_how` VARCHAR(30) DEFAULT NULL COMMENT 'ofg_reply | ai_answered | slack_check',
+  `done_by_admin_id` INT UNSIGNED DEFAULT NULL,
+  `slack_channel` VARCHAR(40) DEFAULT NULL,
+  `slack_ts` VARCHAR(40) DEFAULT NULL,
+  `auto_reply_at` DATETIME DEFAULT NULL,
+  `reminded_at` DATETIME DEFAULT NULL,
+  `escalated_at` DATETIME DEFAULT NULL,
+  `opened_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `done_at` DATETIME DEFAULT NULL,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_cci_conversation_status` (`conversation_id`, `status`),
+  KEY `idx_cci_status_opened` (`status`, `opened_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

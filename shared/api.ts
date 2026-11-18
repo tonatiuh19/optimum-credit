@@ -114,7 +114,8 @@ export type AdminNotifyEventKey =
   | "prospect_temperature"
   | "progress_report_alerts"
   | "credit_analysis_review"
-  | "morning_digest";
+  | "morning_digest"
+  | "holiday_greetings";
 
 export type AdminNotifyChannel = "email" | "in_app" | "sms";
 
@@ -1874,7 +1875,66 @@ export interface CalendarWorkTaskEvent {
   source: "optimum" | "hubspot";
 }
 
+// ── Holiday greetings (Nov 17, 2026) ──────────────────────────────────────
+export type HolidayKey = "new_year" | "valentines" | "mothers_day" | "fathers_day" | "independence_day" | "thanksgiving" | "christmas";
+export type HolidayGreetingStatus = "draft" | "approved" | "sending" | "sent" | "skipped" | "cancelled";
+
+export interface HolidayGreeting {
+  id: number;
+  holiday_key: HolidayKey;
+  label: { en: string; es: string };
+  year: number;
+  /** YYYY-MM-DD */
+  date: string;
+  /** "YYYY-MM-DD HH:MM:SS" Pacific wall time */
+  send_at: string;
+  status: HolidayGreetingStatus;
+  body_en: string;
+  body_es: string;
+  media_url: string | null;
+  media_content_type: string | null;
+  approved_by: string | null;
+  approved_at: string | null;
+  sent_at: string | null;
+  stats: { queued?: number; sent?: number; failed?: number; skipped?: number } | null;
+}
+
+export interface HolidayGreetingsListResponse {
+  greetings: HolidayGreeting[];
+  can_approve: boolean;
+  stop_footer: { en: string; es: string };
+}
+
+export type HolidaySkipReason = "no_phone" | "opted_out" | "no_recent_text" | "no_sender_line";
+
+export type HolidayGreetingAudienceResponse =
+  | {
+      mode: "preview";
+      count: number;
+      by_language: { en: number; es: number };
+      skipped: Record<HolidaySkipReason, number>;
+      total_current_clients: number;
+      preview: { en: string; es: string };
+      recipients: Array<{ client_id: number; first_name: string; last_name: string; lang: "en" | "es" }>;
+    }
+  | {
+      mode: "sent";
+      stats: { queued: number; sent: number; failed: number; skipped: number };
+      recipients: Array<{ client_id: number; first_name: string; last_name: string; lang: "en" | "es"; status: string; skip_reason: string | null; error_message: string | null }>;
+    };
+
+export interface CalendarHolidayGreetingEvent {
+  id: number;
+  holiday_key: HolidayKey;
+  label: { en: string; es: string };
+  date: string;
+  send_at: string;
+  status: HolidayGreetingStatus;
+}
+
 export interface AdminCalendarResponse {
+  /** Holiday greetings in the range (status chip per holiday). */
+  holiday_greetings?: CalendarHolidayGreetingEvent[];
   splits: CalendarSplit[];
   round_events: CalendarRoundEvent[];
   work_tasks: CalendarWorkTaskEvent[];
@@ -3062,4 +3122,47 @@ export interface ThreeWayStartResponse {
   session_id: number;
   status: "active";
   third_party: { label: string | null; number: string };
+}
+
+// ── Out of office (Nov 17, 2026) ────────────────────────────────────────────
+export interface OutOfOfficePeriod {
+  id: number;
+  admin_id: number;
+  name: string;
+  first_name: string;
+  /** YYYY-MM-DD first day away (Pacific) */
+  starts_on: string;
+  /** YYYY-MM-DD first day back */
+  returns_on: string;
+  active: boolean;
+  backup_en: { id: number; name: string } | null;
+  backup_es: { id: number; name: string } | null;
+  note_en: string | null;
+  note_es: string | null;
+}
+
+export interface OutOfOfficeResponse {
+  mine: OutOfOfficePeriod[];
+  everyone: OutOfOfficePeriod[];
+  can_manage_others: boolean;
+  staff: Array<{ id: number; name: string; language_owner_for: "en" | "es" | null }>;
+}
+
+export interface OutOfOfficeInput {
+  admin_id?: number;
+  starts_on: string;
+  returns_on: string;
+  backup_en_admin_id: number | null;
+  backup_es_admin_id: number | null;
+  note_en?: string | null;
+  note_es?: string | null;
+}
+
+
+// ── Staff permission lists (super admin, Settings, Nov 17, 2026) ──
+export type StaffPermissionKey = "holiday_greeting_approver_ids" | "out_of_office_manager_ids";
+export type StaffPermissions = Record<StaffPermissionKey, number[]>;
+export interface StaffPermissionsResponse {
+  permissions: StaffPermissions;
+  staff: { id: number; name: string; role: string }[];
 }

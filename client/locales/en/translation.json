@@ -75,7 +75,8 @@
     "kicker": "Admin",
     "quickNav": "Quick navigation",
     "more": "More",
-    "productivity": "Scorecard"
+    "productivity": "Scorecard",
+    "holidayGreetings": "Holiday Greetings"
   },
   "adminAsk": {
     "title": "Ask",
@@ -224,6 +225,10 @@
       "morning_digest": {
         "label": "Weekday morning digest",
         "hint": "Claude-powered email brief each business morning (tasks, conversations, prospects, quote)"
+      },
+      "holiday_greetings": {
+        "label": "Holiday greetings",
+        "hint": "Approval reminders and results for holiday texts."
       }
     },
     "soundTitle": "Notification sounds",
@@ -287,7 +292,24 @@
     "gcrFreeHint": "The event QR page (ofgllc.com/get-credit-report). On: registrants get the free MyFreeScoreNow report link on screen, by email and SMS. Off: registration only — they get a confirmation and a specialist follows up.",
     "gcrFreeToggleAria": "Offer the free credit report on /get-credit-report",
     "gcrFreeOn": "On — the free report link is offered after registering.",
-    "gcrFreeOff": "Off — registration form only; confirmation email + SMS with no report link. Links sent before keep working."
+    "gcrFreeOff": "Off — registration form only; confirmation email + SMS with no report link. Links sent before keep working.",
+    "staffPermissions": {
+      "title": "Permissions",
+      "subtitle": "Choose who can do these manager tasks. Changes apply within a minute.",
+      "needOne": "Keep at least one person on each list.",
+      "max": "At most 10 people per list.",
+      "saved": "Permissions saved",
+      "saveFailed": "Could not save permissions",
+      "loadFailed": "Could not load permissions",
+      "out_of_office_manager_ids": {
+        "label": "Out of office & client care managers",
+        "hint": "Can set out of office for anyone and edit the client care settings."
+      },
+      "holiday_greeting_approver_ids": {
+        "label": "Holiday greeting approvers",
+        "hint": "Can approve, skip or restore holiday greeting texts and get the approval alert."
+      }
+    }
   },
   "adminReminderFlows": {
     "alsoSmsLabel": "Also SMS after email",
@@ -4059,5 +4081,107 @@
       "backfilling": "Building…",
       "backfillDone": "Built {{built}} of {{scanned}} reports"
     }
+  },
+  "holidayGreetings": {
+    "title": "Holiday Greetings",
+    "description": "One text per holiday from the OFG family, sent from each client's own line. Nothing goes out without approval.",
+    "rules": "Goes to current clients who texted us in the last 12 months (English or Spanish by their language). Numbers that replied STOP are always skipped and every text ends with the opt-out line. Replies land in Conversations; short greetings and photos are not escalated by the AI. Not approved by the send time = not sent.",
+    "pacific": "Pacific",
+    "status": {
+      "draft": "Needs approval",
+      "approved": "Approved",
+      "sending": "Sending",
+      "sent": "Sent",
+      "skipped": "Skipped",
+      "cancelled": "Cancelled"
+    },
+    "textEn": "Text (English)",
+    "textEs": "Text (Spanish)",
+    "footerNote": "Added automatically: \"{{footer}}\"",
+    "nameHint": "Use {{token}} for the client's first name; if a client has no first name it is left out cleanly.",
+    "sendTime": "Send time (Pacific, 8 AM-8 PM)",
+    "timeRange": "Choose a time between 08:00 and 19:59",
+    "required": "Required",
+    "tooLong": "600 characters max",
+    "addImage": "Add image",
+    "imageAttached": "Image attached",
+    "removeImage": "Remove image",
+    "audience": "Who gets it",
+    "willReceive": "clients will receive it ({{en}} English, {{es}} Spanish).",
+    "notIncluded": "Not included: {{opted}} opted out (STOP), {{old}} no text from them in 12 months, {{phone}} no phone, {{line}} no OFG line.",
+    "results": "Sent to {{sent}} clients · {{failed}} failed · {{skipped}} skipped (STOP).",
+    "save": "Save changes",
+    "saved": "Saved",
+    "savedNeedsApproval": "Saved — it needs approval again",
+    "sendTest": "Send me a test",
+    "testSent": "Test sent to your phone",
+    "approve": "Approve",
+    "unapprove": "Unapprove",
+    "skip": "Skip this year",
+    "restore": "Restore",
+    "approvedBy": "Approved by {{name}} — it goes out at the send time. Editing it requires approval again.",
+    "saveFirst": "Save your changes before approving.",
+    "onlyApprovers": "Only Cesar or Alex can approve holiday greetings.",
+    "done": {
+      "approve": "Approved — it will go out at the send time",
+      "unapprove": "Back to draft — nothing will be sent",
+      "skip": "Skipped for this year",
+      "restore": "Restored to draft"
+    }
+  },
+  "outOfOffice": {
+    "title": "Out of office",
+    "description": "While you are away, clients who text or call get an automatic reply saying when you are back and who answers them, and Slack #client-care sends their messages to your backups.",
+    "bannerAway": "{{name}} is out of the office until {{day}}",
+    "bannerEn": "English: {{name}}",
+    "bannerEs": "Spanish: {{name}}",
+    "period": "From {{from}} · back {{day}}",
+    "awayNow": "Away now",
+    "cancel": "Cancel",
+    "who": "Who is away",
+    "startsOn": "First day away",
+    "returnsOn": "First day back",
+    "backupEn": "English clients answered by",
+    "backupEs": "Spanish clients answered by",
+    "none": "No one",
+    "previewTitle": "What clients will get",
+    "save": "Save out of office",
+    "saved": "Out of office saved",
+    "required": "Required",
+    "returnAfter": "The first day back must be after the first day away",
+    "oneBackup": "Choose at least one backup"
+  },
+  "clientCareSettings": {
+    "title": "Client care settings",
+    "description": "What clients get when they text or call, business hours, and when the team is reminded and Cesar is alerted. Changes apply right away.",
+    "readOnly": "Only Cesar or Alex can change these.",
+    "auto_reply_enabled": "Automatic replies to clients",
+    "slack_enabled": "Post to Slack #client-care",
+    "hours": "Business hours (Pacific)",
+    "days": "Business days",
+    "business_start": "Opens",
+    "business_end": "Closes",
+    "reply_today_until": "Promise \"today\" until",
+    "follow": "Follow-up",
+    "remindAfter": "Remind after (business min)",
+    "escalateAfter": "Escalate after (business min)",
+    "gapHours": "Hours between auto-replies",
+    "staffQuiet": "Skip if staff wrote (min)",
+    "escalateTo": "Escalations go to (their out-of-office backup when away)",
+    "texts": "Texts clients receive",
+    "syntax": "Placeholders like {first_name} are filled in. Put optional parts in [[ ]] — they disappear when a placeholder inside is empty, e.g. \"Hi[[ {first_name}]]!\". {owner} and {when} are required.",
+    "insert": "Insert placeholder",
+    "simulateAway": "Preview with someone out of office",
+    "tpl": {
+      "en_message": "English — message",
+      "en_missed_call": "English — missed call",
+      "es_message": "Spanish — message",
+      "es_missed_call": "Spanish — missed call"
+    },
+    "chars": "{{n}} characters",
+    "save": "Save settings",
+    "saved": "Client care settings saved",
+    "reset": "Reset to defaults",
+    "resetDone": "Back to the default settings"
   }
 }

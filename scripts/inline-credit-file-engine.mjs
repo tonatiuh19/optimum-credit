@@ -1,7 +1,7 @@
 /**
  * Regenerates the inlined Credit File engine block in api/index.ts from
  * api/creditFile.ts, creditFileExtract.ts, creditAnalysisFromFile.ts, creditFileProgress.ts,
- * ofgCreditAnalysisPdf.ts, progressReportV2.ts, leadTemperature.ts and leadCreditInsights.ts (Vercel: no sibling runtime
+ * ofgCreditAnalysisPdf.ts, progressReportV2.ts, leadTemperature.ts, leadCreditInsights.ts and shared/clientCareTemplate.ts (Vercel: no sibling runtime
  * imports). Run after editing either module:  node scripts/inline-credit-file-engine.mjs
  * api/creditFileEngine.sync.test.ts fails when the block is stale.
  */
@@ -27,7 +27,9 @@ export function buildInlineBlock() {
   const f = strip(fs.readFileSync(path.join(root, "api/leadTemperature.ts"), "utf8"));
   const g = strip(fs.readFileSync(path.join(root, "api/progressReportV2.ts"), "utf8"));
   const h = strip(fs.readFileSync(path.join(root, "api/leadCreditInsights.ts"), "utf8"));
-  return `${BEGIN}\n${a.trim()}\n\n${b.trim()}\n\n${c.trim()}\n\n${e.trim()}\n\n${d.trim()}\n\n${f.trim()}\n\n${g.trim()}\n\n${h.trim()}\n${END}`;
+  // Client care settings + templates (Nov 17, 2026): shared with the settings screen's live preview.
+  const k = strip(fs.readFileSync(path.join(root, "shared/clientCareTemplate.ts"), "utf8"));
+  return `${BEGIN}\n${a.trim()}\n\n${b.trim()}\n\n${c.trim()}\n\n${e.trim()}\n\n${d.trim()}\n\n${f.trim()}\n\n${g.trim()}\n\n${h.trim()}\n\n${k.trim()}\n${END}`;
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {

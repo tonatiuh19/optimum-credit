@@ -9222,6 +9222,210 @@ paths:
           description: Approval status
         "404":
           description: Not found
+  /admin/settings/staff-permissions:
+    get:
+      tags: [Admin]
+      summary: Staff permission lists (super admin)
+      description: >-
+        Who can manage out of office / client care settings and who approves holiday greetings.
+        Stored in system_settings (out_of_office_manager_ids, holiday_greeting_approver_ids); falls back to the old
+        env vars, then to the default managers. Also returns active staff to pick from.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Lists and staff
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  permissions:
+                    type: object
+                    properties:
+                      out_of_office_manager_ids: { type: array, items: { type: integer } }
+                      holiday_greeting_approver_ids: { type: array, items: { type: integer } }
+                  staff:
+                    type: array
+                    items:
+                      type: object
+                      properties: { id: { type: integer }, name: { type: string }, role: { type: string } }
+        "401": { description: Unauthorized }
+        "403": { description: Not a super admin }
+    put:
+      tags: [Admin]
+      summary: Save staff permission lists (super admin)
+      description: Send one or both lists. Each needs 1-10 active staff ids. Audit-logged; applies within 60 seconds.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                out_of_office_manager_ids: { type: array, items: { type: integer }, minItems: 1, maxItems: 10 }
+                holiday_greeting_approver_ids: { type: array, items: { type: integer }, minItems: 1, maxItems: 10 }
+      responses:
+        "200": { description: Saved lists }
+        "400": { description: Empty, too long, or inactive staff }
+        "403": { description: Not a super admin }
+  /admin/client-care/settings:
+    get:
+      tags: [Admin]
+      summary: Client care settings (auto-replies, Slack, business hours, follow-up, templates)
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200": { description: "{ settings, defaults, tokens, can_edit }" }
+    put:
+      tags: [Admin]
+      summary: Save client care settings (Cesar / Alex) — partial update merged and fully validated; { reset true } restores defaults
+      description: >-
+        Templates use {first_name} {topic} {owner} {owner_phone} {when} {away_name} {return_day} {away_note};
+        [[ ... ]] parts drop when a placeholder inside is empty; {owner} and {when} required outside [[ ]];
+        320 characters max. Business days 0-6, HH:MM times (Pacific), reminder 15-1440 and escalation
+        (after the reminder) up to 2880 business minutes, 1-5 active escalation staff.
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200": { description: "{ ok, settings }" }
+        "400": { description: Invalid setting (message says which) }
+        "403": { description: Not Cesar / Alex }
+  /admin/out-of-office:
+    get:
+      tags: [Admin]
+      summary: Out of office — mine, everyone current/upcoming, staff with lines (backups)
+      description: >-
+        While someone is away, client auto-replies say when they are back and who answers, and Slack
+        #client-care routes their language's clients to the backup. Managers (Settings → Permissions)
+        can set anyone's.
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200": { description: "{ mine[], everyone[], can_manage_others, staff[] }" }
+    post:
+      tags: [Admin]
+      summary: Set out of office (replaces an overlapping period)
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [starts_on, returns_on]
+              properties:
+                admin_id: { type: integer, description: Someone else (managers only) }
+                starts_on: { type: string, format: date, description: First day away (Pacific) }
+                returns_on: { type: string, format: date, description: First day back; at most 60 days after starts_on }
+                backup_en_admin_id: { type: integer, nullable: true }
+                backup_es_admin_id: { type: integer, nullable: true }
+                note_en: { type: string, nullable: true }
+                note_es: { type: string, nullable: true }
+      responses:
+        "201": { description: "{ ok, id, periods[] }" }
+        "400": { description: Invalid dates / backups }
+        "403": { description: Not yours and not a manager }
+  /admin/out-of-office/{id}:
+    delete:
+      tags: [Admin]
+      summary: Cancel an out-of-office period (owner or manager)
+      security: [{ BearerAuth: [] }]
+      parameters: [{ in: path, name: id, required: true, schema: { type: integer } }]
+      responses: { "200": { description: OK }, "403": { description: Not yours }, "404": { description: Not found } }
+  /admin/holiday-greetings:
+    get:
+      tags: [Admin]
+      summary: Holiday greetings (upcoming + last 60 days)
+      description: >-
+        One SMS per holiday per year (Thanksgiving, Christmas, New Year's, 4th of July, Mother's Day,
+        Father's Day, Valentine's Day) to current clients who texted OFG in the last 12 months, from each
+        client's own OFG line, EN/ES. Creates missing drafts (last year's approved text, else a default).
+        Returns can_approve (approvers from Settings → Permissions) and the fixed STOP footer.
+      security:
+        - BearerAuth: []
+      responses:
+        "200": { description: "{ greetings[], can_approve, stop_footer: { en, es } }" }
+  /admin/holiday-greetings/{id}:
+    put:
+      tags: [Admin]
+      summary: Edit a holiday greeting (any edit after approval returns it to draft)
+      security:
+        - BearerAuth: []
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                body_en: { type: string, maxLength: 600 }
+                body_es: { type: string, maxLength: 600 }
+                media_url: { type: string, nullable: true, description: https image (MMS) }
+                media_content_type: { type: string, nullable: true }
+                send_time: { type: string, description: "HH:MM Pacific, 08:00-19:59, on the holiday's date" }
+      responses:
+        "200": { description: "{ ok, greeting, needs_approval }" }
+        "400": { description: Invalid text / time / image }
+        "409": { description: Already sending / sent / skipped }
+  /admin/holiday-greetings/{id}/audience:
+    get:
+      tags: [Admin]
+      summary: Who it goes to now (preview) or who got it (after sending)
+      security:
+        - BearerAuth: []
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: integer } }
+      responses:
+        "200": { description: "preview: { count, by_language, skipped { no_phone, opted_out, no_recent_text, no_sender_line }, preview { en, es }, recipients[] } | sent: { stats, recipients[] }" }
+  /admin/holiday-greetings/{id}/approve:
+    post:
+      tags: [Admin]
+      summary: Approve (Cesar / Alex) — it goes out at its send time; unapproved holidays are skipped
+      security:
+        - BearerAuth: []
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: integer } }
+      responses:
+        "200": { description: "{ ok, greeting }" }
+        "403": { description: Not an approver }
+        "409": { description: "Not a draft (code not_draft) or the send time passed (send_time_passed)" }
+  /admin/holiday-greetings/{id}/unapprove:
+    post:
+      tags: [Admin]
+      summary: Back to draft (approvers); nothing sends
+      security: [{ BearerAuth: [] }]
+      parameters: [{ in: path, name: id, required: true, schema: { type: integer } }]
+      responses: { "200": { description: OK }, "403": { description: Not an approver }, "409": { description: Not approved } }
+  /admin/holiday-greetings/{id}/skip:
+    post:
+      tags: [Admin]
+      summary: Skip this year's holiday (approvers)
+      security: [{ BearerAuth: [] }]
+      parameters: [{ in: path, name: id, required: true, schema: { type: integer } }]
+      responses: { "200": { description: OK }, "403": { description: Not an approver }, "409": { description: Already sending / sent } }
+  /admin/holiday-greetings/{id}/restore:
+    post:
+      tags: [Admin]
+      summary: Restore a skipped holiday to draft (approvers)
+      security: [{ BearerAuth: [] }]
+      parameters: [{ in: path, name: id, required: true, schema: { type: integer } }]
+      responses: { "200": { description: OK }, "403": { description: Not an approver }, "409": { description: Not skipped } }
+  /admin/holiday-greetings/{id}/test:
+    post:
+      tags: [Admin]
+      summary: Text the greeting to the staff member's own phone from their line ([TEST] prefix)
+      security: [{ BearerAuth: [] }]
+      parameters: [{ in: path, name: id, required: true, schema: { type: integer } }]
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { lang: { type: string, enum: [en, es] } } }
+      responses: { "200": { description: "{ ok, lang }" }, "422": { description: "No phone on the profile (no_phone) or no OFG line (no_line)" } }
   /admin/round-reports/{id}/exclude-read:
     post:
       tags: [Admin]

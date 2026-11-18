@@ -9,6 +9,8 @@ import {
   Sparkles,
   Volume2,
 } from "lucide-react";
+import { OutOfOfficeCard } from "@/components/admin/out-of-office/OutOfOfficeCard";
+import { ClientCareSettingsCard } from "@/components/admin/out-of-office/ClientCareSettingsCard";
 import AdminPageHeader from "@/components/AdminPageHeader";
 import { Switch } from "@/components/ui/switch";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -56,6 +58,7 @@ const EVENT_ORDER: AdminNotifyEventKey[] = [
   "progress_report_alerts",
   "credit_analysis_review",
   "morning_digest",
+  "holiday_greetings",
 ];
 
 const CHANNELS: {
@@ -120,6 +123,10 @@ export default function AdminProfile() {
         description={t("adminProfile.description")}
         icon={Bell}
       />
+
+      <OutOfOfficeCard />
+
+      <ClientCareSettingsCard />
 
       <div className="rounded-xl border border-border bg-card px-4 py-3 sm:px-5">
         <div className="text-sm font-semibold text-foreground">
