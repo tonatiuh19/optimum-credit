@@ -1,6 +1,7 @@
 /** Out of office + client care (Nov 17, 2026): business hours, wording, validation. Pure rules. */
 import { describe, expect, it } from "vitest";
-import { validateOutOfOffice } from "./index";
+import { clientCareHasCheckReaction, clientCareThreadNeedsCheck, validateOutOfOffice } from "./index";
+import { CLIENT_CARE_DEFAULT_SETTINGS, normalizeClientCareSettings } from "../shared/clientCareTemplate";
 import { businessMinutesBetween, clientCareText, clientCareWhen, prettyUsPhone, returnDayLabel } from "../shared/clientCareTemplate";
 
 const la = (s: string) => new Date(`${s}Z`); // LA wall clock stored as UTC fields
@@ -77,5 +78,34 @@ describe("validateOutOfOffice", () => {
     const r = validateOutOfOffice(b as Record<string, unknown>, today);
     expect(r.ok).toBe(false);
     expect((r as { error: string }).error).toMatch(msg);
+  });
+});
+
+describe("Slack ✅ check helpers", () => {
+  it("any check-mark reaction counts; others do not", () => {
+    expect(clientCareHasCheckReaction({ reactions: [{ name: "white_check_mark" }] })).toBe(true);
+    expect(clientCareHasCheckReaction({ reactions: [{ name: "heavy_check_mark" }] })).toBe(true);
+    expect(clientCareHasCheckReaction({ reactions: [{ name: "eyes" }] })).toBe(false);
+    expect(clientCareHasCheckReaction(undefined)).toBe(false);
+  });
+  it("only opens a thread when a person replied (not just the bot's own reminder)", () => {
+    expect(clientCareThreadNeedsCheck({ ts: "1", reply_count: 0 }, "UBOT")).toBe(false);
+    expect(clientCareThreadNeedsCheck({ ts: "1", reply_count: 1, reply_users: ["UBOT"] }, "UBOT")).toBe(false);
+    expect(clientCareThreadNeedsCheck({ ts: "1", reply_count: 2, reply_users: ["UBOT", "ULECCA"] }, "UBOT")).toBe(true);
+  });
+});
+
+describe("auto_close_after_days setting", () => {
+  it("defaults to 3, accepts 0-30, refuses the rest", () => {
+    expect(CLIENT_CARE_DEFAULT_SETTINGS.auto_close_after_days).toBe(3);
+    const ok = normalizeClientCareSettings({ auto_close_after_days: 0 }, CLIENT_CARE_DEFAULT_SETTINGS);
+    expect(ok.ok && ok.settings.auto_close_after_days).toBe(0);
+    expect(normalizeClientCareSettings({ auto_close_after_days: 31 }, CLIENT_CARE_DEFAULT_SETTINGS).ok).toBe(false);
+    expect(normalizeClientCareSettings({ auto_close_after_days: 1.5 }, CLIENT_CARE_DEFAULT_SETTINGS).ok).toBe(false);
+  });
+  it("saved settings from before this field keep working (default fills in)", () => {
+    const { auto_close_after_days: _drop, ...old } = CLIENT_CARE_DEFAULT_SETTINGS;
+    const n = normalizeClientCareSettings(old, CLIENT_CARE_DEFAULT_SETTINGS);
+    expect(n.ok && n.settings.auto_close_after_days).toBe(3);
   });
 });

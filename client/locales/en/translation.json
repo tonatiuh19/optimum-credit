@@ -4154,7 +4154,7 @@
   "clientCareSettings": {
     "title": "Client care settings",
     "description": "What clients get when they text or call, business hours, and when the team is reminded and Cesar is alerted. Changes apply right away.",
-    "readOnly": "Only Cesar or Alex can change these.",
+    "readOnly": "Only out-of-office managers (Settings → Permissions) can change these.",
     "auto_reply_enabled": "Automatic replies to clients",
     "slack_enabled": "Post to Slack #client-care",
     "hours": "Business hours (Pacific)",
@@ -4182,6 +4182,8 @@
     "save": "Save settings",
     "saved": "Client care settings saved",
     "reset": "Reset to defaults",
-    "resetDone": "Back to the default settings"
+    "resetDone": "Back to the default settings",
+    "autoCloseDays": "Auto-close after (business days)",
+    "autoCloseHint": "Items nobody marks ✅ are closed automatically after this many business days, so Slack checks stay light. 0 = never."
   }
 }

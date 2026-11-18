@@ -6,7 +6,7 @@ import "dotenv/config";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import request from "supertest";
 import type { Pool, ResultSetHeader, RowDataPacket } from "mysql2/promise";
-import { clientCareAfterInbound, clientCareMarkDone, createServer, createSession } from "./index";
+import { clientCareAfterInbound, clientCareMarkDone, createServer, createSession, runClientCareCronStep } from "./index";
 import { createIntegrationTestPool } from "./testDbCleanup";
 
 const CESAR = 90001; // manager
@@ -92,6 +92,54 @@ describe("client care", () => {
   it("a staff reply in OFG closes the item", async () => {
     expect(await clientCareMarkDone(conversationId, "ofg_reply", LECCA)).toBe(1);
     expect(await item()).toMatchObject({ status: "done", done_how: "ofg_reply", done_by_admin_id: LECCA });
+  });
+});
+
+describe("5-minute check (only this test's items)", () => {
+  const openItem = async (openedSql = "NOW()") => {
+    const [r] = await pool.query<ResultSetHeader>(
+      `INSERT INTO client_care_items (conversation_id, client_id, channel, lang, owner_admin_id, display_name, last_text, status, opened_at, reminded_at, escalated_at)
+       VALUES (?, ?, 'sms', 'en', ?, 'Carla Care', 'test', 'open', ${openedSql}, NOW(), NOW())`,
+      [conversationId, clientId, LECCA],
+    );
+    return r.insertId;
+  };
+  const statusOf = async (id: number) => (await pool.query<RowDataPacket[]>(`SELECT status, done_how, done_by_admin_id FROM client_care_items WHERE id = ?`, [id]))[0][0];
+  const closeAll = () => pool.query(`UPDATE client_care_items SET status = 'done' WHERE conversation_id = ?`, [conversationId]);
+
+  it("an empty scope touches nothing", async () => {
+    expect(await runClientCareCronStep(undefined, { onlyIds: [] })).toMatchObject({ checked: 0, replied: 0, expired: 0, slack_calls: 0 });
+  });
+
+  it("a staff reply sent any way (not only the CRM screen) closes the item", async () => {
+    await closeAll();
+    const id = await openItem("DATE_SUB(NOW(), INTERVAL 5 MINUTE)");
+    await pool.query(`INSERT INTO conversation_messages (conversation_id, direction, channel, body, sent_by_admin_id) VALUES (?, 'outbound', 'sms', 'Hi Carla, on it!', ?)`, [conversationId, LECCA]);
+    const r = await runClientCareCronStep(undefined, { onlyIds: [id] });
+    expect(r.replied).toBe(1);
+    expect(await statusOf(id)).toMatchObject({ status: "done", done_how: "ofg_reply", done_by_admin_id: LECCA });
+  });
+
+  it("an auto-reply or a reply from before the item does not close it", async () => {
+    await closeAll();
+    await pool.query(`UPDATE conversation_messages SET created_at = DATE_SUB(NOW(), INTERVAL 2 HOUR) WHERE conversation_id = ?`, [conversationId]);
+    const id = await openItem();
+    await pool.query(
+      `INSERT INTO conversation_messages (conversation_id, direction, channel, body, sent_by_admin_id, metadata_json) VALUES (?, 'outbound', 'sms', 'auto', ?, JSON_OBJECT('client_care_auto', true))`,
+      [conversationId, LECCA],
+    );
+    const r = await runClientCareCronStep(undefined, { onlyIds: [id] });
+    expect(r).toMatchObject({ replied: 0, checked: 1, expired: 0 });
+    expect(await statusOf(id)).toMatchObject({ status: "open" });
+  });
+
+  it("open longer than the auto-close days → closed as expired", async () => {
+    await closeAll();
+    await pool.query(`DELETE FROM conversation_messages WHERE conversation_id = ? AND direction = 'outbound'`, [conversationId]);
+    const id = await openItem("DATE_SUB(NOW(), INTERVAL 14 DAY)");
+    const r = await runClientCareCronStep(undefined, { onlyIds: [id] });
+    expect(r.expired).toBe(1);
+    expect(await statusOf(id)).toMatchObject({ status: "done", done_how: "expired" });
   });
 });
 

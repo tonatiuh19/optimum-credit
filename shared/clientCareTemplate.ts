@@ -32,6 +32,8 @@ export interface ClientCareSettings {
   auto_reply_gap_hours: number;
   /** No auto-reply when staff wrote in this conversation within this many minutes. */
   staff_quiet_min: number;
+  /** Close items still open after this many business days (0 = never). */
+  auto_close_after_days: number;
   escalate_admin_ids: number[];
   templates: Record<ClientCareLang, Record<ClientCareKind, string>>;
   when_labels: Record<ClientCareLang, ClientCareWhenLabels>;
@@ -53,6 +55,7 @@ export const CLIENT_CARE_DEFAULT_SETTINGS: ClientCareSettings = {
   escalate_after_min: 240,
   auto_reply_gap_hours: 12,
   staff_quiet_min: 60,
+  auto_close_after_days: 3,
   escalate_admin_ids: [90001],
   templates: {
     en: {
@@ -135,7 +138,7 @@ export function normalizeClientCareSettings(
     s[k] = b[k] as boolean;
     return null;
   };
-  const int = (k: "remind_after_min" | "escalate_after_min" | "auto_reply_gap_hours" | "staff_quiet_min", min: number, max: number) => {
+  const int = (k: "remind_after_min" | "escalate_after_min" | "auto_reply_gap_hours" | "staff_quiet_min" | "auto_close_after_days", min: number, max: number) => {
     if (b[k] === undefined) return null;
     const n = Number(b[k]);
     if (!Number.isInteger(n) || n < min || n > max) return `${k} must be a whole number from ${min} to ${max}`;
@@ -149,6 +152,7 @@ export function normalizeClientCareSettings(
     int("escalate_after_min", 30, 2880),
     int("auto_reply_gap_hours", 1, 72),
     int("staff_quiet_min", 0, 240),
+    int("auto_close_after_days", 0, 30),
   ];
   const first = errors.find(Boolean);
   if (first) return { ok: false, error: first };

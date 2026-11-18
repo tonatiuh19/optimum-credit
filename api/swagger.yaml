@@ -109,7 +109,7 @@ paths:
       tags: [Admin, Legal]
       summary: List legal documents (super admin)
       security:
-        - bearerAuth: []
+        - BearerAuth: []
       responses:
         "200":
           description: Full documents for editing
@@ -121,7 +121,7 @@ paths:
       tags: [Admin, Legal]
       summary: Update a legal document (super admin)
       security:
-        - bearerAuth: []
+        - BearerAuth: []
       parameters:
         - name: slug
           in: path
@@ -157,7 +157,7 @@ paths:
         staff (`*@example.test` / `*@affiliate.test`); Vitest keeps them visible
         for integration coverage.
       security:
-        - bearerAuth: []
+        - BearerAuth: []
       responses:
         "200":
           description: Staff and extras
@@ -171,7 +171,7 @@ paths:
       tags: [Admin, Settings]
       summary: Update a staff member's notification prefs (super admin)
       security:
-        - bearerAuth: []
+        - BearerAuth: []
       parameters:
         - name: id
           in: path
@@ -207,7 +207,7 @@ paths:
         Email-only recipients for team alerts and inbound SMS. Addresses need not
         be admin accounts (e.g. support@ shared inbox).
       security:
-        - bearerAuth: []
+        - BearerAuth: []
       responses:
         "200":
           description: List of extra emails
@@ -219,7 +219,7 @@ paths:
       tags: [Admin, Settings]
       summary: Add an extra notification email (super admin)
       security:
-        - bearerAuth: []
+        - BearerAuth: []
       requestBody:
         required: true
         content:
@@ -243,7 +243,7 @@ paths:
       tags: [Admin, Settings]
       summary: Update extra notification email (super admin)
       security:
-        - bearerAuth: []
+        - BearerAuth: []
       parameters:
         - name: id
           in: path
@@ -269,7 +269,7 @@ paths:
       tags: [Admin, Settings]
       summary: Remove extra notification email (super admin)
       security:
-        - bearerAuth: []
+        - BearerAuth: []
       parameters:
         - name: id
           in: path
@@ -1308,7 +1308,7 @@ paths:
   /admin/productivity/access:
     get:
       tags: [Productivity]
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       summary: "GF-8 scorecard access: { can_view, is_manager (BILLING_ADMIN_IDS), scored (admins.productivity_profile set) }"
       responses:
         "200":
@@ -1316,7 +1316,7 @@ paths:
   /admin/productivity/me:
     get:
       tags: [Productivity]
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       summary: "Live scorecard for a Pacific day (own; managers may pass admin_id): today metrics, level, streak, week average, badges"
       parameters:
         - { name: admin_id, in: query, required: false, schema: { type: integer } }
@@ -1331,7 +1331,7 @@ paths:
   /admin/productivity/team:
     get:
       tags: [Productivity]
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       summary: Today's scorecard for every scored staff member (managers only)
       responses:
         "200":
@@ -1341,14 +1341,14 @@ paths:
   /admin/productivity/days-off:
     get:
       tags: [Productivity]
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       summary: Days off from the last 30 days on (own; managers see all)
       responses:
         "200":
           description: "{ days_off[] }"
     post:
       tags: [Productivity]
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       summary: "Mark a day off (managers): { admin_id, day: YYYY-MM-DD, reason? } — the day is not graded"
       responses:
         "201":
@@ -1356,7 +1356,7 @@ paths:
   /admin/productivity/days-off/{id}:
     delete:
       tags: [Productivity]
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       summary: Remove a day off (managers)
       parameters:
         - { name: id, in: path, required: true, schema: { type: integer } }
@@ -1367,7 +1367,7 @@ paths:
     get:
       tags: [Billing]
       summary: "Billing access: { can_view_billing (BILLING_ADMIN_IDS: Alex 30001 + Cesar 90001), is_owner (BILLING_OWNER_IDS: Alex) }"
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: "{ can_view_billing: boolean }"
@@ -1383,7 +1383,7 @@ paths:
         `projection` = month-end estimate from the daily pace (current month).
         `plan` = billable prices (shown before billing starts). Usage: by staff, top MCP tools, daily. Claude provider cost
         (`usage.ai`, `ai_cost_usd`) is returned to the platform owner only.
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - { in: query, name: month, schema: { type: string, example: "2026-10" } }
       responses:
@@ -1393,7 +1393,7 @@ paths:
     get:
       tags: [Billing]
       summary: Platform technical sheet with live counts (routes, tables, roles, accounts, month activity) — billing admins
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - { in: query, name: month, schema: { type: string, example: "2026-10" } }
       responses:
@@ -1403,14 +1403,14 @@ paths:
     get:
       tags: [Billing]
       summary: Price list with measured 30-day average cost and suggested price (cost × markup) — platform owner only
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200": { description: "{ prices: [...] }" }
   /admin/billing/prices/{action}:
     put:
       tags: [Billing]
       summary: Edit unit price / markup / billable for one action — platform owner only
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - { in: path, name: action, required: true, schema: { type: string } }
       requestBody:
@@ -1430,7 +1430,7 @@ paths:
     put:
       tags: [Billing]
       summary: Set the invoice email (synced to the Stripe customer)
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       requestBody:
         content:
           application/json:
@@ -1441,14 +1441,14 @@ paths:
     get:
       tags: [Billing]
       summary: Issued platform invoices (one per month)
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200": { description: "{ invoices: [...] }" }
   /admin/billing/invoices/{month}/retry:
     post:
       tags: [Billing]
       summary: Issue (or retry) the Stripe invoice for a closed month
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - { in: path, name: month, required: true, schema: { type: string, example: "2026-10" } }
       responses:
@@ -1459,7 +1459,7 @@ paths:
     post:
       tags: [Billing]
       summary: Stripe Customer Portal session URL (payment method, receipts)
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200": { description: "{ url }" }
   /webhooks/stripe:
@@ -1656,14 +1656,14 @@ paths:
     get:
       tags: [Event Marketing, Admin]
       summary: List event companies
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: Companies with registration counts
     post:
       tags: [Event Marketing, Admin]
       summary: Create event company (+ default form fields)
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       requestBody:
         required: true
         content:
@@ -1690,7 +1690,7 @@ paths:
     get:
       tags: [Event Marketing, Admin]
       summary: Company detail (series, sessions, fields, registrations)
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - name: id
           in: path
@@ -1704,7 +1704,7 @@ paths:
     put:
       tags: [Event Marketing, Admin]
       summary: Update event company
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - name: id
           in: path
@@ -1725,7 +1725,7 @@ paths:
     post:
       tags: [Event Marketing, Admin]
       summary: Create event series under company
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - name: id
           in: path
@@ -1753,7 +1753,7 @@ paths:
     put:
       tags: [Event Marketing, Admin]
       summary: Update event series
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - name: id
           in: path
@@ -1767,7 +1767,7 @@ paths:
     post:
       tags: [Event Marketing, Admin]
       summary: Create event session
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - name: id
           in: path
@@ -1803,7 +1803,7 @@ paths:
         Cancelling texts/emails everyone registered or waitlisted; changing
         `starts_at` sends a new-date notice and re-arms reminders; raising
         (or removing) capacity promotes the waitlist. `notified` = people told.
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - name: id
           in: path
@@ -1817,7 +1817,7 @@ paths:
     post:
       tags: [Event Marketing, Admin]
       summary: Create (or reuse) the session's door self check-in QR link
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - { name: id, in: path, required: true, schema: { type: integer } }
       responses:
@@ -1840,7 +1840,7 @@ paths:
         `attended: false`, checks in (`check_in_method: import`). Existing
         CRM people are never overwritten. No confirmation is sent; attendees of
         a session that ended in the last 72h get the normal follow-up.
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - { name: id, in: path, required: true, schema: { type: integer } }
       requestBody:
@@ -1872,7 +1872,7 @@ paths:
     get:
       tags: [Event Marketing, Admin]
       summary: Event funnel per session — registered, attended, no-show, new contacts, paid clients, revenue
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - { name: id, in: path, required: true, schema: { type: integer } }
       responses:
@@ -1883,7 +1883,7 @@ paths:
     post:
       tags: [Event Marketing, Admin]
       summary: Create custom form field
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - name: id
           in: path
@@ -1897,7 +1897,7 @@ paths:
     put:
       tags: [Event Marketing, Admin]
       summary: Update form field
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - name: id
           in: path
@@ -1909,7 +1909,7 @@ paths:
     delete:
       tags: [Event Marketing, Admin]
       summary: Delete form field (blocks system fields)
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - name: id
           in: path
@@ -1925,7 +1925,7 @@ paths:
     post:
       tags: [Event Marketing, Admin]
       summary: Check in a registration
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - name: id
           in: path
@@ -1937,7 +1937,7 @@ paths:
     delete:
       tags: [Event Marketing, Admin]
       summary: Undo a check-in
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - name: id
           in: path
@@ -1951,7 +1951,7 @@ paths:
     post:
       tags: [Event Marketing, Admin]
       summary: Cancel a registration (frees the seat; next waitlisted person is promoted and texted)
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - name: id
           in: path
@@ -2113,7 +2113,7 @@ paths:
       description: |
         Paginated Kanban board — first page per status column (limit default 20).
         Pass `column` + `offset` to load more within one column. Requires super_admin or admin role.
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - name: search
           in: query
@@ -2197,7 +2197,7 @@ paths:
         Fires `funding_application_created` (team email/in-app/SMS per prefs + extra emails)
         and emails the applicant a link to `/funding?token=…` to upload documents.
         Requires super_admin or admin role.
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       requestBody:
         required: true
         content:
@@ -2249,7 +2249,7 @@ paths:
       tags: [Funding]
       summary: Funding application detail + documents
       description: Requires super_admin or admin role (agents receive 403).
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - name: id
           in: path
@@ -2273,7 +2273,7 @@ paths:
       tags: [Funding]
       summary: Update funding application status
       description: Requires super_admin or admin role (agents receive 403).
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - name: id
           in: path
@@ -2300,7 +2300,7 @@ paths:
       tags: [Funding]
       summary: Convert funding lead → Credit Repair prospect
       description: Sets client status/pipeline to prospect; marks application converted. Requires super_admin or admin role.
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - name: id
           in: path
@@ -2318,7 +2318,7 @@ paths:
     get:
       tags: [Funding]
       summary: Client portal — my funding applications
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: Applications for the logged-in client
@@ -2336,7 +2336,7 @@ paths:
     post:
       tags: [Funding]
       summary: Client portal — upload remaining funding doc
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - name: id
           in: path
@@ -2444,14 +2444,14 @@ paths:
     get:
       tags: [Affiliates]
       summary: List staff invite links
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: links[]
     post:
       tags: [Affiliates]
       summary: Create staff invite link (evergreen or one-time)
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       requestBody:
         content:
           application/json:
@@ -2472,7 +2472,7 @@ paths:
     patch:
       tags: [Affiliates]
       summary: Enable/disable, relabel, or change path slug on an invite link
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - name: id
           in: path
@@ -2494,7 +2494,7 @@ paths:
     delete:
       tags: [Affiliates]
       summary: Permanently delete an invite link
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - name: id
           in: path
@@ -3180,7 +3180,7 @@ paths:
       tags: [Conversations]
       summary: Twilio Voice SDK access token
       description: Requires admin auth + assigned OFG number. Identity `admin_{id}`.
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: JWT access token for Voice SDK
@@ -3202,7 +3202,7 @@ paths:
     post:
       tags: [Conversations]
       summary: Set softphone available / unavailable
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: Updated
@@ -3211,14 +3211,14 @@ paths:
     get:
       tags: [Conversations]
       summary: Get call-forwarding settings
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: call_forwarding_enabled + phone
     put:
       tags: [Conversations]
       summary: Update call-forwarding settings
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: Updated
@@ -3227,14 +3227,14 @@ paths:
     get:
       tags: [Conversations]
       summary: Admin voicemail overrides + org defaults
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: admin + tenant voicemail settings
     put:
       tags: [Conversations]
       summary: Update admin voicemail overrides
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: Updated
@@ -3243,7 +3243,7 @@ paths:
     put:
       tags: [Conversations]
       summary: Update org voicemail defaults (super_admin/admin)
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: Updated
@@ -3297,7 +3297,7 @@ paths:
         `twilio_error_code`) and the error lands in `error_message`.
         All JSON bodies on /api (except webhooks, /api/voice/*, crons) store
         `*phone` fields as +1XXXXXXXXXX when they are US numbers.
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: Logged
@@ -3306,7 +3306,7 @@ paths:
     post:
       tags: [Conversations]
       summary: Broadcast Ably call-answered (dismiss other softphones)
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: Published
@@ -3315,7 +3315,7 @@ paths:
     get:
       tags: [Conversations]
       summary: Poll whether call recording URL is ready
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - in: path
           name: callSid
@@ -3393,7 +3393,7 @@ paths:
     get:
       tags: [Conversations]
       summary: Quick-dial third parties for "Add caller" (VOICE_THREE_WAY_PRESETS)
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200": { description: "{ presets: [{ label, number }] }" }
   /voice/three-way/start:
@@ -3405,7 +3405,7 @@ paths:
         Moves the call into a recorded conference (the other leg joins via
         dial-status / outbound-dial-end) and dials the third party from the
         staff member's OFG line. US/Canada numbers only.
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       requestBody:
         required: true
         content:
@@ -3427,7 +3427,7 @@ paths:
     post:
       tags: [Conversations]
       summary: Send keypad digits to the third caller (their phone menu)
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       requestBody:
         required: true
         content:
@@ -3446,7 +3446,7 @@ paths:
     post:
       tags: [Conversations]
       summary: Hang up the third caller (client and staff stay connected)
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200": { description: Removed }
         "404": { description: No third caller }
@@ -3522,7 +3522,7 @@ paths:
     post:
       tags: [Conversations]
       summary: Re-verify TwiML App + sync OFG number voice/SMS webhooks
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: "{ success, twimlAppSid, voiceUrl, incomingUrl, numbers[] }"
@@ -3562,7 +3562,7 @@ paths:
     get:
       tags: [Conversations]
       summary: Resolve client by phone for dialpad / inbound UI
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - in: query
           name: phone
@@ -4169,7 +4169,7 @@ paths:
         Gated by `ADMIN_AI_ENABLED` (off by default). UI visibility also requires
         role `super_admin` or `admin`. `configured` reflects whether
         `ANTHROPIC_API_KEY` is set (billing is on the Anthropic account).
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: Status
@@ -4228,7 +4228,7 @@ paths:
         fit the API `maxDuration` (60s). When a write cannot be completed via MCP
         (e.g. file too large), tools return `crm_required` with `user_message` +
         `crm_href` — the assistant must tell staff to finish in CRM and not retry MCP.
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       requestBody:
         required: true
         content:
@@ -4298,7 +4298,7 @@ paths:
       description: |
         Same feature gate as Ask chat. Auth: admin session Bearer **or**
         `ADMIN_AI_MCP_TOKEN` (scoped to `ADMIN_AI_MCP_ADMIN_ID`).
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: Tool definitions
@@ -4345,7 +4345,7 @@ paths:
         `file_base64` / `attachment_base64` / data: URLs are stored only as size + sha256).
         Rate-limited per admin: 120/hour (super_admin 3,000/hour). Write tools are refused
         for affiliate-scoped accounts.
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - name: name
           in: path
@@ -4454,7 +4454,7 @@ paths:
         `/api/mcp/oauth/token` and `/api/mcp/oauth/revoke` are rate-limited per IP
         (60 per 10 minutes → 429 `rate_limited` with `Retry-After`). Expired codes and
         tokens are purged by the daily `/api/cron/admin-morning-digest`.
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: JSON-RPC MCP response
@@ -4471,7 +4471,7 @@ paths:
     get:
       tags: [Admin]
       summary: List my MCP OAuth connections
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: Active connections
@@ -4499,7 +4499,7 @@ paths:
     delete:
       tags: [Admin]
       summary: Revoke an MCP OAuth connection
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - name: id
           in: path
@@ -4522,7 +4522,7 @@ paths:
         From number — not a full SMS relay). Null stored prefs mean all ON.
         SMS channel requires Twilio env keys + an assigned OFG number + profile
         phone. OTP / welcome emails are never included.
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: Prefs + channel availability
@@ -4531,7 +4531,7 @@ paths:
     put:
       tags: [Admin]
       summary: Update my notification preferences
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       requestBody:
         required: true
         content:
@@ -4555,7 +4555,7 @@ paths:
       description: |
         Issues a TokenRequest with subscribe on `admin:{id}:notifications`.
         Adds `admin:{id}:conversations` when the admin has an assigned OFG number.
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: tokenRequest
@@ -4566,7 +4566,7 @@ paths:
     get:
       tags: [Admin]
       summary: List my in-app notifications
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - in: query
           name: limit
@@ -4579,7 +4579,7 @@ paths:
     post:
       tags: [Admin]
       summary: Mark in-app notifications read
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       requestBody:
         content:
           application/json:
@@ -4598,7 +4598,7 @@ paths:
     get:
       tags: [Admin]
       summary: Conversations access for current admin
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: enabled + assigned numbers
@@ -4608,7 +4608,7 @@ paths:
       tags: [Admin]
       summary: Unread SMS count for sidebar nav badge
       description: Sum of unread client + unknown threads assigned to you or on your OFG numbers.
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: unread_total
@@ -4622,7 +4622,7 @@ paths:
       description: >
         Counts from inbound-AI system notes over the last N days: texts the AI answered on its own,
         texts handed to staff (by reason code), live lookups and callback tasks it created.
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - in: query
           name: days
@@ -4638,7 +4638,7 @@ paths:
       tags: [Admin]
       summary: Ably token request for Conversations realtime (alias)
       description: Same as GET /admin/me/ably-token when Conversations access is enabled.
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: tokenRequest
@@ -4651,7 +4651,7 @@ paths:
     get:
       tags: [Admin]
       summary: List OFG Twilio inventory numbers
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: numbers[]
@@ -4661,7 +4661,7 @@ paths:
       tags: [Admin]
       summary: Upsert Twilio IncomingPhoneNumbers into admin_phone_numbers
       description: Super-admin only. Does not change existing assignments.
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: upserted count + numbers[]
@@ -4674,7 +4674,7 @@ paths:
     patch:
       tags: [Admin]
       summary: Assign or unassign an OFG number (admin/super_admin)
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - in: path
           name: id
@@ -4699,7 +4699,7 @@ paths:
     get:
       tags: [Admin]
       summary: Contact-hub inbox (clients + unknown)
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - in: query
           name: view
@@ -4746,7 +4746,7 @@ paths:
     get:
       tags: [Admin]
       summary: Unified timeline for a client or unknown contact
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - in: path
           name: kind
@@ -4766,7 +4766,7 @@ paths:
     post:
       tags: [Admin]
       summary: Send SMS/MMS, WhatsApp (360dialog), or internal note
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       requestBody:
         required: true
         content:
@@ -4804,7 +4804,7 @@ paths:
     post:
       tags: [Admin]
       summary: Cold outbound SMS or WhatsApp to a phone number
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       requestBody:
         required: true
         content:
@@ -4892,7 +4892,7 @@ paths:
     post:
       tags: [Admin]
       summary: AI reply suggestions for an open conversation thread
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       requestBody:
         content:
           application/json:
@@ -4911,7 +4911,7 @@ paths:
     post:
       tags: [Admin]
       summary: Upload MMS media (stored for Twilio-fetchable public URL; optional DisruptingLabs archival)
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       requestBody:
         required: true
         content:
@@ -4977,7 +4977,7 @@ paths:
     post:
       tags: [Admin]
       summary: Assign open client conversation threads
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - in: path
           name: id
@@ -4998,7 +4998,7 @@ paths:
     post:
       tags: [Admin]
       summary: Set status for all threads of a client contact (close/reopen inserts a system timeline event)
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - in: path
           name: id
@@ -5021,7 +5021,7 @@ paths:
     post:
       tags: [Admin]
       summary: Close or reopen unknown-contact SMS threads (does not dismiss the unknown lead)
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - in: path
           name: id
@@ -5046,7 +5046,7 @@ paths:
     post:
       tags: [Admin]
       summary: Link unknown contact to an existing client
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - in: path
           name: id
@@ -5073,7 +5073,7 @@ paths:
         Hard-blocks placeholder phones and phone/email matches on existing clients
         (`409` with `existing_client_id`). There is no `confirm_duplicate` override —
         link the unknown contact to the existing client instead.
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - in: path
           name: id
@@ -5102,7 +5102,7 @@ paths:
     post:
       tags: [Admin]
       summary: Dismiss unknown contact
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - in: path
           name: id
@@ -5120,7 +5120,7 @@ paths:
         Re-queues and immediately transcribes a call or voicemail with Twilio
         Batch Transcription. Requires Conversations access and ACL on the thread.
         Stores the transcript only.
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - in: path
           name: messageId
@@ -5149,7 +5149,7 @@ paths:
     get:
       tags: [Admin]
       summary: Legacy per-thread messages (prefer contact timeline)
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - in: path
           name: id
@@ -5163,7 +5163,7 @@ paths:
     get:
       tags: [Admin]
       summary: List Conversations hub reply templates
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - in: query
           name: channel
@@ -5178,7 +5178,7 @@ paths:
     post:
       tags: [Admin]
       summary: Create conversation template (admin/super_admin)
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       requestBody:
         required: true
         content:
@@ -5199,7 +5199,7 @@ paths:
     patch:
       tags: [Admin]
       summary: Update conversation template
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - in: path
           name: id
@@ -5211,7 +5211,7 @@ paths:
     delete:
       tags: [Admin]
       summary: Delete conversation template
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       parameters:
         - in: path
           name: id
@@ -9205,7 +9205,7 @@ paths:
   /admin/round-reports/pending-approval:
     get:
       tags: [Report Wizard]
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       summary: "Spec v1.1 P0-1: progress reports published but not sent (pending_approval | needs_review), with failed self-checks and whether the caller can approve / override"
       responses:
         "200":
@@ -9213,7 +9213,7 @@ paths:
   /admin/round-reports/{id}/approval:
     get:
       tags: [Report Wizard]
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       summary: "Approval status of one round report: delivery_status, §9 self-check rows, publish options, approver"
       parameters:
         - { name: id, in: path, required: true, schema: { type: integer } }
@@ -9230,7 +9230,7 @@ paths:
         Who can manage out of office / client care settings and who approves holiday greetings.
         Stored in system_settings (out_of_office_manager_ids, holiday_greeting_approver_ids); falls back to the old
         env vars, then to the default managers. Also returns active staff to pick from.
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       responses:
         "200":
           description: Lists and staff
@@ -9255,7 +9255,7 @@ paths:
       tags: [Admin]
       summary: Save staff permission lists (super admin)
       description: Send one or both lists. Each needs 1-10 active staff ids. Audit-logged; applies within 60 seconds.
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       requestBody:
         required: true
         content:
@@ -9278,8 +9278,9 @@ paths:
         "200": { description: "{ settings, defaults, tokens, can_edit }" }
     put:
       tags: [Admin]
-      summary: Save client care settings (Cesar / Alex) — partial update merged and fully validated; { reset true } restores defaults
+      summary: Save client care settings (out-of-office managers, Settings → Permissions) — partial update merged and fully validated; { reset true } restores defaults
       description: >-
+        auto_close_after_days (0-30, default 3, 0 = never) closes items nobody marked ✅ after that many business days (done_how expired).
         Templates use {first_name} {topic} {owner} {owner_phone} {when} {away_name} {return_day} {away_note};
         [[ ... ]] parts drop when a placeholder inside is empty; {owner} and {when} required outside [[ ]];
         320 characters max. Business days 0-6, HH:MM times (Pacific), reminder 15-1440 and escalation
@@ -9466,7 +9467,7 @@ paths:
   /admin/round-reports/{id}/rebuild:
     post:
       tags: [Report Wizard]
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       summary: "Rebuild a held report (Nov 6, 2026): a report never sent to the client (needs_review or pending_approval) on the client's latest round goes back to its wizard session's Review step with the reads already uploaded; its PDF is removed. Publishing again rebuilds it with the current reader and self-check. Same people as Approve. Audited (report_wizard.rebuild_held_report). The §9 self-check also lists printed_repairs (values corrected from the PDF's own rows) and a held publish alerts REPORT_HELD_ALERT_ADMIN_IDS in-app."
       parameters:
         - { name: id, in: path, required: true, schema: { type: integer } }
@@ -9488,7 +9489,7 @@ paths:
   /admin/round-reports/{id}/approve:
     post:
       tags: [Report Wizard]
-      security: [{ bearerAuth: [] }]
+      security: [{ BearerAuth: [] }]
       summary: "Approve & send (language owner EN/ES or REPORT_RELEASE_MANAGER_IDS). needs_review needs a release manager + override_reason (≥ 10 chars, audited). Sends the client flow + partner PDF, or releases to the portal silently for old rounds. A sent round that makes two in a row with no items removed and no score gain alerts ROUND_NO_CHANGE_ALERT_ADMIN_IDS by SMS + in-app."
       parameters:
         - { name: id, in: path, required: true, schema: { type: integer } }

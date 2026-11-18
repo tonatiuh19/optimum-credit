@@ -53,6 +53,7 @@ const fromForm = (v: FormValues): Partial<ClientCareSettings> => ({
   escalate_after_min: Number(v.escalate_after_min),
   auto_reply_gap_hours: Number(v.auto_reply_gap_hours),
   staff_quiet_min: Number(v.staff_quiet_min),
+  auto_close_after_days: Number(v.auto_close_after_days),
   escalate_admin_ids: v.escalate_admin_ids.map(Number),
   templates: {
     en: { message: v.tpl_en_message, missed_call: v.tpl_en_missed_call },
@@ -151,7 +152,7 @@ export function ClientCareSettingsCard() {
 
   const v = formik.values;
   const dayNames = (es ? "Dom Lun Mar Mié Jue Vie Sáb" : "Sun Mon Tue Wed Thu Fri Sat").split(" ");
-  const num = (k: "remind_after_min" | "escalate_after_min" | "auto_reply_gap_hours" | "staff_quiet_min", label: string) => (
+  const num = (k: "remind_after_min" | "escalate_after_min" | "auto_reply_gap_hours" | "staff_quiet_min" | "auto_close_after_days", label: string) => (
     <div className="space-y-1.5">
       <Label htmlFor={`cc-${k}`}>{label}</Label>
       <Input id={`cc-${k}`} type="number" inputMode="numeric" disabled={!canEdit} {...formik.getFieldProps(k)} />
@@ -221,12 +222,14 @@ export function ClientCareSettingsCard() {
             <BellRing className="h-4 w-4 text-primary" />
             {t("clientCareSettings.follow")}
           </legend>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
             {num("remind_after_min", t("clientCareSettings.remindAfter"))}
             {num("escalate_after_min", t("clientCareSettings.escalateAfter"))}
             {num("auto_reply_gap_hours", t("clientCareSettings.gapHours"))}
             {num("staff_quiet_min", t("clientCareSettings.staffQuiet"))}
+            {num("auto_close_after_days", t("clientCareSettings.autoCloseDays"))}
           </div>
+          <p className="text-xs text-muted-foreground">{t("clientCareSettings.autoCloseHint")}</p>
           <div className="space-y-1.5">
             <Label>{t("clientCareSettings.escalateTo")}</Label>
             <div className="flex flex-wrap gap-1.5">

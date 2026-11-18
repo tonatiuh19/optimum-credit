@@ -5627,7 +5627,7 @@ export const ADMIN_AI_TOOLS: Array<{
   },
   {
     name: "get_client_care_settings",
-    description: "Client care rules in force: auto-replies and Slack on/off, business days and hours (Pacific), when 'today' is promised until, reminder / escalation thresholds (business minutes), hours between auto-replies, who gets escalations, and the English / Spanish message and missed-call templates (with {placeholders} and [[optional parts]]). Edited in the CRM (Profile → Client care settings) by out-of-office managers (Settings → Permissions). Read-only.",
+    description: "Client care rules in force: auto-replies and Slack on/off, business days and hours (Pacific), when 'today' is promised until, reminder / escalation thresholds (business minutes), hours between auto-replies, auto-close after N business days without ✅, who gets escalations, and the English / Spanish message and missed-call templates (with {placeholders} and [[optional parts]]). Edited in the CRM (Profile → Client care settings) by out-of-office managers (Settings → Permissions). Read-only.",
     input_schema: { type: "object", properties: {} },
   },
   {
@@ -16240,6 +16240,8 @@ interface ClientCareSettings {
   auto_reply_gap_hours: number;
   /** No auto-reply when staff wrote in this conversation within this many minutes. */
   staff_quiet_min: number;
+  /** Close items still open after this many business days (0 = never). */
+  auto_close_after_days: number;
   escalate_admin_ids: number[];
   templates: Record<ClientCareLang, Record<ClientCareKind, string>>;
   when_labels: Record<ClientCareLang, ClientCareWhenLabels>;
@@ -16261,6 +16263,7 @@ const CLIENT_CARE_DEFAULT_SETTINGS: ClientCareSettings = {
   escalate_after_min: 240,
   auto_reply_gap_hours: 12,
   staff_quiet_min: 60,
+  auto_close_after_days: 3,
   escalate_admin_ids: [90001],
   templates: {
     en: {
@@ -16343,7 +16346,7 @@ function normalizeClientCareSettings(
     s[k] = b[k] as boolean;
     return null;
   };
-  const int = (k: "remind_after_min" | "escalate_after_min" | "auto_reply_gap_hours" | "staff_quiet_min", min: number, max: number) => {
+  const int = (k: "remind_after_min" | "escalate_after_min" | "auto_reply_gap_hours" | "staff_quiet_min" | "auto_close_after_days", min: number, max: number) => {
     if (b[k] === undefined) return null;
     const n = Number(b[k]);
     if (!Number.isInteger(n) || n < min || n > max) return `${k} must be a whole number from ${min} to ${max}`;
@@ -16357,6 +16360,7 @@ function normalizeClientCareSettings(
     int("escalate_after_min", 30, 2880),
     int("auto_reply_gap_hours", 1, 72),
     int("staff_quiet_min", 0, 240),
+    int("auto_close_after_days", 0, 30),
   ];
   const first = errors.find(Boolean);
   if (first) return { ok: false, error: first };
@@ -41760,7 +41764,7 @@ export async function clientCareAfterInbound(i: ClientCareInbound): Promise<{ po
       const [[recent]] = await pool.query<RowDataPacket[]>(
         `SELECT
            (SELECT MAX(created_at) FROM conversation_messages WHERE conversation_id = ? AND direction = 'outbound' AND sent_by_admin_id IS NOT NULL
-              AND COALESCE(JSON_EXTRACT(metadata_json, '$.client_care_auto'), false) = false) AS staff_at,
+              AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(metadata_json, '$.client_care_auto')), 'false') <> 'true') AS staff_at,
            (SELECT MAX(created_at) FROM conversation_messages WHERE conversation_id = ? AND direction = 'outbound'
               AND JSON_EXTRACT(metadata_json, '$.client_care_auto') = true) AS auto_at`,
         [i.conversationId, i.conversationId],
@@ -41894,30 +41898,128 @@ export async function clientCareMarkDone(conversationId: number, how: "ofg_reply
   return items.length;
 }
 
-/** ✅ on the post, or a ✅ in a thread reply. */
-async function clientCareSlackChecked(channel: string, ts: string): Promise<boolean> {
-  const r = await slackApi("reactions.get", { channel, timestamp: ts });
-  if (r.ok && ((r.message?.reactions as Array<{ name: string }>) ?? []).some((x) => /^(white_check_mark|heavy_check_mark|ballot_box_with_check)$/.test(x.name))) return true;
-  const rep = await slackApi("conversations.replies", { channel, ts, limit: 50 });
-  return !!rep.ok && ((rep.messages as Array<{ text?: string; bot_id?: string; ts: string }>) ?? []).some((m) => m.ts !== ts && !m.bot_id && /✅|:white_check_mark:|:heavy_check_mark:/.test(m.text ?? ""));
+const CLIENT_CARE_CHECK_RE = /^(white_check_mark|heavy_check_mark|ballot_box_with_check)$/;
+const CLIENT_CARE_CHECK_TEXT_RE = /✅|:white_check_mark:|:heavy_check_mark:/;
+const CLIENT_CARE_REPLY_THREAD_CAP = 15;
+type ClientCareSlackMsg = { ts: string; reactions?: Array<{ name: string }>; reply_count?: number; reply_users?: string[]; latest_reply?: string; bot_id?: string; user?: string; text?: string };
+let clientCareBotUserId: string | null | undefined;
+
+/** True when someone put a ✅ on the bot's post. */
+export function clientCareHasCheckReaction(m: { reactions?: Array<{ name: string }> } | undefined): boolean {
+  return (m?.reactions ?? []).some((x) => CLIENT_CARE_CHECK_RE.test(x.name));
 }
 
-/** Cron step: ✅ from Slack, then reminder (2 business hours) and Cesar (4) for what is still open. */
-export async function runClientCareCronStep(nowLa: Date = laWallClockAsUtcDate()): Promise<{ checked: number; done: number; reminded: number; escalated: number }> {
-  const out = { checked: 0, done: 0, reminded: 0, escalated: 0 };
-  const [items] = await pool.query<RowDataPacket[]>(`SELECT * FROM client_care_items WHERE status = 'open' ORDER BY id LIMIT 60`);
+/** Thread worth opening: has replies from a person (not only the bot's own reminder). */
+export function clientCareThreadNeedsCheck(m: ClientCareSlackMsg, botUserId: string | null): boolean {
+  if (!m.reply_count) return false;
+  const users = m.reply_users ?? [];
+  return users.some((u) => u !== botUserId);
+}
+
+/**
+ * Which open posts got a ✅ — one channel read per run (reactions + reply counts come with it),
+ * then only threads where a person replied. Returns done ts values and the Slack calls used.
+ */
+async function clientCareSlackCheckedBatch(channel: string, tsList: string[]): Promise<{ done: Set<string>; calls: number; ok: boolean }> {
+  const want = new Set(tsList);
+  const done = new Set<string>();
+  let calls = 0;
+  if (!want.size) return { done, calls, ok: true };
+  if (clientCareBotUserId === undefined) {
+    const me = await slackApi("auth.test", {});
+    calls++;
+    clientCareBotUserId = me.ok ? String((me as { user_id?: string }).user_id ?? "") || null : null;
+  }
+  const oldest = String(Math.min(...tsList.map(Number)) - 1);
+  const found = new Map<string, ClientCareSlackMsg>();
+  let cursor: string | undefined;
+  for (let page = 0; page < 5; page++) {
+    const r = await slackApi("conversations.history", { channel, oldest, limit: 200, ...(cursor ? { cursor } : {}) });
+    calls++;
+    if (!r.ok) return { done, calls, ok: false };
+    for (const m of (r.messages as ClientCareSlackMsg[]) ?? []) if (want.has(m.ts)) found.set(m.ts, m);
+    cursor = (r as { response_metadata?: { next_cursor?: string } }).response_metadata?.next_cursor || undefined;
+    if (!cursor || found.size === want.size) break;
+  }
+  let threads = 0;
+  for (const [ts, m] of found) {
+    if (clientCareHasCheckReaction(m)) {
+      done.add(ts);
+      continue;
+    }
+    if (threads >= CLIENT_CARE_REPLY_THREAD_CAP || !clientCareThreadNeedsCheck(m, clientCareBotUserId ?? null)) continue;
+    threads++;
+    const rep = await slackApi("conversations.replies", { channel, ts, limit: 50 });
+    calls++;
+    const msgs = (rep.messages as ClientCareSlackMsg[]) ?? [];
+    if (rep.ok && msgs.some((x) => x.ts !== ts && !x.bot_id && CLIENT_CARE_CHECK_TEXT_RE.test(x.text ?? ""))) done.add(ts);
+  }
+  return { done, calls, ok: true };
+}
+
+/**
+ * Cron step (every 5 min, inside process-queue):
+ * 1. staff already replied from anywhere → done (one SQL)
+ * 2. ✅ in Slack → done (one channel read + a few threads)
+ * 3. open longer than auto_close_after_days business days → expired
+ * 4. reminder / escalation for what is still open.
+ */
+export async function runClientCareCronStep(nowLa: Date = laWallClockAsUtcDate(), opts: { onlyIds?: number[] } = {}): Promise<{ checked: number; done: number; replied: number; expired: number; reminded: number; escalated: number; slack_calls: number }> {
+  const out = { checked: 0, done: 0, replied: 0, expired: 0, reminded: 0, escalated: 0, slack_calls: 0 };
+  // Tests pass onlyIds so they never touch real items in the shared database.
+  const scope = opts.onlyIds ? (opts.onlyIds.length ? ` AND i.id IN (${opts.onlyIds.map((n) => Number(n) | 0).join(",")})` : " AND 1 = 0") : "";
+  // 1. A staff reply sent any way (CRM, MCP, bulk, phone app) closes the item.
+  const [replied] = await pool.query<RowDataPacket[]>(
+    `SELECT DISTINCT i.conversation_id, (
+        SELECT m.sent_by_admin_id FROM conversation_messages m
+        WHERE m.conversation_id = i.conversation_id AND m.direction = 'outbound' AND m.sent_by_admin_id IS NOT NULL
+          AND m.created_at >= i.opened_at AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(m.metadata_json, '$.client_care_auto')), 'false') <> 'true'
+        ORDER BY m.id DESC LIMIT 1) AS admin_id
+     FROM client_care_items i
+     WHERE i.status = 'open'${scope} AND EXISTS (
+        SELECT 1 FROM conversation_messages m
+        WHERE m.conversation_id = i.conversation_id AND m.direction = 'outbound' AND m.sent_by_admin_id IS NOT NULL
+          AND m.created_at >= i.opened_at AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(m.metadata_json, '$.client_care_auto')), 'false') <> 'true')`,
+  );
+  for (const r of replied) out.replied += await clientCareMarkDone(Number(r.conversation_id), "ofg_reply", r.admin_id ? Number(r.admin_id) : null);
+
+  const [items] = await pool.query<RowDataPacket[]>(`SELECT * FROM client_care_items i WHERE i.status = 'open'${scope} ORDER BY i.id`);
   if (!items.length) return out;
   const settings = await loadClientCareSettings();
+
+  // 2. ✅ in Slack, batched per channel.
+  const byChannel = new Map<string, string[]>();
+  for (const it of items) if (it.slack_channel && it.slack_ts && !String(it.slack_ts).startsWith("dry-")) byChannel.set(String(it.slack_channel), [...(byChannel.get(String(it.slack_channel)) ?? []), String(it.slack_ts)]);
+  const checkedTs = new Set<string>();
+  if (!realMessagingBlocked()) {
+    for (const [channel, tsList] of byChannel) {
+      const r = await clientCareSlackCheckedBatch(channel, tsList);
+      out.slack_calls += r.calls;
+      if (!r.ok) console.warn("[client-care:cron] Slack read failed for", channel);
+      for (const ts of r.done) checkedTs.add(`${channel}|${ts}`);
+    }
+  }
+
   const escalateTo = settings.escalate_admin_ids;
+  const dayMinutes = businessMinutesBetween(new Date(Date.UTC(2026, 0, 5, 0, 0)), new Date(Date.UTC(2026, 0, 5, 23, 59)), { ...settings, business_days: [0, 1, 2, 3, 4, 5, 6] });
   for (const it of items) {
     out.checked++;
-    if (it.slack_channel && it.slack_ts && (await clientCareSlackChecked(String(it.slack_channel), String(it.slack_ts)))) {
+    if (checkedTs.has(`${it.slack_channel}|${it.slack_ts}`)) {
       await pool.query(`UPDATE client_care_items SET status = 'done', done_how = 'slack_check', done_at = NOW() WHERE id = ? AND status = 'open'`, [it.id]);
       out.done++;
       continue;
     }
     const openedLa = laWallClockAsUtcDate(new Date(it.opened_at));
     const mins = businessMinutesBetween(openedLa, nowLa, settings);
+    // 3. Nobody marked it in time → close quietly so it stops costing Slack reads.
+    if (settings.auto_close_after_days > 0 && mins >= settings.auto_close_after_days * dayMinutes) {
+      await pool.query(`UPDATE client_care_items SET status = 'done', done_how = 'expired', done_at = NOW() WHERE id = ? AND status = 'open'`, [it.id]);
+      if (it.slack_channel && it.slack_ts) {
+        await clientCareSlackWrite("chat.postMessage", { channel: it.slack_channel, thread_ts: it.slack_ts, text: `⌛ Closed automatically after ${settings.auto_close_after_days} business day${settings.auto_close_after_days === 1 ? "" : "s"} without ✅.` });
+      }
+      out.expired++;
+      continue;
+    }
     if (mins >= settings.remind_after_min && !it.reminded_at) {
       const owner = await adminCard(it.owner_admin_id ? Number(it.owner_admin_id) : null);
       if (it.slack_channel && it.slack_ts) {
@@ -41928,7 +42030,7 @@ export async function runClientCareCronStep(nowLa: Date = laWallClockAsUtcDate()
     } else if (mins >= settings.escalate_after_min && !it.escalated_at) {
       const ymd = nowLa.toISOString().slice(0, 10);
       for (const id of escalateTo) {
-        // Cesar out of office → his backup for that language gets it instead.
+        // Escalation person out of office → their backup for that language gets it instead.
         const ooo = await outOfOfficeOn(id, ymd);
         const target = ooo ? Number((it.lang === "es" ? ooo.backup_es_admin_id : ooo.backup_en_admin_id) ?? ooo.backup_en_admin_id ?? id) : id;
         const a = await adminCard(target);
@@ -78970,7 +79072,7 @@ function buildApp() {
         console.error("[cron:event-marketing]", e?.message ?? e);
       }
 
-      let clientCare = { checked: 0, done: 0, reminded: 0, escalated: 0 };
+      let clientCare: Awaited<ReturnType<typeof runClientCareCronStep>> = { checked: 0, done: 0, replied: 0, expired: 0, reminded: 0, escalated: 0, slack_calls: 0 };
       try {
         if (process.env.VITEST !== "true") clientCare = await runClientCareCronStep();
       } catch (e: any) {

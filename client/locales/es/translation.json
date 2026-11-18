@@ -4154,7 +4154,7 @@
   "clientCareSettings": {
     "title": "Ajustes de atención a clientes",
     "description": "Lo que reciben los clientes cuando escriben o llaman, el horario, y cuándo se le recuerda al equipo y se avisa a Cesar. Los cambios aplican al instante.",
-    "readOnly": "Solo Cesar o Alex pueden cambiar estos ajustes.",
+    "readOnly": "Solo los gerentes de fuera de oficina (Configuración → Permisos) pueden cambiar esto.",
     "auto_reply_enabled": "Respuestas automáticas a clientes",
     "slack_enabled": "Publicar en Slack #client-care",
     "hours": "Horario (Pacífico)",
@@ -4182,6 +4182,8 @@
     "save": "Guardar ajustes",
     "saved": "Ajustes guardados",
     "reset": "Restaurar valores predeterminados",
-    "resetDone": "Ajustes predeterminados restaurados"
+    "resetDone": "Ajustes predeterminados restaurados",
+    "autoCloseDays": "Cerrar solo después de (días hábiles)",
+    "autoCloseHint": "Los pendientes que nadie marca con ✅ se cierran solos después de estos días hábiles, para que las revisiones en Slack sigan ligeras. 0 = nunca."
   }
 }
