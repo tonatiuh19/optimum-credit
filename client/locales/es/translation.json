@@ -1112,6 +1112,26 @@
       "theClient": "el cliente",
       "cancel": "Regresar y editar",
       "confirm": "Enviar de todos modos"
+    },
+    "filters": {
+      "inboxAria": "Bandeja",
+      "statusAria": "Estado de la conversación",
+      "open": "Abiertas",
+      "closed": "Cerradas",
+      "button": "Filtros",
+      "ownerTitle": "Asignada a",
+      "owner": {
+        "any": "Cualquiera",
+        "mine": "A mí",
+        "unassigned": "Sin asignar"
+      },
+      "platformTitle": "Plataforma",
+      "unread": "Solo no leídas",
+      "unknownOnly": "Solo remitentes desconocidos",
+      "unknownHint": "Aún sin vincular a un cliente o contacto",
+      "reset": "Quitar filtros",
+      "removeAria": "Quitar filtro: {{name}}",
+      "unreadCount": "{{count}} sin leer"
     }
   },
   "onboarding": {

@@ -1112,6 +1112,26 @@
       "theClient": "the client",
       "cancel": "Go back and edit",
       "confirm": "Send anyway"
+    },
+    "filters": {
+      "inboxAria": "Inbox",
+      "statusAria": "Conversation status",
+      "open": "Open",
+      "closed": "Closed",
+      "button": "Filters",
+      "ownerTitle": "Assigned to",
+      "owner": {
+        "any": "Anyone",
+        "mine": "Me",
+        "unassigned": "Unassigned"
+      },
+      "platformTitle": "Platform",
+      "unread": "Unread only",
+      "unknownOnly": "Unknown senders only",
+      "unknownHint": "Not linked to a client or contact yet",
+      "reset": "Clear filters",
+      "removeAria": "Remove filter: {{name}}",
+      "unreadCount": "{{count}} unread"
     }
   },
   "onboarding": {

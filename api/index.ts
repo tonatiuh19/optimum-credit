@@ -73279,6 +73279,12 @@ function buildApp() {
       // Social tab only: Instagram / Facebook filter chips.
       const rawPlatform = String(req.query.platform || "");
       const platform = hub === "social" && (rawPlatform === "instagram" || rawPlatform === "messenger") ? rawPlatform : null;
+      // Nov 23, 2026: combinable filters on top of `view` (status). Each adds an AND condition.
+      const flag = (k: string) => String(req.query[k] || "") === "1";
+      const fMine = flag("mine");
+      const fUnassigned = flag("unassigned") && !fMine;
+      const fUnread = flag("unread");
+      const fUnknownOnly = flag("unknown");
       const q = String(req.query.q || "")
         .trim()
         .slice(0, 120);
@@ -73316,6 +73322,12 @@ function buildApp() {
         // Active inbox: hide closed/archived (use Closed filter to find them)
         where.push("cv.status NOT IN ('closed','archived')");
       }
+      if (fMine) {
+        where.push("cv.assigned_admin_id = ?");
+        args.push(adminId);
+      }
+      if (fUnassigned) where.push("cv.assigned_admin_id IS NULL");
+      if (fUnread) where.push("cv.unread_count > 0");
       if (q) {
         const like = likeContains(q);
         // Phones are stored +1XXXXXXXXXX: also match typed "(213) 573-…" by digits.
@@ -73410,7 +73422,7 @@ function buildApp() {
       });
 
       let clientTotal = 0;
-      if (view !== "unknown") {
+      if (view !== "unknown" && !fUnknownOnly) {
         const [clientCountRow] = await pool.query<RowDataPacket[]>(
           `SELECT COUNT(*) AS cnt FROM (
              SELECT c.id
@@ -73520,6 +73532,16 @@ function buildApp() {
             );
             unkWhere.push(`u.unread_count > 0`);
           }
+          if (fMine) {
+            unkWhere.push(`EXISTS (SELECT 1 FROM conversations cvf WHERE cvf.unknown_contact_id = u.id AND cvf.assigned_admin_id = ?)`);
+            unkArgs.push(adminId);
+          }
+          if (fUnassigned) {
+            unkWhere.push(
+              `NOT EXISTS (SELECT 1 FROM conversations cvf WHERE cvf.unknown_contact_id = u.id AND cvf.assigned_admin_id IS NOT NULL)`,
+            );
+          }
+          if (fUnread) unkWhere.push(`u.unread_count > 0`);
           if (q) {
             const like = likeContains(q);
             unkWhere.push(
@@ -73596,7 +73618,7 @@ function buildApp() {
       // CRM contacts with conversation threads (exclude unknown-only view; no social channel)
       let crmContacts: any[] = [];
       let crmTotal = 0;
-      if (view !== "unknown" && hub !== "social") {
+      if (view !== "unknown" && !fUnknownOnly && hub !== "social") {
         const crmWhere: string[] = [
           "ct.deleted_at IS NULL",
           "cv.contact_id IS NOT NULL",
@@ -73621,6 +73643,12 @@ function buildApp() {
             crmWhere.push("cv.assigned_admin_id IS NULL");
           }
         }
+        if (fMine) {
+          crmWhere.push("cv.assigned_admin_id = ?");
+          crmArgs.push(adminId);
+        }
+        if (fUnassigned) crmWhere.push("cv.assigned_admin_id IS NULL");
+        if (fUnread) crmWhere.push("cv.unread_count > 0");
         if (q) {
           const like = likeContains(q);
           crmWhere.push(
@@ -73702,7 +73730,7 @@ function buildApp() {
       }
 
       const items =
-        view === "unknown"
+        view === "unknown" || fUnknownOnly
           ? unknowns
           : [...unknowns, ...contacts, ...crmContacts];
       items.sort((a, b) => {
@@ -73716,7 +73744,7 @@ function buildApp() {
       });
 
       const total =
-        view === "unknown"
+        view === "unknown" || fUnknownOnly
           ? unknownTotal
           : unknownTotal + clientTotal + crmTotal;
       const offset = (page - 1) * limit;

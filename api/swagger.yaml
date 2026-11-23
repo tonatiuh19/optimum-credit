@@ -4720,6 +4720,10 @@ paths:
           name: platform
           description: "Social tab only: one platform (messenger = Facebook Page DMs). Social rows also return social_platform, social_username, social_reply_window (standard | human_agent | closed) and social_window_ends_at."
           schema: { type: string, enum: [instagram, messenger] }
+        - { in: query, name: mine, description: "1 = only threads assigned to me (combines with the others, AND)", schema: { type: string, enum: ["1"] } }
+        - { in: query, name: unassigned, description: "1 = only unassigned threads (ignored with mine=1)", schema: { type: string, enum: ["1"] } }
+        - { in: query, name: unread, description: "1 = only threads with unread messages (tab badges use limit=1 + pagination.total)", schema: { type: string, enum: ["1"] } }
+        - { in: query, name: unknown, description: "1 = only unknown senders (not linked to a client or CRM contact)", schema: { type: string, enum: ["1"] } }
         - in: query
           name: q
           schema: { type: string }

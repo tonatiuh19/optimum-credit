@@ -142,7 +142,11 @@ afterAll(async () => {
     await pool.query(`DELETE FROM conversations WHERE id IN (?)`, [convIds]);
   }
   if (ids.length) {
-    await pool.query(`DELETE FROM admin_notifications WHERE link_url LIKE ?`, [`%unknown=%`]).catch(() => null);
+    // Only this run's alerts: a bare "%unknown=%" would delete real staff notifications too.
+    for (const id of ids) {
+      await pool.query(`DELETE FROM admin_notifications WHERE link_url LIKE ?`, [`%unknown=${id}&%`]).catch(() => null);
+      await pool.query(`DELETE FROM admin_notifications WHERE link_url LIKE ?`, [`%unknown=${id}`]).catch(() => null);
+    }
     await pool.query(`DELETE FROM conversation_unknown_contacts WHERE id IN (?)`, [ids]);
   }
   await cleanupIntegrationTestClients(pool, { runId: RUN, clientIds: [clientId] });
@@ -357,6 +361,34 @@ describe("Meta DM webhook + inbox", () => {
     const closed = await run("set_conversation_status", { unknown_contact_id: igId, status: "closed", confirm: true, confirm_phrase: "CONFIRM" });
     expect(closed).toMatchObject({ ok: true, data: { status: "closed" } });
     await run("set_conversation_status", { unknown_contact_id: igId, status: "open", confirm: true, confirm_phrase: "CONFIRM" });
+  });
+
+  it("inbox filters combine: mine / unassigned / unread / unknown only (AND)", async () => {
+    const q = (extra: Record<string, string>) =>
+      request(app).get("/api/admin/conversations").query({ hub: "social", view: "all", limit: 100, ...extra }).set("Authorization", `Bearer ${token}`);
+    const ids = (r: any) => r.body.contacts.map((c: any) => c.unknown_contact_id).filter(Boolean);
+    const fbId = Number((await unknownFor(user("fb"))).id);
+    const igId = Number((await unknownFor(user("ig"))).id);
+    await pool.query(`UPDATE conversations SET assigned_admin_id = ? WHERE unknown_contact_id = ?`, [CESAR, igId]);
+    await pool.query(`UPDATE conversations SET assigned_admin_id = NULL WHERE unknown_contact_id = ?`, [fbId]);
+    await pool.query(`UPDATE conversation_unknown_contacts SET unread_count = 2 WHERE id = ?`, [igId]);
+    await pool.query(`UPDATE conversation_unknown_contacts SET unread_count = 0 WHERE id = ?`, [fbId]);
+
+    const mine = ids(await q({ mine: "1" }));
+    expect(mine).toContain(igId);
+    expect(mine).not.toContain(fbId);
+    const unassigned = ids(await q({ unassigned: "1" }));
+    expect(unassigned).toContain(fbId);
+    expect(unassigned).not.toContain(igId);
+    const unread = ids(await q({ unread: "1" }));
+    expect(unread).toContain(igId);
+    expect(unread).not.toContain(fbId);
+    expect(ids(await q({ unread: "1", unassigned: "1" }))).not.toContain(igId); // AND, not OR
+    const unknownOnly = await q({ unknown: "1" });
+    expect(unknownOnly.body.contacts.every((c: any) => c.kind === "unknown")).toBe(true);
+    expect(ids(unknownOnly)).toEqual(expect.arrayContaining([fbId, igId]));
+    // Unread badge source: the same endpoint with unread=1 reports the total.
+    expect((await q({ unread: "1", limit: "1" })).body.pagination.total).toBeGreaterThanOrEqual(1);
   });
 
   it("after linking to a client, the next DM lands on the client's record and replies go to them", async () => {

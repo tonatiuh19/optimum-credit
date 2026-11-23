@@ -23,6 +23,25 @@ export type ConversationsView =
 
 const CONTACTS_PAGE_SIZE = 25;
 
+/** Combinable inbox filters (AND), on top of the Open / Closed status. */
+export interface ConversationsFilters {
+  owner: "any" | "mine" | "unassigned";
+  unread: boolean;
+  unknownOnly: boolean;
+}
+
+export const DEFAULT_CONVERSATIONS_FILTERS: ConversationsFilters = { owner: "any", unread: false, unknownOnly: false };
+
+/** Query params for the list endpoint (only the active filters are sent). */
+export function conversationsFilterParams(f?: Partial<ConversationsFilters>): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (f?.owner === "mine") out.mine = "1";
+  if (f?.owner === "unassigned") out.unassigned = "1";
+  if (f?.unread) out.unread = "1";
+  if (f?.unknownOnly) out.unknown = "1";
+  return out;
+}
+
 function contactKey(c: { kind: string; contact_id: number }) {
   return `${c.kind}:${c.contact_id}`;
 }
@@ -92,6 +111,8 @@ interface ConversationsState {
   aiSuggestionsLoading: boolean;
   aiSuggestions: Array<{ id: string; label: string; body: string }>;
   retryCallInsightsId: number | null;
+  /** Unread threads per inbox tab (badges on SMS / Social). */
+  hubUnread: { sms: number; social: number };
 }
 
 const initialState: ConversationsState = {
@@ -126,6 +147,7 @@ const initialState: ConversationsState = {
   aiSuggestionsLoading: false,
   aiSuggestions: [],
   retryCallInsightsId: null,
+  hubUnread: { sms: 0, social: 0 },
 };
 
 /** Maps API timeline rows into hub messages (includes call recording fields). */
@@ -270,6 +292,8 @@ export const fetchConversationContacts = createAsyncThunk(
           hub?: "sms" | "social";
           /** Social tab only: one platform. */
           platform?: SocialPlatformFilter;
+          /** Combinable filters (owner, unread, unknown only). */
+          filters?: Partial<ConversationsFilters>;
         }
       | undefined,
     { rejectWithValue },
@@ -279,6 +303,7 @@ export const fetchConversationContacts = createAsyncThunk(
         params: {
           hub: args?.hub === "social" ? "social" : undefined,
           platform: args?.hub === "social" ? args?.platform : undefined,
+          ...conversationsFilterParams(args?.filters),
           view: args?.view || "all",
           q: args?.q || undefined,
           page: args?.page || 1,
@@ -292,6 +317,25 @@ export const fetchConversationContacts = createAsyncThunk(
       };
     } catch (e: any) {
       return rejectWithValue(formatAxiosError(e, "Failed to load inbox"));
+    }
+  },
+);
+
+/** Unread thread counts for the SMS / Social tab badges (same visibility rules as the list). */
+export const fetchConversationHubUnread = createAsyncThunk(
+  "conversations/hubUnread",
+  async (args: { social: boolean }, { rejectWithValue }) => {
+    try {
+      const total = async (hub: "sms" | "social") => {
+        const { data } = await api.get("/admin/conversations", {
+          params: { hub: hub === "social" ? "social" : undefined, view: "all", unread: "1", page: 1, limit: 1 },
+        });
+        return Number((data as AdminConversationsListResponse)?.pagination?.total ?? 0);
+      };
+      const [sms, social] = await Promise.all([total("sms"), args.social ? total("social") : Promise.resolve(0)]);
+      return { sms, social };
+    } catch (e: any) {
+      return rejectWithValue(formatAxiosError(e, "Failed to load unread counts"));
     }
   },
 );
@@ -1014,6 +1058,9 @@ const slice = createSlice({
     },
   },
   extraReducers: (b) => {
+    b.addCase(fetchConversationHubUnread.fulfilled, (s, a) => {
+      s.hubUnread = a.payload;
+    });
     b.addCase(fetchConversationsAccess.pending, (s) => {
       s.accessLoading = true;
     });

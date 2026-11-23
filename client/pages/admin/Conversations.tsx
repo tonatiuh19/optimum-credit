@@ -23,7 +23,6 @@ import {
   ChevronUp,
   ArchiveRestore,
   Instagram,
-  Facebook,
   Loader2,
 } from "lucide-react";
 import { getSharedAblyClient, isAblyPermanentlyUnavailable } from "@/lib/ably-client";
@@ -37,12 +36,6 @@ import {
   ConversationMediaThumb,
   type ConversationMediaPreviewItem,
 } from "@/components/admin/ConversationMediaLightbox";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 import { ClientPanelSheet } from "@/components/admin/ClientPanelSheet";
 import ConversationsHubSkeleton, {
   ConversationsContactListSkeleton,
@@ -90,13 +83,13 @@ import {
   setConversationsSearch,
   setConversationsSendError,
   setConversationsView,
+  fetchConversationHubUnread,
   startConversationOutbound,
   uploadConversationMedia,
   contactActivityRealtime,
   messageStatusRealtime,
   callInsightsRealtime,
   callRecordingRealtime,
-  type ConversationsView,
 } from "@/store/slices/conversationsSlice";
 import { fetchClientReferrers } from "@/store/slices/adminSlice";
 import { AlsoSendNameWarningDialog } from "@/components/admin/AlsoSendNameWarningDialog";
@@ -130,6 +123,8 @@ import { useNewMessageIds } from "@/components/conversations/useNewMessageIds";
 import { SocialPlatformBadge } from "@/components/conversations/SocialPlatformBadge";
 import { SocialReplyWindowChip } from "@/components/conversations/SocialReplyWindowChip";
 import { SocialMessageAttachments } from "@/components/conversations/SocialMessageAttachments";
+import { ConversationsFilterBar } from "@/components/conversations/ConversationsFilterBar";
+import { loadFilterPrefs, saveFilterPrefs, type ConversationsFilterPrefs } from "@/lib/conversationsFilterPrefs";
 import { socialReplyWindowState } from "@/lib/socialReplyWindow";
 
 const GUIDE_STORAGE_KEY = "ofg.conversations.guide.v2";
@@ -138,15 +133,6 @@ const FALLBACK_POLL_MS = 5 * 60 * 1000;
 const NO_ABLY_POLL_MS = 30_000;
 const CONTACTS_THROTTLE_MS = 3_000;
 
-const VIEWS: ConversationsView[] = [
-  "all",
-  "mine",
-  "unassigned",
-  "unread",
-  "unknown",
-  "open",
-  "closed",
-];
 
 const COMPOSE_STARTER_KEYS = [
   "composeStarterHello",
@@ -208,6 +194,7 @@ export default function AdminConversations() {
     templates,
     aiSuggestions,
     aiSuggestionsLoading,
+    hubUnread,
   } = useAppSelector((s) => s.conversations);
   const sessionToken = useAppSelector((s) => s.adminAuth.token);
   const isAvailable = useAppSelector((s) => s.voice.isAvailable);
@@ -306,12 +293,40 @@ export default function AdminConversations() {
   const [isDialerCallActive, setIsDialerCallActive] = useState(false);
   const [voiceSettingsOpen, setVoiceSettingsOpen] = useState(false);
   const [unknownLeadOpen, setUnknownLeadOpen] = useState(false);
+  /** Tab, status and combinable filters — remembered per staff member (this browser). */
+  const [filterPrefs, setFilterPrefs] = useState<ConversationsFilterPrefs>(() => loadFilterPrefs(authUser?.id));
+  const prefsLoadedForRef = useRef<number | null>(authUser?.id ?? null);
+  useEffect(() => {
+    // Signed-in user resolved after first render: restore their saved filters once.
+    if (authUser?.id && prefsLoadedForRef.current !== authUser.id) {
+      prefsLoadedForRef.current = authUser.id;
+      setFilterPrefs(loadFilterPrefs(authUser.id));
+    }
+  }, [authUser?.id]);
+  useEffect(() => {
+    saveFilterPrefs(authUser?.id, filterPrefs);
+  }, [authUser?.id, filterPrefs]);
   /** SMS hub vs Social DM (FB/IG) — social locked until credentials. */
-  const [hubChannel, setHubChannel] = useState<"sms" | "social">("sms");
+  const hubChannel = filterPrefs.hub;
+  const setHubChannel = useCallback((hub: "sms" | "social") => setFilterPrefs((p) => ({ ...p, hub })), []);
   /** Social tab: All / Instagram / Facebook. */
-  const [socialPlatform, setSocialPlatform] = useState<SocialPlatformFilter | null>(null);
+  const socialPlatform: SocialPlatformFilter | null = filterPrefs.platform;
+  const listFilters = useMemo(
+    () => ({ owner: filterPrefs.owner, unread: filterPrefs.unread, unknownOnly: filterPrefs.unknownOnly }),
+    [filterPrefs.owner, filterPrefs.unread, filterPrefs.unknownOnly],
+  );
   const socialDmMode = authUser?.social_dm_mode || "disabled";
   const socialDmLive = authUser?.social_dm_enabled === true;
+  const socialDmLiveRef = useRef(socialDmLive);
+  socialDmLiveRef.current = socialDmLive;
+  // Open | Closed drives the existing list `view` ("all" = everything not closed).
+  useEffect(() => {
+    dispatch(setConversationsView(filterPrefs.status === "closed" ? "closed" : "all"));
+  }, [dispatch, filterPrefs.status]);
+  // Tab badges: unread threads per inbox, refreshed with the list.
+  useEffect(() => {
+    if (accessEnabled) dispatch(fetchConversationHubUnread({ social: socialDmLive }));
+  }, [accessEnabled, socialDmLive, dispatch]);
   const whatsappEnabled = authUser?.whatsapp_enabled === true;
   const threadChannels = (
     whatsappEnabled
@@ -330,6 +345,8 @@ export default function AdminConversations() {
   hubRef.current = hubChannel;
   const socialPlatformRef = useRef<SocialPlatformFilter | null>(null);
   socialPlatformRef.current = socialPlatform;
+  const listFiltersRef = useRef(listFilters);
+  listFiltersRef.current = listFilters;
 
   const lastContactsFetchRef = useRef(0);
   const ablyRefreshRef = useRef({
@@ -351,10 +368,11 @@ export default function AdminConversations() {
           append: !!opts?.append,
           hub: hubChannel,
           platform: socialPlatform ?? undefined,
+          filters: listFilters,
         }),
       );
     },
-    [dispatch, view, search, hubChannel, socialPlatform],
+    [dispatch, view, search, hubChannel, socialPlatform, listFilters],
   );
 
   const refreshContacts = useCallback(() => {
@@ -373,8 +391,10 @@ export default function AdminConversations() {
         append: false,
         hub: hubRef.current,
         platform: socialPlatformRef.current ?? undefined,
+        filters: listFiltersRef.current,
       }),
     );
+    dispatch(fetchConversationHubUnread({ social: socialDmLiveRef.current }));
   }, [dispatch]);
 
   const loadMoreContacts = useCallback(async () => {
@@ -393,6 +413,7 @@ export default function AdminConversations() {
           append: true,
           hub: hubChannel,
           platform: socialPlatform ?? undefined,
+          filters: listFilters,
         }),
       ).unwrap();
       setContactsPage(next);
@@ -411,6 +432,7 @@ export default function AdminConversations() {
     search,
     hubChannel,
     socialPlatform,
+    listFilters,
   ]);
 
   const refreshOpenTimeline = useCallback(() => {
@@ -496,9 +518,22 @@ export default function AdminConversations() {
     if (!accessEnabled) return;
     const clientId = Number(searchParams.get("client"));
     const unknownId = Number(searchParams.get("unknown"));
-    // Facebook / Instagram alert links open the Social tab.
-    if (searchParams.get("hub") === "social") setHubChannel("social");
     const contactId = Number(searchParams.get("contact"));
+    // Alert / deep links must land where the thread is listed, whatever filters were saved:
+    // their own tab (Facebook / Instagram alerts carry hub=social), Open, no extra filters.
+    if (clientId > 0 || unknownId > 0 || contactId > 0) {
+      setFilterPrefs((p) => ({
+        ...p,
+        hub: searchParams.get("hub") === "social" ? "social" : "sms",
+        status: "open",
+        owner: "any",
+        unread: false,
+        unknownOnly: false,
+        platform: null,
+      }));
+    } else if (searchParams.get("hub") === "social") {
+      setHubChannel("social");
+    }
     if (clientId > 0) {
       dispatch(selectConversationContact({ kind: "client", id: clientId }));
       dispatch(fetchConversationTimeline({ kind: "client", id: clientId }));
@@ -1114,6 +1149,8 @@ export default function AdminConversations() {
     void dispatch(fetchConversationTimeline({ kind, id })).then((action) => {
       if (fetchConversationTimeline.fulfilled.match(action)) {
         dispatch(fetchConversationsNavBadge());
+        // Opening marks the thread read: the SMS / Social tab badges must drop too.
+        dispatch(fetchConversationHubUnread({ social: socialDmLiveRef.current }));
       }
     });
     // Client panel opens only via name / explicit panel control — not on select or send
@@ -1896,100 +1933,12 @@ export default function AdminConversations() {
                 className="w-full h-10 pl-9 pr-3 rounded-xl border border-input bg-background text-sm"
               />
             </div>
-            <div className="flex flex-wrap gap-1">
-              <TooltipProvider delayDuration={200}>
-              <button
-                  type="button"
-                  onClick={() => setHubChannel("sms")}
-                  className={cn(
-                    "px-2.5 py-1 rounded-lg text-[11px] font-semibold uppercase tracking-wide transition-colors inline-flex items-center gap-1",
-                    hubChannel === "sms"
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-muted text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  <MessageSquare className="w-3 h-3" />
-                  {t("conversations.hubChannels.sms")}
-                </button>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      onClick={() => setHubChannel("social")}
-                      className={cn(
-                        "px-2.5 py-1 rounded-lg text-[11px] font-semibold uppercase tracking-wide transition-colors inline-flex items-center gap-1",
-                        hubChannel === "social"
-                          ? "bg-primary text-primary-foreground"
-                          : "bg-muted text-muted-foreground hover:text-foreground",
-                        !socialDmLive && "opacity-90",
-                      )}
-                      data-testid="conversations-hub-social"
-                      aria-label={
-                        socialDmLive
-                          ? t("conversations.hubChannels.social")
-                          : t("conversations.social.chipLockedAria")
-                      }
-                    >
-                      <Instagram className="w-3 h-3" />
-                      {t("conversations.hubChannels.social")}
-                      {!socialDmLive && (
-                        <Lock className="w-3 h-3 opacity-80" />
-                      )}
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom" className="max-w-[220px] text-xs">
-                    {socialDmLive
-                      ? t("conversations.social.chipLiveHint")
-                      : t("conversations.social.chipSoonHint")}
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            </div>
-            {(hubChannel === "sms" || socialDmLive) && (
-            <div className="flex flex-wrap gap-1">
-              {VIEWS.map((v) => (
-              <button
-                  key={v}
-                  type="button"
-                  onClick={() => dispatch(setConversationsView(v))}
-                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold uppercase tracking-wide transition-colors ${
-                    view === v
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-muted text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  {t(`conversations.views.${v}`)}
-                </button>
-              ))}
-            </div>
-            )}
-            {hubChannel === "social" && socialDmLive && (
-              <div className="flex flex-wrap gap-1" data-testid="conversations-social-platforms">
-                {(
-                  [
-                    [null, "platformAll", null],
-                    ["instagram", "platformInstagram", Instagram],
-                    ["messenger", "platformFacebook", Facebook],
-                  ] as const
-                ).map(([value, key, Icon]) => (
-                  <button
-                    key={key}
-                    type="button"
-                    onClick={() => setSocialPlatform(value)}
-                    aria-pressed={socialPlatform === value}
-                    className={cn(
-                      "px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-colors inline-flex items-center gap-1",
-                      socialPlatform === value
-                        ? "bg-accent text-accent-foreground"
-                        : "bg-muted text-muted-foreground hover:text-foreground",
-                    )}
-                  >
-                    {Icon ? <Icon className="w-3 h-3" /> : null}
-                    {t(`conversations.social.${key}`)}
-                  </button>
-                ))}
-              </div>
-            )}
+            <ConversationsFilterBar
+              prefs={filterPrefs}
+              onChange={setFilterPrefs}
+              socialLive={socialDmLive}
+              unread={hubUnread}
+            />
           </div>
 
           {hubChannel === "social" && !socialDmLive ? (
