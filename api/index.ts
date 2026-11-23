@@ -56546,22 +56546,28 @@ function mountOptimumMcpRoutes(opts: MountOptimumMcpOpts): void {
         }
         const access = randomToken(32);
         const newRefresh = randomToken(32);
-        await pool.query(
+        // Compare-and-swap: only the request still holding the current refresh token rotates it.
+        // Two refreshes racing with the same token can no longer both succeed (old pair must die).
+        const [rotated] = await pool.query<ResultSetHeader>(
           `UPDATE mcp_oauth_tokens
            SET access_token_hash = ?,
                refresh_token_hash = ?,
                access_expires_at = DATE_ADD(NOW(), INTERVAL ? SECOND),
                refresh_expires_at = DATE_ADD(NOW(), INTERVAL ? SECOND),
                last_used_at = NOW()
-           WHERE id = ?`,
+           WHERE id = ? AND refresh_token_hash = ? AND revoked_at IS NULL`,
           [
             sha256Hex(access),
             sha256Hex(newRefresh),
             ACCESS_TTL_SEC,
             REFRESH_TTL_SEC,
             rows[0].id,
+            sha256Hex(refresh),
           ],
         );
+        if (rotated.affectedRows !== 1) {
+          return res.status(400).json({ error: "invalid_grant" });
+        }
         return res.json({
           access_token: access,
           token_type: "bearer",

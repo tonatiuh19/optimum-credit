@@ -432,9 +432,17 @@ describe("MCP OAuth + remote endpoint", () => {
     expect(r1.body.access_token).not.toBe(t.access);
     expect(r1.body.refresh_token).not.toBe(t.refresh);
 
-    expect((await refreshWith(t.clientId, t.refresh)).body.error).toBe("invalid_grant");
+    const reuse = await refreshWith(t.clientId, t.refresh);
+    expect({ status: reuse.status, error: reuse.body.error }).toEqual({ status: 400, error: "invalid_grant" });
     expect((await mcpCall(t.access, "tools/list")).status).toBe(401);
     expect((await mcpCall(r1.body.access_token, "tools/list")).status).toBe(200);
+
+    // Two refreshes racing with the same token: exactly one wins.
+    const race = await Promise.all([refreshWith(t.clientId, r1.body.refresh_token), refreshWith(t.clientId, r1.body.refresh_token)]);
+    expect(race.map((r) => r.status).sort()).toEqual([200, 400]);
+    const winner = race.find((r) => r.status === 200)!;
+    r1.body.refresh_token = winner.body.refresh_token;
+    r1.body.access_token = winner.body.access_token;
 
     // A refresh token is bound to its client
     expect((await refreshWith(`vitest-${RUN_ID}-other`, r1.body.refresh_token)).status).toBe(400);
