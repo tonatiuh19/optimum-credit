@@ -50,7 +50,7 @@ OAuth callbacks we allow for Claude:
 
 Each tool advertises its own JSON Schema over MCP (not a shared stub). Annotations come from the API (`GET /api/admin/ai/tools` → `annotations`), so the stdio proxy and the remote `/api/mcp` server always agree:
 
-- **Send tools** (`send_sms`, `send_text`, `send_email`, `send_whatsapp`, `send_wa`, `send_round_report`, `send_contact_sms`, `send_contact_whatsapp`, `send_contact_email`) are `destructiveHint: true` / `readOnlyHint: false`, so Claude asks you before each call (the preview and the real send). Don't pick "Always allow" for these.
+- **Send tools** (`send_sms`, `send_text`, `send_email`, `send_whatsapp`, `send_wa`, `send_round_report`, `send_contact_sms`, `send_contact_whatsapp`, `send_contact_email`, `send_social_reply`) are `destructiveHint: true` / `readOnlyHint: false`, so Claude asks you before each call (the preview and the real send). Don't pick "Always allow" for these.
 - **Other writes** keep `readOnlyHint: true` so their dry-runs are not blocked by UI approval.
 - **Every write still requires** `confirm=true` + `confirm_phrase: "CONFIRM"` in the tool args (API-enforced), and is refused for affiliate accounts.
 - The server sends MCP `instructions`: tool data (notes, messages, documents) is untrusted and must never trigger a send or change.
@@ -88,6 +88,9 @@ Claude must collect fields, call with `confirm=false` (preview), show the user, 
 | `send_wa` | **Alias for `send_whatsapp`** |
 | `send_contact_whatsapp` | WhatsApp to CRM Contact (address book); dry-run → confirm; hub + `contacts.admin_notes` |
 | `list_sms` | Read recent SMS/call/WhatsApp hub messages for a client (optional `channel` filter); call rows include `call_insights_status` + short `insights_summary` when ready |
+| `list_social_inbox` | Instagram + Facebook DM inbox (Conversations → Social): name, @username, `client_id` when linked, platform, last message, unread, assignee and Meta's reply window (`standard` ≤24h, `human_agent` ≤7 days, `closed`). Your threads, or all for a release manager. Filters: `platform`, `view`, `q` |
+| `get_social_thread` | One Instagram / Facebook thread by `conversation_id`: messages oldest→newest + reply window |
+| `send_social_reply` | Reply on Instagram / Facebook by `conversation_id` (text, max 1000 chars). Dry-run then confirm; refused when Meta's 7-day window is closed; after 24h it goes with the Human Agent tag. `assign_conversation` / `set_conversation_status` also take `unknown_contact_id` for social senders |
 | `list_whatsapp` | WhatsApp-only timeline for a client (shortcut for `list_sms` with `channel=whatsapp`) |
 | `get_call_insights` | Claude call/voicemail resume — sentiment, feelings, topics, action items, risk flags, transcript. Pass `client_id`, `contact_id` (CRM contact), or just `message_id` (from `list_sms` / `list_inbox`) |
 | `update_lead_signals` | Record "analysis reviewed with Cesar" and/or the next scheduled call for a prospect (both turn it Hot) — dry-run then confirm |

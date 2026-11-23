@@ -324,6 +324,8 @@ A report the self-check holds (`needs_review`) is explained from its actual chec
 - **Composer**: in the Social tab the reply channel is the thread's platform, picked automatically (plus Note for clients). The SMS tab never offers social channels. Templates written for SMS are reused on social. Attachments are SMS-only for now. Meta's reply-window errors show inline in the usual send-error spot.
 - **Alerts** read "Facebook · Name" / "Instagram · Name" and deep-link to `?unknown=ID&hub=social`, which opens the Social tab.
 - Setup and behaviour: `docs/META_MESSAGING_SETUP.md`.
+- **Social tab UX (Nov 23, 2026):** Platform chips **All / Instagram / Facebook** (`platform` query param). Rows show `SocialPlatformBadge` (platform icon + @username) instead of raw channel chips. Empty list / no-selection states are Social-specific with **no "new message" CTA** (on Meta, people message first). The thread composer shows `SocialReplyWindowChip` (`client/lib/socialReplyWindow.ts`: reply window time left → Human Agent time left → closed) and disables Send when the 7-day window is closed. Social senders are listed for staff without an OFG phone line too.
+- **MCP:** `list_social_inbox`, `get_social_thread`, `send_social_reply` (dry-run → CONFIRM, asks before sending); `assign_conversation` / `set_conversation_status` accept `unknown_contact_id` for social senders. Linking a sender to a client stays in the UI.
 
 ## Holiday Greetings (Nov 17, 2026)
 

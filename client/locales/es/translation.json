@@ -673,7 +673,7 @@
   },
   "conversations": {
     "title": "Conversaciones",
-    "description": "Centro de contacto para SMS con clientes.",
+    "description": "Centro de contacto para SMS, llamadas y mensajes de Instagram / Facebook.",
     "loading": "Cargando…",
     "loadingHub": "Cargando conversaciones",
     "lockedTitle": "Se requiere número OFG",
@@ -806,7 +806,25 @@
       "stepFlag": "Activa SOCIAL_DM_INBOX_ENABLED en el entorno",
       "stepMeta": "Agrega META_APP_SECRET, META_PAGE_ACCESS_TOKEN, META_WEBHOOK_VERIFY_TOKEN y META_PAGE_ID (+ META_IG_ACCOUNT_ID)",
       "stepWebhook": "Apunta webhooks de Meta a /api/webhooks/meta/messaging",
-      "hintEnv": "El staff con Conversaciones verá Social desbloquearse automáticamente tras el deploy con llaves."
+      "hintEnv": "El staff con Conversaciones verá Social desbloquearse automáticamente tras el deploy con llaves.",
+      "emptyTitle": "Aún no hay mensajes",
+      "emptyBody": "Aquí llegan los mensajes de Instagram a @optimum_financial_group y de Facebook a la página Optimum Financial. La persona escribe primero y tú respondes desde aquí.",
+      "selectPromptTitle": "Bandeja social",
+      "selectPromptBody": "Elige un mensaje a la izquierda para leerlo y responder en Instagram o Facebook.",
+      "platformAll": "Todos",
+      "platformInstagram": "Instagram",
+      "platformFacebook": "Facebook",
+      "window": {
+        "standard": "Ventana de respuesta · quedan {{time}}",
+        "humanAgent": "Agente humano · quedan {{time}}",
+        "closed": "Ventana cerrada: pídele que escriba de nuevo, o envíale un SMS",
+        "standardHint": "Meta permite respuestas normales durante 24 horas después de su último mensaje.",
+        "humanAgentHint": "Pasaron más de 24 horas desde su último mensaje: las respuestas van con la etiqueta Human Agent de Meta, hasta 7 días.",
+        "closedHint": "Pasaron más de 7 días desde su último mensaje. Meta bloquea respuestas hasta que vuelva a escribir.",
+        "minutes": "{{count}} min",
+        "hours": "{{count}} h",
+        "days": "{{count}} d"
+      }
     },
     "phoneNumbersTitle": "Números OFG",
     "phoneNumbersHint": "Asigna números de Twilio al staff. Conversaciones se desbloquea para los asignados.",

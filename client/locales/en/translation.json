@@ -673,7 +673,7 @@
   },
   "conversations": {
     "title": "Conversations",
-    "description": "Contact hub for SMS with clients.",
+    "description": "Contact hub for SMS, calls and Instagram / Facebook DMs.",
     "loading": "Loading…",
     "loadingHub": "Loading conversations",
     "lockedTitle": "OFG number required",
@@ -806,7 +806,25 @@
       "stepFlag": "Enable SOCIAL_DM_INBOX_ENABLED in env",
       "stepMeta": "Add META_APP_SECRET, META_PAGE_ACCESS_TOKEN, META_WEBHOOK_VERIFY_TOKEN and META_PAGE_ID (+ META_IG_ACCOUNT_ID)",
       "stepWebhook": "Point Meta webhooks at /api/webhooks/meta/messaging",
-      "hintEnv": "Staff with Conversations access will see Social unlock automatically after deploy with keys."
+      "hintEnv": "Staff with Conversations access will see Social unlock automatically after deploy with keys.",
+      "emptyTitle": "No DMs yet",
+      "emptyBody": "Instagram DMs to @optimum_financial_group and Facebook messages to the Optimum Financial Page land here. People message first, and you reply from here.",
+      "selectPromptTitle": "Social inbox",
+      "selectPromptBody": "Choose a DM on the left to read it and reply on Instagram or Facebook.",
+      "platformAll": "All",
+      "platformInstagram": "Instagram",
+      "platformFacebook": "Facebook",
+      "window": {
+        "standard": "Reply window · {{time}} left",
+        "humanAgent": "Human agent · {{time}} left",
+        "closed": "Window closed: ask them to message again, or text them",
+        "standardHint": "Meta allows normal replies for 24 hours after their last message.",
+        "humanAgentHint": "More than 24 hours since their last message: replies go with Meta's Human Agent tag, up to 7 days.",
+        "closedHint": "More than 7 days since their last message. Meta blocks replies until they write again.",
+        "minutes": "{{count}}m",
+        "hours": "{{count}}h",
+        "days": "{{count}}d"
+      }
     },
     "phoneNumbersTitle": "OFG phone numbers",
     "phoneNumbersHint": "Assign Twilio inventory numbers to staff. Conversations unlocks for assignees.",

@@ -3292,6 +3292,7 @@ export const ADMIN_AI_WRITE_TOOLS: ReadonlySet<string> = new Set([
   "set_conversation_status",
   "assign_conversation",
   "review_client_document",
+  "send_social_reply",
 ]);
 
 /** Writes that reach someone outside OFG (SMS / WhatsApp / email). MCP clients
@@ -3306,6 +3307,8 @@ export const ADMIN_AI_SEND_TOOLS: ReadonlySet<string> = new Set([
   "send_text",
   "send_whatsapp",
   "send_wa",
+  // Instagram / Facebook DM reply to a person outside OFG.
+  "send_social_reply",
   // Reach the client too: approving sends the report; rejecting a document texts + emails them.
   // Approving a holiday greeting texts every eligible client at its send time.
   "approve_holiday_greeting",
@@ -5705,32 +5708,77 @@ export const ADMIN_AI_TOOLS: Array<{
   {
     name: "set_conversation_status",
     description:
-      "Close, reopen, snooze or archive a client's Conversations threads (same as the inbox buttons). Needs an assigned OFG number. ALWAYS dry-run first (confirm=false), then confirm=true + confirm_phrase=\"CONFIRM\".",
+      "Close, reopen, snooze or archive a client's Conversations threads (same as the inbox buttons), or an Instagram / Facebook sender's thread with unknown_contact_id (from list_social_inbox). Client threads need an assigned OFG number. ALWAYS dry-run first (confirm=false), then confirm=true + confirm_phrase=\"CONFIRM\".",
     input_schema: {
       type: "object",
       properties: {
         client_id: { type: "integer" },
+        unknown_contact_id: { type: "integer", description: "Instagram / Facebook sender not linked to a client (list_social_inbox)" },
         status: { type: "string", enum: ["open", "closed", "snoozed", "archived"] },
         confirm: { type: "boolean" },
         confirm_phrase: { type: "string" },
       },
-      required: ["client_id", "status"],
+      required: ["status"],
     },
   },
   {
     name: "assign_conversation",
     description:
-      "Assign a client's open Conversations threads to a staff member (admin_id from search_admins), or unassign with unassign=true. ALWAYS dry-run first (confirm=false), then confirm=true + confirm_phrase=\"CONFIRM\".",
+      "Assign a client's open Conversations threads to a staff member (admin_id from search_admins), or an Instagram / Facebook sender's thread with unknown_contact_id (from list_social_inbox); unassign with unassign=true. ALWAYS dry-run first (confirm=false), then confirm=true + confirm_phrase=\"CONFIRM\".",
     input_schema: {
       type: "object",
       properties: {
         client_id: { type: "integer" },
+        unknown_contact_id: { type: "integer", description: "Instagram / Facebook sender not linked to a client (list_social_inbox)" },
         admin_id: { type: "integer" },
         unassign: { type: "boolean" },
         confirm: { type: "boolean" },
         confirm_phrase: { type: "string" },
       },
-      required: ["client_id"],
+      required: [],
+    },
+  },
+  {
+    name: "list_social_inbox",
+    description:
+      "Instagram + Facebook DM inbox (Conversations → Social). Lists social threads you can see (yours, or every one for a release manager): who wrote (name, @username, client_id when linked), platform, last message, unread count, assignee and Meta's reply window (standard ≤24h, human_agent ≤7 days, closed). Use conversation_id with get_social_thread / send_social_reply. Read-only.",
+    input_schema: {
+      type: "object",
+      properties: {
+        platform: { type: "string", enum: ["instagram", "messenger"], description: "messenger = Facebook Page DMs" },
+        view: { type: "string", enum: ["open", "unread", "mine", "closed", "all"], description: "Default open" },
+        q: { type: "string", description: "Search name, @username or last message" },
+        limit: { type: "integer", description: "1–50, default 25" },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "get_social_thread",
+    description:
+      "Read one Instagram / Facebook DM thread by conversation_id (from list_social_inbox): messages oldest→newest with direction, body, sender staff, delivery status, plus the reply window. Use before drafting send_social_reply. Read-only.",
+    input_schema: {
+      type: "object",
+      properties: {
+        conversation_id: { type: "integer" },
+        limit: { type: "integer", description: "Last N messages, 1–100, default 40" },
+      },
+      required: ["conversation_id"],
+    },
+  },
+  {
+    name: "send_social_reply",
+    description:
+      'Reply to an Instagram / Facebook DM thread (conversation_id from list_social_inbox) as the acting admin — text only, max 1000 chars. Meta only allows replies within 7 days of the person\'s last message (after 24h it goes with the Human Agent tag); a closed window is refused. ALWAYS dry-run first with confirm=false; only confirm=true with confirm_phrase="CONFIRM" after the user approves the exact text. Logs into Conversations → Social.',
+    input_schema: {
+      type: "object",
+      properties: {
+        conversation_id: { type: "integer" },
+        body: { type: "string", description: "Plain text, max 1000 characters" },
+        confirm: { type: "boolean" },
+        confirm_phrase: { type: "string" },
+      },
+      required: ["conversation_id", "body"],
     },
   },
   {
@@ -19472,9 +19520,14 @@ async function executeAdminAiTool(
       );
     }
 
+    if ((name === "set_conversation_status" || name === "assign_conversation") && !(Number(args.client_id) > 0) && Number(args.unknown_contact_id) > 0) {
+      if (scope) return { ok: false, error: "forbidden", message: "Social inbox tools are not available to affiliate accounts" };
+      return await mcpSocialSenderStatusOrAssign(name, Number(args.unknown_contact_id), args, ctx.adminId);
+    }
+
     if (name === "set_conversation_status" || name === "assign_conversation") {
       const clientId = Number(args.client_id) || 0;
-      if (!clientId) return { ok: false, error: "invalid_args", message: "client_id is required" };
+      if (!clientId) return { ok: false, error: "invalid_args", message: "client_id (or unknown_contact_id for an Instagram / Facebook sender) is required" };
       let assignee: number | null | undefined;
       if (name === "assign_conversation") {
         if (args.unassign === true) assignee = null;
@@ -19515,6 +19568,95 @@ async function executeAdminAiTool(
           ? await assignClientConversationsCore(clientId, ctx.adminId, assignee)
           : await setClientConversationStatusCore(clientId, ctx.adminId, String(args.status)),
       );
+    }
+
+    if (name === "list_social_inbox" || name === "get_social_thread" || name === "send_social_reply") {
+      if (scope) return { ok: false, error: "forbidden", message: "Social inbox tools are not available to affiliate accounts" };
+      if (name === "list_social_inbox") return { ok: true, data: await mcpListSocialInbox(ctx.adminId, args) };
+      const conversationId = Number(args.conversation_id) || 0;
+      if (!conversationId) return { ok: false, error: "invalid_args", message: "conversation_id is required (list_social_inbox)" };
+      const thread = await loadSocialThreadForAdmin(conversationId, ctx.adminId);
+      if (!thread) return { ok: false, error: "not_found", message: "No Instagram / Facebook thread with that conversation_id that you can see (list_social_inbox)" };
+      if (name === "get_social_thread") {
+        const limit = Math.min(100, Math.max(1, Number(args.limit) || 40));
+        const [msgs] = await pool.query<RowDataPacket[]>(
+          `SELECT m.id, m.direction, m.channel, m.body, m.created_at, m.provider_status, m.error_message,
+                  CONCAT(a.first_name, ' ', a.last_name) AS sent_by
+           FROM conversation_messages m LEFT JOIN admins a ON a.id = m.sent_by_admin_id
+           WHERE m.conversation_id = ? ORDER BY m.id DESC LIMIT ?`,
+          [conversationId, limit],
+        );
+        return {
+          ok: true,
+          data: {
+            ...thread.summary,
+            messages: msgs.reverse().map((m) => ({
+              message_id: Number(m.id),
+              direction: String(m.direction),
+              body: m.body ? decodeLiteralUnicodeEscapes(String(m.body)) : "",
+              sent_by: m.sent_by ? String(m.sent_by) : null,
+              provider_status: m.provider_status ?? null,
+              error: m.error_message ?? null,
+              created_at: m.created_at,
+            })),
+          },
+        };
+      }
+      // send_social_reply
+      const body = decodeLiteralUnicodeEscapes(String(args.body || args.message || "")).trim();
+      if (!body) return { ok: false, error: "invalid_args", message: "body is required" };
+      if ([...body].length > SOCIAL_MAX_BODY_CHARS) {
+        return { ok: false, error: "body_too_long", message: `Instagram / Facebook replies are limited to ${SOCIAL_MAX_BODY_CHARS} characters` };
+      }
+      const w = thread.summary.reply_window;
+      const preview = {
+        to: thread.summary.name,
+        username: thread.summary.username,
+        platform: thread.summary.platform,
+        body,
+        reply_window: w,
+        window_ends_at: thread.summary.window_ends_at,
+        thread_status: thread.summary.status,
+        note:
+          w === "closed"
+            ? "Meta's 7-day reply window is closed: this cannot be sent. Ask them to message again, or reach them by text."
+            : w === "human_agent"
+              ? "More than 24h since their last message: it will go with Meta's Human Agent tag."
+              : "Within 24h of their last message: normal reply.",
+      };
+      if (w === "closed") return { ok: false, error: "reply_window_closed", message: preview.note, data: { preview } };
+      if (thread.summary.status === "closed" || thread.summary.status === "archived") {
+        return { ok: false, error: "conversation_closed", message: "This thread is closed — reopen it first (set_conversation_status)." };
+      }
+      if (!adminAiConfirmTrue(args.confirm)) {
+        return {
+          ok: true,
+          data: {
+            dry_run: true,
+            ready: true,
+            preview,
+            required_confirm_phrase: ADMIN_AI_WRITE_CONFIRM_PHRASE,
+            guidance: `Show the exact recipient, platform and text. After approval, re-call with confirm=true and confirm_phrase="${ADMIN_AI_WRITE_CONFIRM_PHRASE}".`,
+          },
+        };
+      }
+      const gate = adminAiWriteConfirmed(args);
+      if (gate.ok === false) return { ok: false, error: "confirm_required", message: gate.message };
+      try {
+        const out = await deliverSocialHubMessage({
+          adminId: ctx.adminId,
+          clientId: thread.clientId ?? undefined,
+          unknownContactId: thread.clientId ? undefined : thread.unknownContactId ?? undefined,
+          channel: thread.summary.platform,
+          textBody: body,
+        });
+        const sent = { conversation_id: out.conversation_id, message_id: out.message_id, provider_status: out.provider_status, reply_window: w };
+        return out.ok
+          ? { ok: true, data: { sent: true, ...sent } }
+          : { ok: false, error: "send_failed", message: out.error || "Meta send failed", data: { sent: false, ...sent } };
+      } catch (e: any) {
+        return { ok: false, error: "send_failed", message: String(e?.message || e) };
+      }
     }
 
     if (name === "get_conversation_ai_stats") {
@@ -51769,6 +51911,17 @@ function metaReplyWindow(lastInboundAt: Date | string | null, nowMs = Date.now()
   return "closed";
 }
 
+/** Reply window plus when it ends (for the inbox chip and MCP). */
+export function socialReplyWindowInfo(
+  lastInboundAt: Date | string | null | undefined,
+  nowMs = Date.now(),
+): { window: "standard" | "human_agent" | "closed"; ends_at: string | null } {
+  const window = metaReplyWindow(lastInboundAt ?? null, nowMs);
+  if (window === "closed" || !lastInboundAt) return { window, ends_at: null };
+  const t = new Date(lastInboundAt).getTime();
+  return { window, ends_at: new Date(t + (window === "standard" ? 24 : 7 * 24) * 3600_000).toISOString() };
+}
+
 function socialPlatformLabel(p: SocialPlatform): string {
   return p === "instagram" ? "Instagram" : "Facebook";
 }
@@ -52006,6 +52159,171 @@ async function sendMetaSocialText(opts: {
 }
 
 const SOCIAL_MAX_BODY_CHARS = 1000;
+
+// ── Social inbox for the MCP (Nov 23, 2026) ──────────────────────────────────
+// Same visibility as Conversations → Social: the thread's assignee, or a release manager sees all.
+
+type SocialThreadSummary = {
+  conversation_id: number;
+  platform: SocialPlatform;
+  name: string;
+  username: string | null;
+  client_id: number | null;
+  unknown_contact_id: number | null;
+  status: string;
+  unread_count: number;
+  assigned_admin_id: number | null;
+  assigned_admin_name: string | null;
+  last_message_at: unknown;
+  last_message_preview: string | null;
+  reply_window: "standard" | "human_agent" | "closed";
+  window_ends_at: string | null;
+};
+
+const SOCIAL_THREAD_SELECT = `
+  SELECT cv.id, cv.channel, cv.status, cv.unread_count, cv.assigned_admin_id, cv.last_message_at, cv.last_message_preview,
+         cv.client_id, cv.unknown_contact_id,
+         CONCAT(a.first_name, ' ', a.last_name) AS assigned_admin_name,
+         COALESCE(NULLIF(TRIM(CONCAT(IFNULL(c.first_name,''), ' ', IFNULL(c.last_name,''))), ''), NULLIF(TRIM(u.display_name), ''), 'Unknown') AS name,
+         COALESCE(u.social_username, (SELECT su.social_username FROM conversation_unknown_contacts su
+           WHERE su.linked_client_id = cv.client_id AND su.social_platform = cv.channel ORDER BY su.social_last_inbound_at DESC LIMIT 1)) AS username,
+         COALESCE(u.social_last_inbound_at, (SELECT MAX(su.social_last_inbound_at) FROM conversation_unknown_contacts su
+           WHERE su.linked_client_id = cv.client_id AND su.social_platform = cv.channel)) AS last_inbound_at
+  FROM conversations cv
+  LEFT JOIN clients c ON c.id = cv.client_id
+  LEFT JOIN conversation_unknown_contacts u ON u.id = cv.unknown_contact_id
+  LEFT JOIN admins a ON a.id = cv.assigned_admin_id
+  WHERE cv.channel IN ('messenger','instagram')`;
+
+function mapSocialThreadRow(r: RowDataPacket): SocialThreadSummary {
+  const win = socialReplyWindowInfo(r.last_inbound_at);
+  return {
+    conversation_id: Number(r.id),
+    platform: String(r.channel) as SocialPlatform,
+    name: String(r.name || "Unknown"),
+    username: r.username ? String(r.username) : null,
+    client_id: r.client_id != null ? Number(r.client_id) : null,
+    unknown_contact_id: r.unknown_contact_id != null ? Number(r.unknown_contact_id) : null,
+    status: String(r.status || "open"),
+    unread_count: Number(r.unread_count || 0),
+    assigned_admin_id: r.assigned_admin_id != null ? Number(r.assigned_admin_id) : null,
+    assigned_admin_name: r.assigned_admin_name ? String(r.assigned_admin_name) : null,
+    last_message_at: r.last_message_at,
+    last_message_preview: r.last_message_preview ? decodeLiteralUnicodeEscapes(String(r.last_message_preview)) : null,
+    reply_window: win.window,
+    window_ends_at: win.ends_at,
+  };
+}
+
+/** SQL fragment: social threads this admin may see (release manager = all). */
+function socialVisibilitySql(adminId: number): { sql: string; params: number[] } {
+  return reportReleaseManagerIds().includes(adminId) ? { sql: "1=1", params: [] } : { sql: "cv.assigned_admin_id = ?", params: [adminId] };
+}
+
+async function mcpListSocialInbox(adminId: number, args: Record<string, unknown>) {
+  const vis = socialVisibilitySql(adminId);
+  const where: string[] = [vis.sql];
+  const params: unknown[] = [...vis.params];
+  const platform = String(args.platform || "");
+  if (platform === "instagram" || platform === "messenger") {
+    where.push("cv.channel = ?");
+    params.push(platform);
+  }
+  const view = String(args.view || "open");
+  if (view === "open") where.push("cv.status = 'open'");
+  else if (view === "unread") where.push("cv.unread_count > 0 AND cv.status NOT IN ('closed','archived')");
+  else if (view === "mine") {
+    where.push("cv.assigned_admin_id = ? AND cv.status NOT IN ('closed','archived')");
+    params.push(adminId);
+  } else if (view === "closed") where.push("cv.status IN ('closed','archived')");
+  const q = String(args.q || "").trim().slice(0, 120);
+  if (q) {
+    const like = likeContains(q);
+    where.push(`(c.first_name LIKE ? ESCAPE '!' OR c.last_name LIKE ? ESCAPE '!' OR u.display_name LIKE ? ESCAPE '!' OR u.social_username LIKE ? ESCAPE '!' OR cv.last_message_preview LIKE ? ESCAPE '!')`);
+    params.push(like, like, like, like, like);
+  }
+  const limit = Math.min(50, Math.max(1, Number(args.limit) || 25));
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `${SOCIAL_THREAD_SELECT} AND ${where.join(" AND ")} ORDER BY cv.last_message_at DESC, cv.id DESC LIMIT ?`,
+    [...params, limit],
+  );
+  return {
+    social_inbox_live: metaSocialConfig().enabled,
+    count: rows.length,
+    threads: rows.map(mapSocialThreadRow),
+    hint: "Read a thread with get_social_thread(conversation_id); reply with send_social_reply (dry-run first).",
+  };
+}
+
+async function loadSocialThreadForAdmin(
+  conversationId: number,
+  adminId: number,
+): Promise<{ summary: SocialThreadSummary; clientId: number | null; unknownContactId: number | null } | null> {
+  const vis = socialVisibilitySql(adminId);
+  const [[r]] = await pool.query<RowDataPacket[]>(`${SOCIAL_THREAD_SELECT} AND cv.id = ? AND ${vis.sql} LIMIT 1`, [conversationId, ...vis.params]);
+  if (!r) return null;
+  const summary = mapSocialThreadRow(r);
+  return { summary, clientId: summary.client_id, unknownContactId: summary.unknown_contact_id };
+}
+
+/** set_conversation_status / assign_conversation for an Instagram / Facebook sender not linked to a client. */
+async function mcpSocialSenderStatusOrAssign(
+  name: "set_conversation_status" | "assign_conversation",
+  unknownContactId: number,
+  args: Record<string, unknown>,
+  adminId: number,
+): Promise<AdminAiToolResult> {
+  const vis = socialVisibilitySql(adminId);
+  const [[u]] = await pool.query<RowDataPacket[]>(
+    `SELECT u.id, u.display_name, u.social_platform, u.social_username,
+            (SELECT COUNT(*) FROM conversations cv WHERE cv.unknown_contact_id = u.id AND ${vis.sql}) AS visible_threads
+     FROM conversation_unknown_contacts u WHERE u.id = ? AND u.social_platform IS NOT NULL LIMIT 1`,
+    [...vis.params, unknownContactId],
+  );
+  if (!u || Number(u.visible_threads) === 0) {
+    return { ok: false, error: "not_found", message: "No Instagram / Facebook sender with that unknown_contact_id that you can see (list_social_inbox)" };
+  }
+  let assignee: number | null | undefined;
+  if (name === "assign_conversation") {
+    if (args.unassign === true) assignee = null;
+    else if (Number(args.admin_id) > 0) assignee = Number(args.admin_id);
+    else return { ok: false, error: "invalid_args", message: "admin_id (from search_admins) or unassign=true is required" };
+    if (assignee) {
+      const [[a]] = await pool.query<RowDataPacket[]>(`SELECT id FROM admins WHERE id = ? AND status = 'active' LIMIT 1`, [assignee]);
+      if (!a) return { ok: false, error: "not_found", message: "No active staff member with that admin_id (use search_admins)" };
+    }
+  } else if (!["open", "closed", "snoozed", "archived"].includes(String(args.status || ""))) {
+    return { ok: false, error: "invalid_args", message: "status must be open, closed, snoozed or archived" };
+  }
+  const who = `${String(u.display_name || "Unknown")}${u.social_username ? ` (@${u.social_username})` : ""} · ${socialPlatformLabel(String(u.social_platform) as SocialPlatform)}`;
+  const confirmed = adminAiWriteConfirmed(args);
+  if (!confirmed.ok) {
+    return {
+      ok: true,
+      dry_run: true,
+      preview: {
+        sender: who,
+        action: name === "assign_conversation" ? (assignee === null ? "unassign" : `assign to admin #${assignee}`) : `set status ${String(args.status)}`,
+      },
+      message: (confirmed as { message?: string }).message,
+    };
+  }
+  if (name === "assign_conversation") {
+    await pool.query(`UPDATE conversations SET assigned_admin_id = ? WHERE unknown_contact_id = ?`, [assignee ?? null, unknownContactId]);
+    await pool.query(
+      `INSERT INTO audit_logs (actor_type, actor_id, action, entity_type, entity_id, changes_json, status)
+       VALUES ('admin', ?, 'conversations.social_assign', 'conversation_unknown_contact', ?, ?, 'success')`,
+      [adminId, unknownContactId, JSON.stringify({ assigned_admin_id: assignee ?? null, via: "mcp" })],
+    );
+    return { ok: true, data: { sender: who, assigned_admin_id: assignee ?? null } };
+  }
+  const result = await setContactConversationStatus({
+    unknownContactId,
+    status: String(args.status) as "open" | "snoozed" | "closed" | "archived",
+    adminId,
+  });
+  return { ok: true, data: { sender: who, status: result.status } };
+}
 
 /** Inbox reply on Facebook / Instagram (unknown social sender or a client linked to one). */
 async function deliverSocialHubMessage(opts: {
@@ -72660,6 +72978,9 @@ function buildApp() {
       const view = String(req.query.view || "all");
       // Nov 10, 2026: Social tab = Facebook / Instagram threads only; SMS hub hides social-only senders.
       const hub = String(req.query.hub || "") === "social" ? "social" : "sms";
+      // Social tab only: Instagram / Facebook filter chips.
+      const rawPlatform = String(req.query.platform || "");
+      const platform = hub === "social" && (rawPlatform === "instagram" || rawPlatform === "messenger") ? rawPlatform : null;
       const q = String(req.query.q || "")
         .trim()
         .slice(0, 120);
@@ -72675,7 +72996,10 @@ function buildApp() {
       // Contact-centric: aggregate client threads visible on my OFG lines or assigned to me
       const where: string[] = ["cv.client_id IS NOT NULL", clientScope.sql];
       const args: any[] = [...clientScope.params];
-      if (hub === "social") where.push("cv.channel IN ('messenger','instagram')");
+      if (hub === "social") {
+        where.push(platform ? "cv.channel = ?" : "cv.channel IN ('messenger','instagram')");
+        if (platform) args.push(platform);
+      }
       if (view === "mine") {
         where.push("cv.assigned_admin_id = ?");
         where.push("cv.status NOT IN ('closed','archived')");
@@ -72731,7 +73055,17 @@ function buildApp() {
              GROUP_CONCAT(cv.id ORDER BY cv.last_message_at DESC),
              ',', 1
            ) AS primary_conversation_id,
-           GROUP_CONCAT(DISTINCT cv.channel) AS channels
+           GROUP_CONCAT(DISTINCT cv.channel) AS channels${
+             hub === "social"
+               ? `,
+           (SELECT su.social_platform FROM conversation_unknown_contacts su
+             WHERE su.linked_client_id = c.id AND su.social_platform IS NOT NULL ORDER BY su.social_last_inbound_at DESC LIMIT 1) AS social_platform,
+           (SELECT su.social_username FROM conversation_unknown_contacts su
+             WHERE su.linked_client_id = c.id AND su.social_platform IS NOT NULL ORDER BY su.social_last_inbound_at DESC LIMIT 1) AS social_username,
+           (SELECT MAX(su.social_last_inbound_at) FROM conversation_unknown_contacts su
+             WHERE su.linked_client_id = c.id AND su.social_platform IS NOT NULL) AS social_last_inbound_at`
+               : ""
+           }
          FROM conversations cv
          JOIN clients c ON c.id = cv.client_id
          WHERE ${where.join(" AND ")}
@@ -72766,6 +73100,14 @@ function buildApp() {
             : null,
           pipeline_stage: r.pipeline_stage,
           client_status: r.client_status,
+          ...(hub === "social"
+            ? {
+                social_platform: r.social_platform ? String(r.social_platform) : null,
+                social_username: r.social_username ? String(r.social_username) : null,
+                social_reply_window: socialReplyWindowInfo(r.social_last_inbound_at).window,
+                social_window_ends_at: socialReplyWindowInfo(r.social_last_inbound_at).ends_at,
+              }
+            : {}),
         };
       });
 
@@ -72800,7 +73142,8 @@ function buildApp() {
         view === "unread"
       ) {
         const phoneIds = await adminAssignedPhoneNumberIds(req.auth!.id);
-        if (phoneIds.length) {
+        // Social senders are not tied to an OFG line: list them even for staff without a number.
+        if (phoneIds.length || hub === "social") {
           const seesAllSocial = reportReleaseManagerIds().includes(adminId);
           const unkWhere: string[] = [
             `u.status = 'open'`,
@@ -72812,6 +73155,10 @@ function buildApp() {
               : `u.social_platform IS NULL AND u.ofg_number_id IN (${phoneIds.map(() => "?").join(",")})`,
           ];
           const unkArgs: any[] = hub === "social" ? [adminId] : [...phoneIds];
+          if (platform) {
+            unkWhere.push("u.social_platform = ?");
+            unkArgs.push(platform);
+          }
           if (view === "closed") {
             unkWhere.push(
               `EXISTS (
@@ -72878,9 +73225,9 @@ function buildApp() {
           if (q) {
             const like = likeContains(q);
             unkWhere.push(
-              `(u.display_name LIKE ? ESCAPE '!' OR u.phone_e164 LIKE ? ESCAPE '!' OR u.email LIKE ? ESCAPE '!' OR u.last_message_preview LIKE ? ESCAPE '!')`,
+              `(u.display_name LIKE ? ESCAPE '!' OR u.phone_e164 LIKE ? ESCAPE '!' OR u.email LIKE ? ESCAPE '!' OR u.last_message_preview LIKE ? ESCAPE '!' OR u.social_username LIKE ? ESCAPE '!')`,
             );
-            unkArgs.push(like, like, like, like);
+            unkArgs.push(like, like, like, like, like);
           }
           unkWhereSql = unkWhere.join(" AND ");
           unkArgsForCount = [...unkArgs];
@@ -72935,6 +73282,12 @@ function buildApp() {
             channels: [u.social_platform ? String(u.social_platform) : "sms"],
             social_platform: u.social_platform ? String(u.social_platform) : null,
             social_username: u.social_username ? String(u.social_username) : null,
+            ...(u.social_platform
+              ? {
+                  social_reply_window: socialReplyWindowInfo(u.social_last_inbound_at).window,
+                  social_window_ends_at: socialReplyWindowInfo(u.social_last_inbound_at).ends_at,
+                }
+              : {}),
             primary_conversation_id: u.primary_conversation_id
               ? Number(u.primary_conversation_id)
               : null,

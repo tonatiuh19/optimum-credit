@@ -47,6 +47,7 @@ const FALLBACK_SEND_TOOLS = new Set([
   "send_text",
   "send_whatsapp",
   "send_wa",
+  "send_social_reply",
 ]);
 
 function toolAnnotations(t: ToolDef): ToolAnnotations {

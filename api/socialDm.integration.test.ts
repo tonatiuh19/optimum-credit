@@ -35,6 +35,7 @@ import type { Pool, RowDataPacket } from "mysql2/promise";
 import {
   createServer,
   createSession,
+  executeAdminAiTool,
   guessSocialMessageLang,
   metaReplyWindow,
   parseMetaMessagingWebhook,
@@ -286,6 +287,67 @@ describe("Meta DM webhook + inbox", () => {
     expect(row).toMatchObject({ social_platform: "messenger", channels: ["messenger"] });
     const sms = await request(app).get("/api/admin/conversations").query({ view: "all", limit: 100 }).set("Authorization", `Bearer ${token}`);
     expect(sms.body.contacts.some((c: any) => c.kind === "unknown" && c.social_platform)).toBe(false);
+  });
+
+  it("Social tab: platform filter, @username search and live reply window on each row", async () => {
+    const q = (extra: Record<string, unknown>) =>
+      request(app).get("/api/admin/conversations").query({ hub: "social", view: "all", limit: 100, ...extra }).set("Authorization", `Bearer ${token}`);
+    const fbId = Number((await unknownFor(user("fb"))).id);
+    const igId = Number((await unknownFor(user("ig"))).id);
+    const ig = await q({ platform: "instagram" });
+    const igIds = ig.body.contacts.filter((c: any) => c.kind === "unknown").map((c: any) => c.unknown_contact_id);
+    expect(igIds).toContain(igId);
+    expect(igIds).not.toContain(fbId);
+    const fbRow = (await q({ platform: "messenger" })).body.contacts.find((c: any) => c.unknown_contact_id === fbId);
+    expect(fbRow).toMatchObject({ social_platform: "messenger", social_reply_window: "standard" });
+    expect(Date.parse(fbRow.social_window_ends_at)).toBeGreaterThan(Date.now());
+    await pool.query(`UPDATE conversation_unknown_contacts SET social_username = ? WHERE id = ?`, [`${RUN}_handle`, igId]);
+    const found = await q({ q: `${RUN}_handle` });
+    expect(found.body.contacts.map((c: any) => c.unknown_contact_id)).toContain(igId);
+  });
+
+  it("MCP: list_social_inbox / get_social_thread read; send_social_reply dry-runs, sends on CONFIRM, refuses a closed window", async () => {
+    const run = (name: string, args: Record<string, unknown>) => executeAdminAiTool(name, args, { adminId: CESAR }) as Promise<any>;
+    const fbId = Number((await unknownFor(user("fb"))).id);
+    await pool.query(`UPDATE conversation_unknown_contacts SET social_last_inbound_at = NOW() WHERE id = ?`, [fbId]);
+    const list = await run("list_social_inbox", { platform: "messenger", view: "all", limit: 50 });
+    const thread = list.data.threads.find((t: any) => t.unknown_contact_id === fbId);
+    expect(thread).toMatchObject({ platform: "messenger", reply_window: "standard" });
+
+    const read = await run("get_social_thread", { conversation_id: thread.conversation_id });
+    expect(read.ok).toBe(true);
+    expect(read.data.messages.length).toBeGreaterThan(0);
+
+    graphCalls.length = 0;
+    const dry = await run("send_social_reply", { conversation_id: thread.conversation_id, body: "Hi from MCP" });
+    expect(dry.data).toMatchObject({ dry_run: true, preview: { platform: "messenger", reply_window: "standard", body: "Hi from MCP" } });
+    expect(graphCalls).toHaveLength(0);
+    const sent = await run("send_social_reply", { conversation_id: thread.conversation_id, body: "Hi from MCP", confirm: true, confirm_phrase: "CONFIRM" });
+    expect(sent).toMatchObject({ ok: true, data: { sent: true } });
+    expect(graphCalls[0].body).toMatchObject({ recipient: { id: user("fb") }, message: { text: "Hi from MCP" } });
+
+    await pool.query(`UPDATE conversation_unknown_contacts SET social_last_inbound_at = NOW() - INTERVAL 8 DAY WHERE id = ?`, [fbId]);
+    const late = await run("send_social_reply", { conversation_id: thread.conversation_id, body: "Too late", confirm: true, confirm_phrase: "CONFIRM" });
+    expect(late).toMatchObject({ ok: false, error: "reply_window_closed" });
+    expect(graphCalls).toHaveLength(1);
+    await pool.query(`UPDATE conversation_unknown_contacts SET social_last_inbound_at = NOW() WHERE id = ?`, [fbId]);
+
+    const missing = await run("get_social_thread", { conversation_id: 999999999 });
+    expect(missing).toMatchObject({ ok: false, error: "not_found" });
+  });
+
+  it("MCP: assign_conversation / set_conversation_status take an Instagram sender's unknown_contact_id", async () => {
+    const run = (name: string, args: Record<string, unknown>) => executeAdminAiTool(name, args, { adminId: CESAR }) as Promise<any>;
+    const igId = Number((await unknownFor(user("ig"))).id);
+    const dry = await run("assign_conversation", { unknown_contact_id: igId, admin_id: CESAR });
+    expect(dry).toMatchObject({ ok: true, dry_run: true });
+    const done = await run("assign_conversation", { unknown_contact_id: igId, admin_id: CESAR, confirm: true, confirm_phrase: "CONFIRM" });
+    expect(done).toMatchObject({ ok: true, data: { assigned_admin_id: CESAR } });
+    const [[cv]] = await pool.query<RowDataPacket[]>(`SELECT assigned_admin_id FROM conversations WHERE unknown_contact_id = ? LIMIT 1`, [igId]);
+    expect(Number(cv.assigned_admin_id)).toBe(CESAR);
+    const closed = await run("set_conversation_status", { unknown_contact_id: igId, status: "closed", confirm: true, confirm_phrase: "CONFIRM" });
+    expect(closed).toMatchObject({ ok: true, data: { status: "closed" } });
+    await run("set_conversation_status", { unknown_contact_id: igId, status: "open", confirm: true, confirm_phrase: "CONFIRM" });
   });
 
   it("after linking to a client, the next DM lands on the client's record and replies go to them", async () => {

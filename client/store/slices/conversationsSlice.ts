@@ -9,6 +9,7 @@ import type {
   ConversationMessage,
   ConversationTemplate,
   ConversationsAiStats,
+  SocialPlatformFilter,
 } from "@shared/api";
 
 export type ConversationsView =
@@ -267,6 +268,8 @@ export const fetchConversationContacts = createAsyncThunk(
           append?: boolean;
           /** "social" = Facebook / Instagram threads only. */
           hub?: "sms" | "social";
+          /** Social tab only: one platform. */
+          platform?: SocialPlatformFilter;
         }
       | undefined,
     { rejectWithValue },
@@ -275,6 +278,7 @@ export const fetchConversationContacts = createAsyncThunk(
       const { data } = await api.get("/admin/conversations", {
         params: {
           hub: args?.hub === "social" ? "social" : undefined,
+          platform: args?.hub === "social" ? args?.platform : undefined,
           view: args?.view || "all",
           q: args?.q || undefined,
           page: args?.page || 1,

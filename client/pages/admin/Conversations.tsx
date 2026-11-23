@@ -23,6 +23,7 @@ import {
   ChevronUp,
   ArchiveRestore,
   Instagram,
+  Facebook,
   Loader2,
 } from "lucide-react";
 import { getSharedAblyClient, isAblyPermanentlyUnavailable } from "@/lib/ably-client";
@@ -120,12 +121,15 @@ import {
   setVoiceAvailable,
   startOutboundCall,
 } from "@/store/slices/voiceSlice";
-import type { AdminClientListItem, ClientReferrerLink, ConversationContactHubItem, ConversationMessage } from "@shared/api";
+import type { AdminClientListItem, ClientReferrerLink, ConversationContactHubItem, ConversationMessage, SocialPlatformFilter } from "@shared/api";
 import { logger } from "@/utils/logger";
 import { cn } from "@/lib/utils";
 import { messageGroupPositions } from "@/lib/messageGrouping";
 import { MessageBubble } from "@/components/conversations/MessageBubble";
 import { useNewMessageIds } from "@/components/conversations/useNewMessageIds";
+import { SocialPlatformBadge } from "@/components/conversations/SocialPlatformBadge";
+import { SocialReplyWindowChip } from "@/components/conversations/SocialReplyWindowChip";
+import { socialReplyWindowState } from "@/lib/socialReplyWindow";
 
 const GUIDE_STORAGE_KEY = "ofg.conversations.guide.v2";
 const FALLBACK_POLL_MS = 5 * 60 * 1000;
@@ -303,6 +307,8 @@ export default function AdminConversations() {
   const [unknownLeadOpen, setUnknownLeadOpen] = useState(false);
   /** SMS hub vs Social DM (FB/IG) — social locked until credentials. */
   const [hubChannel, setHubChannel] = useState<"sms" | "social">("sms");
+  /** Social tab: All / Instagram / Facebook. */
+  const [socialPlatform, setSocialPlatform] = useState<SocialPlatformFilter | null>(null);
   const socialDmMode = authUser?.social_dm_mode || "disabled";
   const socialDmLive = authUser?.social_dm_enabled === true;
   const whatsappEnabled = authUser?.whatsapp_enabled === true;
@@ -321,6 +327,8 @@ export default function AdminConversations() {
   /** Current hub for realtime refreshes (kept in a ref, like the other refresh targets). */
   const hubRef = useRef<"sms" | "social">("sms");
   hubRef.current = hubChannel;
+  const socialPlatformRef = useRef<SocialPlatformFilter | null>(null);
+  socialPlatformRef.current = socialPlatform;
 
   const lastContactsFetchRef = useRef(0);
   const ablyRefreshRef = useRef({
@@ -341,10 +349,11 @@ export default function AdminConversations() {
           limit: 25,
           append: !!opts?.append,
           hub: hubChannel,
+          platform: socialPlatform ?? undefined,
         }),
       );
     },
-    [dispatch, view, search, hubChannel],
+    [dispatch, view, search, hubChannel, socialPlatform],
   );
 
   const refreshContacts = useCallback(() => {
@@ -362,6 +371,7 @@ export default function AdminConversations() {
         limit: 25,
         append: false,
         hub: hubRef.current,
+        platform: socialPlatformRef.current ?? undefined,
       }),
     );
   }, [dispatch]);
@@ -381,6 +391,7 @@ export default function AdminConversations() {
           limit: 25,
           append: true,
           hub: hubChannel,
+          platform: socialPlatform ?? undefined,
         }),
       ).unwrap();
       setContactsPage(next);
@@ -397,6 +408,8 @@ export default function AdminConversations() {
     dispatch,
     view,
     search,
+    hubChannel,
+    socialPlatform,
   ]);
 
   const refreshOpenTimeline = useCallback(() => {
@@ -935,6 +948,14 @@ export default function AdminConversations() {
         (c): c is "messenger" | "instagram" => c === "messenger" || c === "instagram",
       ),
     [activeContact?.channels],
+  );
+  // Live Meta reply window for the open Social thread (re-evaluated with the list clock).
+  const activeSocialWindow = useMemo(
+    () =>
+      hubChannel === "social"
+        ? socialReplyWindowState(activeContact?.social_reply_window, activeContact?.social_window_ends_at, listClock)
+        : null,
+    [hubChannel, activeContact?.social_reply_window, activeContact?.social_window_ends_at, listClock],
   );
   // Social tab replies on the thread's platform; the SMS tab never sends on a social channel.
   useEffect(() => {
@@ -1941,6 +1962,33 @@ export default function AdminConversations() {
               ))}
             </div>
             )}
+            {hubChannel === "social" && socialDmLive && (
+              <div className="flex flex-wrap gap-1" data-testid="conversations-social-platforms">
+                {(
+                  [
+                    [null, "platformAll", null],
+                    ["instagram", "platformInstagram", Instagram],
+                    ["messenger", "platformFacebook", Facebook],
+                  ] as const
+                ).map(([value, key, Icon]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => setSocialPlatform(value)}
+                    aria-pressed={socialPlatform === value}
+                    className={cn(
+                      "px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-colors inline-flex items-center gap-1",
+                      socialPlatform === value
+                        ? "bg-accent text-accent-foreground"
+                        : "bg-muted text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {Icon ? <Icon className="w-3 h-3" /> : null}
+                    {t(`conversations.social.${key}`)}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
           {hubChannel === "social" && !socialDmLive ? (
@@ -1970,24 +2018,31 @@ export default function AdminConversations() {
                 )}
               >
                 <div className="w-11 h-11 rounded-2xl bg-muted mx-auto flex items-center justify-center">
-                  <MessageSquare className="w-5 h-5 text-muted-foreground" />
+                  {hubChannel === "social" ? (
+                    <Instagram className="w-5 h-5 text-muted-foreground" />
+                  ) : (
+                    <MessageSquare className="w-5 h-5 text-muted-foreground" />
+                  )}
                 </div>
                 <div>
                   <div className="text-sm font-semibold text-foreground">
-                    {t("conversations.emptyTitle")}
+                    {t(hubChannel === "social" ? "conversations.social.emptyTitle" : "conversations.emptyTitle")}
                   </div>
                   <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
-                    {t("conversations.emptyBody")}
+                    {t(hubChannel === "social" ? "conversations.social.emptyBody" : "conversations.emptyBody")}
                   </p>
                 </div>
-                <Button
-                  size="sm"
-                  onClick={() => setComposeOpen(true)}
-                  className="inline-flex items-center gap-1.5"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  {t("conversations.emptyCta")}
-                </Button>
+                {/* Instagram / Facebook: people message first, so there is nothing to start. */}
+                {hubChannel !== "social" && (
+                  <Button
+                    size="sm"
+                    onClick={() => setComposeOpen(true)}
+                    className="inline-flex items-center gap-1.5"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    {t("conversations.emptyCta")}
+                  </Button>
+                )}
               </div>
             ) : (
               <>
@@ -2056,7 +2111,12 @@ export default function AdminConversations() {
                             {t("conversations.contactBadge")}
                           </span>
                         )}
-                        {(c.channels || []).map((ch) => (
+                        {c.social_platform && (
+                          <SocialPlatformBadge platform={c.social_platform} username={c.social_username} />
+                        )}
+                        {(c.channels || [])
+                          .filter((ch) => !(c.social_platform && (ch === "instagram" || ch === "messenger")))
+                          .map((ch) => (
                           <span
                             key={ch}
                             className="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded bg-muted text-muted-foreground"
@@ -2178,21 +2238,23 @@ export default function AdminConversations() {
               </div>
               <div>
                 <div className="text-sm font-semibold text-foreground">
-                  {t("conversations.selectPromptTitle")}
+                  {t(hubChannel === "social" ? "conversations.social.selectPromptTitle" : "conversations.selectPromptTitle")}
                 </div>
                 <p className="text-xs text-muted-foreground mt-1 max-w-xs">
-                  {t("conversations.selectPromptBody")}
+                  {t(hubChannel === "social" ? "conversations.social.selectPromptBody" : "conversations.selectPromptBody")}
                 </p>
               </div>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => setComposeOpen(true)}
-                className="inline-flex items-center gap-1.5"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                {t("conversations.newMessage")}
-              </Button>
+              {hubChannel !== "social" && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setComposeOpen(true)}
+                  className="inline-flex items-center gap-1.5"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  {t("conversations.newMessage")}
+                </Button>
+              )}
             </div>
           ) : (
             <>
@@ -2674,6 +2736,15 @@ export default function AdminConversations() {
                     suggestedReplies={composerSuggestions}
                     onSuggestAi={loadAiSuggestions}
                     aiSuggestionsLoading={aiSuggestionsLoading}
+                    disabled={
+                      activeSocialWindow?.window === "closed" &&
+                      (channel === "instagram" || channel === "messenger")
+                    }
+                    footerStart={
+                      activeSocialWindow && (channel === "instagram" || channel === "messenger") ? (
+                        <SocialReplyWindowChip state={activeSocialWindow} />
+                      ) : undefined
+                    }
                     allowedChannels={
                       hubChannel === "social" && socialReplyChannels.length
                         ? [

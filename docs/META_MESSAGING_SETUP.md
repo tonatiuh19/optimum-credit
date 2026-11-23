@@ -26,9 +26,11 @@ You can test with your own accounts before the review is approved.
 
 ## 2. Create the Meta app
 
-1. Open https://developers.facebook.com/apps/ and click **Create app**.
-2. Use case: **Other** → app type **Business**. Name it e.g. `OFG Conversations` and choose OFG's Business account.
-3. In the app dashboard, add the products **Messenger** and **Instagram** (Instagram API with Facebook Login).
+1. Open https://developers.facebook.com/apps/ and click **Create app**. Name it e.g. `OFG Conversations`.
+2. **Use cases** → filter **Business messaging** → check **Engage with customers on Messenger from Meta** and **Manage messaging & content on Instagram**. Nothing else (not WhatsApp, Marketing API, Facebook Login).
+3. **Business:** choose OFG's business portfolio → Requirements → Overview → **Create app**.
+4. **Use cases → Instagram → Customize → API setup with Facebook login** (not "Unified login": the code sends with the Page token through `graph.facebook.com`). Click **Add required messaging permissions** only (not the content one).
+5. **Permissions and features:** add **Human Agent** and **Business Asset User Profile Access** (sender names). Leave ads, email, catalog, page_user_* etc. alone.
    - Messenger docs: https://developers.facebook.com/docs/messenger-platform/
    - Instagram messaging docs: https://developers.facebook.com/docs/messenger-platform/instagram/
 
@@ -39,10 +41,10 @@ You can test with your own accounts before the review is approved.
 | App secret | Your app at https://developers.facebook.com/apps/ → **App settings → Basic → App secret → Show** | `META_APP_SECRET` |
 | Page ID | In https://developers.facebook.com/tools/explorer/ select your app, request `pages_show_list`, run `GET me/accounts` and copy the OFG Page's `id` | `META_PAGE_ID` |
 | Instagram account ID | Same Explorer: `GET {page-id}?fields=instagram_business_account` and copy that `id` | `META_IG_ACCOUNT_ID` |
-| Page access token | Your app → **Messenger → Settings → Access tokens → Generate** for the OFG Page, then make it long-lived: https://developers.facebook.com/docs/facebook-login/guides/access-tokens/get-long-lived/ | `META_PAGE_ACCESS_TOKEN` |
+| Page access token | **Messenger use case → Instagram settings → Add or remove Pages** (select the Page **and** the Instagram account) → **Generate token**. Not the "Messenger API Settings → Add Page" button: that one only grants Messenger, so Instagram replies fail. | `META_PAGE_ACCESS_TOKEN` |
 | Verify token | Make up a long random string (e.g. from a password generator) | `META_WEBHOOK_VERIFY_TOKEN` |
 
-**Check the Page token:** paste it into https://developers.facebook.com/tools/debug/accesstoken/. It must say **Expires: Never**. A short-lived token will quietly stop replies working after about an hour.
+**Check the Page token:** paste it into https://developers.facebook.com/tools/debug/accesstoken/. It must say **Expires: Never** and list `pages_messaging`, `instagram_manage_messages` and `pages_manage_metadata`. A short-lived token will quietly stop replies working after about an hour.
 
 ## 4. Turn it on in Vercel (Production)
 
@@ -67,7 +69,9 @@ Webhook docs: https://developers.facebook.com/docs/messenger-platform/webhooks/
 
 Meta calls the URL once to verify it. That only works after step 4 is deployed.
 
-**Test before review:** while the app is in Development mode, only people with a role on the app (Admin, Developer or Tester) can message it. Add your own Facebook and Instagram accounts under your app → **App roles → Roles**, send the OFG Page a DM, and it should appear in **Conversations → Social** within seconds.
+Check the subscriptions are really on: Meta can save the callback URL with **no fields** turned on. The app subscription must list `messages` (+ `message_echoes` for the Page), and the Page must be subscribed to the app (`GET /{page-id}/subscribed_apps`).
+
+**Publish before testing:** an unpublished app only gets Meta's dashboard test webhooks — no real DMs, not even from admins. Fill **App settings → Basic** (Privacy Policy URL, category, icon) and **Publish**. Until App Review is approved, only people with a role on the app (Admin, Developer or Tester) reach the inbox: add test accounts under **App roles → Roles**, send @optimum_financial_group a DM, and it appears in **Conversations → Social** within seconds.
 
 ## 6. App Review (to receive DMs from the public)
 

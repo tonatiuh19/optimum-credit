@@ -4199,6 +4199,8 @@ paths:
         `send_round_report` (resend published Round PDF with secure download token + branded email + optional SMS),
         `send_sms`, `send_text`, `send_whatsapp`, `send_wa`, `send_contact_sms`, `send_contact_whatsapp`, `send_contact_email`,
         `list_sms`, `list_whatsapp`, `get_texts`, `get_conversation`, `list_ofg_phone_numbers`,
+        `list_social_inbox`, `get_social_thread` (Instagram / Facebook DMs; assignee or release manager),
+        `send_social_reply` (reply by conversation_id; dry-run then confirm; refused after Meta's 7-day window),
         `update_pipeline_stage`, `preview_convert_prospect`, `convert_prospect`
         (unconverted leads without an enrolled case), `update_client_status`
         (MCP blocks pending_payment/onboarding/active until enrolled),
@@ -4398,6 +4400,9 @@ paths:
               - send_contact_sms
               - send_contact_whatsapp
               - send_contact_email
+              - list_social_inbox
+              - get_social_thread
+              - send_social_reply
               - list_sms
               - list_whatsapp
               - get_texts
@@ -4711,6 +4716,10 @@ paths:
           name: hub
           description: "social = Facebook / Instagram threads only (social senders visible to their assignee and release managers); default hides social-only senders"
           schema: { type: string, enum: [sms, social] }
+        - in: query
+          name: platform
+          description: "Social tab only: one platform (messenger = Facebook Page DMs). Social rows also return social_platform, social_username, social_reply_window (standard | human_agent | closed) and social_window_ends_at."
+          schema: { type: string, enum: [instagram, messenger] }
         - in: query
           name: q
           schema: { type: string }

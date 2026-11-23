@@ -460,6 +460,12 @@ export interface AdminPhoneNumber {
   capabilities?: { sms?: boolean; mms?: boolean; voice?: boolean } | null;
 }
 
+/** Meta reply window: normal reply ≤24h, Human Agent tag ≤7 days, then closed. */
+export type SocialReplyWindow = "standard" | "human_agent" | "closed";
+
+/** Social tab platform filter. */
+export type SocialPlatformFilter = "instagram" | "messenger";
+
 /** Contact-centric inbox row (aggregates channel threads for one client or unknown). */
 export interface ConversationContactHubItem {
   kind: "client" | "unknown" | "contact";
@@ -478,6 +484,10 @@ export interface ConversationContactHubItem {
   /** Facebook / Instagram sender (unknown kind). */
   social_platform?: "messenger" | "instagram" | null;
   social_username?: string | null;
+  /** Meta reply window from the person's last DM (Social tab rows only). */
+  social_reply_window?: SocialReplyWindow | null;
+  /** When the current window ends (ISO); null when closed or unknown. */
+  social_window_ends_at?: string | null;
   /** Primary conversation id for deep links (latest active thread) */
   primary_conversation_id?: number | null;
   client_id?: number | null;
