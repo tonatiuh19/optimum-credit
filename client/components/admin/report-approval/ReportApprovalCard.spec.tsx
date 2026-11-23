@@ -68,7 +68,7 @@ describe("ReportApprovalCard", () => {
     expect(screen.getByTestId("self-check-failed").textContent).toMatch(/Account totals vs the pull summary · Before TU: 11 accounts read, summary 32/);
     expect(screen.queryByTestId("report-approve")).toBeNull();
     expect(screen.queryByTestId("report-override-form")).toBeNull();
-    expect(screen.getByTestId("report-approval-card").textContent).toMatch(/Only Cesar can override/);
+    expect(screen.getByTestId("report-approval-card").textContent).toMatch(/Only a release manager \(Cesar, Alex or Lecca\) can override/);
   });
 
   it("self-check failed, release manager: override form with a required reason", () => {

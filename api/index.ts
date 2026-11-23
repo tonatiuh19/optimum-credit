@@ -5594,7 +5594,7 @@ export const ADMIN_AI_TOOLS: Array<{
       type: "object",
       properties: {
         report_id: { type: "integer" },
-        override_reason: { type: "string", description: "Required only for a failed self-check (Cesar)" },
+        override_reason: { type: "string", description: "Required only for a failed self-check (release managers: Cesar, Alex, Lecca; Cesar is alerted)" },
         confirm: { type: "boolean" },
         confirm_phrase: { type: "string" },
       },
@@ -19455,7 +19455,7 @@ async function executeAdminAiTool(
             delivery_status: String(r.delivery_status),
             failed_checks: failed.map((c) => `${c.key}: ${c.detail}`),
             you_can: name === "approve_round_report"
-              ? (who.canApprove ? (String(r.delivery_status) === "needs_review" ? (who.isSuper ? "override with a reason" : "not approve (self-check failed; Cesar only)") : "approve") : "not approve (language owner or Cesar only)")
+              ? (who.canApprove ? (String(r.delivery_status) === "needs_review" ? (who.isSuper ? "override with a reason" : "not approve (self-check failed; release managers Cesar, Alex, Lecca only)") : "approve") : "not approve (language owner or Cesar only)")
               : (who.canApprove ? "rebuild" : "not rebuild (approver or Cesar only)"),
             ...(name === "approve_round_report"
               ? { client_notified: opts.notify_client !== false, partners_emailed: opts.notify_client !== false && opts.notify_partners !== false }
@@ -25826,7 +25826,7 @@ async function executeAdminAiTool(
           error: "awaiting_approval",
           message:
             String(gate.delivery_status) === "needs_review"
-              ? `Round ${roundNumber} failed the progress-report self-check and is held from the client. Fix the data and republish, or Cesar can override in the CRM (case panel → Reports).`
+              ? `Round ${roundNumber} failed the progress-report self-check and is held from the client. Fix the data and republish, or a release manager (Cesar, Alex, Lecca) can override in the CRM (case panel → Reports).`
               : `Round ${roundNumber} is published but waiting for Approve & send (EN owner Lecca / ES owner Angel / Cesar) in the CRM — it cannot be sent from here.`,
           data: { round_report_id: Number(gate.id), delivery_status: String(gate.delivery_status) },
         };
@@ -34089,7 +34089,7 @@ function roundReportApprovalForAi(r: RowDataPacket): {
         status === "pending_approval"
           ? "Waiting for Approve & send in the CRM (EN owner Lecca / ES owner Angel / Cesar). Not sent to the client."
           : status === "needs_review"
-            ? "Self-check failed (see failed_checks) — held from the client. Fix and republish, or Cesar can override in the CRM."
+            ? "Self-check failed (see failed_checks) — held from the client. Fix and republish, or a release manager (Cesar, Alex, Lecca) can override in the CRM."
             : null,
     },
   };
@@ -40660,6 +40660,64 @@ async function notifyRoundNoChangeAlert(opts: { clientId: number; roundNumber: n
   return sent;
 }
 
+// ── Self-check override alert (Nov 23, 2026) ─────────────────────────────────
+// Every release manager may override a failed self-check; Cesar hears about each one he did not do himself.
+
+/** Who is told about an override (default Cesar). Override with REPORT_OVERRIDE_ALERT_ADMIN_IDS. */
+export function reportOverrideAlertAdminIds(env: NodeJS.ProcessEnv = process.env): number[] {
+  return String(env.REPORT_OVERRIDE_ALERT_ADMIN_IDS ?? "90001")
+    .split(",")
+    .map((x) => Number(x.trim()))
+    .filter((n) => Number.isInteger(n) && n > 0);
+}
+
+/** The override alert never goes to the person who overrode. */
+export function reportOverrideAlertRecipients(actorAdminId: number, env: NodeJS.ProcessEnv = process.env): number[] {
+  return reportOverrideAlertAdminIds(env).filter((id) => id !== actorAdminId);
+}
+
+async function notifyReportOverrideAlert(opts: {
+  reportId: number;
+  actorAdminId: number;
+  clientId: number;
+  roundNumber: number;
+  clientName: string;
+  reason: string;
+  failedChecks: string[];
+}): Promise<number> {
+  const ids = reportOverrideAlertRecipients(opts.actorAdminId);
+  if (ids.length === 0) return 0;
+  const team = await listActiveTeamAdmins();
+  const actor = team.find((a) => a.id === opts.actorAdminId);
+  const actorName = actor?.first_name || `#${opts.actorAdminId}`;
+  const linkUrl = `${APP_URL}/admin/pipeline?client=${opts.clientId}`;
+  let sent = 0;
+  for (const admin of team.filter((a) => ids.includes(a.id))) {
+    const es = admin.preferred_language === "es";
+    const title = es
+      ? `Self-check anulado (R${opts.roundNumber}) — ${opts.clientName}`
+      : `Self-check overridden (R${opts.roundNumber}) — ${opts.clientName}`;
+    const checks = opts.failedChecks.length ? opts.failedChecks.join("; ") : es ? "sin detalle" : "no detail";
+    const body = es
+      ? `${actorName} anuló la revisión fallida y envió la Ronda ${opts.roundNumber} de ${opts.clientName}. Fallas: ${checks}. Motivo: "${opts.reason}".`
+      : `${actorName} overrode the failed self-check and sent Round ${opts.roundNumber} for ${opts.clientName}. Failed: ${checks}. Reason: "${opts.reason}".`;
+    const prefs: AdminNotificationPrefs = {
+      ...admin.prefs,
+      email: Object.fromEntries(Object.keys(admin.prefs.email).map((k) => [k, false])) as AdminNotificationPrefs["email"],
+    };
+    const delivered = await deliverAdminNotificationChannels({
+      admin: { ...admin, prefs },
+      eventKey: "progress_report_alerts",
+      tpl: { subject: title, html: `<p>${escapeHtml(body)}</p>`, inAppTitle: title, inAppBody: body, linkUrl, smsBody: `OFG: ${title}. ${linkUrl}`.slice(0, 300) },
+    }).catch((e: any) => {
+      console.error("[report-override-alert]", admin.id, e?.message ?? e);
+      return null;
+    });
+    if (delivered && (delivered.sms || delivered.in_app)) sent++;
+  }
+  return sent;
+}
+
 // ── Self-healing held reports (Nov 7, 2026) ──────────────────────────────────
 // A report held by the self-check re-checks itself when the engine changes (after every deploy, and when
 // someone opens it): if it now passes it is rebuilt through the normal publish and waits for approval —
@@ -42218,7 +42276,7 @@ async function approveRoundReportCore(reportIdIn: number, adminIdIn: number, ove
       const [[r]] = await pool.query<RowDataPacket[]>(
         `SELECT r.id, r.client_id, r.case_id, r.round_number, r.report_locale, r.delivery_status, r.delivery_options_json,
                 JSON_UNQUOTE(JSON_EXTRACT(r.engine_json, '$.engine')) AS engine_kind,
-                r.score_before, r.score_after, r.items_removed, c.first_name, c.last_name, c.email, c.phone, c.preferred_language,
+                r.score_before, r.score_after, r.items_removed, r.self_check_json, c.first_name, c.last_name, c.email, c.phone, c.preferred_language,
                 (SELECT p.id FROM round_report_pdfs p WHERE p.round_report_id = r.id ORDER BY p.id DESC LIMIT 1) pdf_id
          FROM client_round_reports r JOIN clients c ON c.id = r.client_id WHERE r.id = ? LIMIT 1`,
         [reportId],
@@ -42237,7 +42295,7 @@ async function approveRoundReportCore(reportIdIn: number, adminIdIn: number, ove
       const overrideReason = String(req.body?.override_reason || "").trim();
       if (status === "needs_review" && !(who.isSuper && overrideReason.length >= 10)) {
         return __R(422, {
-          error: "The self-check failed — fix the data and publish again. Cesar can override with a written reason.",
+          error: "The self-check failed — fix the data and publish again. A release manager (Cesar, Alex, Lecca) can override with a written reason.",
           code: "self_check_failed",
         });
       }
@@ -42297,6 +42355,17 @@ async function approveRoundReportCore(reportIdIn: number, adminIdIn: number, ove
          VALUES ('admin', ?, ?, 'client_round_report', ?, ?, 'success')`,
         [adminId, status === "needs_review" ? "report_wizard.approved_override" : "report_wizard.approved_sent", reportId, JSON.stringify({ round_number: Number(r.round_number), ...deliveryResult })],
       );
+      if (status === "needs_review") {
+        await notifyReportOverrideAlert({
+          reportId,
+          actorAdminId: adminId,
+          clientId: Number(r.client_id),
+          roundNumber: Number(r.round_number),
+          clientName: `${r.first_name || ""} ${r.last_name || ""}`.trim() || `Client #${r.client_id}`,
+          reason: overrideReason,
+          failedChecks: (parseWizardJsonField<Pv2Check[]>(r.self_check_json) ?? []).filter((c) => c.pass === false).map((c) => (c.detail ? `${c.key}: ${c.detail}` : c.key)),
+        }).catch((e: any) => console.error("[report-override-alert]", reportId, e?.message ?? e));
+      }
       return __R(200, { ok: true, delivery_status: notifyClient ? "sent" : "silent", ...deliveryResult, secure_pdf_url: result.securePdfUrl || null });
     } catch (e: any) {
       console.error("[round-report:approve]", reportId, e?.message || e);
@@ -48070,7 +48139,7 @@ export async function normalizeStoredPhonesInDb(db: Pool = pool): Promise<number
 
 /** Spec v1.1 P0-1: Cesar + Alex release reports and may override a failed self-check. */
 function reportReleaseManagerIds(): number[] {
-  const raw = String(process.env.REPORT_RELEASE_MANAGER_IDS || "30001,90001");
+  const raw = String(process.env.REPORT_RELEASE_MANAGER_IDS || "30001,90001,150002");
   return raw.split(",").map((x) => Number(x.trim())).filter((n) => Number.isFinite(n) && n > 0);
 }
 

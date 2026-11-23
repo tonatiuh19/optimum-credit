@@ -3952,7 +3952,7 @@
     "notApprover": "La responsable del idioma o Cesar pueden aprobar este informe.",
     "reasonPlaceholder": "Por qué es seguro enviarlo aunque falló la revisión (queda registrado)",
     "override": "Anular y enviar",
-    "fixAndRepublish": "Solo Cesar puede anular una revisión fallida.",
+    "fixAndRepublish": "Solo un responsable de publicación (Cesar, Alex o Lecca) puede anular una revisión fallida.",
     "queueTitle_one": "{{count}} informe de progreso esperando aprobación",
     "queueTitle_other": "{{count}} informes de progreso esperando aprobación",
     "failedCount_one": "{{count}} revisión falló",

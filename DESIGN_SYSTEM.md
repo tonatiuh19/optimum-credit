@@ -289,6 +289,8 @@ Surfaces: New Case schedule, Client panel Payment Schedule, Admin Payments split
 - Used in the wizard's last step, the case panel round card (above the delivery timeline) and the dashboard `ReportApprovalQueue` (hidden when empty, anchor `#report-approvals`, inbox item "reports_approval").
 - Wizard preview shows the same self-check above the PDF (accent when it passes, destructive when publishing would hold the report).
 
+- **Override access (Nov 23, 2026):** Release managers (`REPORT_RELEASE_MANAGER_IDS`, default Alex, Cesar, Lecca) may override a failed self-check on EN and ES reports with a written reason (≥ 10 chars, audited). Each override by anyone else alerts `REPORT_OVERRIDE_ALERT_ADMIN_IDS` (default Cesar) in-app + SMS with the client, round, failed checks and the reason.
+
 ## Held reports: explain, don't send staff to reset (Nov 7, 2026)
 
 A report the self-check holds (`needs_review`) is explained from its actual check results (`shared/heldReport.ts` → `explainHeldChecks`), never with a generic "fix and reset":

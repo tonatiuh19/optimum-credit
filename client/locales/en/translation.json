@@ -3952,7 +3952,7 @@
     "notApprover": "The language owner or Cesar can approve this report.",
     "reasonPlaceholder": "Why it is safe to send despite the failed check (logged)",
     "override": "Override and send",
-    "fixAndRepublish": "Only Cesar can override a failed self-check.",
+    "fixAndRepublish": "Only a release manager (Cesar, Alex or Lecca) can override a failed self-check.",
     "queueTitle_one": "{{count}} progress report waiting for approval",
     "queueTitle_other": "{{count}} progress reports waiting for approval",
     "failedCount_one": "{{count}} check failed",
