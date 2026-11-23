@@ -138,16 +138,14 @@ async function runCommand(command: string, args: string[]) {
     });
 
     child.on("error", reject);
-    child.on("exit", (code) => {
+    child.on("exit", (code, signal) => {
       if (code === 0) {
         resolve();
         return;
       }
-      reject(
-        new Error(
-          `${command} ${args.join(" ")} failed with exit code ${code ?? "unknown"}`,
-        ),
-      );
+      // No exit code = killed by a signal (SIGKILL is usually the OS out of memory); say which.
+      const why = code != null ? `exit code ${code}` : `signal ${signal ?? "unknown"} (killed, not a test failure)`;
+      reject(new Error(`${command} ${args.join(" ")} failed with ${why}`));
     });
   });
 }
