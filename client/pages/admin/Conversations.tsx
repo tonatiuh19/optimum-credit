@@ -123,6 +123,9 @@ import {
 import type { AdminClientListItem, ClientReferrerLink, ConversationContactHubItem, ConversationMessage } from "@shared/api";
 import { logger } from "@/utils/logger";
 import { cn } from "@/lib/utils";
+import { messageGroupPositions } from "@/lib/messageGrouping";
+import { MessageBubble } from "@/components/conversations/MessageBubble";
+import { useNewMessageIds } from "@/components/conversations/useNewMessageIds";
 
 const GUIDE_STORAGE_KEY = "ofg.conversations.guide.v2";
 const FALLBACK_POLL_MS = 5 * 60 * 1000;
@@ -1637,6 +1640,16 @@ export default function AdminConversations() {
     }
   }, [threadKey, threadMessageCount, timelineLoading]);
 
+  const threadGroupPositions = useMemo(
+    () => messageGroupPositions(timeline?.messages || []),
+    [timeline?.messages],
+  );
+  const freshMessageIds = useNewMessageIds(
+    threadKey,
+    (timeline?.messages || []).map((m) => m.id),
+    timelineLoading,
+  );
+
   if (accessLoading || accessEnabled === null) {
   return (
     <div className="flex flex-col gap-3 lg:h-[calc(100dvh-7rem)] min-h-0">
@@ -2444,7 +2457,7 @@ export default function AdminConversations() {
                 }}
                 data-testid="conversation-thread-scroll"
                 className={cn(
-                  "flex-1 min-h-0 overflow-y-auto p-4 space-y-2",
+                  "flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4",
                   timelineRefreshing && messages.length > 0 && "opacity-60 transition-opacity",
                 )}
               >
@@ -2455,7 +2468,7 @@ export default function AdminConversations() {
                     {t("conversations.noMessages")}
                   </div>
                 ) : (
-                  messages.map((m) => {
+                  messages.map((m, i) => {
                     if (m.direction === "system") {
                       const closed = m.body === "closed";
                       return (
@@ -2483,23 +2496,17 @@ export default function AdminConversations() {
                     }
                     const isOut = m.direction === "outbound";
                     const isNote = m.direction === "internal" || m.channel === "internal";
+                    const pos = threadGroupPositions[i] ?? { first: true, last: true };
                     return (
-                  <div
-                    key={m.id}
-                    className={`flex ${
-                          isNote ? "justify-center" : isOut ? "justify-end" : "justify-start"
-                    }`}
-                  >
-                    <div
-                          className={`max-w-[85%] p-3 rounded-2xl text-sm ${
-                            isNote
-                              ? "bg-secondary text-secondary-foreground border border-border w-full max-w-xl"
-                              : isOut
-                          ? "bg-primary text-primary-foreground"
-                          : "bg-muted text-foreground"
-                      }`}
-                    >
-                          <div className="flex items-center gap-1.5 mb-1 text-[10px] uppercase font-semibold opacity-80">
+                    <MessageBubble
+                      key={m.id}
+                      data-testid="conversation-message-bubble"
+                      variant={isNote ? "note" : isOut ? "out" : "in"}
+                      first={pos.first}
+                      last={pos.last}
+                      animateIn={freshMessageIds.has(String(m.id))}
+                      header={
+                          <>
                             {m.channel === "internal" ? (
                               <StickyNote className="w-3 h-3" />
                             ) : m.channel === "call" ? (
@@ -2517,7 +2524,24 @@ export default function AdminConversations() {
                             {m.sent_by_admin_name
                               ? ` · ${m.sent_by_admin_name}`
                               : ""}
-                          </div>
+                          </>
+                      }
+                      footer={
+                          <>
+                            <span>{formatWhen(m.created_at)}</span>
+                            {(m.provider_status || m.error_message) && (
+                              <>
+                                <span aria-hidden>·</span>
+                                <ConversationMessageStatus
+                                  status={m.provider_status}
+                                  errorMessage={m.error_message}
+                                  outbound={isOut}
+                                />
+                              </>
+                            )}
+                          </>
+                      }
+                    >
                       {m.subject && (
                         <div className="font-semibold mb-1">{m.subject}</div>
                       )}
@@ -2564,23 +2588,9 @@ export default function AdminConversations() {
                             <ConversationCallInsights message={m} />
                           ) : null}
                           {m.body ? (
-                      <div className="whitespace-pre-wrap">{m.body}</div>
+                      <div className="whitespace-pre-wrap break-words">{m.body}</div>
                           ) : null}
-                          <div className="text-[10px] opacity-70 mt-1 flex flex-wrap items-center gap-x-1">
-                            <span>{formatWhen(m.created_at)}</span>
-                            {(m.provider_status || m.error_message) && (
-                              <>
-                                <span aria-hidden>·</span>
-                                <ConversationMessageStatus
-                                  status={m.provider_status}
-                                  errorMessage={m.error_message}
-                                  outbound={isOut}
-                                />
-                              </>
-                            )}
-                      </div>
-                    </div>
-                  </div>
+                    </MessageBubble>
                     );
                   })
                 )}
