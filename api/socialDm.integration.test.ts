@@ -14,10 +14,18 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 const graphCalls: Array<{ url: string; body: any }> = [];
 let graphFail = false;
+/** GET responses for the past-DM import, keyed by URL path fragment. */
+let graphGets: Record<string, unknown> = {};
 vi.mock("axios", async (orig) => {
   const actual = await orig<typeof import("axios")>();
   const ax = actual.default as any;
   const realPost = ax.post.bind(ax);
+  const realGet = ax.get.bind(ax);
+  ax.get = (url: string, ...rest: unknown[]) => {
+    if (!String(url).includes("graph.facebook.com")) return realGet(url, ...rest);
+    const key = Object.keys(graphGets).find((k) => String(url).endsWith(k));
+    return Promise.resolve(key ? { status: 200, data: graphGets[key] } : { status: 404, data: { error: { message: "not mocked" } } });
+  };
   ax.post = (url: string, body: unknown, ...rest: unknown[]) => {
     if (!String(url).includes("graph.facebook.com")) return realPost(url, body, ...rest);
     graphCalls.push({ url: String(url), body });
@@ -36,6 +44,7 @@ import {
   createServer,
   createSession,
   executeAdminAiTool,
+  importMetaDmHistory,
   guessSocialMessageLang,
   metaReplyWindow,
   parseMetaMessagingWebhook,
@@ -366,6 +375,47 @@ describe("Meta DM webhook + inbox", () => {
     const reply = await send({ client_id: clientId, channel: "messenger", body: "Welcome back" });
     expect(reply.body).toMatchObject({ ok: true });
     expect(graphCalls[0].body.recipient.id).toBe(user("fb"));
+  });
+
+  it("past DM import: closed + read threads with real timestamps, no alerts, idempotent, old messages skipped", async () => {
+    const person = user("hist");
+    const day = 24 * 3600_000;
+    const recent = new Date(Date.now() - 10 * day).toISOString();
+    graphGets = {
+      [`/${PAGE}/conversations`]: { data: [{ id: `t_${RUN}`, updated_time: recent }] },
+      [`/t_${RUN}`]: {
+        participants: { data: [{ id: person, name: "History Person" }, { id: PAGE, name: "Optimum Financial" }] },
+        messages: {
+          data: [
+            { id: `${RUN}_h3`, created_time: recent, message: "Thanks, we'll call you", from: { id: PAGE } },
+            { id: `${RUN}_h2`, created_time: new Date(Date.now() - 11 * day).toISOString(), message: "Can you help with my credit?", from: { id: person } },
+            { id: `${RUN}_h1`, created_time: new Date(Date.now() - 200 * day).toISOString(), message: "too old", from: { id: person } },
+          ],
+        },
+      },
+    };
+    const dry = await importMetaDmHistory({ days: 90, dryRun: true, platforms: ["messenger"] });
+    expect(dry).toMatchObject({ dry_run: true, threads_new: 1, messages_inserted: 2 });
+    expect(await unknownFor(person)).toBeUndefined();
+
+    const run = await importMetaDmHistory({ days: 90, dryRun: false, platforms: ["messenger"] });
+    expect(run).toMatchObject({ threads_new: 1, messages_inserted: 2, messages_duplicate: 0 });
+    const u = await unknownFor(person);
+    expect(u).toMatchObject({ display_name: "History Person", social_platform: "messenger", unread_count: 0 });
+    const msgs = await messagesFor(person);
+    expect(msgs.map((m) => [m.direction, m.body])).toEqual([
+      ["inbound", "Can you help with my credit?"],
+      ["outbound", "Thanks, we'll call you"],
+    ]);
+    const [[cv]] = await pool.query<RowDataPacket[]>(`SELECT status, unread_count, last_message_at FROM conversations WHERE unknown_contact_id = ?`, [u.id]);
+    expect(cv).toMatchObject({ status: "closed", unread_count: 0 });
+    expect(Math.abs(new Date(cv.last_message_at).getTime() - Date.parse(recent))).toBeLessThan(2000);
+    const [[alerts]] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) n FROM admin_notifications WHERE link_url LIKE ?`, [`%unknown=${u.id}&%`]);
+    expect(Number(alerts.n)).toBe(0);
+
+    const again = await importMetaDmHistory({ days: 90, dryRun: false, platforms: ["messenger"] });
+    expect(again).toMatchObject({ threads_existing: 1, messages_inserted: 0, messages_duplicate: 2 });
+    graphGets = {};
   });
 
   it("feature off → 503 and nothing saved", async () => {

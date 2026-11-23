@@ -129,6 +129,7 @@ import { MessageBubble } from "@/components/conversations/MessageBubble";
 import { useNewMessageIds } from "@/components/conversations/useNewMessageIds";
 import { SocialPlatformBadge } from "@/components/conversations/SocialPlatformBadge";
 import { SocialReplyWindowChip } from "@/components/conversations/SocialReplyWindowChip";
+import { SocialMessageAttachments } from "@/components/conversations/SocialMessageAttachments";
 import { socialReplyWindowState } from "@/lib/socialReplyWindow";
 
 const GUIDE_STORAGE_KEY = "ofg.conversations.guide.v2";
@@ -2630,6 +2631,9 @@ export default function AdminConversations() {
                               })()}
                             </div>
                           )}
+                          {m.channel === "instagram" || m.channel === "messenger" ? (
+                            <SocialMessageAttachments metadata={m.metadata_json} mediaShown={!!m.media_url} outbound={isOut} />
+                          ) : null}
                           {m.channel === "call" && formatCallDuration(m.call_duration_sec) ? (
                             <div className="text-xs opacity-90 mb-1">
                               {formatCallDuration(m.call_duration_sec)}

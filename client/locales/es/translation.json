@@ -824,6 +824,20 @@
         "minutes": "{{count}} min",
         "hours": "{{count}} h",
         "days": "{{count}} d"
+      },
+      "attachment": {
+        "image": "Foto",
+        "video": "Video",
+        "ig_reel": "Reel",
+        "reel": "Reel",
+        "audio": "Mensaje de voz",
+        "file": "Archivo",
+        "share": "Compartió una publicación",
+        "story_mention": "Te mencionó en su historia",
+        "story_reply": "Respondió a tu historia",
+        "sticker": "Sticker",
+        "unsupported": "Contenido que Meta no muestra aquí",
+        "open": "Abrir"
       }
     },
     "phoneNumbersTitle": "Números OFG",

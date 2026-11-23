@@ -51962,6 +51962,296 @@ async function resolveSocialAssigneeAdminId(lang: "en" | "es"): Promise<number |
  * Unknown sender → unknown-contact thread (link / prospect from the inbox);
  * a sender already linked to a client → that client's messenger/instagram thread.
  */
+// ── Past DM import (Nov 23, 2026) ────────────────────────────────────────────
+// Meta's webhooks only deliver new DMs. This pulls recent history from the Conversations API
+// into Conversations → Social as closed, read threads: no alerts, no unread badges, real
+// timestamps. Idempotent on the Meta message id (the webhook's mid), so it is safe to re-run
+// (e.g. for Instagram once App Review grants Advanced Access). A live thread is never closed.
+
+type MetaHistoryMessage = {
+  id: string;
+  created_time: string;
+  message?: string;
+  from?: { id?: string; name?: string; username?: string };
+  attachments?: { data?: Array<{ mime_type?: string; name?: string; file_url?: string; image_data?: { url?: string }; video_data?: { url?: string } }> };
+  shares?: { data?: Array<{ link?: string; name?: string }> };
+  sticker?: string;
+  story?: { mention?: { link?: string }; reply_to?: { link?: string } };
+  is_unsupported?: boolean;
+};
+
+/** Conversations-API message → the same attachment shape the webhook stores ({ type, url }). */
+export function metaHistoryAttachments(m: MetaHistoryMessage): Array<{ type: string; url: string | null }> {
+  const out: Array<{ type: string; url: string | null }> = [];
+  for (const a of m.attachments?.data ?? []) {
+    const mime = String(a.mime_type || "");
+    if (a.image_data?.url || mime.startsWith("image/")) out.push({ type: "image", url: a.image_data?.url || a.file_url || null });
+    else if (a.video_data?.url || mime.startsWith("video/")) out.push({ type: "video", url: a.video_data?.url || a.file_url || null });
+    else if (mime.startsWith("audio/")) out.push({ type: "audio", url: a.file_url || null });
+    else out.push({ type: "file", url: a.file_url || null });
+  }
+  for (const sh of m.shares?.data ?? []) out.push({ type: "share", url: sh.link || null });
+  if (m.story?.mention) out.push({ type: "story_mention", url: m.story.mention.link || null });
+  if (m.story?.reply_to) out.push({ type: "story_reply", url: m.story.reply_to.link || null });
+  if (m.sticker) out.push({ type: "sticker", url: m.sticker });
+  if (m.is_unsupported && !out.length) out.push({ type: "unsupported", url: null });
+  return out.slice(0, 10);
+}
+type MetaHistoryThread = {
+  platform: SocialPlatform;
+  userId: string;
+  name: string | null;
+  username: string | null;
+  messages: Array<{ mid: string; at: Date; text: string; inbound: boolean; attachments: Array<{ type: string; url: string | null }> }>;
+};
+
+export type MetaDmImportSummary = {
+  dry_run: boolean;
+  since: string;
+  platforms: Record<string, { threads: number; messages: number; error?: string }>;
+  threads_new: number;
+  threads_existing: number;
+  messages_inserted: number;
+  messages_duplicate: number;
+  /** Earlier imports refreshed with attachments the first version did not read. */
+  messages_refreshed: number;
+  sample: Array<{ platform: string; name: string; messages: number; last: string }>;
+};
+
+async function metaGraphGet(path: string, params: Record<string, string | number>): Promise<any> {
+  const cfg = metaSocialConfig();
+  const r = await axios.get(path.startsWith("https://") ? path : `https://graph.facebook.com/${cfg.graphVersion}/${path}`, {
+    params: path.startsWith("https://") ? undefined : { ...params, access_token: cfg.pageToken },
+    timeout: 60_000,
+    validateStatus: () => true,
+  });
+  if (r.status < 200 || r.status >= 300 || r.data?.error) {
+    throw new Error(`Meta ${r.status}: ${String(r.data?.error?.message || "request failed").slice(0, 200)}`);
+  }
+  return r.data;
+}
+
+/** Recent threads for one platform, oldest message first, only messages since `since`. */
+async function fetchMetaDmHistory(platform: SocialPlatform, since: Date, maxThreads: number): Promise<MetaHistoryThread[]> {
+  const cfg = metaSocialConfig();
+  const accountIds = new Set([cfg.pageId, cfg.igAccountId].filter(Boolean));
+  const out: MetaHistoryThread[] = [];
+  // Instagram's endpoint refuses big pages ("reduce the amount of data"): page one thread at a time.
+  let next: string | null = null;
+  let first = true;
+  while ((first || next) && out.length < maxThreads) {
+    const page: any = first
+      ? // Instagram threads answer reliably only on the Instagram account's own edge.
+        await metaGraphGet(`${platform === "instagram" && cfg.igAccountId ? cfg.igAccountId : cfg.pageId}/conversations`, {
+          platform,
+          // Participants are fetched per thread: asking for them in the list times out on Instagram.
+          fields: "updated_time",
+          limit: platform === "instagram" ? 1 : 25,
+        })
+      : await metaGraphGet(next!, {});
+    first = false;
+    next = page?.paging?.next ?? null;
+    let reachedOld = false;
+    for (const c of (page?.data ?? []) as Array<{ id: string; updated_time: string }>) {
+      if (new Date(c.updated_time).getTime() < since.getTime()) {
+        reachedOld = true; // newest first: everything after this is older
+        break;
+      }
+      const msgs: MetaHistoryMessage[] = [];
+      let mPage: any = await metaGraphGet(c.id, { fields: "participants,messages.limit(25){id,created_time,message,from,attachments{mime_type,name,file_url,image_data,video_data},shares{link,name},sticker,story,is_unsupported}" });
+      const person = ((mPage?.participants?.data ?? []) as Array<{ id: string; name?: string; username?: string }>).find(
+        (p) => !accountIds.has(String(p.id)),
+      );
+      if (!person?.id) continue;
+      let batch: MetaHistoryMessage[] = mPage?.messages?.data ?? [];
+      let mNext: string | null = mPage?.messages?.paging?.next ?? null;
+      for (;;) {
+        let older = false;
+        for (const m of batch) {
+          if (new Date(m.created_time).getTime() < since.getTime()) older = true;
+          else msgs.push(m);
+        }
+        if (older || !mNext) break;
+        mPage = await metaGraphGet(mNext, {});
+        batch = mPage?.data ?? [];
+        mNext = mPage?.paging?.next ?? null;
+      }
+      if (!msgs.length) continue;
+      out.push({
+        platform,
+        userId: String(person.id),
+        name: person.name ? String(person.name) : null,
+        username: person.username ? String(person.username) : null,
+        messages: msgs
+          .map((m) => ({
+            mid: String(m.id),
+            at: new Date(m.created_time),
+            text: String(m.message || ""),
+            inbound: String(m.from?.id || "") === String(person.id),
+            attachments: metaHistoryAttachments(m),
+          }))
+          .sort((a, b) => a.at.getTime() - b.at.getTime()),
+      });
+      if (out.length >= maxThreads) break;
+    }
+    if (reachedOld) break;
+  }
+  return out;
+}
+
+/** Inbox preview for a message: its text, else what it was ("[story mention]", "[image]"…). */
+function metaHistoryPreview(m: { text: string; attachments: Array<{ type: string }> }): string {
+  return (m.text || `[${(m.attachments[0]?.type || "attachment").replace(/_/g, " ")}]`).slice(0, 200);
+}
+
+export async function importMetaDmHistory(opts: {
+  days: number;
+  dryRun: boolean;
+  platforms?: SocialPlatform[];
+  maxThreads?: number;
+}): Promise<MetaDmImportSummary> {
+  const cfg = metaSocialConfig();
+  if (!cfg.pageToken || !cfg.pageId) throw new Error("META_PAGE_ACCESS_TOKEN and META_PAGE_ID are required");
+  const since = new Date(Date.now() - Math.max(1, opts.days) * 24 * 3600_000);
+  const summary: MetaDmImportSummary = {
+    dry_run: opts.dryRun,
+    since: since.toISOString(),
+    platforms: {},
+    threads_new: 0,
+    threads_existing: 0,
+    messages_inserted: 0,
+    messages_duplicate: 0,
+    messages_refreshed: 0,
+    sample: [],
+  };
+  for (const platform of opts.platforms ?? (["messenger", "instagram"] as SocialPlatform[])) {
+    let threads: MetaHistoryThread[] = [];
+    try {
+      threads = await fetchMetaDmHistory(platform, since, opts.maxThreads ?? 500);
+    } catch (e: any) {
+      summary.platforms[platform] = { threads: 0, messages: 0, error: String(e?.message || e) };
+      continue;
+    }
+    summary.platforms[platform] = { threads: threads.length, messages: threads.reduce((n, t) => n + t.messages.length, 0) };
+    for (const t of threads) {
+      const last = t.messages[t.messages.length - 1];
+      const displayName = (t.name || (t.username ? `@${t.username}` : `${socialPlatformLabel(platform)} user`)).slice(0, 200);
+      if (summary.sample.length < 10) summary.sample.push({ platform, name: displayName, messages: t.messages.length, last: last.at.toISOString() });
+      const [found] = await pool.query<RowDataPacket[]>(
+        `SELECT id, status, linked_client_id FROM conversation_unknown_contacts WHERE social_platform = ? AND social_user_id = ? LIMIT 1`,
+        [platform, t.userId],
+      );
+      const known = found[0];
+      if (known) summary.threads_existing++;
+      else summary.threads_new++;
+      if (opts.dryRun) {
+        const [dups] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) n FROM conversation_messages WHERE provider_message_id IN (?)`, [t.messages.map((m) => m.mid)]);
+        summary.messages_duplicate += Number(dups[0]?.n || 0);
+        summary.messages_inserted += t.messages.length - Number(dups[0]?.n || 0);
+        continue;
+      }
+      const lastInbound = [...t.messages].reverse().find((m) => m.inbound)?.at ?? null;
+      let unknownId: number;
+      if (known) {
+        unknownId = Number(known.id);
+        // Keep the newest inbound time (drives Meta's reply window), never move it back.
+        if (lastInbound) {
+          await pool.query(
+            `UPDATE conversation_unknown_contacts SET social_last_inbound_at = GREATEST(COALESCE(social_last_inbound_at, ?), ?) WHERE id = ?`,
+            [lastInbound, lastInbound, unknownId],
+          );
+        }
+      } else {
+        const [ins] = await pool.query<ResultSetHeader>(
+          `INSERT INTO conversation_unknown_contacts
+             (phone_e164, display_name, status, social_platform, social_user_id, social_page_id, social_username,
+              social_last_inbound_at, last_message_at, last_message_preview, unread_count)
+           VALUES (NULL, ?, 'open', ?, ?, ?, ?, ?, ?, ?, 0)`,
+          [displayName, platform, t.userId, platform === "instagram" ? cfg.igAccountId || cfg.pageId : cfg.pageId, t.username, lastInbound, last.at, metaHistoryPreview(last)],
+        );
+        unknownId = ins.insertId;
+      }
+      const linkedClientId = known?.linked_client_id && String(known.status) === "linked" ? Number(known.linked_client_id) : null;
+      const [existingConv] = await pool.query<RowDataPacket[]>(
+        linkedClientId
+          ? `SELECT id FROM conversations WHERE client_id = ? AND channel = ? ORDER BY id DESC LIMIT 1`
+          : `SELECT id FROM conversations WHERE unknown_contact_id = ? AND channel = ? ORDER BY id DESC LIMIT 1`,
+        [linkedClientId ?? unknownId, platform],
+      );
+      const createdNow = !existingConv[0];
+      const firstInboundText = t.messages.find((m) => m.inbound)?.text || "";
+      const conversationId = linkedClientId
+        ? await getOrCreateClientChannelConversation({ clientId: linkedClientId, channel: platform, ofgNumberId: null, assignedAdminId: null, reopenIfClosed: false })
+        : await getOrCreateUnknownSmsConversation({
+            unknownContactId: unknownId,
+            ofgNumberId: null,
+            assignedAdminId: createdNow ? await resolveSocialAssigneeAdminId(guessSocialMessageLang(firstInboundText)) : null,
+            reopenIfClosed: false,
+            channel: platform,
+          });
+      for (const m of t.messages) {
+        const firstImage = m.attachments.find((a) => a.type === "image" && a.url);
+        const metadata = JSON.stringify({ provider: "meta", imported: true, attachments: m.attachments, ...(m.inbound ? {} : { sent_outside_inbox: true }) });
+        const [dup] = await pool.query<RowDataPacket[]>(
+          `SELECT id, JSON_EXTRACT(metadata_json, '$.imported') AS imported, JSON_LENGTH(metadata_json, '$.attachments') AS att
+           FROM conversation_messages WHERE provider_message_id = ? LIMIT 1`,
+          [m.mid],
+        );
+        if (dup[0]) {
+          // Only our own earlier import is refreshed; webhook-saved rows are never touched.
+          if (String(dup[0].imported) === "true" && !Number(dup[0].att) && m.attachments.length) {
+            await pool.query(
+              `UPDATE conversation_messages SET body = COALESCE(NULLIF(body, ''), ?), media_url = ?, media_content_type = ?, metadata_json = ? WHERE id = ?`,
+              [m.text || null, firstImage?.url ? firstImage.url.slice(0, 1000) : null, firstImage?.url ? "image/jpeg" : null, metadata, Number(dup[0].id)],
+            );
+            summary.messages_refreshed++;
+          } else summary.messages_duplicate++;
+          continue;
+        }
+        await pool.query(
+          `INSERT INTO conversation_messages
+             (conversation_id, direction, channel, body, media_url, media_content_type, from_address, to_address, provider_message_id, provider_status, metadata_json, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            conversationId,
+            m.inbound ? "inbound" : "outbound",
+            platform,
+            m.text || null,
+            firstImage?.url ? firstImage.url.slice(0, 1000) : null,
+            firstImage?.url ? "image/jpeg" : null,
+            m.inbound ? t.userId : null,
+            m.inbound ? null : t.userId,
+            m.mid,
+            m.inbound ? "received" : "sent",
+            metadata,
+            m.at,
+          ],
+        );
+        summary.messages_inserted++;
+      }
+      // A preview left as the generic "[attachment]" (first import version) gets the real kind.
+      await pool.query(
+        `UPDATE conversations SET last_message_preview = ? WHERE id = ? AND last_message_preview = '[attachment]' AND last_message_at <= ?`,
+        [metaHistoryPreview(last), conversationId, last.at],
+      );
+      if (!linkedClientId) {
+        await pool.query(
+          `UPDATE conversation_unknown_contacts SET last_message_preview = ? WHERE id = ? AND last_message_preview = '[attachment]'`,
+          [metaHistoryPreview(last), unknownId],
+        );
+      }
+      // History lands closed and read; a thread that was already live keeps its status and counters.
+      if (createdNow) {
+        await pool.query(
+          `UPDATE conversations SET status = 'closed', unread_count = 0, last_message_at = ?, last_message_preview = ? WHERE id = ?`,
+          [last.at, metaHistoryPreview(last), conversationId],
+        );
+      }
+    }
+  }
+  return summary;
+}
+
 async function processMetaInboundEvent(ev: MetaInboundEvent): Promise<{
   status: "saved" | "duplicate" | "echo_saved" | "echo_skipped" | "no_assignee";
   conversationId?: number;
@@ -52295,7 +52585,9 @@ async function mcpSocialSenderStatusOrAssign(
   } else if (!["open", "closed", "snoozed", "archived"].includes(String(args.status || ""))) {
     return { ok: false, error: "invalid_args", message: "status must be open, closed, snoozed or archived" };
   }
-  const who = `${String(u.display_name || "Unknown")}${u.social_username ? ` (@${u.social_username})` : ""} · ${socialPlatformLabel(String(u.social_platform) as SocialPlatform)}`;
+  const shown = String(u.display_name || "Unknown");
+  const handle = u.social_username ? `@${u.social_username}` : "";
+  const who = `${shown}${handle && handle !== shown ? ` (${handle})` : ""} · ${socialPlatformLabel(String(u.social_platform) as SocialPlatform)}`;
   const confirmed = adminAiWriteConfirmed(args);
   if (!confirmed.ok) {
     return {
