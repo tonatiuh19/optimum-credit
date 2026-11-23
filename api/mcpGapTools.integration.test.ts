@@ -207,7 +207,7 @@ describe("MCP gap tools", () => {
     const id = await report(2, "needs_review", [{ key: "account_totals", pass: false, detail: "TU 25 vs 23" }]);
     const dry = await run("approve_round_report", { report_id: id }, LECCA);
     expect(dry.preview.failed_checks).toEqual(["account_totals: TU 25 vs 23"]);
-    expect(dry.preview.you_can).toMatch(/Cesar only/);
+    expect(dry.preview.you_can).toMatch(/release managers only/);
     expect(await run("approve_round_report", { report_id: id, ...OK }, LECCA)).toMatchObject({ ok: false, error: "self_check_failed" });
     expect(await run("approve_round_report", { report_id: id, ...OK, override_reason: "short" }, CESAR)).toMatchObject({ ok: false, error: "self_check_failed" });
     expect(await run("approve_round_report", { report_id: id, ...OK, override_reason: "Totals verified by hand against the PDF" }, CESAR)).toMatchObject({ ok: true });

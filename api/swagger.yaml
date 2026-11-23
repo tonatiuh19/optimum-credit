@@ -9493,7 +9493,7 @@ paths:
     post:
       tags: [Report Wizard]
       security: [{ BearerAuth: [] }]
-      summary: "Approve & send (language owner EN/ES or REPORT_RELEASE_MANAGER_IDS). needs_review needs a release manager (REPORT_RELEASE_MANAGER_IDS, default Alex, Cesar, Lecca) + override_reason (≥ 10 chars, audited); an override by anyone else alerts REPORT_OVERRIDE_ALERT_ADMIN_IDS (default Cesar) by SMS + in-app. Sends the client flow + partner PDF, or releases to the portal silently for old rounds. A sent round that makes two in a row with no items removed and no score gain alerts ROUND_NO_CHANGE_ALERT_ADMIN_IDS by SMS + in-app."
+      summary: "Approve & send (language owner EN/ES or REPORT_RELEASE_MANAGER_IDS). needs_review needs a release manager (REPORT_RELEASE_MANAGER_IDS, default Alex, Cesar; production also Lecca) + override_reason (≥ 10 chars, audited); an override by anyone else alerts REPORT_OVERRIDE_ALERT_ADMIN_IDS (default Cesar) by SMS + in-app. Sends the client flow + partner PDF, or releases to the portal silently for old rounds. A sent round that makes two in a row with no items removed and no score gain alerts ROUND_NO_CHANGE_ALERT_ADMIN_IDS by SMS + in-app."
       parameters:
         - { name: id, in: path, required: true, schema: { type: integer } }
       requestBody:
