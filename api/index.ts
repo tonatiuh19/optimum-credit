@@ -49023,7 +49023,63 @@ export async function issueBillingInvoiceForLines(opts: {
   }
 }
 
-/** Cron step: set billing start (prod), then invoice last month once it closed. */
+/**
+ * Scheduled price changes (billing_price_changes): a month's new prices apply once that month has
+ * started AND the previous month's invoice exists (it froze its own lines), or a day into the month
+ * if that invoice never comes (nothing to bill / no Stripe). Applied rows stay as history.
+ */
+export async function applyDueBillingPriceChanges(
+  nowMs = Date.now(),
+  /** Tests only: limit to these effective months so a faked clock never applies real rows. */
+  onlyMonths?: string[],
+): Promise<{ applied: string[] }> {
+  if (onlyMonths && !onlyMonths.length) return { applied: [] };
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT id, effective_month, action, unit_price_usd FROM billing_price_changes
+     WHERE applied_at IS NULL${onlyMonths ? " AND effective_month IN (?)" : ""} ORDER BY effective_month, id`,
+    onlyMonths ? [onlyMonths] : [],
+  );
+  const applied: string[] = [];
+  const months = [...new Set(rows.map((r) => String(r.effective_month)))];
+  for (const month of months) {
+    const m = /^(\d{4})-(\d{2})$/.exec(month);
+    if (!m) continue;
+    const start = Date.UTC(Number(m[1]), Number(m[2]) - 1, 1);
+    if (nowMs < start) continue;
+    const prev = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 2, 1)).toISOString().slice(0, 7);
+    const [[prevInvoice]] = await pool.query<RowDataPacket[]>(`SELECT id FROM billing_invoices WHERE period_month = ? LIMIT 1`, [prev]);
+    if (!prevInvoice && nowMs < start + 24 * 3600_000) continue;
+    const due = rows.filter((r) => String(r.effective_month) === month);
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      for (const r of due) {
+        // Claim first: two cron runs at once can never apply a change twice.
+        const [claim] = await conn.query<ResultSetHeader>(
+          `UPDATE billing_price_changes SET applied_at = NOW() WHERE id = ? AND applied_at IS NULL`,
+          [Number(r.id)],
+        );
+        if (!claim.affectedRows) continue;
+        await conn.query(`UPDATE billing_prices SET unit_price_usd = ? WHERE action = ?`, [Number(r.unit_price_usd), String(r.action)]);
+        applied.push(`${month}:${String(r.action)}`);
+      }
+      await conn.query(
+        `INSERT INTO audit_logs (actor_type, actor_id, action, entity_type, entity_id, changes_json, status)
+         VALUES ('system', NULL, 'billing.price_change_applied', 'billing_price_changes', 0, ?, 'success')`,
+        [JSON.stringify({ effective_month: month, prices: due.map((r) => ({ action: r.action, unit_price_usd: Number(r.unit_price_usd) })) })],
+      );
+      await conn.commit();
+    } catch (e) {
+      await conn.rollback().catch(() => {});
+      throw e;
+    } finally {
+      conn.release();
+    }
+  }
+  return { applied };
+}
+
+/** Cron step: set billing start (prod), invoice last month once it closed, then apply due price changes. */
 async function runBillingCronStep(): Promise<void> {
   // Tests call /api/cron/process-queue against the shared (production) DB with
   // a test Stripe key: never sync usage or issue invoices from a test run
@@ -49032,17 +49088,19 @@ async function runBillingCronStep(): Promise<void> {
   try {
     await ensureBillingStartAt();
     await syncMcpUsageFromAuditLog();
-    if (!stripeSecretKey()) return;
-    const month = previousBillingMonth();
-    // Skip when issued, or when the last automatic attempt failed < 1 h ago
-    // (the Billing page "Retry" button stays immediate).
-    const [[done]] = await pool.query<RowDataPacket[]>(
-      `SELECT status FROM billing_invoices
-       WHERE period_month = ? AND (status <> 'failed' OR updated_at > NOW() - INTERVAL 1 HOUR) LIMIT 1`,
-      [month],
-    );
-    if (done) return;
-    await issueBillingInvoice(month);
+    if (stripeSecretKey()) {
+      const month = previousBillingMonth();
+      // Skip when issued, or when the last automatic attempt failed < 1 h ago
+      // (the Billing page "Retry" button stays immediate).
+      const [[done]] = await pool.query<RowDataPacket[]>(
+        `SELECT status FROM billing_invoices
+         WHERE period_month = ? AND (status <> 'failed' OR updated_at > NOW() - INTERVAL 1 HOUR) LIMIT 1`,
+        [month],
+      );
+      if (!done) await issueBillingInvoice(month);
+    }
+    // After the invoice step: last month's invoice has frozen its lines before new prices land.
+    await applyDueBillingPriceChanges();
   } catch (e) {
     console.warn("[billing:cron]", (e as Error)?.message ?? e);
   }

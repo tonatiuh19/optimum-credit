@@ -65,6 +65,8 @@ async function withDb<T>(fn: (conn: mysql.Connection) => Promise<T>): Promise<T>
 
 let testsRunning = false;
 let interrupted = false;
+/** --no-release-notes: skip the Slack "What's new" post (the deploy still counts as announced). */
+let silentReleaseNotes = false;
 /** True once the shared DB is known clean after the last test run (no second purge needed). */
 let purged = false;
 /** Set when the test run starts: before that there is no test data to purge. */
@@ -625,6 +627,7 @@ async function main() {
     process.env.SKIP_DEPLOY_CHECKS === "true";
   // --allow-dirty: deploy uncommitted files as they are; main, up to date with origin and no secrets still apply.
   const allowDirty = cliArgs.includes("--allow-dirty");
+  silentReleaseNotes = cliArgs.includes("--no-release-notes");
   const filteredArgs = cliArgs.filter((arg) => arg !== "--skip-checks" && arg !== "--allow-dirty");
   const explicitVersion =
     filteredArgs.find((arg) => !arg.startsWith("-")) ?? "";
@@ -738,6 +741,13 @@ async function announceRelease(version: string): Promise<void> {
         ),
       );
     };
+    if (silentReleaseNotes) {
+      // --no-release-notes: this deploy is never announced (e.g. a billing price change). Everything
+      // in it counts as announced, so the next deploy's "What's new" does not pick it up either.
+      await saveSnapshot();
+      console.log("🤫 --no-release-notes: nothing posted; this deploy is marked as announced.");
+      return;
+    }
     if (!changes.hasBaseline) {
       // First run on this mechanism: everything up to now was already announced.
       await saveSnapshot();

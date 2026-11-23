@@ -2337,6 +2337,21 @@ CREATE TABLE IF NOT EXISTS `billing_prices` (
   PRIMARY KEY (`action`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Scheduled price changes: applied by the billing cron once the month starts and the previous
+-- month's invoice exists; applied rows stay as history (20261124_010000). Pending: 2026-12 suite → $671.
+CREATE TABLE IF NOT EXISTS `billing_price_changes` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `effective_month` CHAR(7) NOT NULL COMMENT 'YYYY-MM (UTC): first month billed at the new price',
+  `action` VARCHAR(64) NOT NULL COMMENT 'billing_prices.action',
+  `unit_price_usd` DECIMAL(12,6) NOT NULL,
+  `note` VARCHAR(255) DEFAULT NULL,
+  `applied_at` DATETIME DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uniq_billing_price_change` (`effective_month`, `action`),
+  KEY `idx_billing_price_changes_pending` (`applied_at`, `effective_month`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 INSERT IGNORE INTO `billing_prices` (`action`, `service`, `unit`, `unit_price_usd`, `billable`, `sort_order`) VALUES
   -- OFG Operating Suite ($582/month): 20261023_010000 split + 20261023_020000 reduced to $580, 20261023_030000 → $582, 20261023_040000 cents
   ('suite_credit_intelligence', 'suite', 'month', 152.35, 1, 1),
